@@ -81,6 +81,17 @@ user/          programy user space
   lib/           biblioteka programów (syscalle, alokator)
 ```
 
-## Licencje
+## Licencja
 
-Czcionka konsoli – patrz [`FONT-LICENSE.txt`](FONT-LICENSE.txt).
+Copyright (C) 2026 Dawid ([Platefobrain](https://github.com/Platefobrain))
+
+DeSoOS jest wolnym oprogramowaniem: możesz go rozpowszechniać i zmieniać na warunkach
+**GNU General Public License w wersji 3** albo (według Twojego wyboru) dowolnej późniejszej wersji,
+opublikowanej przez Free Software Foundation. Program jest rozpowszechniany bez żadnej gwarancji.
+Pełny tekst: [`LICENSE`](LICENSE). SPDX: `GPL-3.0-or-later`.
+
+**Wyjątek – czcionka konsoli.** Plik [`kernel/drivers/font.rs`](kernel/drivers/font.rs) zawiera
+zmodyfikowany podzbiór czcionki **Terminus Font** (Copyright (c) 2020 Dimitar Toshkov Zhekov,
+Reserved Font Name "Terminus Font") i podlega wyłącznie licencji **SIL Open Font License 1.1** –
+pełny tekst w [`FONT-LICENSE.txt`](FONT-LICENSE.txt), SPDX: `OFL-1.1`. Przy rozpowszechnianiu
+DeSoOS, także w postaci zbudowanej (`BOOTX64.EFI`), dołącz `LICENSE` i `FONT-LICENSE.txt`.
