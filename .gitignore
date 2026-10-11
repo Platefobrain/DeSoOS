@@ -1,0 +1,16 @@
+# Wyniki budowania
+/build/
+/target/
+
+# Obrazy dysków QEMU (tworzone przy pierwszym uruchomieniu)
+*.img
+
+# Logi testów
+*.log
+
+# Pliki edytorów / systemu
+*~
+*.swp
+.vscode/
+.idea/
+.DS_Store

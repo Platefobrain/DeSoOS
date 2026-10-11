@@ -1,0 +1,12 @@
+[package]
+name = "desoos-boot"
+version = "0.18.4"
+edition = "2024"
+build = "build.rs"
+
+[[bin]]
+name = "dsb"
+path = "boot/dsb.rs"
+
+[dependencies]
+uefi = "0.41"
