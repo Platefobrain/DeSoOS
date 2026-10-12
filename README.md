@@ -1,4 +1,4 @@
-# DeSoOS v0.16.0
+# DeSoOS v0.22.0
 
 Wlasny system operacyjny
 
@@ -10,7 +10,7 @@ UEFI/OVMF -> DSB -> DeSoOS kernel
 
 ```bash
 ./build.sh              # zwykly kernel (bez samotestow)
-./build.sh --selftest   # kernel z samotestami M1-M16b
+./build.sh --selftest   # kernel z samotestami (27 zestawow, M1-M19 + etap P)
 ./test.sh               # build --selftest + testy w QEMU, wynik PASS/FAIL
 ```
 
