@@ -102,6 +102,7 @@ pub extern "sysv64" fn kernel_main(
     memory::heap_self_test();
     // M17b.h: listy bloków per CPU – po samoteście (sprawdza dokładne liczniki).
     memory::heap::enable_cpu_caches();
+    memory::enable_frame_caches(); // P3
 
     // M16: stosy IST ze stronami-strażnikami (zamiast tablic w .bss).
     arch::x86_64::gdt::move_ist_to_guarded_stacks();
@@ -212,6 +213,9 @@ pub extern "sysv64" fn kernel_main(
     // M18: IPC – uchwyty z prawami, kanały, pamięć współdzielona.
     #[cfg(selftest)]
     user::ipc_self_test();
+    // M19: usługi w user space.
+    #[cfg(selftest)]
+    user::svc_self_test();
     #[cfg(selftest)]
     user::stress_self_test();
 

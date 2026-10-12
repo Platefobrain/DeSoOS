@@ -14,3 +14,7 @@
 .vscode/
 .idea/
 .DS_Store
+
+# Prywatne skrypty/pomiary A/B
+/ab/
+ab-usb.sh

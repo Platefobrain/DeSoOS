@@ -62,4 +62,5 @@ exec qemu-system-x86_64 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$NVME",format=raw,if=none,id=nv0 \
   -device nvme,serial=desoos,drive=nv0 \
+  -device edu,addr=06 \
   -serial stdio

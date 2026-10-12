@@ -10,10 +10,12 @@
 // * Przekierowania: > plik, >> plik, < plik; & na końcu = w tle.
 // * M17b: potoki `a | b | c` (programy z /bin; z wbudowanych echo, pwd,
 //   help, history).
-// * Komendy wbudowane: cd, pwd, echo, exit, help, history, clear, wait, k.
+// * Komendy wbudowane: cd, pwd, echo, exit, help, history, clear, wait;
+//   M19.i: sync, reboot, halt, stress – syscall sysctl, tylko gdy shell ma od
+//   init uchwyt SYSCTL (slot 4; programom go nie przekazuje).
 // * Inne nazwy: program /bin/<nazwa> albo ścieżka (z '/'), a gdy go nie ma –
-//   komenda diagnostyczna shella kernela (syscall kcmd; `k <komenda>`
-//   wymusza kernel).
+//   informacja od jądra (M19.i syscall sysinfo, tylko odczyt: mem, lspci,
+//   cpus, disk...).  mkfs, zapis na dysk i run – tylko w awaryjnym shellu jądra.
 // * Ctrl+C w trakcie programu kończy program (nie shell) – kernel zna
 //   proces pierwszego planu (spawn z SPAWN_FOREGROUND).
 #![no_std]
@@ -50,14 +52,20 @@ const BUILTINS: &[(&str, &str)] = &[
     ("history", "history            command history"),
     ("clear", "clear              clear the screen (also Ctrl+L)"),
     ("wait", "wait               wait for background programs"),
-    ("k", "k <command>        kernel diagnostics (k help: list)"),
+    ("sync", "sync               flush file system buffers to disk"),
+    ("reboot", "reboot             restart the computer"),
+    ("halt", "halt               stop the computer"),
+    ("stress", "stress [s]         SMP stress test in the kernel (1..600 s, default 10)"),
 ];
 
-/// Komendy shella kernela dostępne przez kcmd (do dopełniania i podpowiedzi).
-const KERNEL_COMMANDS: &[&str] = &[
-    "ver", "uptime", "mem", "irq", "spawn", "colors", "lspci", "acpi", "disk", "hexdump", "write", "mount", "df", "mkfs",
-    "sync", "date", "reboot", "halt", "run",
-];
+/// M19.i: akcje systemowe (syscall sysctl) – tylko z uchwytem SYSCTL od init.
+const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress"];
+
+/// M19.i: informacje od jądra (syscall sysinfo, tylko odczyt).
+const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+
+/// M19.i: komendy, które zostały tylko w awaryjnym shellu jądra.
+const KERNEL_ONLY: &[&str] = &["mkfs", "run", "hexdump", "write", "spawn", "colors", "keys", "k"];
 
 // ------------------------------------------------------------
 // Wyjście
@@ -428,7 +436,7 @@ fn bin_programs() -> Vec<String> {
 fn command_names() -> Vec<String> {
     let mut names: Vec<String> = BUILTINS.iter().map(|(n, _)| String::from(*n)).collect();
     names.extend(bin_programs());
-    names.extend(KERNEL_COMMANDS.iter().map(|n| String::from(*n)));
+    names.extend(INFO_COMMANDS.iter().map(|n| String::from(*n)));
     names
 }
 
@@ -507,6 +515,20 @@ fn close_redirects(fin: u64, fout: u64) {
 // Shell
 // ------------------------------------------------------------
 
+/// M19.g: shell uruchomiony przez init ma w slocie 3 kanał do menedżera
+/// usług – programy dostają go też w slocie 3 (`services`, `svc_connect`).
+static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// M19.i: uchwyt SYSCTL w slocie 4 (od init) – tylko shell, dzieci go nie dostają.
+static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i64 {
+    if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
+        desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (desoos::SVC, desoos::SVC)], flags)
+    } else {
+        spawn(path, args, flags, fds(fin, fout, 2))
+    }
+}
+
 struct Shell {
     editor: LineEditor,
     cwd: String,
@@ -564,8 +586,13 @@ impl Shell {
             self.external(&path, &cmd);
             return;
         }
-        // Komenda shella kernela (diagnostyka) – jeśli taka jest.
-        if self.kernel(&cmd, false) {
+        // M19.i: informacje od jądra (sysinfo) albo komenda już tylko w jądrze.
+        if INFO_COMMANDS.contains(&name.as_str()) {
+            self.info(&cmd);
+            return;
+        }
+        if KERNEL_ONLY.contains(&name.as_str()) {
+            eprintln!("sh: {}: only in the kernel emergency shell (since M19.i)", name);
             return;
         }
         match suggest(&name) {
@@ -584,7 +611,7 @@ impl Shell {
         };
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
         let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND };
-        let pid = spawn(path, &args, flags, fds(fin, fout, 2));
+        let pid = spawn_child(path, &args, flags, fin, fout);
         close_redirects(fin, fout);
         if pid < 0 {
             eprintln!("sh: {}: {}", cmd.args[0], strerror(pid));
@@ -672,7 +699,7 @@ impl Shell {
                 None => builtins.push((i, fout)),
                 Some(path) => {
                     let args: Vec<&str> = c.args.iter().map(|s| s.as_str()).collect();
-                    let pid = spawn(path, &args, flags, fds(fin, fout, 2));
+                    let pid = spawn_child(path, &args, flags, fin, fout);
                     if pid < 0 {
                         eprintln!("sh: {}: {}", c.args[0], strerror(pid));
                     } else {
@@ -739,9 +766,9 @@ impl Shell {
                 bin.sort();
                 let _ = writeln!(o, "Programs in /bin:");
                 let _ = writeln!(o, "  {}", bin.join("  "));
-                let _ = writeln!(o, "Kernel diagnostics (run directly or as 'k <command>'):");
-                let _ = writeln!(o, "  {}", KERNEL_COMMANDS.join("  "));
-                let _ = writeln!(o, "  ('run' = ring 3 test programs in asm from M13-M14, e.g. run sum, run xmm 4)");
+                let _ = writeln!(o, "System information (read-only, from the kernel):");
+                let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
+                let _ = writeln!(o, "Only in the kernel emergency shell: mkfs, disk read/write, run");
                 let _ = writeln!(o, "Syntax: cmd args  > file  >> file  < file  a | b  &   (\"quotes\" group words)");
             }
             "history" => {
@@ -753,41 +780,64 @@ impl Shell {
         }
     }
 
-    /// Komenda shella kernela przez kcmd.  `forced`: `k <komenda>`.
-    fn kernel(&mut self, cmd: &Command, forced: bool) -> bool {
-        let words: &[String] = if forced { &cmd.args[1..] } else { &cmd.args[..] };
-        if words.is_empty() {
-            eprintln!("usage: k <command> [args]   (k help: kernel commands)");
-            return true;
-        }
-        let line = words.join(" ");
+    /// M19.i: informacja od jądra (sysinfo) – z przekierowaniem wyjścia.
+    fn info(&mut self, cmd: &Command) {
+        let line = cmd.args.join(" ");
         let (fin, fout) = match open_redirects(cmd) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("sh: {}", e);
-                return true;
+                return;
             }
         };
-        let r = desoos::kcmd(&line, fout);
-        close_redirects(fin, fout);
-        if r == ENOENT {
-            if forced {
-                eprintln!("k: {}: no such kernel command (k help)", words[0]);
+        let mut buf = vec![0u8; 16 * 1024];
+        let r = loop {
+            match desoos::sysinfo(&line, &mut buf) {
+                Err(ERANGE) if buf.len() < 1024 * 1024 => buf.resize(buf.len() * 4, 0),
+                r => break r,
             }
-            return forced;
+        };
+        match r {
+            Ok(n) => {
+                write(fout, &buf[..n]);
+            }
+            Err(ENOENT) if cmd.args[0] == "disk" && cmd.args.len() > 1 => {
+                eprintln!("disk: only the list here; read / write only in the kernel emergency shell")
+            }
+            Err(ENOENT) => eprintln!("{}: unsupported arguments", cmd.args[0]),
+            Err(e) => eprintln!("{}: {}", cmd.args[0], strerror(e)),
         }
+        close_redirects(fin, fout);
+    }
+
+    /// M19.i: sync / reboot / halt / stress przez sysctl (uchwyt SYSCTL od init).
+    fn sysctl(&mut self, cmd: &Command, fout: u64) {
+        let name = cmd.args[0].as_str();
+        if !SYSCTL_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
+            eprintln!("{}: not allowed - this shell has no system control handle (only the shell started by init has it)", name);
+            return;
+        }
+        let (op, arg) = match name {
+            "sync" => (desoos::SYSCTL_SYNC, 0),
+            "reboot" => (desoos::SYSCTL_REBOOT, 0),
+            "halt" => (desoos::SYSCTL_HALT, 0),
+            _ => match cmd.args.get(1).map(|a| a.parse::<u64>()) {
+                None => (desoos::SYSCTL_STRESS, 0),
+                Some(Ok(s)) if (1..=600).contains(&s) => (desoos::SYSCTL_STRESS, s),
+                _ => {
+                    eprintln!("usage: stress [seconds]  (1..600)");
+                    return;
+                }
+            },
+        };
+        let r = desoos::sysctl(desoos::SYSCTL, op, arg, fout);
         if r < 0 {
-            eprintln!("k: {}", strerror(r));
+            eprintln!("{}: {}", name, strerror(r));
         }
-        true
     }
 
     fn builtin(&mut self, cmd: &Command) {
         let name = cmd.args[0].as_str();
-        if name == "k" {
-            self.kernel(cmd, true);
-            return;
-        }
         let (fin, fout) = match open_redirects(cmd) {
             Ok(f) => f,
             Err(e) => {
@@ -818,6 +868,12 @@ impl Shell {
             }
             "clear" => {
                 let _ = write!(o, "\x1b[2J\x1b[H");
+            }
+            n if SYSCTL_BUILTINS.contains(&n) => {
+                drop(o);
+                self.sysctl(cmd, fout);
+                close_redirects(fin, fout);
+                return;
             }
             "wait" => {
                 drop(o);
@@ -886,6 +942,13 @@ impl Shell {
 }
 
 fn main(args: desoos::Args) -> i32 {
+    // Slot 3 sprawdzony na starcie – później mógłby go zająć plik przekierowania.
+    if desoos::handle_info(desoos::SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
+        SVC_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    if desoos::handle_info(desoos::SYSCTL).map(|(k, _)| k) == Ok(desoos::KIND_SYSCTL) {
+        SYSCTL_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     let mut sh = Shell { editor: LineEditor::new(), cwd: String::from("/"), background: Vec::new(), exit: None };
     sh.refresh_cwd();
     // sh -c "komenda": jedna linia i koniec (skrypty, testy).

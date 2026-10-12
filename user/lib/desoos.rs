@@ -40,7 +40,6 @@ pub const SYS_MKDIR: u64 = 17;
 pub const SYS_UNLINK: u64 = 18;
 pub const SYS_READKEY: u64 = 19;
 pub const SYS_TASKS: u64 = 20;
-pub const SYS_KCMD: u64 = 21;
 pub const SYS_DUP: u64 = 22;
 pub const SYS_DUP2: u64 = 23;
 pub const SYS_SEEK: u64 = 24;
@@ -57,6 +56,24 @@ pub const SYS_SHM_CREATE: u64 = 34;
 pub const SYS_SHM_MAP: u64 = 35;
 pub const SYS_SPAWN_EX: u64 = 36;
 pub const SYS_SHM_SIZE: u64 = 37;
+pub const SYS_WAIT_MANY: u64 = 38;
+pub const SYS_DEV_CLAIM: u64 = 39;
+pub const SYS_DEV_INFO: u64 = 40;
+pub const SYS_DEV_MAP: u64 = 41;
+pub const SYS_IRQ_BIND: u64 = 42;
+pub const SYS_IRQ_READ: u64 = 43;
+pub const SYS_DMA_ALLOC: u64 = 44;
+pub const SYS_DMA_PHYS: u64 = 45;
+pub const SYS_SYSINFO: u64 = 46;
+pub const SYS_SYSCTL: u64 = 47;
+
+/// M19.b: sygnały wait_many.
+pub const W_READABLE: u64 = 1;
+pub const W_WRITABLE: u64 = 2;
+pub const W_IRQ: u64 = 4;
+/// M19.b: najwięcej wpisów w wait_many; bez limitu czasu.
+pub const WAIT_MAX: usize = 16;
+pub const FOREVER: u64 = u64::MAX;
 /// M18: najwięcej uchwytów w komunikacie.
 pub const MSG_HANDLES: usize = 8;
 /// M18: nie czekaj na miejsce / komunikat (EAGAIN).
@@ -84,6 +101,22 @@ pub const KIND_FILE: u64 = 2;
 pub const KIND_PIPE: u64 = 3;
 pub const KIND_CHANNEL: u64 = 4;
 pub const KIND_SHM: u64 = 5;
+/// M19.c: dostęp do sprzętu (tylko init, slot 3) i przejęte urządzenie PCI.
+pub const KIND_HW_ROOT: u64 = 6;
+pub const KIND_DEVICE: u64 = 7;
+pub const KIND_IRQ: u64 = 8;
+/// M19.i: prawo do akcji systemowych (reboot, halt, sync, stress) – init slot 4,
+/// shell od init też slot 4 (programom go nie przekazuje).
+pub const KIND_SYSCTL: u64 = 9;
+pub const HW_ROOT: u64 = 3;
+pub const SYSCTL: u64 = 4;
+pub const SYSCTL_REBOOT: u64 = 1;
+pub const SYSCTL_HALT: u64 = 2;
+pub const SYSCTL_SYNC: u64 = 3;
+pub const SYSCTL_STRESS: u64 = 4;
+/// M19.c: błędy dev_claim.
+pub const EBUSY: i64 = -16;
+pub const ENODEV: i64 = -19;
 
 /// mmap: prawa obszaru.
 pub const PROT_READ: u64 = 1;
@@ -283,6 +316,149 @@ pub fn shm_size(h: u64) -> i64 {
     syscall3(SYS_SHM_SIZE, h, 0, 0)
 }
 
+/// M19.b: czeka, aż któryś uchwyt z listy [(uchwyt, sygnały)] będzie gotowy
+/// (W_READABLE: recv / read nie będzie czekać; W_WRITABLE: send / write).
+/// Ok(maska) – bit i = wpis i gotowy; Ok(0) – minęło `timeout_ms`
+/// (FOREVER = bez limitu, 0 = tylko sprawdź).
+pub fn wait_many(list: &[(u64, u64)], timeout_ms: u64) -> Result<u64, i64> {
+    let mut flat = [0u64; 2 * WAIT_MAX];
+    if list.len() > WAIT_MAX {
+        return Err(-22);
+    }
+    for (i, &(h, sig)) in list.iter().enumerate() {
+        flat[2 * i] = h;
+        flat[2 * i + 1] = sig;
+    }
+    let r = syscall3(SYS_WAIT_MANY, flat.as_ptr() as u64, list.len() as u64, timeout_ms);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+/// M19.c: adres PCI urządzenia (bus, urządzenie, funkcja) dla dev_claim.
+pub const fn bdf(bus: u64, dev: u64, func: u64) -> u64 {
+    bus << 8 | dev << 3 | func
+}
+
+/// M19.c: przejmuje urządzenie PCI (z uchwytu HW_ROOT) – uchwyt DEVICE albo
+/// -errno (EACCES: sterownik w jądrze / dysk / grafika / mostek; EBUSY: ma je
+/// inna usługa; ENODEV: brak urządzenia).
+pub fn dev_claim(root: u64, bdf: u64) -> i64 {
+    syscall3(SYS_DEV_CLAIM, root, bdf, 0)
+}
+
+/// M19.c: opis przejętego urządzenia.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DevInfo {
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+    /// Rozmiary BAR-ów (0 = brak); BAR-y I/O w `io_mask`.
+    pub bars: [u64; 6],
+    pub io_mask: u8,
+    pub msi: bool,
+    pub msix: bool,
+}
+
+pub fn dev_info(h: u64) -> Result<DevInfo, i64> {
+    let mut v = [0u64; 10];
+    let r = syscall3(SYS_DEV_INFO, h, v.as_mut_ptr() as u64, 0);
+    if r < 0 {
+        return Err(r);
+    }
+    let mut bars = [0u64; 6];
+    bars.copy_from_slice(&v[2..8]);
+    Ok(DevInfo {
+        vendor: v[0] as u16,
+        device: (v[0] >> 16) as u16,
+        class: (v[1] >> 16) as u8,
+        subclass: (v[1] >> 8) as u8,
+        prog_if: v[1] as u8,
+        bars,
+        io_mask: v[8] as u8,
+        msi: v[9] & 1 != 0,
+        msix: v[9] & 2 != 0,
+    })
+}
+
+/// M19.c: mapuje rejestry BAR-u (PROT_READ albo PROT_READ | PROT_WRITE) – bez
+/// cache, nigdy wykonywalne.  Odmapowanie: munmap(adres, rozmiar BAR-u).
+pub fn dev_map(h: u64, bar: u64, prot: u64) -> Result<u64, i64> {
+    let r = syscall3(SYS_DEV_MAP, h, bar, prot);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+/// M19.d: przypina przerwanie urządzenia (wymaga R_MAP_WRITE) – uchwyt IRQ.
+/// Czekanie: wait_many z W_IRQ; odczyt licznika: irq_read.
+pub fn irq_bind(dev: u64) -> i64 {
+    syscall3(SYS_IRQ_BIND, dev, 0, 0)
+}
+
+/// M19.d: przerwania od ostatniego odczytu (zeruje licznik).
+pub fn irq_read(irq: u64) -> i64 {
+    syscall3(SYS_IRQ_READ, irq, 0, 0)
+}
+
+/// M19.e: bufor DMA urządzenia – uchwyt pamięci współdzielonej (mapowanie:
+/// shm_map) z ciągłych ramek poniżej 2^bits (szyna adresów urządzenia).  Bufor
+/// żyje tak długo jak przejęcie urządzenia (zamknięcie uchwytu go nie zwalnia).
+pub fn dma_alloc(dev: u64, size: u64, bits: u64) -> i64 {
+    syscall3(SYS_DMA_ALLOC, dev, size, bits)
+}
+
+/// M19.e: adres fizyczny bufora DMA (do wpisania w urządzenie).
+pub fn dma_phys(buf: u64) -> Result<u64, i64> {
+    let r = syscall3(SYS_DMA_PHYS, buf, 0, 0);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+/// M19.g: kanał do menedżera usług (init) – programy uruchomione z shella mają
+/// go w slocie 3 (tylko wysyłanie).  Init ma w slocie 3 HW_ROOT.
+pub const SVC: u64 = 3;
+
+/// M19.g: połączenie z usługą po nazwie (np. "edu") – zwraca koniec kanału do
+/// rozmowy z usługą.  Usługa nieznana / niedziałająca: kanał zamknięty przez
+/// init, pierwsza operacja na nim da EPIPE.
+pub fn svc_connect(name: &str) -> Result<u64, i64> {
+    let mut msg = [0u8; 64];
+    let p = b"connect ";
+    if p.len() + name.len() > msg.len() {
+        return Err(-22);
+    }
+    msg[..p.len()].copy_from_slice(p);
+    msg[p.len()..p.len() + name.len()].copy_from_slice(name.as_bytes());
+    let (mine, theirs) = channel_create()?;
+    let r = chan_send_h(SVC, &msg[..p.len() + name.len()], &[theirs], 0);
+    if r != 0 {
+        close(mine);
+        close(theirs);
+        return Err(r);
+    }
+    Ok(mine)
+}
+
+/// M19.g: lista usług od init (wiersze "nazwa stan pid N restarts N (program)")
+/// do `buf`; zwraca długość.
+pub fn svc_list(buf: &mut [u8]) -> Result<usize, i64> {
+    let (mine, theirs) = channel_create()?;
+    let r = chan_send_h(SVC, b"list", &[theirs], 0);
+    if r != 0 {
+        close(mine);
+        close(theirs);
+        return Err(r);
+    }
+    let mut msg = [0u8; MSG_MAX];
+    let mut info = RecvInfo::default();
+    let r = chan_recv(mine, &mut msg, 0, &mut info);
+    close(mine);
+    if r < 0 {
+        return Err(r);
+    }
+    let n = (r as usize).min(buf.len());
+    buf[..n].copy_from_slice(&msg[..n]);
+    Ok(n)
+}
+
 /// M17b: `new` wskazuje obiekt `old` (poprzedni `new` zamknięty).
 pub fn dup2(old: u64, new: u64) -> i64 {
     syscall3(SYS_DUP2, old, new, 0)
@@ -406,9 +582,16 @@ pub fn tasks(buf: &mut [u8]) -> i64 {
     syscall3(SYS_TASKS, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
 
-/// Komenda shella kernela (diagnostyka), wyjście na `fd`; -ENOENT = nie ma takiej.
-pub fn kcmd(line: &str, fd: u64) -> i64 {
-    syscall3(SYS_KCMD, line.as_ptr() as u64, line.len() as u64, fd)
+/// M19.i: tekst tylko do odczytu od jądra ("mem", "lspci -v", "cpus", "disk"...)
+/// do `buf`.  Err(ENOENT) – nieznany temat; Err(ERANGE) – bufor za mały.
+pub fn sysinfo(topic: &str, buf: &mut [u8]) -> Result<usize, i64> {
+    let r = syscall6(SYS_SYSINFO, topic.as_ptr() as u64, topic.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    if r < 0 { Err(r) } else { Ok(r as usize) }
+}
+
+/// M19.i: akcja systemowa z uchwytem SYSCTL (`h`); wynik tekstem na `fd`.
+pub fn sysctl(h: u64, op: u64, arg: u64, fd: u64) -> i64 {
+    syscall6(SYS_SYSCTL, h, op, arg, fd, 0, 0)
 }
 
 /// Opis statusu z wait.
@@ -602,6 +785,8 @@ pub fn strerror(e: i64) -> &'static str {
         -34 => "buffer too small",
         -11 => "try again (would block)",
         -90 => "message too long",
+        -16 => "device or resource busy",
+        -19 => "no such device",
         -38 => "unknown syscall",
         -39 => "directory not empty",
         _ => "error",

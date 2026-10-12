@@ -2,6 +2,295 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.22.0 — 2026-10-12
+
+### ✅ P3 zamknięte (KVM + Legion)
+- KVM 8 CPU: 27/27, stress 174 257 (w szumie; compare na KVM ogranicza pula), czekania na „frames” 8,2 mln → 4 351,
+  spawn 34,1 → 23,4 µs, reap 26,0 → 15,1 µs.
+- Legion 16 CPU: compare **436 134** (v0.21.0: 412 608, +5,7%), max6 **528 869** (473 223, +11,8%), `pass=1`,
+  ping-pong 6,75 / 6,5 µs. „frames”: 48 / 60 mln czekań → 17 / 26 tys., CPU 4 / 6% → 0%. spawn 48,3 → 24,5 µs
+  (compare), 54,3 → 27,3 µs (max6).
+- Cały etap P od M18 (v0.18.4: 392 943 / 448 079): **+11% compare, +18% max6**.
+- Teraz największe: blokada schedulera (37–41% wzięć czeka, 15–19 s czekania na 960 s CPU ≈ 1,6–1,9%), heap
+  w max6 znów 1,1 mln czekań (1,0% CPU).
+
+### P3: zapasy ramek fizycznych per CPU
+- Powód (Legion v0.21.0): blokada alokatora ramek „frames” – 48 / 60 mln czekań w minucie (compare / max6),
+  4 / 6% CPU; każdy proces bierze dziesiątki ramek (obraz, stos, tablice stron), wszystkie spod jednej blokady.
+- Każdy CPU trzyma do 64 wolnych ramek; `alloc_frame` / `free_frame` to zdjęcie / dołożenie przy wyłączonych
+  przerwaniach, bez blokady. Pusto – paczka 32 ramek spod blokady, pełno – 32 wracają do bitmapy.
+  `free_frame_count` liczy ramki w zapasach jako wolne (testy wycieku bez zmian).
+- Druga bitmapa „wydana” (atomowa, ten sam obszar co bitmapa wolnych, 2× większy): każda ścieżka wydania ustawia
+  bit, `free_frame` najpierw go zdejmuje (`fetch_and`) – bez blokady odrzuca double-free (także ramki leżącej już
+  w zapasie CPU), ramki zarezerwowane i adresy spoza RAM-u.
+- Ciągłe przedziały (`alloc_frames*`, `alloc_frame_below`, DMA) – spod blokady jak dotąd.
+- Nowy test ALLOC TEST 4/5: odmowy (0, niewyrównany, poza RAM-em, zarezerwowany, double-free z zapasu), k zadań
+  po 400 ramek ze znacznikami (żadna ramka u dwóch właścicieli), połowa oddana na innym CPU, licznik wolnych
+  ramek wraca dokładnie. Testy mutacyjne: przyjęcie double-free i wydanie tej samej ramki dwa razy – wykryte.
+- Stress TCG (8 CPU): czekania na „frames” ~2,8 tys. (v0.20.0) → 13. Samotesty 27/27 przy 1/2/4 CPU (raz TIME TEST
+  790 ticków na sekundę RTC – obciążony host u mnie, niezwiązane), stress PASS, bez ostrzeżeń.
+
+## v0.21.0 — 2026-10-11
+
+### ✅ P2 zamknięte (KVM + Legion)
+- KVM 8 CPU: stress **177 373** (rekord; v0.20.2: 166 373), czekania na heap 2 395 873 → 113 785 (−95%),
+  spawn 41,8 → 34,1 µs.
+- Legion 16 CPU: compare **412 608** (v0.20.2: 394 272, +4,7%), max6 **473 223** (447 314, +5,8%), `pass=1`,
+  ping-pong 6,6 / 6,85 µs. Heap: 7,23 / 7,66 mln czekań → 0,66 / 0,86 mln (−90%), CPU 6,0 / 7,5% → 0,4 / 0,6%.
+- Następne wąskie gardło: alokator ramek („frames”: 48 / 60 mln czekań, 4,0 / 6,0% CPU) i blokada
+  schedulera (27–35% wzięć czeka, łącznie 5,7 / 12,1 s na 16 CPU ≈ 0,6–1,3% CPU).
+
+### ✅ P1 zamknięte (Legion, 16 CPU, v0.20.2)
+- compare **394 272** skryptów (v0.19.7: 388 883, +1,4%), max6 **447 314** (443 666, +0,8%), `pass=1`, ping-pong
+  6,75 µs. Blokady „process table (zombies)” nie ma (było 168 s czekania w max6). Blokada schedulera w max6:
+  6,3 s czekania (było 13,1 s). Wąskie gardła teraz: heap (7,2–7,7 mln czekań, 6–7,5% CPU) i scheduler.
+
+### P2: duże klasy heapa (4–32 KiB) na listach per CPU
+- Pomiar wolnej ścieżki heapa w stressie (licznik tymczasowy, 8 CPU): 164 tys. alokacji poza listami CPU –
+  89% to bloki 2–8 KiB, 7% 16–32 KiB, reszta: 32–128 KiB (~1 na skrypt) i wyrównanie 64 B (~1,5 na skrypt).
+- Klasy list per CPU rozszerzone z 16 B..2 KiB do 16 B..32 KiB (12 klas). Duże klasy trzymają mniej bloków na
+  CPU (4 KiB: 8, 8 KiB: 8, 16 KiB: 4, 32 KiB: 2 – najwyżej 224 KiB na CPU). Wynik lokalnie: alokacje wolną
+  ścieżką 164 tys. → 6,7 tys. (−96%), czekania na blokadę heapa w stressie TCG ~17 tys. → ~0,9 tys.; heap
+  zmapowany 2,3 → 4,0 MiB (8 CPU).
+- Test: ALLOC TEST 3/4 (producenci / konsumenci na różnych CPU) także z blokami 2049 B, 4, 6, 12 i 32 KiB.
+- Zostaje na później: bloki 32–128 KiB (bufory potoków, ELF przy spawn) i obiekty z wyrównaniem 64 B.
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.20.2 — 2026-10-11
+
+### P1 cd.: prawdziwa przyczyna wzrostu czekań na heap
+- U Dawida (v0.20.1): 27/27 TCG i KVM, stress KVM 166 362, ale spin „heap” nadal 3,61 mln (v0.19.7: 2,39 mln) –
+  hipoteza z v0.20.1 (alokacja listy zombie) była błędna: liczba alokacji się nie zmieniła.
+- Przyczyna: `IrqSpinLock` w `Process`. `RawSpin` ma `#[repr(align(64))]` (osobna linia cache), więc cały
+  `Process` dostał wyrównanie 64 B, a heap obsługuje szybko tylko bloki do 2 KiB z wyrównaniem do 16 B –
+  każdy proces (milion na minutę) szedł wolną ścieżką: globalna lista bloków pod jedną blokadą. Widać to też
+  w profilu: spawn 38 → 44 µs, reap 25 → 30 µs.
+- Teraz lista zombie ma własną jednobajtową blokadę (`procs::ChildList`: przerwania wyłączone na czas sekcji,
+  bez lockdep, nigdy dwie naraz) – `level::CHILDREN` usunięty. Asercja w czasie kompilacji: `Process` ≤ 2 KiB
+  i wyrównanie ≤ 16 (żeby to się nie powtórzyło).
+- Wniosek na P2: obiekty z `SpinLock` (wyrównanie 64) alokowane często (kanały, potoki, pliki) też idą wolną
+  ścieżką heapa – do sprawdzenia.
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.20.1 — 2026-10-11
+
+### P1 cd.: lista zombie bez heapa
+- Potwierdzone u Dawida (v0.20.0): 27/27 TCG i KVM, stress KVM 8 CPU 168 711 skryptów, `pass=1`; blokady
+  „process table (zombies)” już nie ma w raporcie.
+- Ale czekania na blokadę heapa wzrosły o 45% (2,39 → 3,47 mln): każdy proces z dziećmi alokował i zwalniał
+  własny `Vec` na zombie. Teraz `procs::Zombies` – 4 wpisy w samym procesie (bez alokacji), dopiero dalsze w
+  `Vec`. Odbiór w dowolnej kolejności (jak w POSIX).
+- famtest (200 dzieci naraz) sprawdza też przelanie poza 4 wpisy. Samotesty 27/27 przy 1/2/4 CPU, stress PASS.
+
+## v0.20.0 — 2026-10-11
+
+### P1: zombie w procesie-rodzicu (koniec globalnej tablicy ZOMBIES)
+- Powód (Legion v0.19.7, max6): blokada „process table (zombies)” – jedna usypiająca blokada dla wszystkich
+  procesów: 12,3 mln wzięć w minucie, 168 s czekania łącznie (compare 46 s).
+- Teraz każdy proces ma własną listę zombie dzieci (`Process.zombies`, `IrqSpinLock` poziom 52 – nowy
+  `level::CHILDREN`) i licznik `child_gen`:
+  - koniec dziecka: pod blokadą schedulera (`with_process` na rodzicu) – sprawdza, że rodzic wciąż jest jego
+    rodzicem (inaczej próbuje u nowego) i że się nie kończy; wpis zombie i −1 żywych dzieci w jednej sekcji,
+  - koniec rodzica: `sched::reparent_with` – w jednej sekcji pod blokadą schedulera `exiting`, zabranie
+    własnych zombie, oddanie żywych dzieci (init dostaje też licznik żywych dzieci +n w tej samej sekcji –
+    wcześniej osobno, z małym wyścigiem); zombie przekazane init,
+  - `wait`: tylko blokada własnej listy (bez blokady schedulera dla ANY); ECHILD dopiero po sprawdzeniu, że
+    `child_gen` się nie zmienił (dziecko mogło dopisać się i zniknąć między sprawdzeniami).
+- init w trybie `init test`: na końcu „init: test program ended, N orphans reaped”.
+- Nowy test NOBKL TEST 10/10 – `/bin/famtest` pod prawdziwym init (zarejestrowanym jako init): 200 dzieci
+  naraz (każdy status raz, właściwy kod), wait(pid) w odwrotnej kolejności, WNOHANG, 8 × 25 wnuków-sierot →
+  init odbiera dokładnie 200, 4 rodziców po 50 dzieci równolegle. Test mutacyjny: zgubione przekazanie sierot
+  do init – wykryte.
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń; w stressie blokady zombie już nie ma na liście
+  czekających.
+
+## v0.19.7 — 2026-10-11
+
+### ✅ Zamknięcie M19 (Legion, 16 CPU)
+- Potwierdzone u Dawida (v0.19.7): 27/27 TCG i KVM, stress KVM 8 CPU 172 059 skryptów; pomiar KVM: przerwanie
+  34,6 µs jądro / 31,4 µs usługa, restart usługi 1,2 ms.
+- Legion: compare **388 883** skryptów (M18: 392 943), max6 **443 666** (M18: 448 079) – −1%, w granicach szumu;
+  ping-pong 6,55 / 6,75 µs, kanał 930 MB/s (compare), `pass=1` w obu trybach. W QEMU (`run-qemu.sh`): `services`
+  pokazuje edu i echo, `mem` przez sysinfo, `sync` działa, `mkfs 0` odrzucone.
+- Do poprawy (następny krok): przy pełnym obciążeniu blokada tablicy procesów („process table (zombies)”)
+  czeka łącznie 168 s na 16 CPU (13% wzięć musiało czekać); w compare 46 s.
+
+### M19.i: koniec mostu `kcmd` – `sysinfo` i `sysctl` za uchwytem
+- Potwierdzone u Dawida (v0.19.6): 27/27 TCG i KVM, stress KVM 8 CPU 174 243 skryptów, `pass=1`.
+  Pomiar KVM: przerwanie → sterownik 32,6 µs jądro / 31,9 µs usługa, silnia 53,1 / 55,5 µs, przez `edud`
+  84,4 µs, PING 22,6 µs, restart 1,2 ms (opis w ARCHITEKTURA.md, „Pomiar”).
+- Syscall 21 `kcmd` usunięty (ENOSYS). Nowe:
+  - 46 `sysinfo(temat, bufor)` – tylko odczyt: ver, uptime, date, mem, irq, cpus, lspci (-v), acpi, disk (lista),
+    mount, df; ERANGE, gdy bufor za mały.
+  - 47 `sysctl(uchwyt, akcja, arg, fd)` – reboot, halt, sync, stress [s]; tylko z uchwytem `SYSCTL` (rodzaj 9,
+    prawo tylko DUP). Jądro tworzy go dla init (slot 4), init daje shellowi, shell nie przekazuje programom.
+- `/bin/sh`: `mem`, `lspci`… przez sysinfo (z przekierowaniem); wbudowane `sync`, `reboot`, `halt`, `stress`;
+  `mkfs`, `disk read/write`, `run`, `k` → „only in the kernel emergency shell”. Bez uchwytu SYSCTL reboot
+  odmawia (shell nie z init).
+- Testy: INIT TEST 4/9 (sysinfo z przekierowaniem, mkfs / k / disk read / reboot odrzucone), svctest 42
+  sprawdzeń (sysinfo, prawa SYSCTL, EBADF / EINVAL, nie da się go wysłać, shell bez niego odmawia, kcmd = ENOSYS).
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.6 — 2026-10-11
+
+### M19.h: pomiar – sterownik w jądrze vs usługa w user space
+- Potwierdzone u Dawida (v0.19.5): 27/27 TCG i KVM, stress KVM 8 CPU 172 953 skryptów, `pass=1`.
+- SVC TEST 7/7 mierzy tę samą pracę na `edu` (każdy pomiar ≥ 200 ms):
+  - przerwanie → obudzony sterownik (jądro: `WaitQueue` + handler MSI; user space: `wait_many`),
+  - silnia zakończona przerwaniem: jądro / sterownik w procesie / klient przez usługę `edud`,
+  - `PING` przez usługę (sam koszt IPC) i restart usługi (kill → nowa instancja odpowiada).
+- Linia `[RESULT-SVC] ver=… irq_kernel_ns irq_user_ns fact_kernel_ns fact_user_ns fact_svc_ns ping_svc_ns
+  restart_us` – `test.sh` wypisuje ją pod „Log:”. W autostressie jej nie ma (edu trzyma `edud` z init).
+- `/bin/svcbench`: z HW_ROOT – pełny pomiar; z shella – PING i silnia przez usługę `edu` z init.
+  svctest: +1 sprawdzenie (svcbench z shella przez menedżer usług).
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.5 — 2026-10-11
+
+### M19.g: menedżer usług w init (wariant A)
+- Potwierdzone u Dawida (v0.19.4): 27/27 TCG i KVM, stress KVM 8 CPU 168 140 skryptów, `pass=1`.
+- `/bin/init` uruchamia usługi z tabeli: `edu` (`/bin/edud`, urządzenie 00:06.0) i `echo` (`/bin/echod`, bez
+  urządzenia). Restart po końcu z odstępem 100 ms, podwajanym do 5 s (po 10 s pracy znowu 100 ms); 5 awarii
+  w 30 s → „broken”. Brak urządzenia → „no device” (Legion: edu nie ma, echo działa).
+- Łączenie po nazwie: shell i programy mają w slocie 3 kanał do init (tylko wysyłanie). `svc_connect("edu")`
+  – init przekazuje koniec kanału klienta usłudze; nieznana / leżąca usługa → `EPIPE`. `svc_list` i nowa
+  komenda `services` (stan, pid, restarty, program).
+- `/bin/echod` – najprostsza usługa (odbija komunikaty, `pid`, `crash` → kod 7), wzór i test na sprzęcie bez edu.
+- Shell przekazuje slot 3 uruchamianym programom (`spawn_ex`), gdy sam go dostał.
+- `init test <program>` – tryb samotestu; SVC TEST 6/6: prawdziwy init + `/bin/svctest` (28 sprawdzeń: prawa
+  kanału svc, lista, echo po nazwie, restart po awarii z nowym pid, edu przez menedżer, restart edud po kill,
+  nieznana usługa i złe prośby, `sh -c services`, broken po 5 awariach). Po teście: edu wolne, bus mastering
+  off, wektory i ramki wróciły.
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.4 — 2026-10-11
+
+### M19.f: edud – pierwsza usługa w user space (sterownik `edu`)
+- Potwierdzone u Dawida (v0.19.3): 27/27 TCG i KVM, stress KVM 8 CPU 166 889 skryptów, `pass=1`.
+- `/bin/edud`: sterownik urządzenia edu jako zwykły proces. Uchwyty na starcie: 1 konsola, 3 urządzenie,
+  4 kanał połączeń (w 19.g da je menedżer usług w init). Rejestry przez `dev_map`, silnia i DMA kończą się
+  przerwaniem (`irq_bind` + `wait_many`; o końcu decyduje status urządzenia), bufor DMA 8 KiB.
+  Jedna pętla `wait_many`: kanał połączeń + przerwanie + do 14 klientów. Prośby obsługiwane po kolei
+  (urządzenie jest jedno); odpowiedź wysyłana bez czekania (klient, który nie odbiera, nie zatrzyma usługi).
+  Koniec: kanał połączeń zamknięty i żadnego klienta – kod 0.
+- Protokół (`user/lib/edu_proto.rs`, wspólny dla usługi i klientów): nagłówek 16 B + dane; `PING`
+  (identyfikacja 0x010000ed), `FACT n` (silnia na urządzeniu, 13! = EINVAL – nie mieści się w rejestrze),
+  `COPY` (do 4000 B: bufor usługi → urządzenie → bufor przez DMA), `STATS`. Zła prośba – odpowiedź EINVAL,
+  usługa działa dalej. Połączenie: klient tworzy kanał i wysyła jeden koniec do kanału połączeń usługi.
+- `/bin/edutest` (16 sprawdzeń) – uruchamia usługę jak przyszły menedżer (przejęcie z HW_ROOT, `spawn_ex`),
+  klient: PING, silnie 0..12, kopiowanie 4000 B przez DMA, zła / krótka prośba; 4 procesy-klienci po 50 próśb
+  naraz; **kill usługi → klient dostaje EPIPE, urządzenie wraca, nowa instancja działa** (restart ręczny – w
+  19.g zrobi to init); zamknięcie – usługa kończy się sama. Jądro po teście: urządzenie wolne, bus mastering
+  wyłączony, wektory i ramki wróciły. SVC TEST 5/5 (219 próśb obsłużonych przez usługę).
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.3 — 2026-10-11
+
+### M19.e: DMA – urządzenie samo czyta i zapisuje bufor usługi
+- Potwierdzone u Dawida (v0.19.2): 27/27 TCG i KVM, stress KVM 8 CPU 168 412 skryptów, `pass=1`.
+- Syscalle: 44 `dma_alloc(dev, rozmiar, bity_adresu)` → uchwyt pamięci współdzielonej (mapowanie przez
+  `shm_map`) z **ciągłych** ramek leżących całe poniżej `2^bity` (24..=64; `edu` widzi tylko 28 bitów i
+  obcina wyższe – bufor powyżej trafiłby w cudzą pamięć); ≤ 2 MiB na bufor, ≤ 16 MiB na urządzenie (`ENOMEM`);
+  wymaga `MAP_WRITE`; włącza bus mastering. 45 `dma_phys(bufor)` – adres fizyczny (`EINVAL` dla zwykłej pamięci
+  współdzielonej; bez BKL).
+- **Bufor DMA żyje tak długo jak przejęcie urządzenia** (`DevClaim` trzyma listę) – zamknięcie uchwytu i
+  munmap go nie zwalniają; ramki wracają dopiero po wyłączeniu bus masteringu i MSI przy oddaniu urządzenia.
+- Alokator ramek: `alloc_frames_below(n, align, limit)` – ciągłe ramki poniżej adresu.
+- `/bin/dmatest` (23 sprawdzenia): prawa, rozmiary, bity szyny, `dma_phys`; edu czyta bufor (RAM → edu) i
+  zapisuje go w drugą połowę (edu → RAM), dwa razy z różnymi wzorami, koniec każdego transferu przerwaniem;
+  zamknięty bufor nie jest oddany innemu (sprawdzone mutacją: bez listy w przejęciu nowy bufor dostaje te same
+  ramki – FAIL); limit 16 MiB; kill procesu z buforem DMA i przerwaniem. Jądro po teście: ramki wróciły
+  (15 MiB buforów), bus mastering wyłączony, urządzenie wolne. SVC TEST 4/4.
+- **irqtest – poprawka założenia:** 10 szybkich przerwań może dać licznik < 10 – przerwania tego samego wektora,
+  które przyjdą, zanim procesor obsłuży poprzednie, APIC łączy w jedno (lokalnie raz: 9 z 10). Licznik to
+  „co najmniej jedno przerwanie od ostatniego odczytu”, nie dokładna liczba; usługa sprawdza status urządzenia.
+  Test sprawdza teraz 1..=10 i wszystkie bity w rejestrze statusu edu. Opisane w ARCHITEKTURA.md.
+- Samotesty 27/27 przy 1/2/4 CPU (4 CPU – 3 razy z rzędu), stress PASS, bez ostrzeżeń.
+
+## v0.19.2 — 2026-10-11
+
+### Poprawka testów: fałszywy "frames leaked"
+- U Dawida (v0.19.1, raz na dwa uruchomienia): `[IPC TEST] FAIL: frames leaked (115418 -> 115478)` – na końcu
+  zestawu WIĘCEJ wolnych ramek niż na starcie. Przyczyna: pomiar startowy, zanim reap (pętla idle) sprzątnął
+  procesy poprzedniego zestawu (FILE TEST kończy procesy przez #PF i sprawdza ramki z tolerancją). Nowe
+  `selftest::settled_free_frames()` – reap, aż liczba wolnych ramek nie zmienia się przez 3 próbki co 5 ms –
+  jako punkt odniesienia w ELF, SYSCALL, INIT, IPC i SVC TEST. To nie był wyciek w jądrze.
+
+### M19.d: przerwania urządzeń w user space
+- Syscalle: 42 `irq_bind(dev)` → uchwyt **IRQ** (rodzaj 8, prawo `RECV`; wymaga `MAP_WRITE` na urządzeniu) –
+  wektor MSI (albo MSI-X wpis 0), bus mastering (MSI to zapis urządzenia do pamięci); `EBUSY` – już przypięte
+  albo brak wektorów, `ENODEV` – urządzenie bez MSI. 43 `irq_read(irq)` – przerwania od ostatniego odczytu
+  (zeruje; bez BKL). `wait_many` z sygnałem **`W_IRQ`**.
+- `device.rs`: statyczne sloty wektor ↔ licznik + obserwatorzy (handler nie dotyka pamięci, która mogłaby być
+  zwolniona); handler: licznik + pobudka – nic więcej. MSI zboczowe – bez maskowania; kilka przerwań przed
+  obsługą = jedna pobudka z licznikiem.
+- **Zwalnianie wektorów** (`msi::free`, `free_count`) – wcześniej wektor raz wzięty zostawał na zawsze; usługa
+  restartowana 16 razy zabrałaby wszystkie. Drop uchwytu IRQ: MSI off w urządzeniu, odczyt rejestru (zapis
+  dotarł), wektor wolny. Drop przejęcia urządzenia: MSI off i **bus mastering off**, zanim urządzenie wróci.
+  `pci.rs`: `disable_msi`, `set_bus_master`.
+- `/bin/irqtest` (25 sprawdzeń na `edu`): prawa i EBUSY, przerwanie na żądanie budzi `wait_many`, licznik i
+  status w urządzeniu, 10 przerwań → 1 pobudka z licznikiem 10, silnia 12! zakończona przerwaniem zamiast
+  odpytywania, przerwanie i kanał na jednej liście (właściwe bity), 20 × przypięcie / zamknięcie (wektorów jest
+  16), zabicie procesu z przypiętym przerwaniem. Jądro sprawdza po teście: wektory wróciły, bus mastering edu
+  wyłączony, urządzenie wolne. Sprawdzone, że bez `msi::free` test pada („13 succeeded”). SVC TEST 3/3.
+- Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.1 — 2026-10-11
+
+### M19.c: urządzenie jako uchwyt – HW_ROOT, dev_claim, dev_map
+- Potwierdzone u Dawida (v0.19.0): 27/27 TCG i KVM, stress KVM 8 CPU 166 070 skryptów, `pass=1`.
+- **HW_ROOT** (rodzaj uchwytu 6): powstaje tylko w jądrze (`SpawnOptions::hw_root`) – dostaje go `/bin/init`
+  w slocie 3 (i testy jądra). Prawa 0: bez `DUP` i `TRANSFER` nie da się go skopiować, dać dziecku ani wysłać.
+- **Właściciel urządzenia** (`drivers/pci.rs`): tablica `OWNERS` (wolne / sterownik jądra / usługa), virtio-blk
+  i NVMe zapisują się jako sterownik jądra. `claim_user` odmawia: sterownik w jądrze, klasy 0x01 (dyski –
+  zawsze, także bez sterownika), 0x03 (grafika), 0x06 (mostki), 0x08 (urządzenia systemowe), funkcje
+  niebędące zwykłym urządzeniem. `lspci` pokazuje właściciela.
+- Syscalle: 39 `dev_claim(hw_root, bdf)` → uchwyt **DEVICE** (rodzaj 7; `MAP_READ|MAP_WRITE|DUP|TRANSFER`),
+  błędy `EACCES` / `EBUSY` (-16) / `ENODEV` (-19); 40 `dev_info` (vendor, device, klasa, rozmiary BAR-ów, BAR-y
+  I/O, MSI / MSI-X); 41 `dev_map(dev, bar, prot)` – rejestry BAR-u w procesie, **bez cache (UC), nigdy
+  wykonywalne**, strony tablicy MSI-X / PBA pominięte; BAR musi mieć ≥ 4 KiB i być wyrównany do strony (na
+  wspólnej stronie mogłyby leżeć rejestry innego urządzenia), ≤ 256 MiB. Pod BKL (dostęp do konfiguracji PCI
+  przez porty nie jest bezpieczny na wielu CPU naraz; syscalle rzadkie).
+- `kernel/user/device.rs`: `DevClaim` (Arc – uchwyty i mapowania); Drop oddaje urządzenie. `vm.rs`: obszar
+  wspólny ma właściciela `SharedRef` (pamięć współdzielona albo przejęcie urządzenia) – mapowanie trzyma
+  przejęcie, `munmap` tylko w całości.
+- **Koniec procesu zdejmuje mapowania wspólne od razu** (`exit_current`, nie dopiero przy reap) – przejęte
+  urządzenie wraca, zanim rodzic dostanie status z `wait` (test to wykrył: po kill urządzenie było jeszcze
+  zajęte).
+- Profil: 48 numerów syscalli (było 40). QEMU w `test.sh`, `stress-qemu.sh`, `run-qemu.sh`: `-device edu,addr=06`.
+- `/bin/devtest` (37 sprawdzeń): HW_ROOT nie do skopiowania / wysłania / przekazania, odmowy dla mostka, VGA,
+  virtio-blk, NVMe, mostka ISA, SATA; edu: przejęcie, EBUSY, `dev_info`, rejestry (identyfikacja 0x010000ed,
+  rejestr żywotności, silnia 10! przez MMIO), prawa mapowania, munmap w całości, przejęcie trzymane przez
+  mapowanie, zapis przez mapowanie tylko do odczytu = #PF, kill procesu z zamapowanym urządzeniem → wolne.
+  SVC TEST 2/2. Samotesty 27/27 przy 1/2/4 CPU, stress PASS, bez ostrzeżeń.
+
+## v0.19.0 — 2026-10-11
+
+### M19.a: projekt usług w user space
+- `ARCHITEKTURA.md`, „Usługi w user space”: `wait_many`, `HW_ROOT` / `dev_claim` / `dev_map`, przerwania jako
+  licznik + pobudka, DMA (bufory żyją z przejęciem urządzenia, sprzątanie: bus mastering off → wektor → ramki),
+  menedżer usług w init (wariant A; wariant B – osobny `/bin/svcmgr` – opisany na później), pierwsza usługa
+  `edu` z QEMU, koniec `kcmd`, numery syscalli 38–46. Zaakceptowany przez Dawida.
+
+### M19.b: wait_many – czekanie na wiele uchwytów naraz
+- Syscall 38 `wait_many(lista, n, timeout_ms)`: lista do 16 par [uchwyt, sygnały], wynik = maska gotowych
+  wpisów (0 = minął czas; `u64::MAX` = bez limitu, 0 = tylko sprawdź). Sygnały: `READABLE` (kanał: komunikat
+  albo zamknięta druga strona; potok: dane albo brak piszących), `WRITABLE` (miejsce albo zamknięta druga
+  strona); `IRQ` zarezerwowany na 19.d. Prawa jak przy operacji: `RECV` / `SEND`, `READ` / `WRITE`. Cała lista
+  sprawdzana przed czekaniem (EINVAL / EBADF / EACCES / EFAULT). Kill przerywa (EINTR). Bez BKL.
+- `kernel/user/waitset.rs`: `Observers` – lista kanałów czekających zadań w każdym obiekcie (kolejka końca
+  kanału, potok), `IrqSpinLock` na nowym poziomie `WAITERS` (45 – nad kanałami / potokami, pod schedulerem).
+  `wait_many` zapisuje się u obiektów, śpi na własnej WaitQueue, wypisuje się po pobudce. Obiekty budzą
+  obserwatorów przy każdej zmianie (komunikat, miejsce, zamknięcie). Licznik obserwatorów – `notify` bez
+  czekających nie bierze blokady (każdy send / recv go woła; bez tego ping-pong w TCG wolniejszy o ~30%).
+- `/bin/waittest` (34 sprawdzenia): błędy listy, limit czasu, kanały i potoki, ten sam uchwyt dwa razy,
+  zamknięta druga strona, pobudka komunikatem od dziecka, **serwer obsługujący 4 klientów naraz** (2000 próśb,
+  nadawca od jądra), pełna kolejka, kill procesu czekającego w `wait_many`. Sprawdzone, że bez budzenia
+  obserwatorów test się zawiesza (FAIL).
+- Nowy zestaw samotestów **SVC TEST** (27 zestawów). Profil: nazwa `wait_many`. Biblioteka: `wait_many`,
+  `W_READABLE` / `W_WRITABLE` / `W_IRQ`, `FOREVER`.
+- Samotesty 27/27 przy 1, 2 i 4 CPU, stress 8 CPU PASS, bez ostrzeżeń.
+
 ## v0.18.4 — 2026-10-11
 
 ### M18.f: IPC pod obciążeniem, pomiar, linia [RESULT]

@@ -1,20 +1,20 @@
 # Roadmapa DeSoOS
 
-Stan: 2026-10-11 – **M18 (IPC) gotowe** (v0.18.4): uchwyty z prawami, kanały, uchwyty w komunikatach + `spawn_ex`, pamięć współdzielona; Legion: 392 943 / 448 079 skryptów razem z IPC, ping-pong 6,6 µs. Następne: **M19**. **M17b gotowe** (v0.17.35): Legion 360 713 / 447 028 skryptów. **M17a gotowe** (v0.17.27). Architektura: `ARCHITEKTURA.md`.
+Stan: 2026-10-11 – **M19 (usługi w user space) gotowe** (v0.19.7): sterownik `edu` jako proces (MMIO, przerwania, DMA), menedżer usług w init, `sysinfo` / `sysctl` zamiast `kcmd`; Legion: 388 883 / 443 666 skryptów, ping-pong 6,6 µs. Następne: poprawki wydajności (tablica procesów, duże bloki heapa), potem **M20**. **M18 (IPC) gotowe** (v0.18.4): uchwyty z prawami, kanały, uchwyty w komunikatach + `spawn_ex`, pamięć współdzielona; Legion: 392 943 / 448 079 skryptów razem z IPC, ping-pong 6,6 µs. **M17b gotowe** (v0.17.35): Legion 360 713 / 447 028 skryptów. **M17a gotowe** (v0.17.27). Architektura: `ARCHITEKTURA.md`.
 Szczegóły ukończonych etapów: `CHANGELOG.md`.
 
 ```
 Faza 1  Fundament        M1–M15    ✅  kernel, pamięć, scheduler, ring 3, syscalle, ELF
 Faza 2  Userland         M16–M16b  ✅  init + shell w user space, start na prawdziwym laptopie
 Faza 3  Skalowanie       M17–M17b  ✅  wiele rdzeni ✅, drobne blokady ✅ (M17a), obiekty plików i pamięć procesu ✅ (M17b)
-Faza 4  Hybryda          M18–M20   🔶  IPC ✅, usługi w user space, USB
+Faza 4  Hybryda          M18–M20   🔶  IPC ✅, usługi w user space ✅, USB
 ```
 
 Kolejność ma znaczenie: SMP przed IPC (IPC piszemy raz, od razu ze spinlockami),
 drobne blokady (M17a) przed M17b (nowy kod pamięci, procesów i VFS powstaje od razu bez BKL),
 obiekty plików i mmap przed IPC (uchwyty kanałów i wspólna pamięć z nich korzystają).
 
-Najbliższe kroki: ~~test SMP na Legionie~~ ✅ (16 CPU) → ~~M17a~~ ✅ → ~~M17b~~ ✅ → ~~M18~~ ✅ → **M19**.
+Najbliższe kroki: ~~test SMP na Legionie~~ ✅ (16 CPU) → ~~M17a~~ ✅ → ~~M17b~~ ✅ → ~~M18~~ ✅ → ~~M19~~ ✅ → poprawki wydajności → **M20**.
 
 ---
 
@@ -524,16 +524,62 @@ pamięci (po e); futex → gdy pomiar pokaże potrzebę.
 **Gotowe, gdy:** ✅ (v0.18.4, Legion 2026-10-11) dwa niezależne procesy rozmawiają przez kanał i dzielą pamięć, przekazują sobie uchwyty
 z ograniczonymi prawami, a zabicie któregoś w dowolnym momencie niczego nie psuje ani nie zostawia wycieku.
 
-### ⬜ M19 – Pierwsza usługa w user space
+### ✅ M19 – Pierwsza usługa w user space
 
-**Cel:** sprawdzić hybrydę na jednym konkretnym przypadku i zmierzyć koszt.
+**Cel:** sterownik urządzenia jako zwykły proces – awaria nie wywraca systemu, init go restartuje, koszt
+zmierzony. Projekt: `ARCHITEKTURA.md`, „Usługi w user space”. Decyzje (2026-10-11): pierwsza usługa = `edu`
+z QEMU (sieć – osobny etap później); poprawki wydajności (duże bloki heapa, tablica procesów) – po M19.
 
-- [ ] Kernel udostępnia: MMIO do procesu, IRQ jako komunikat IPC (+ EOI), bufory DMA, porty I/O.
-- [ ] Jedna usługa poza kernelem (kandydaci: sterownik testowy w QEMU, prosty stos sieciowy na virtio-net).
-- [ ] Usługa pada → kernel i reszta systemu działają, init może ją uruchomić ponownie.
-- [ ] Pomiar: ta sama operacja w kernelu i w user space.
+Kroki (każdy z testem; bez spadku w stressie względem v0.18.4):
+- [x] **a.** (2026-10-11) Projekt na papierze: `wait_many`, `HW_ROOT` / `dev_claim` / `dev_map`, IRQ, DMA, sprzątanie po
+      usłudze, menedżer usług, koniec `kcmd`, numery syscalli – zaakceptowany.
+- [x] **b.** (v0.19.0) `wait_many` – czekanie na wiele uchwytów (kanały, potoki; IRQ w d), obserwatorzy w
+      obiektach. SVC TEST 1/1 (`/bin/waittest`, 34 sprawdzenia, serwer 4 klientów).
+- [x] **c.** (v0.19.1) `HW_ROOT` dla init, `dev_claim` (właściciel urządzenia, odmowa: sterownik w jądrze, dyski,
+      grafika, mostki), `dev_info`, `dev_map` (UC, NX, bez tablicy MSI-X). SVC TEST 2/2 (`/bin/devtest`, 37
+      sprawdzeń na `-device edu`).
+- [x] **d.** (v0.19.2) Przerwania: `irq_bind` (wektor MSI ze zwalnianiem), `irq_read`, sygnał `IRQ` w `wait_many`.
+      SVC TEST 3/3 (`/bin/irqtest`, 25 sprawdzeń). Poprawka testów: punkt odniesienia wycieku ramek po reap.
+- [x] **e.** (v0.19.3) DMA: `dma_alloc` (ciągłe ramki poniżej limitu adresu), `dma_phys`, bufory żyją z
+      przejęciem; sprzątanie w kolejności: bus mastering off → wektor → ramki → przejęcie. SVC TEST 4/4
+      (`/bin/dmatest`, 23 sprawdzenia: edu kopiuje bufor RAM → urządzenie → RAM).
+- [x] **f.** (v0.19.4) Usługa `/bin/edud` + `/bin/edutest` na `-device edu` (silnia, przerwania, DMA, 4 klientów,
+      kill i restart usługi, samodzielny koniec). SVC TEST 5/5. Protokół: `user/lib/edu_proto.rs`.
+- [x] **g.** (v0.19.5) Menedżer usług w init (tabela, restart z odstępem 100 ms → 5 s, 5 awarii w 30 s = broken,
+      łączenie po nazwie przez slot 3 `svc`), `/bin/echod` (usługa bez sprzętu – test na Legionie), komenda
+      `services`, shell przekazuje slot 3. SVC TEST 6/6 (`init test /bin/svctest`, 28 sprawdzeń).
+      Wariant B na później: osobny `/bin/svcmgr`, init minimalny (`ARCHITEKTURA.md`, „Menedżer usług”).
+- [x] **h.** (v0.19.6) Pomiar: przerwanie → obudzony sterownik i silnia przez przerwanie (jądro vs usługa w
+      procesie vs klient przez `edud`), PING przez usługę, czas restartu. SVC TEST 7/7 (`/bin/svcbench` +
+      sterownik edu w jądrze), linia `[RESULT-SVC]` w `test.sh` (w autostressie edu trzyma `edud` z init).
+- [x] **i.** (v0.19.7) Koniec mostu `kcmd`: syscall 46 `sysinfo` (tylko odczyt), 47 `sysctl` (reboot, halt,
+      sync, stress) tylko z uchwytem `SYSCTL` (jądro → init → shell, nie dalej); `mkfs`, zapis na dysk i `run`
+      tylko w awaryjnym shellu jądra. Testy: INIT TEST 4/9, svctest (42 sprawdzenia).
+- [x] Zamknięcie (v0.19.7, Legion 2026-10-11): compare 388 883 skryptów (M18: 392 943), max6 443 666 (M18: 448 079) –
+      w granicach szumu (−1%); ping-pong 6,55 / 6,75 µs, `pass=1`. W pełnym obciążeniu widać koszt tablicy procesów
+      (blokada „process table (zombies)”: 168 s czekania łącznie na 16 CPU) – następny krok.
 
-**Gotowe, gdy:** zabicie usługi nie wywraca systemu, a narzut jest zmierzony.
+**Gotowe, gdy:** ✅ (v0.19.7, Legion 2026-10-11) sterownik w user space obsługuje urządzenie (MMIO, przerwania, DMA), zabicie go w dowolnym
+momencie niczego nie psuje ani nie zostawia wycieku, init go restartuje, a narzut jest zmierzony.
+
+### 🔶 P – Poprawki wydajności (po M19)
+
+Na podstawie pomiarów z Legiona (v0.19.7, pełne obciążenie, 16 CPU). Każdy krok: testy + Legion bez spadku.
+- [x] **P1.** ✅ (v0.20.2, Legion: compare 394 272 / max6 447 314 – +1,4% / +0,8%, blokada zombie zniknęła, scheduler
+      w max6 13,1 → 6,3 s czekania) (v0.20.0) Zombie w procesie-rodzicu zamiast globalnej tablicy pod usypiającą blokadą („process
+      table (zombies)”: 12,3 mln wzięć, 168 s czekania w minucie). Test: NOBKL TEST 10/10 (`/bin/famtest` pod
+      prawdziwym init: 200 dzieci naraz, wait(pid), WNOHANG, 200 sierot do init, 4 rodziców równolegle).
+      v0.20.1: 4 wpisy w procesie (bez alokacji). v0.20.2: prawdziwa przyczyna +50% czekań na heap –
+      `IrqSpinLock` (wyrównanie 64) w `Process` spychał każdy proces na wolną ścieżkę heapa; własna lekka
+      blokada + asercja (`Process` ≤ 2 KiB, wyrównanie ≤ 16).
+- [x] **P2.** ✅ (v0.21.0) Wolna ścieżka heapa: klasy list per CPU do 32 KiB (pomiar: 96% alokacji wolną ścieżką
+      to bloki 2–32 KiB). Legion: compare 412 608 (+4,7%), max6 473 223 (+5,8%); czekania na heap −90%,
+      CPU heapa 6–7,5% → 0,4–0,6%. KVM: 177 373 (rekord). Na później: bloki 32–128 KiB, wyrównanie 64 B.
+- [x] **P3.** ✅ (v0.22.0) Alokator ramek: zapas 64 ramek na CPU (paczki po 32) + atomowa bitmapa „wydana” (double-free
+      bez blokady). ALLOC TEST 4/5. Legion: compare 436 134 (+5,7%), max6 528 869 (+11,8%); „frames” 48–60 mln
+      czekań → ~20 tys., spawn 48 → 25 µs. Etap P od M18: +11% / +18%.
+- [ ] **P4.** Blokada schedulera (32–36% wzięć czeka; `wait_event`, `with_process`, `wake_one_channel`) – po
+      pomiarze P1/P2.
 
 ### ⬜ M20 – USB
 
@@ -551,7 +597,7 @@ z ograniczonymi prawami, a zabicie któregoś w dowolnym momencie niczego nie ps
 ## Dalej (bez kolejności)
 
 natywny system plików, sieć (TCP/IP), GUI (kompozytor na wspólnej pamięci), audio,
-virtio-gpu, XSAVE/AVX, IOMMU, biblioteki dzielone.
+virtio-gpu, XSAVE/AVX, IOMMU, biblioteki dzielone, menedżer usług jako osobny program (`/bin/svcmgr`, wariant B z M19).
 
 **Agent DeSo AI** (wizja, `ARCHITEKTURA.md` – „Kierunek: agent DeSo AI”): format aplikacji `.eso` (ELF + manifest:
 wersja, wymagane uchwyty, skrót źródeł), powtarzalne budowanie, agent jako zwykły program w user space z
@@ -576,13 +622,13 @@ Numer w nawiasie = etap, w którym brak znika.
 
 **Procesy i syscalle**
 - `spawn` zamiast `fork`/`exec`; brak zmiennych środowiska i sygnałów (kill = koniec procesu)
-- most `kcmd`: komendy diagnostyczne shella kernela wołane z user space – tymczasowy (M19)
+- akcje systemowe (`sysctl`) za jednym uchwytem `SYSCTL` – bez podziału na reboot / sync / stress; zmiany na dyskach tylko z awaryjnego shella jądra
 - PID = numer zadania schedulera (0 = idle BSP, 1 = zadanie startowe kernela, dalej zadania idle pozostałych rdzeni – przy 4 CPU init ma PID 5)
 - shell: linia max ~70 znaków (mieści się w 80 kolumnach), brak skryptów, zmiennych i `$?`
 - brak katalogów przez deskryptor (readdir po ścieżce)
 - IPC: cykl uchwytów przez kolejki kilku kanałów zostaje w pamięci (opisany, nie wykrywany); brak futexa i ring bufferów w bibliotece
 - ELF: tylko statyczne ET_EXEC, envp i auxv puste
-- programy z `/bin` wbudowane w obraz kernela (initrd); programy testowe w asm (M13–M14) też (z shella: `run <nazwa>` przez kcmd)
+- programy z `/bin` wbudowane w obraz kernela (initrd); programy testowe w asm (M13–M14) też (od M19.i tylko z awaryjnego shella jądra: `run <nazwa>`)
 - brak limitów zasobów procesu
 - `read(0)` czyta całą linię; procesy w tle konkurują z shellem o klawiaturę (`readkey`/`read` – kto pierwszy)
 

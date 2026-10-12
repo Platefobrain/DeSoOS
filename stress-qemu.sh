@@ -72,6 +72,7 @@ qemu-system-x86_64 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$TMP_NVME",format=raw,if=none,id=nv0 \
   -device nvme,serial=desoos-stress,drive=nv0 \
+  -device edu,addr=06 \
   -serial stdio -display none -no-reboot < /dev/null > "$LOG" 2>&1 &
 QPID=$!
 

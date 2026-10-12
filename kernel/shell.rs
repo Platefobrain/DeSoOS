@@ -3,8 +3,9 @@
 // M16: zwykłym shellem jest /bin/sh (user space, uruchamia go init).  Ten
 // shell zostaje jako:
 //   * awaryjny – gdy nie ma /bin/init albo init ciągle pada (user::run_init),
-//   * źródło komend diagnostycznych dla user space (syscall kcmd ->
-//     `kernel_command`): mem, lspci, disk, mkfs, run (programy testowe)...
+//   * źródło tekstu dla user space: M19.i syscall sysinfo (tylko odczyt: mem,
+//     lspci, cpus...) i sysctl (reboot, halt, sync, stress – z uchwytem SYSCTL);
+//     mkfs, zapis na dysk i run (programy testowe) – tylko tutaj.
 // Wejście z klawiatury PS/2 i z terminala (serial), wyjście na serial
 // i ekran (console.rs).
 //
@@ -950,7 +951,7 @@ fn cmd_history(_: &str, out: &mut dyn Write, ctx: &mut Context) {
 fn cmd_lspci(args: &str, out: &mut dyn Write, _: &mut Context) {
     use crate::drivers::pci;
     let verbose = args.trim() == "-v";
-    for d in pci::devices() {
+    for (i, d) in pci::devices().iter().enumerate() {
         let _ = write!(
             out,
             "{} {:04x}:{:04x} {} (class {:02x}:{:02x}:{:02x} rev {:02x})",
@@ -958,6 +959,16 @@ fn cmd_lspci(args: &str, out: &mut dyn Write, _: &mut Context) {
         );
         if d.interrupt_pin != 0 && d.interrupt_line != 0xFF {
             let _ = write!(out, " IRQ {}", d.interrupt_line);
+        }
+        // M19.c: kto obsługuje urządzenie.
+        match pci::owner(i) {
+            pci::OWNER_KERNEL => {
+                let _ = write!(out, " [kernel driver]");
+            }
+            pci::OWNER_USER => {
+                let _ = write!(out, " [user-space service]");
+            }
+            _ => {}
         }
         let _ = writeln!(out);
         if verbose {
@@ -1562,21 +1573,55 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
     }
 }
 
-/// M16: komenda shella kernela wywołana z user space (syscall kcmd) –
-/// wyjście jako tekst.  None: nieznana komenda albo taka, która w user
-/// space nie ma sensu (cd/pwd/history – stan shella; keys – interaktywna).
-/// `run` zostaje – programy testowe w asm (M13–M14) są tylko w kernelu.
-pub fn kernel_command(line: &str, cwd: &str) -> Option<String> {
+/// M19.i: komendy tylko do odczytu dla user space (syscall sysinfo) –
+/// zastępują most kcmd.  Argumenty: tylko `lspci -v`; `disk` tylko lista
+/// (odczyt / zapis sektorów, mkfs, run – wyłącznie w awaryjnym shellu jądra).
+pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+
+pub fn sysinfo(line: &str) -> Option<String> {
     let line = line.trim();
-    let name = line.split_whitespace().next()?;
-    if matches!(name, "cd" | "pwd" | "history" | "keys") {
+    let mut words = line.split_whitespace();
+    let name = words.next()?;
+    let args: Vec<&str> = words.collect();
+    if !SYSINFO_TOPICS.contains(&name) {
         return None;
     }
-    COMMANDS.iter().find(|c| c.name == name)?;
+    let args_ok = match name {
+        "lspci" => args.is_empty() || args == ["-v"],
+        _ => args.is_empty(),
+    };
+    if !args_ok {
+        return None;
+    }
+    Some(run_to_string(line))
+}
+
+/// M19.i: akcje systemowe (syscall sysctl – tylko z uchwytem SYSCTL, który
+/// jądro daje init, a init shellowi).  1 reboot, 2 halt, 3 sync, 4 stress
+/// `arg` sekund (0 = domyślnie 10, najwyżej 600).
+pub const SYSCTL_REBOOT: u64 = 1;
+pub const SYSCTL_HALT: u64 = 2;
+pub const SYSCTL_SYNC: u64 = 3;
+pub const SYSCTL_STRESS: u64 = 4;
+
+pub fn sysctl(op: u64, arg: u64) -> Option<String> {
+    let line = match op {
+        SYSCTL_REBOOT => String::from("reboot"),
+        SYSCTL_HALT => String::from("halt"),
+        SYSCTL_SYNC => String::from("sync"),
+        SYSCTL_STRESS if arg <= 600 => {
+            if arg == 0 { String::from("stress") } else { alloc::format!("stress {}", arg) }
+        }
+        _ => return None,
+    };
+    Some(run_to_string(&line))
+}
+
+fn run_to_string(line: &str) -> String {
     let mut out = String::new();
-    let mut cwd = String::from(cwd);
+    let mut cwd = String::from("/");
     execute(line, &mut out, &mut Context { history: &[], cwd: &mut cwd });
-    Some(out)
+    out
 }
 
 // ------------------------------------------------------------

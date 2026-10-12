@@ -77,6 +77,7 @@ pub enum VmaKind {
     Stack,
     /// M18.e: pamięć współdzielona – strony zamapowane od razu, ramki należą
     /// do obiektu (ProcMem.shared), nigdy nie są zwalniane przez proces.
+    /// M19.c: tak samo rejestry urządzenia (BAR) – strony fizyczne urządzenia.
     Shared,
 }
 
@@ -88,6 +89,14 @@ pub struct Vma {
     pub kind: VmaKind,
 }
 
+/// M19.c: właściciel stron obszaru wspólnego – trzymany, dopóki obszar jest
+/// zamapowany (obiekt pamięci współdzielonej albo przejęcie urządzenia).
+#[allow(dead_code)]
+pub enum SharedRef {
+    Shm(alloc::sync::Arc<super::shm::ShmObj>),
+    Dev(alloc::sync::Arc<super::device::DevClaim>),
+}
+
 pub struct ProcMem {
     brk_start: u64,
     brk: u64,
@@ -95,7 +104,7 @@ pub struct ProcMem {
     vmas: Vec<Vma>,
     /// M18.e: mapowania pamięci współdzielonej (początek obszaru, obiekt) –
     /// trzymają obiekt przy życiu.
-    shared: Vec<(u64, alloc::sync::Arc<super::shm::ShmObj>)>,
+    shared: Vec<(u64, SharedRef)>,
     /// Strony dociągnięte leniwie (statystyka, testy).
     pub faulted: u64,
 }
@@ -227,14 +236,41 @@ impl ProcMem {
         obj: alloc::sync::Arc<super::shm::ShmObj>,
         write: bool,
     ) -> Result<u64, i64> {
+        let pages: Vec<Option<u64>> = obj.frames().iter().map(|&f| Some(f)).collect();
+        self.map_pages(space, &pages, write, 0, SharedRef::Shm(obj))
+    }
+
+    /// M19.c: rejestry urządzenia (strony fizyczne BAR-u) – bez cache (UC),
+    /// nigdy wykonywalne; None = dziura (MSI-X), dostęp tam = #PF.
+    pub fn map_mmio(
+        &mut self,
+        space: &mut AddressSpace,
+        pages: &[Option<u64>],
+        write: bool,
+        claim: alloc::sync::Arc<super::device::DevClaim>,
+    ) -> Result<u64, i64> {
+        use crate::memory::{CACHE_DISABLE, WRITE_THROUGH};
+        self.map_pages(space, pages, write, CACHE_DISABLE | WRITE_THROUGH, SharedRef::Dev(claim))
+    }
+
+    /// Obszar wspólny: strony mapowane od razu, `keep` trzyma ich właściciela.
+    fn map_pages(
+        &mut self,
+        space: &mut AddressSpace,
+        pages: &[Option<u64>],
+        write: bool,
+        extra: u64,
+        keep: SharedRef,
+    ) -> Result<u64, i64> {
         use super::syscalls::ENOMEM;
-        let len = obj.len();
+        let len = pages.len() as u64 * PAGE;
         if self.mapped_total() + len > MAX_MAPPED {
             return Err(ENOMEM);
         }
         let start = self.mmap_next;
-        let flags = USER | if write { WRITABLE } else { 0 } | crate::memory::nx_flag();
-        for (i, &f) in obj.frames().iter().enumerate() {
+        let flags = USER | if write { WRITABLE } else { 0 } | crate::memory::nx_flag() | extra;
+        for (i, page) in pages.iter().enumerate() {
+            let Some(f) = *page else { continue };
             if !space.map(start + i as u64 * PAGE, f, flags) {
                 unmap_keep(space, start, start + i as u64 * PAGE);
                 return Err(ENOMEM);
@@ -242,7 +278,7 @@ impl ProcMem {
         }
         self.mmap_next += len + PAGE;
         self.vmas.push(Vma { start, end: start + len, writable: write, kind: VmaKind::Shared });
-        self.shared.push((start, obj));
+        self.shared.push((start, keep));
         Ok(start)
     }
 

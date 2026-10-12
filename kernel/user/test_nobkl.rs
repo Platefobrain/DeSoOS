@@ -157,7 +157,7 @@ pub fn self_test() {
     check!(getpids >= want, "only {} getpid without BKL (want {})", getpids, want);
     check!(taken < want / 4, "BKL taken {} times for {} getpid - fast path not used?", taken, want);
     serial_println!(
-        "[NOBKL TEST] 1/9 {} x 100000 getpid without BKL in {} ms, BKL taken only {} times meanwhile PASS",
+        "[NOBKL TEST] 1/10 {} x 100000 getpid without BKL in {} ms, BKL taken only {} times meanwhile PASS",
         k,
         wall,
         taken
@@ -183,7 +183,7 @@ pub fn self_test() {
     let (fast1, _) = syscalls::syscall_stats();
     let writes = fast1[2] - fast0[2];
     check!(writes >= k as u64 * 2000, "only {} writes without BKL", writes);
-    serial_println!("[NOBKL TEST] 2/9 {} x 2000 lines written at once without BKL, every line intact PASS", k);
+    serial_println!("[NOBKL TEST] 2/10 {} x 2000 lines written at once without BKL, every line intact PASS", k);
 
     // 3. kill procesu, który robi tylko syscalle bez BKL (Ctrl+C musi
     //    działać także wtedy).
@@ -196,7 +196,7 @@ pub fn self_test() {
     check!(wait_for(5_000, || sched::task_info(id).is_none()), "pidloop not killed");
     let e = exit_info(id).map(|e| e.kind);
     check!(e == Some(ExitKind::Killed), "pidloop ended with {:?}", e);
-    serial_println!("[NOBKL TEST] 3/9 kill of a process doing only BKL-free syscalls PASS");
+    serial_println!("[NOBKL TEST] 3/10 kill of a process doing only BKL-free syscalls PASS");
 
     // 4. Pliki bez BKL (M17a.e): k shelli naraz dopisuje po 40 linii do
     //    własnych plików (echo >> – open/write/close w shellu, bez nowych
@@ -233,7 +233,7 @@ pub fn self_test() {
     let files = f1[3] - f0[3];
     check!(files >= k as u64 * 41 * 2, "only {} file syscalls without BKL", files);
     serial_println!(
-        "[NOBKL TEST] 4/9 {} shells x 41 appends to own files at once, {} file syscalls without BKL, contents exact PASS",
+        "[NOBKL TEST] 4/10 {} shells x 41 appends to own files at once, {} file syscalls without BKL, contents exact PASS",
         k,
         files
     );
@@ -267,7 +267,7 @@ pub fn self_test() {
     let procs = f1[4] - f0[4];
     check!(procs >= k as u64 * 15 * 2, "only {} process syscalls without BKL", procs);
     serial_println!(
-        "[NOBKL TEST] 5/9 {} shells x 15 programs at once (spawn/wait without BKL: {}), no zombies left PASS",
+        "[NOBKL TEST] 5/10 {} shells x 15 programs at once (spawn/wait without BKL: {}), no zombies left PASS",
         k,
         procs
     );
@@ -311,7 +311,7 @@ pub fn self_test() {
         check!(owner == 0 || owner != crate::arch::x86_64::cpu::id() as u32 + 1, "scheduler lock still held by this CPU");
         let (a1, _, _) = crate::sched::sched_lock_stats();
         serial_println!(
-            "[NOBKL TEST] 6/9 scheduler lock: {} ping-pong wake-ups in {} ms + {} yields on {} tasks, lock free afterwards ({} takes) PASS",
+            "[NOBKL TEST] 6/10 scheduler lock: {} ping-pong wake-ups in {} ms + {} yields on {} tasks, lock free afterwards ({} takes) PASS",
             2 * ROUNDS,
             wall,
             YIELDS.load(SeqCst),
@@ -362,7 +362,7 @@ pub fn self_test() {
         let sleeps = f1[5] - f0[5];
         check!(sleeps >= k as u64, "only {} sleep/yield syscalls without BKL", sleeps);
         serial_println!(
-            "[NOBKL TEST] 7/9 wake-up storm: {} tasks x {} generations ({} wake-ups) in {} ms, none lost; {} x sleep(100) without BKL (longest {} ms) PASS",
+            "[NOBKL TEST] 7/10 wake-up storm: {} tasks x {} generations ({} wake-ups) in {} ms, none lost; {} x sleep(100) without BKL (longest {} ms) PASS",
             k,
             STORM_ROUNDS,
             STORM_WAKES.load(SeqCst),
@@ -398,7 +398,7 @@ pub fn self_test() {
             check!(e == Some(ExitKind::Killed), "ticker {} ended with {:?}", id, e);
         }
         check!(wall < 700, "kill took {} ms - sleeping process not woken?", wall);
-        serial_println!("[NOBKL TEST] 8/9 kill of {} processes sleeping without BKL: gone after {} ms PASS", k, wall);
+        serial_println!("[NOBKL TEST] 8/10 kill of {} processes sleeping without BKL: gone after {} ms PASS", k, wall);
     }
 
     // 9. Statystyka BKL per miejsce (M17a.g): każde wzięcie przypisane
@@ -430,7 +430,7 @@ pub fn self_test() {
         }
         let top = &sites[0];
         serial_println!(
-            "[NOBKL TEST] 9/9 BKL by site: {} sites, {} of {} takes tracked, top: {}{} ({} taken, held {} ms) PASS",
+            "[NOBKL TEST] 9/10 BKL by site: {} sites, {} of {} takes tracked, top: {}{} ({} taken, held {} ms) PASS",
             sites.len(),
             tracked,
             acq,
@@ -440,6 +440,30 @@ pub fn self_test() {
             top.held_us / 1000
         );
     }
+
+    // 10. P1: rodzina procesów bez globalnej tablicy zombie – prawdziwy init
+    // (`init test /bin/famtest`, zarejestrowany jako init: sieroty idą do
+    // niego): 200 dzieci naraz, wait(pid), WNOHANG, 8 x 25 sierot, 4 rodziców
+    // po 50 dzieci równolegle.  Potem: żadnych zombie, żadnego famtest.
+    let opts = SpawnOptions { stdin: Some(Vec::new()), capture: true, ..SpawnOptions::default() };
+    let id = exec("/bin/init", &["init", "test", "/bin/famtest"], "/", &opts);
+    check!(id.is_ok(), "cannot start init test /bin/famtest");
+    let id = id.unwrap_or(0);
+    super::procs::set_init_pid(id);
+    let done = wait_for(60_000, || sched::task_info(id).is_none());
+    super::procs::set_init_pid(0);
+    check!(done, "init test /bin/famtest did not finish");
+    let kind = exit_info(id).map(|e| e.kind);
+    let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
+    let line = out.lines().find(|l| l.starts_with("famtest:")).unwrap_or("").trim();
+    check!(kind == Some(ExitKind::Exit(0)) && line.contains("checks OK"), "famtest: {:?} {:?}", kind, out.trim());
+    check!(
+        wait_for(2_000, || !sched::tasks().iter().any(|t| t.name == "famtest")),
+        "famtest processes left (orphans not reaped by init)"
+    );
+    check!(out.contains("init: test program ended, 200 orphans reaped"), "init must reap all 200 orphans: {:?}", out.trim());
+    check!(super::procs::zombies().is_empty(), "zombies left: {:?}", super::procs::zombies());
+    serial_println!("[NOBKL TEST] 10/10 process family with per-parent zombie lists, 200 orphans reaped by init: {} PASS", line);
 
     crate::selftest::pass();
 }

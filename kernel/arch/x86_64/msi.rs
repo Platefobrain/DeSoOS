@@ -30,6 +30,22 @@ pub fn alloc(handler: MsiHandler) -> Option<u8> {
     None
 }
 
+/// M19.d: zwalnia wektor (usługa w user space może się restartować – bez tego
+/// po 16 restartach zabrakłoby wektorów).  Przerwanie, które przyjdzie po
+/// zwolnieniu, zostaje tylko policzone (handler 0).
+pub fn free(vector: u8) {
+    let i = (vector as usize).wrapping_sub(MSI_BASE);
+    if i < MSI_VECTORS {
+        HANDLERS[i].store(0, Ordering::Release);
+    }
+}
+
+/// M19.d: wolne wektory (testy wycieku wektorów).
+#[allow(dead_code)]
+pub fn free_count() -> usize {
+    HANDLERS.iter().filter(|h| h.load(Ordering::Relaxed) == 0).count()
+}
+
 /// Ile przerwań przyszło na wektorze (testy, diagnostyka).
 #[allow(dead_code)]
 pub fn count(vector: u8) -> u64 {

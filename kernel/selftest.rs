@@ -27,6 +27,32 @@ pub fn pass() {
     PASSED.fetch_add(1, Ordering::SeqCst);
 }
 
+/// M19.c: wolne ramki po sprzątnięciu procesów z poprzednich testów – punkt
+/// odniesienia testu wycieku.  Procesy poprzedniego zestawu (np. zabite przez
+/// #PF) sprząta reap w pętli idle chwilę po ich końcu; pomiar przed końcem
+/// sprzątania dawał na końcu zestawu WIĘCEJ wolnych ramek niż na starcie
+/// (fałszywy "frames leaked", IPC TEST u Dawida: 115418 -> 115478).
+/// Czeka, aż liczba się nie zmienia przez 3 kolejne próbki co 5 ms (max 2 s).
+pub fn settled_free_frames() -> u64 {
+    let mut last = u64::MAX;
+    let mut stable = 0;
+    for _ in 0..400 {
+        crate::sched::reap();
+        let now = crate::sched::stack::free_frames_flushed();
+        if now == last {
+            stable += 1;
+            if stable >= 3 {
+                return now;
+            }
+        } else {
+            stable = 0;
+            last = now;
+        }
+        crate::time::sleep_ms(5);
+    }
+    last
+}
+
 /// Podsumowanie; `true` gdy wszystkie rozpoczęte zestawy przeszły.
 pub fn finish() -> bool {
     let started = STARTED.load(Ordering::SeqCst);

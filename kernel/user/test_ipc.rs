@@ -42,7 +42,7 @@ fn run(path: &str, args: &[&str], ms: u64) -> Option<(ExitKind, String)> {
 pub fn self_test() {
     serial_println!("[IPC TEST] Starting IPC tests (handles, channels, shared memory)...");
     crate::selftest::begin();
-    let frames0 = crate::sched::stack::free_frames_flushed();
+    let frames0 = crate::selftest::settled_free_frames();
 
     // 1. M18.b: uchwyty z prawami – handle_dup tylko zmniejsza, read / write
     // bez prawa = EBADF, kopie bez DUP = EACCES, dziecko dziedziczy prawa,

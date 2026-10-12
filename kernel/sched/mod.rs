@@ -1276,12 +1276,19 @@ pub fn children_of(ppid: TaskId) -> Vec<TaskId> {
 }
 
 /// M16: dzieci procesu `from` dostają nowego rodzica `to` (0 = kernel).
-pub fn reparent(from: TaskId, to: TaskId) -> usize {
+/// P1: `first` (pod blokadą schedulera – np. kończący się rodzic ustawia
+/// `exiting` i zabiera swoje zombie), potem żywe dzieci `from` dostają rodzica
+/// `to`, a `to` – licznik żywych dzieci +n.  Jedna sekcja: dziecko kończące
+/// się w tym samym czasie (with_process na rodzicu) widzi albo starego
+/// rodzica, który jeszcze przyjmuje, albo już nowego.
+pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
     if !active() {
+        first();
         return 0;
     }
     without_interrupts(|| {
         let _g = lock_sched_at(&"reparent");
+        first();
         let s = sched();
         let mut n = 0;
         for t in s.tasks.iter() {
@@ -1299,10 +1306,29 @@ pub fn reparent(from: TaskId, to: TaskId) -> usize {
             if let Some(t) = find(s, to) {
                 if let Some(p) = tm(t).process.as_deref() {
                     p.has_children.store(true, Ordering::SeqCst);
+                    p.live_children.fetch_add(n as u32, Ordering::SeqCst);
                 }
             }
         }
         n
+    })
+}
+
+/// P1: `f` dla każdego żywego procesu (testy: zombie we wszystkich rodzicach).
+#[allow(dead_code)]
+pub fn for_each_process(mut f: impl FnMut(TaskId, &crate::user::Process)) {
+    if !active() {
+        return;
+    }
+    without_interrupts(|| {
+        let _g = lock_sched_at(&"for_each_process");
+        for t in sched().tasks.iter() {
+            if t.state != State::Dead {
+                if let Some(p) = t.process.as_deref() {
+                    f(t.id, p);
+                }
+            }
+        }
     })
 }
 

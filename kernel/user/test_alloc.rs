@@ -63,7 +63,8 @@ static X_CROSS: AtomicU64 = AtomicU64::new(0);
 static X_PRODUCERS_LEFT: AtomicU64 = AtomicU64::new(0);
 const X_ROUNDS: u32 = 6000;
 /// Rozmiary: wszystkie klasy, także nie-potęgi 2 (zaokrąglane do klasy).
-const X_SIZES: [usize; 12] = [8, 16, 24, 40, 64, 100, 128, 300, 512, 777, 1500, 2048];
+// P2: także duże klasy (do 32 KiB) i granice klas.
+const X_SIZES: [usize; 17] = [8, 16, 24, 40, 64, 100, 128, 300, 512, 777, 1500, 2048, 2049, 4096, 6000, 12000, 32768];
 
 fn x_byte(seed: u32, k: usize) -> u8 {
     (seed as usize).wrapping_mul(31).wrapping_add(k * 7) as u8 ^ 0xA5
@@ -247,11 +248,83 @@ fn bad_text(code: u64) -> &'static str {
         2 => "frame contents overwritten",
         3 => "out of memory",
         4 => "free_frame refused a frame it had just given out",
+        5 => "the same frame given to two owners (tag overwritten)",
+        6 => "double free of a frame accepted",
         _ => "?",
     }
 }
 
 fn noop(_: usize) {}
+
+// P3: zapasy ramek per CPU – każda ramka u jednego właściciela, ramki oddawane
+// na innym CPU niż wzięte, double-free odrzucany także dla ramki w zapasie.
+const F_PER: usize = 400;
+static F_POOL: crate::sched::spin::SpinLock<Vec<u64>> =
+    crate::sched::spin::SpinLock::new("alloc-fpool", crate::sched::spin::level::TEST_INNER, Vec::new());
+static F_READY: AtomicU64 = AtomicU64::new(0);
+static F_PUSHED: AtomicU64 = AtomicU64::new(0);
+static F_TASKS: AtomicU64 = AtomicU64::new(0);
+
+fn f_tag(i: usize, j: usize) -> u64 {
+    ((i as u64) << 32 | j as u64) ^ 0x5a5a_0000_a5a5_0000
+}
+
+fn f_worker(i: usize) {
+    CPUS.fetch_or(1 << cpu::id(), Ordering::SeqCst);
+    let k = F_TASKS.load(Ordering::SeqCst);
+    let mut mine: Vec<u64> = Vec::with_capacity(F_PER);
+    for j in 0..F_PER {
+        match crate::memory::alloc_frame() {
+            Some(f) => {
+                unsafe { *(crate::memory::phys_to_virt(f) as *mut u64) = f_tag(i, j) };
+                mine.push(f);
+            }
+            None => {
+                BAD.store(3, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+    // Wszyscy wzięli swoje – dopiero teraz sprawdzenie znaczników (ramka
+    // wydana dwóm właścicielom miałaby znacznik drugiego).
+    F_READY.fetch_add(1, Ordering::SeqCst);
+    while F_READY.load(Ordering::SeqCst) < k && !STOP.load(Ordering::SeqCst) {
+        crate::sched::yield_now();
+    }
+    for (j, &f) in mine.iter().enumerate() {
+        if unsafe { *(crate::memory::phys_to_virt(f) as *const u64) } != f_tag(i, j) {
+            let _ = BAD.compare_exchange(0, 5, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+    // Połowa do wspólnej puli, z puli oddajemy cudze (na innym CPU).
+    let half = mine.split_off(F_PER / 2);
+    F_POOL.lock().extend_from_slice(&half);
+    F_PUSHED.fetch_add(1, Ordering::SeqCst);
+    while F_PUSHED.load(Ordering::SeqCst) < k && !STOP.load(Ordering::SeqCst) {
+        crate::sched::yield_now();
+    }
+    let mut first = true;
+    loop {
+        let f = F_POOL.lock().pop();
+        let Some(f) = f else { break };
+        if !crate::memory::free_frame(f) {
+            let _ = BAD.compare_exchange(0, 4, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        if first {
+            first = false;
+            // Ramka leży teraz w zapasie tego CPU – drugi zwrot musi odpaść.
+            if crate::memory::free_frame(f) {
+                let _ = BAD.compare_exchange(0, 6, Ordering::SeqCst, Ordering::SeqCst);
+            }
+        }
+    }
+    for f in mine {
+        if !crate::memory::free_frame(f) {
+            let _ = BAD.compare_exchange(0, 4, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+    DONE.fetch_add(1, Ordering::SeqCst);
+}
 
 pub fn self_test() {
     serial_println!("[ALLOC TEST] Starting heap / frame allocator tests without BKL...");
@@ -289,7 +362,7 @@ pub fn self_test() {
         "no TLB shootdown from heap shrinking"
     );
     serial_println!(
-        "[ALLOC TEST] 1/4 {} tasks x {} x 640 KiB on {} CPUs without BKL: heap grows and shrinks ({} shootdowns), data intact PASS",
+        "[ALLOC TEST] 1/5 {} tasks x {} x 640 KiB on {} CPUs without BKL: heap grows and shrinks ({} shootdowns), data intact PASS",
         k,
         BIG_ROUNDS,
         cpus,
@@ -334,7 +407,7 @@ pub fn self_test() {
     // które chwilę zostają – prawdziwy wyciek to ramki na każdą rundę.
     check!(frames1 + heap_pages + 64 >= frames0, "frames {} -> {} (+{} heap pages)", frames0, frames1, heap_pages);
     serial_println!(
-        "[ALLOC TEST] 2/4 {} tasks x {} small blocks + frames, {} allocs in the timer IRQ, {} task stacks meanwhile, nothing lost PASS",
+        "[ALLOC TEST] 2/5 {} tasks x {} small blocks + frames, {} allocs in the timer IRQ, {} task stacks meanwhile, nothing lost PASS",
         k,
         SMALL_ROUNDS,
         irq,
@@ -366,17 +439,56 @@ pub fn self_test() {
     let used_x1 = crate::memory::heap_used_bytes();
     check!(used_x1 <= used_x0 + 16 * 1024, "heap used {} -> {} bytes after cross-CPU frees (leak?)", used_x0, used_x1);
     serial_println!(
-        "[ALLOC TEST] 3/4 {} producer(s) + {} consumer(s): {} blocks, {} freed on another CPU, patterns intact PASS",
+        "[ALLOC TEST] 3/5 {} producer(s) + {} consumer(s): {} blocks, {} freed on another CPU, patterns intact PASS",
         k,
         k,
         freed,
         cross
     );
 
-    // 4. Blokady alokatorów: nikt nie zgłosił zakleszczenia w trakcie testu.
+    // 4. P3: zapasy ramek per CPU.  Odmowy bez blokady: adres 0, niewyrównany,
+    // poza RAM-em, zarezerwowany (bitmapa), double-free (też z zapasu CPU);
+    // potem k zadań po F_PER ramek, połowa oddana na innym CPU.
+    crate::sched::reap();
+    let fr0 = crate::memory::free_frame_count();
+    let (bitmap_phys, _) = crate::memory::bitmap_info();
+    check!(
+        !crate::memory::free_frame(0) && !crate::memory::free_frame(0x1234) && !crate::memory::free_frame(1 << 50) && !crate::memory::free_frame(bitmap_phys),
+        "free_frame accepted 0 / unaligned / non-RAM / reserved frame"
+    );
+    let f = crate::memory::alloc_frame();
+    check!(f.is_some(), "alloc_frame");
+    let f = f.unwrap_or(0);
+    check!(crate::memory::free_frame(f) && !crate::memory::free_frame(f), "double free of a frame in the CPU cache accepted");
+    DONE.store(0, Ordering::SeqCst);
+    BAD.store(0, Ordering::SeqCst);
+    CPUS.store(0, Ordering::SeqCst);
+    F_READY.store(0, Ordering::SeqCst);
+    F_PUSHED.store(0, Ordering::SeqCst);
+    F_TASKS.store(k as u64, Ordering::SeqCst);
+    for i in 0..k {
+        check!(crate::sched::spawn("alloc-frames", f_worker, i).is_ok(), "spawn frame worker");
+    }
+    check!(wait_for(120_000, || DONE.load(Ordering::SeqCst) == k as u64), "frame workers did not finish ({} / {})", DONE.load(Ordering::SeqCst), k);
+    let bad = BAD.load(Ordering::SeqCst);
+    check!(bad == 0, "frame caches: {}", bad_text(bad));
+    *F_POOL.lock() = Vec::new();
+    crate::sched::reap();
+    let fcpus = CPUS.load(Ordering::SeqCst).count_ones();
+    let fr1 = crate::memory::free_frame_count();
+    check!(wait_for(2_000, || { crate::sched::reap(); crate::memory::free_frame_count() == fr0 }), "frames {} -> {} after the per-CPU cache test", fr0, fr1);
+    serial_println!(
+        "[ALLOC TEST] 4/5 frame caches: {} tasks x {} frames on {} CPU(s), each frame one owner, half freed on another CPU, double free / reserved / bad addresses refused, count back to {} PASS",
+        k,
+        F_PER,
+        fcpus,
+        fr0
+    );
+
+    // 5. Blokady alokatorów: nikt nie zgłosił zakleszczenia w trakcie testu.
     let (acq, cont, dl) = crate::sched::spin::stats();
     check!(dl == dl0, "{} deadlock report(s) during the test", dl - dl0);
-    serial_println!("[ALLOC TEST] 4/4 spinlocks so far: {} taken, {} contended, 0 deadlock reports PASS", acq, cont);
+    serial_println!("[ALLOC TEST] 5/5 spinlocks so far: {} taken, {} contended, 0 deadlock reports PASS", acq, cont);
 
     crate::selftest::pass();
 }

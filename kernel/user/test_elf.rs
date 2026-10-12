@@ -93,7 +93,7 @@ pub fn self_test() {
     use crate::elf::{PF_R, PF_W, PF_X};
     serial_println!("[ELF TEST] Starting ELF loader tests...");
     crate::selftest::begin();
-    let frames = crate::sched::stack::free_frames_flushed();
+    let frames = crate::selftest::settled_free_frames();
 
     // 1. /bin z initrd: każdy plik to poprawny ELF dla procesu.
     let bin = crate::fs::read_dir("/bin").unwrap_or_default();

@@ -44,6 +44,8 @@ mod test_alloc;
 mod test_nobkl;
 // M17b.b: potoki.
 pub mod channel;
+pub mod waitset;
+pub mod device;
 pub mod pipe;
 pub mod shm;
 pub mod prof;
@@ -54,6 +56,9 @@ pub mod vm;
 mod test_files;
 #[cfg(selftest)]
 mod test_ipc;
+// M19: usługi w user space (wait_many, urządzenia, menedżer usług).
+#[cfg(selftest)]
+mod test_svc;
 // M17a: stress test SMP (samotest i komenda `stress`).
 pub mod stress;
 
@@ -154,11 +159,15 @@ pub struct SpawnOptions {
     pub entry_offset: u64,
     /// M15: shell czeka na proces (exit(0) bez komunikatu).
     pub foreground: bool,
+    /// M19.c: uchwyt HW_ROOT w slocie 3 (tylko /bin/init i testy jądra).
+    pub hw_root: bool,
+    /// M19.i: uchwyt SYSCTL za HW_ROOT (slot 4) – tylko /bin/init i testy jądra.
+    pub sysctl: bool,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false }
+        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false }
     }
 }
 
@@ -218,6 +227,14 @@ pub fn spawn_elf(
     process.initial_rsp = loaded.rsp;
     process.cwd = alloc::string::String::from(cwd);
     process.foreground = opts.foreground;
+    if opts.hw_root {
+        // M19.c: jedyne miejsce, w którym powstaje HW_ROOT (slot 3).
+        process.fds.push(Some(process::Handle::new(process::Fd::HwRoot)));
+    }
+    if opts.sysctl {
+        // M19.i: jedyne miejsce, w którym powstaje SYSCTL (slot 4 u init).
+        process.fds.push(Some(process::Handle::new(process::Fd::Sysctl)));
+    }
     apply_test_io(&mut process, opts);
     sched::spawn_user(name, user_task_entry, loaded.entry as usize, process, false)
         .map_err(|_| elf_loader::LoadError::NoMemory)
@@ -335,7 +352,7 @@ pub const INIT_PATH: &str = "/bin/init";
 pub fn run_init() -> ! {
     let mut failures: Vec<u64> = Vec::new();
     loop {
-        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions::default()) {
+        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions { hw_root: true, sysctl: true, ..SpawnOptions::default() }) {
             Ok(pid) => pid,
             Err(e) => {
                 serial_println!("[INIT] cannot start {}: {} - starting the kernel shell", INIT_PATH, e);
@@ -524,6 +541,10 @@ pub(crate) fn exit_current() -> ! {
         // M17b.b: deskryptory zamknięte od razu (nie przy reap) – czytający z
         // potoku dostaje koniec danych, gdy kończy się ostatni piszący.
         p.fds.clear();
+        // M19.c: mapowania wspólne (pamięć współdzielona, rejestry urządzeń) też
+        // od razu – przejęte urządzenie wraca, zanim rodzic dostanie status z
+        // wait (inaczej dopiero przy reap; restart usługi dostałby EBUSY).
+        p.mem.release_shared(&mut p.space);
         if let Some(out) = p.stdout.take() {
             // M17a.e: tylko twórca bufora (albo jego ostatni właściciel) – dzieci
             // dziedziczące bufor wypychały z dziennika wpis rodzica (SMP TEST 4
@@ -684,6 +705,8 @@ pub use test_init::self_test as init_self_test;
 pub use test_files::self_test as files_self_test;
 #[cfg(selftest)]
 pub use test_ipc::self_test as ipc_self_test;
+#[cfg(selftest)]
+pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]
 pub use test_smp::self_test as smp_self_test;
 #[cfg(selftest)]

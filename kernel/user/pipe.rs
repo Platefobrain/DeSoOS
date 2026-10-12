@@ -11,6 +11,7 @@
 //   drugą stronę.  Proces zamyka deskryptory już w exit_current (nie
 //   dopiero przy reap) – czytający dostaje koniec danych od razu.
 // * Czekanie przerywa kill / Ctrl+C (EINTR).
+// * M19.b: lista obserwatorów `wait_many` – budzona przy każdej zmianie.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -18,6 +19,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use super::syscalls::{EINTR, EPIPE};
+use super::waitset::Observers;
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
@@ -33,6 +35,20 @@ pub struct Pipe {
     readable: WaitQueue,
     /// Piszący czekają na miejsce / koniec czytających.
     writable: WaitQueue,
+    /// M19.b: `wait_many` na którymkolwiek końcu.
+    obs: Observers,
+}
+
+impl Pipe {
+    fn wake_readers(&self) {
+        self.readable.wake_all();
+        self.obs.notify();
+    }
+
+    fn wake_writers(&self) {
+        self.writable.wake_all();
+        self.obs.notify();
+    }
 }
 
 pub struct PipeEnd {
@@ -44,10 +60,10 @@ impl Drop for PipeEnd {
     fn drop(&mut self) {
         if self.write {
             self.pipe.writers.fetch_sub(1, Ordering::SeqCst);
-            self.pipe.readable.wake_all();
+            self.pipe.wake_readers();
         } else {
             self.pipe.readers.fetch_sub(1, Ordering::SeqCst);
-            self.pipe.writable.wake_all();
+            self.pipe.wake_writers();
         }
     }
 }
@@ -61,11 +77,27 @@ pub fn new() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
         writers: AtomicU32::new(1),
         readable: WaitQueue::new(),
         writable: WaitQueue::new(),
+        obs: Observers::new(),
     });
     (Arc::new(PipeEnd { pipe: pipe.clone(), write: false }), Arc::new(PipeEnd { pipe, write: true }))
 }
 
 impl PipeEnd {
+    /// M19.b: koniec do odczytu – są dane albo nikt nie pisze (read nie
+    /// będzie czekać); koniec do zapisu – jest miejsce albo nikt nie czyta.
+    pub fn ready(&self) -> bool {
+        let p = &self.pipe;
+        if self.write {
+            p.len.load(Ordering::SeqCst) < PIPE_CAP || p.readers.load(Ordering::SeqCst) == 0
+        } else {
+            p.len.load(Ordering::SeqCst) > 0 || p.writers.load(Ordering::SeqCst) == 0
+        }
+    }
+
+    pub fn observers(&self) -> &Observers {
+        &self.pipe.obs
+    }
+
     /// Do `max` bajtów; pusty wynik = koniec danych (nikt już nie pisze).
     pub fn read(&self, max: usize) -> Result<Vec<u8>, i64> {
         let p = &self.pipe;
@@ -77,7 +109,7 @@ impl PipeEnd {
                     let out: Vec<u8> = b.drain(..n).collect();
                     p.len.store(b.len(), Ordering::SeqCst);
                     drop(b);
-                    p.writable.wake_all();
+                    p.wake_writers();
                     return Ok(out);
                 }
             }
@@ -119,7 +151,7 @@ impl PipeEnd {
             };
             if wrote > 0 {
                 done += wrote;
-                p.readable.wake_all();
+                p.wake_readers();
                 continue;
             }
             p.writable.wait_until(

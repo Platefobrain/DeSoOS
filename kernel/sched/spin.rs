@@ -50,6 +50,10 @@ pub mod level {
     pub const BLOCK: u8 = 30;
     /// Procesy: tablica zombie, rodzina, deskryptory.
     pub const PROCESS: u8 = 40;
+    /// M19.b: listy obserwatorów `wait_many` (kanały, potoki, przerwania) –
+    /// nad kolejkami kanałów / potoków (PROCESS), pod schedulerem (pobudka po
+    /// zwolnieniu listy).  IrqSpinLock: czyta ją też handler przerwania.
+    pub const WAITERS: u8 = 45;
     /// Scheduler (lista zadań, kolejki per CPU).
     pub const SCHED: u8 = 50;
     /// Przestrzenie adresowe / tablice stron.

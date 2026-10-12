@@ -85,6 +85,7 @@ QEMU=(qemu-system-x86_64
   -device virtio-blk-pci,drive=vd0
   -drive file="$TEST_NVME",format=raw,if=none,id=nv0
   -device nvme,serial=desoos-test,drive=nv0
+  -device edu,addr=06
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
   -fw_cfg name=opt/desoos/autotest,string=1
   -serial stdio -display none -no-reboot)
@@ -102,6 +103,8 @@ TIME=$(( $(date +%s) - START ))
 PASSED=$(grep -c " PASS" "$LOG" || true)
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | sed 's/^.*Self-tests: //')
 echo "Log: test.log (${TIME} s, ${PASSED} testow PASS)"
+# M19.h: pomiar usług (jądro vs user space) – linia [RESULT-SVC] z samotestu SVC.
+grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 
 case "$CODE" in
   33)

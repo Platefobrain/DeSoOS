@@ -19,6 +19,7 @@ pub use frame::{
     init,
     alloc_frame,
     alloc_frames,
+    alloc_frames_below,
     free_frame,
     free_frames,
     bitmap_info,
@@ -28,6 +29,7 @@ pub use frame::{
     overlaps_known_memory,
     trampoline_frame,
     alloc_frame_below,
+    enable_frame_caches,
 };
 
 #[allow(unused_imports)]

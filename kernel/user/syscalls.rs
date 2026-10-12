@@ -36,9 +36,8 @@
 //        line = prompt + tekst do odrysowania, gdy w trakcie czekania coś
 //        wypisze proces w tle; 0 = koniec wejścia
 //  20  tasks(buf, len) -> n              linie "pid\tppid\tstan\tms\tprzełączenia\ttyp\tnazwa\n"
-//  21  kcmd(line, len, fd)               komenda shella kernela (diagnostyka:
-//        mem, lspci, mkfs...) – wyjście na deskryptor fd; tymczasowy most do czasu
-//        właściwych syscalli
+//  21  (wolny – do M19.h kcmd, most do komend shella jądra; zastąpiony przez
+//        46 sysinfo i 47 sysctl)
 //
 // M17b (obiekty plików): deskryptor wskazuje wspólny obiekt (OpenFile:
 // ścieżka, prawa, pozycja) – kopie (dup, dup2, spawn) dzielą pozycję.
@@ -101,7 +100,6 @@ pub const SYS_MKDIR: u64 = 17;
 pub const SYS_UNLINK: u64 = 18;
 pub const SYS_READKEY: u64 = 19;
 pub const SYS_TASKS: u64 = 20;
-pub const SYS_KCMD: u64 = 21;
 pub const SYS_DUP: u64 = 22;
 pub const SYS_DUP2: u64 = 23;
 pub const SYS_SEEK: u64 = 24;
@@ -132,6 +130,48 @@ pub const SYS_SHM_CREATE: u64 = 34;
 pub const SYS_SHM_MAP: u64 = 35;
 /// M18.e: shm_size(h) -> rozmiar obiektu w bajtach.
 pub const SYS_SHM_SIZE: u64 = 37;
+/// M19.b: wait_many(lista, n, timeout_ms) -> maska gotowych (bit i = wpis i),
+/// 0 = minął czas.  Lista = n × [uchwyt, sygnały] (2 × u64), n ≤ WAIT_MAX;
+/// timeout u64::MAX = bez limitu, 0 = tylko sprawdź.
+pub const SYS_WAIT_MANY: u64 = 38;
+pub const WAIT_MAX: u64 = 16;
+/// Sygnały wait_many.
+pub const W_READABLE: u64 = 1;
+pub const W_WRITABLE: u64 = 2;
+/// M19.d: przerwanie (obiekt IRQ): licznik > 0.
+pub const W_IRQ: u64 = 4;
+/// M19.d: przerwanie spod uchwytu (prawo RECV).
+fn irq_obj(p: &Process, h: u64) -> Result<Arc<super::device::IrqObj>, i64> {
+    let hd = p.handle(h)?;
+    let Fd::Irq(q) = &hd.obj else { return Err(EBADF) };
+    if hd.rights & rights::RECV == 0 {
+        return Err(EACCES);
+    }
+    Ok(q.clone())
+}
+
+/// M19.c: dev_claim(hw_root, bdf) -> uchwyt DEVICE; bdf = bus << 8 | urz. << 3 | fn.
+pub const SYS_DEV_CLAIM: u64 = 39;
+/// M19.c: dev_info(dev, out) – out = 10 × u64: [vendor | device << 16,
+/// klasa << 16 | podklasa << 8 | prog_if, rozmiary BAR 0..5, maska BAR-ów I/O,
+/// flagi (1 = MSI, 2 = MSI-X)].
+pub const SYS_DEV_INFO: u64 = 40;
+/// M19.c: dev_map(dev, bar, prot) -> adres rejestrów (UC, NX); munmap w całości.
+pub const SYS_DEV_MAP: u64 = 41;
+/// M19.d: irq_bind(dev) -> uchwyt IRQ (wektor MSI / MSI-X, bus mastering);
+/// wymaga MAP_WRITE na urządzeniu.  EBUSY – już przypięte / brak wektorów.
+pub const SYS_IRQ_BIND: u64 = 42;
+/// M19.d: irq_read(irq) -> przerwania od ostatniego odczytu (zeruje).
+pub const SYS_IRQ_READ: u64 = 43;
+/// M19.e: dma_alloc(dev, rozmiar, bity_adresu) -> uchwyt SHM (ciągłe ramki poniżej
+/// 2^bity, ≤ 2 MiB, ≤ 16 MiB na urządzenie; bus mastering); wymaga MAP_WRITE.
+pub const SYS_DMA_ALLOC: u64 = 44;
+/// M19.e: dma_phys(shm) -> adres fizyczny bufora DMA (EINVAL – zwykła pamięć).
+pub const SYS_DMA_PHYS: u64 = 45;
+/// M19.i: sysinfo(temat, len, bufor, cap) -> długość tekstu (tylko odczyt).
+pub const SYS_SYSINFO: u64 = 46;
+/// M19.i: sysctl(uchwyt SYSCTL, akcja, arg, fd) – 1 reboot, 2 halt, 3 sync, 4 stress.
+pub const SYS_SYSCTL: u64 = 47;
 /// M18.d: najwięcej wpisów w mapie spawn_ex.
 pub const SPAWN_EX_MAX: u64 = 16;
 
@@ -152,6 +192,9 @@ pub const EBADF: i64 = -9;
 pub const EAGAIN: i64 = -11;
 /// M18.c: komunikat za duży / bufor odbiorcy za mały.
 pub const EMSGSIZE: i64 = -90;
+/// M19.c: urządzenie ma już właściciela / nie ma urządzenia pod adresem.
+pub const EBUSY: i64 = -16;
+pub const ENODEV: i64 = -19;
 pub const ECHILD: i64 = -10;
 pub const E2BIG: i64 = -7;
 pub const ENOEXEC: i64 = -8;
@@ -294,7 +337,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
     match p.fd(fd)? {
         // Kanał nie ma READ / WRITE (komunikaty – chan_send / chan_recv).
-        Fd::Console | Fd::Channel(_) | Fd::Shm(_) => Err(EBADF),
+        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl => Err(EBADF),
         Fd::Pipe(e) => {
             if !e.write {
                 return Err(EBADF);
@@ -381,7 +424,7 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
         }
     } else {
         match p.fd(fd)? {
-            Fd::Console | Fd::Channel(_) | Fd::Shm(_) => return Err(EBADF),
+            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl => return Err(EBADF),
             Fd::Pipe(e) => {
                 if e.write {
                     return Err(EBADF);
@@ -481,6 +524,117 @@ fn chan_end(p: &Process, h: u64, right: u32) -> Result<Arc<super::channel::ChanE
         return Err(EACCES);
     }
     Ok(e.clone())
+}
+
+/// M19.b: obiekt, na który czeka wait_many (Arc trzymany przez całe czekanie –
+/// zamknięcie uchwytu w tym czasie nie zwalnia obiektu).
+enum Waitable {
+    Chan(Arc<super::channel::ChanEnd>, bool),
+    Pipe(Arc<super::pipe::PipeEnd>),
+    Irq(Arc<super::device::IrqObj>),
+}
+
+impl Waitable {
+    fn ready(&self) -> bool {
+        match self {
+            Waitable::Chan(e, write) => {
+                if *write { e.writable() } else { e.readable() }
+            }
+            Waitable::Pipe(e) => e.ready(),
+            Waitable::Irq(i) => i.pending(),
+        }
+    }
+
+    fn observers(&self) -> &super::waitset::Observers {
+        match self {
+            Waitable::Chan(e, write) => e.observers(*write),
+            Waitable::Pipe(e) => e.observers(),
+            Waitable::Irq(i) => i.observers(),
+        }
+    }
+}
+
+/// M19.b: wait_many – czeka, aż któryś z uchwytów będzie gotowy.  Cała lista
+/// sprawdzana przed czekaniem (EBADF / EACCES / EINVAL dla pierwszego złego
+/// wpisu).  Wpis z READABLE | WRITABLE na kanale – dwa obiekty, jeden bit.
+fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult {
+    if n == 0 || n > WAIT_MAX {
+        return Err(EINVAL);
+    }
+    let raw = copy_from_user(p, list, n * 16)?;
+    // (bit, obiekt) – do 2 obiektów na wpis.
+    let mut objs: Vec<(u32, Waitable)> = Vec::with_capacity(n as usize * 2);
+    for i in 0..n as usize {
+        let h = u64::from_le_bytes(raw[i * 16..i * 16 + 8].try_into().unwrap());
+        let sig = u64::from_le_bytes(raw[i * 16 + 8..i * 16 + 16].try_into().unwrap());
+        if sig == 0 || sig & !(W_READABLE | W_WRITABLE | W_IRQ) != 0 {
+            return Err(EINVAL);
+        }
+        let hd = p.handle(h)?;
+        match &hd.obj {
+            Fd::Channel(e) => {
+                if sig & W_IRQ != 0 {
+                    return Err(EINVAL);
+                }
+                if sig & W_READABLE != 0 {
+                    if hd.rights & rights::RECV == 0 {
+                        return Err(EACCES);
+                    }
+                    objs.push((i as u32, Waitable::Chan(e.clone(), false)));
+                }
+                if sig & W_WRITABLE != 0 {
+                    if hd.rights & rights::SEND == 0 {
+                        return Err(EACCES);
+                    }
+                    objs.push((i as u32, Waitable::Chan(e.clone(), true)));
+                }
+            }
+            Fd::Pipe(e) => {
+                // Koniec potoku ma jeden kierunek: odczyt – READABLE, zapis – WRITABLE.
+                let want = if e.write { W_WRITABLE } else { W_READABLE };
+                if sig != want {
+                    return Err(EINVAL);
+                }
+                let need = if e.write { rights::WRITE } else { rights::READ };
+                if hd.rights & need == 0 {
+                    return Err(EBADF);
+                }
+                objs.push((i as u32, Waitable::Pipe(e.clone())));
+            }
+            Fd::Irq(q) => {
+                if sig != W_IRQ {
+                    return Err(EINVAL);
+                }
+                if hd.rights & rights::RECV == 0 {
+                    return Err(EACCES);
+                }
+                objs.push((i as u32, Waitable::Irq(q.clone())));
+            }
+            _ => return Err(EINVAL),
+        }
+    }
+    let mask = |objs: &[(u32, Waitable)]| objs.iter().filter(|(_, o)| o.ready()).fold(0u64, |m, (b, _)| m | 1 << b);
+    let now = mask(&objs);
+    if now != 0 || timeout == 0 {
+        return Ok(now);
+    }
+    // Własna kolejka na stosie – jej adres to kanał; zapis u obiektów PRZED
+    // sprawdzeniem warunku (pod blokadą schedulera w wait_until).
+    let wq = crate::sched::sync::WaitQueue::new();
+    let ch = &wq as *const _ as usize;
+    for (_, o) in &objs {
+        o.observers().add(ch);
+    }
+    // Bardzo długi limit (> ~34 lata) = bez limitu – bez przepełnienia terminu.
+    let limit = if timeout >= 1 << 40 { None } else { Some(timeout) };
+    wq.wait_until(|| objs.iter().any(|(_, o)| o.ready()) || sched::should_exit(), limit);
+    for (_, o) in &objs {
+        o.observers().remove(ch);
+    }
+    if sched::should_exit() {
+        return Err(EINTR);
+    }
+    Ok(mask(&objs))
 }
 
 /// M18.c: channel_create(out) – dwa końce kanału (najniższe wolne numery).
@@ -640,6 +794,75 @@ fn sys_shm_map(p: &mut Process, h: u64, prot: u64) -> SysResult {
     let obj = shm_obj(p, h, need)?;
     super::vm::count_call();
     p.mem.map_shared(&mut p.space, obj, write)
+}
+
+/// M19.c: przejęte urządzenie spod uchwytu (EBADF – to nie urządzenie).
+fn dev_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::device::DevClaim>, i64> {
+    let hd = p.handle(h)?;
+    let Fd::Device(d) = &hd.obj else { return Err(EBADF) };
+    if hd.rights & right != right {
+        return Err(EACCES);
+    }
+    Ok(d.clone())
+}
+
+/// M19.c: dev_claim(hw_root, bdf) – urządzenie PCI dla usługi.  EACCES:
+/// sterownik w jądrze, dysk, grafika, mostek, urządzenie systemowe; EBUSY:
+/// ma je inna usługa; ENODEV: nie ma urządzenia pod tym adresem.
+fn sys_dev_claim(p: &mut Process, root: u64, bdf: u64) -> SysResult {
+    if !matches!(p.fd(root)?, Fd::HwRoot) {
+        return Err(EBADF);
+    }
+    let addr = super::device::address(bdf).ok_or(EINVAL)?;
+    let claim = super::device::DevClaim::claim(addr).map_err(|e| match e {
+        crate::drivers::pci::ClaimError::NoDevice => ENODEV,
+        crate::drivers::pci::ClaimError::Busy => EBUSY,
+        crate::drivers::pci::ClaimError::Forbidden => EACCES,
+    })?;
+    install_fd(p, 0, Fd::Device(Arc::new(claim)))
+}
+
+/// M19.c: dev_info(dev, out) – opis urządzenia (10 × u64, patrz SYS_DEV_INFO).
+fn sys_dev_info(p: &mut Process, h: u64, out: u64) -> SysResult {
+    use crate::drivers::pci::{Bar, CAP_MSI, CAP_MSIX};
+    let claim = dev_obj(p, h, 0)?;
+    let d = claim.dev();
+    let mut v = [0u64; 10];
+    v[0] = d.vendor as u64 | (d.device as u64) << 16;
+    v[1] = (d.class as u64) << 16 | (d.subclass as u64) << 8 | d.prog_if as u64;
+    for (i, b) in d.bars.iter().enumerate() {
+        match *b {
+            Bar::Memory { size, .. } => v[2 + i] = size,
+            Bar::Io { size, .. } => {
+                v[2 + i] = size as u64;
+                v[8] |= 1 << i;
+            }
+            Bar::None => {}
+        }
+    }
+    v[9] = d.find_capability(CAP_MSI).is_some() as u64 | (d.find_capability(CAP_MSIX).is_some() as u64) << 1;
+    let mut bytes = [0u8; 80];
+    for (i, x) in v.iter().enumerate() {
+        bytes[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());
+    }
+    copy_to_user(p, out, &bytes)?;
+    Ok(0)
+}
+
+/// M19.c: dev_map(dev, bar, prot) – rejestry BAR-u w procesie: bez cache,
+/// nigdy wykonywalne, bez stron MSI-X.  Mapowanie trzyma przejęcie (zamknięcie
+/// uchwytu go nie oddaje, dopóki obszar jest zamapowany).
+fn sys_dev_map(p: &mut Process, h: u64, bar: u64, prot: u64) -> SysResult {
+    use super::vm::{PROT_READ, PROT_WRITE};
+    if prot & PROT_READ == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 || bar > 5 {
+        return Err(EINVAL);
+    }
+    let write = prot & PROT_WRITE != 0;
+    let need = rights::MAP_READ | if write { rights::MAP_WRITE } else { 0 };
+    let claim = dev_obj(p, h, need)?;
+    let pages = claim.bar_pages(bar as usize)?;
+    super::vm::count_call();
+    p.mem.map_mmio(&mut p.space, &pages, write, claim)
 }
 
 /// M18.b: handle_info(h) -> (rodzaj << 32) | prawa.
@@ -961,13 +1184,26 @@ fn sys_tasks(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     text_to_user(p, ptr, len, &text)
 }
 
-fn sys_kcmd(p: &mut Process, ptr: u64, len: u64, fd: u64) -> SysResult {
-    if len == 0 || len > 255 {
+/// M19.i: sysinfo(temat, len, bufor, cap) – tekst tylko do odczytu (mem, lspci,
+/// cpus, disk...; lista: shell::SYSINFO_TOPICS).  ENOENT: nieznany temat albo
+/// niedozwolone argumenty; ERANGE: bufor za mały (nic nie jest ucinane).
+fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysResult {
+    if len == 0 || len > 64 {
         return Err(EINVAL);
     }
     let raw = copy_from_user(p, ptr, len)?;
-    let line = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
-    let out = crate::shell::kernel_command(line, &p.cwd).ok_or(ENOENT)?;
+    let topic = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let text = crate::shell::sysinfo(topic).ok_or(ENOENT)?;
+    text_to_user(p, buf, cap, &text)
+}
+
+/// M19.i: sysctl(uchwyt SYSCTL, akcja, arg, fd) – reboot / halt / sync /
+/// stress; tekst wyniku na `fd`.  EBADF: to nie uchwyt SYSCTL; EINVAL: zła akcja.
+fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult {
+    if !matches!(p.fd(h)?, Fd::Sysctl) {
+        return Err(EBADF);
+    }
+    let out = crate::shell::sysctl(op, arg).ok_or(EINVAL)?;
     if !out.is_empty() {
         write_fd(p, fd, out.as_bytes())?;
     }
@@ -987,7 +1223,7 @@ fn sys_kcmd(p: &mut Process, ptr: u64, len: u64, fd: u64) -> SysResult {
 // Czekanie na dysk (WaitQueue) – od f2 tylko blokada schedulera.
 // Procesy (e2): spawn, wait, kill, getppid – tablica zombie pod własną
 // blokadą.  Sleep i yield (f2) – tylko blokada schedulera.  Pod BKL
-// zostają: exit (koniec zadania), read / readkey z klawiatury, tasks, kcmd.
+// zostają: exit (koniec zadania), read / readkey z klawiatury, tasks, sysinfo, sysctl.
 
 static FAST: [crate::arch::x86_64::percpu::PerCpuCounter; 6] = [const { crate::arch::x86_64::percpu::PerCpuCounter::new() }; 6];
 static SLOW: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
@@ -1019,9 +1255,11 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
         SYS_READKEY => p.stdin.is_some().then_some(3),
         SYS_DUP | SYS_DUP2 | SYS_SEEK | SYS_PIPE | SYS_HANDLE_DUP | SYS_HANDLE_INFO => Some(3),
         // M18.c: kanały – własne blokady, bez BKL.
-        SYS_CHANNEL_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV => Some(3),
+        SYS_CHANNEL_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV | SYS_WAIT_MANY => Some(3),
+        // M19.d: licznik przerwań – atomik.
+        SYS_IRQ_READ => Some(3),
         // M18.e: pamięć współdzielona – jak brk / mmap (zmienia ją tylko proces).
-        SYS_SHM_CREATE | SYS_SHM_MAP | SYS_SHM_SIZE => Some(4),
+        SYS_SHM_CREATE | SYS_SHM_MAP | SYS_SHM_SIZE | SYS_DMA_PHYS => Some(4),
         // M17b.d: pamięć procesu – zmienia ją tylko on sam, ramki bez BKL.
         SYS_BRK | SYS_MMAP | SYS_MUNMAP => Some(4),
         SYS_OPEN | SYS_CLOSE | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_GETCWD => Some(3),
@@ -1094,7 +1332,8 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_UNLINK => user_path(p, a0, a1).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),
         SYS_READKEY => sys_readkey(p, a0, a1),
         SYS_TASKS => sys_tasks(p, a0, a1),
-        SYS_KCMD => sys_kcmd(p, a0, a1, a2),
+        SYS_SYSINFO => sys_sysinfo(p, a0, a1, a2, frame.r10),
+        SYS_SYSCTL => sys_sysctl(p, a0, a1, a2, frame.r10),
         SYS_DUP => sys_dup(p, a0),
         SYS_DUP2 => sys_dup2(p, a0, a1),
         SYS_SEEK => sys_seek(p, a0, a1, a2),
@@ -1104,6 +1343,18 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_CHANNEL_CREATE => sys_channel_create(p, a0),
         SYS_CHAN_SEND => sys_chan_send(p, frame),
         SYS_CHAN_RECV => sys_chan_recv(p, frame),
+        SYS_WAIT_MANY => sys_wait_many(p, a0, a1, a2),
+        SYS_DEV_CLAIM => sys_dev_claim(p, a0, a1),
+        SYS_DEV_INFO => sys_dev_info(p, a0, a1),
+        SYS_DEV_MAP => sys_dev_map(p, a0, a1, a2),
+        SYS_IRQ_BIND => dev_obj(p, a0, rights::MAP_WRITE)
+            .and_then(super::device::IrqObj::bind)
+            .and_then(|q| install_fd(p, 0, Fd::Irq(Arc::new(q)))),
+        SYS_IRQ_READ => irq_obj(p, a0).map(|q| q.take()),
+        SYS_DMA_ALLOC => dev_obj(p, a0, rights::MAP_WRITE)
+            .and_then(|d| d.dma_alloc(a1, a2))
+            .and_then(|b| install_fd(p, 0, Fd::Shm(b))),
+        SYS_DMA_PHYS => shm_obj(p, a0, 0).and_then(|o| o.dma_phys().ok_or(EINVAL)),
         SYS_SHM_CREATE => sys_shm_create(p, a0),
         SYS_SHM_MAP => sys_shm_map(p, a0, a1),
         SYS_SHM_SIZE => shm_obj(p, a0, 0).map(|o| o.len()),

@@ -20,7 +20,7 @@
 // zablokowałoby system).  Sterownik włącza INTx dla swojego urządzenia.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::arch::x86_64::interrupts::without_interrupts;
 use crate::arch::x86_64::port::{inb, outb};
@@ -361,6 +361,27 @@ impl Device {
         write16(self.address, cap + 2, (ctrl & !(7 << 4)) | 1);
         Ok(())
     }
+
+    /// M19.d: wyłącza MSI i MSI-X (urządzenie przestaje wysyłać przerwania).
+    pub fn disable_msi(&self) {
+        if let Some(cap) = self.find_capability(CAP_MSI) {
+            let ctrl = read16(self.address, cap + 2);
+            write16(self.address, cap + 2, ctrl & !1);
+        }
+        if let Some(cap) = self.find_capability(CAP_MSIX) {
+            let ctrl = read16(self.address, cap + 2);
+            write16(self.address, cap + 2, ctrl & !(1 << 15));
+        }
+    }
+
+    /// M19.d: bus mastering (DMA i przerwania MSI – to też zapisy urządzenia
+    /// do pamięci).  Wyłączenie kończy się odczytem rejestru: zapisy do
+    /// konfiguracji PCI mogą być buforowane, odczyt gwarantuje, że dotarły.
+    pub fn set_bus_master(&self, on: bool) {
+        let cmd = self.command();
+        self.set_command(if on { cmd | CMD_BUS_MASTER | CMD_MEMORY } else { cmd & !CMD_BUS_MASTER });
+        let _ = self.command();
+    }
 }
 
 fn class_name(class: u8, subclass: u8) -> &'static str {
@@ -522,6 +543,93 @@ pub fn init() {
     }
     unsafe {
         *core::ptr::addr_of_mut!(DEVICES) = found;
+    }
+}
+
+// ------------------------------------------------------------
+// M19.c: właściciel urządzenia – sterownik w jądrze albo usługa w user space
+// (dev_claim).  Jedno urządzenie – jeden właściciel naraz.
+// ------------------------------------------------------------
+
+pub const OWNER_FREE: u8 = 0;
+pub const OWNER_KERNEL: u8 = 1;
+pub const OWNER_USER: u8 = 2;
+/// Urządzenia dalej na liście nie mogą być przejęte przez usługę.
+const MAX_OWNED: usize = 256;
+static OWNERS: [AtomicU8; MAX_OWNED] = [const { AtomicU8::new(OWNER_FREE) }; MAX_OWNED];
+
+/// Powód odmowy `claim_user`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClaimError {
+    NoDevice,
+    /// Sterownik w jądrze albo klasa, której usługa nie dostanie nigdy.
+    Forbidden,
+    /// Inna usługa już ma to urządzenie.
+    Busy,
+}
+
+/// Indeks urządzenia na liście `devices()`.
+pub fn index_of(a: Address) -> Option<usize> {
+    devices().iter().position(|d| d.address == a)
+}
+
+/// Sterownik w jądrze obsługuje urządzenie (virtio-blk, NVMe).
+pub fn set_kernel_owner(a: Address) {
+    if let Some(i) = index_of(a).filter(|&i| i < MAX_OWNED) {
+        OWNERS[i].store(OWNER_KERNEL, Ordering::SeqCst);
+    }
+}
+
+pub fn owner(index: usize) -> u8 {
+    if index < MAX_OWNED { OWNERS[index].load(Ordering::SeqCst) } else { OWNER_KERNEL }
+}
+
+/// Klasy, których usługa nie dostanie nigdy: pamięć masowa (0x01 – także bez
+/// sterownika: ochrona dysków na prawdziwym sprzęcie), grafika (0x03 –
+/// framebuffer konsoli), mostki (0x06), urządzenia systemowe (0x08 – PIC,
+/// IOAPIC, timery, IOMMU).
+pub fn class_forbidden(d: &Device) -> bool {
+    matches!(d.class, 0x01 | 0x03 | 0x06 | 0x08)
+}
+
+/// Przejęcie urządzenia przez usługę – indeks albo powód odmowy.
+pub fn claim_user(a: Address) -> Result<usize, ClaimError> {
+    let i = index_of(a).ok_or(ClaimError::NoDevice)?;
+    let d = &devices()[i];
+    if i >= MAX_OWNED || class_forbidden(d) || d.header_type & 0x7F != 0 {
+        return Err(ClaimError::Forbidden);
+    }
+    match OWNERS[i].compare_exchange(OWNER_FREE, OWNER_USER, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => Ok(i),
+        Err(OWNER_USER) => Err(ClaimError::Busy),
+        Err(_) => Err(ClaimError::Forbidden),
+    }
+}
+
+/// Usługa oddaje urządzenie (ostatni uchwyt / mapowanie zniknęło).
+pub fn release_user(index: usize) {
+    if index < MAX_OWNED {
+        let _ = OWNERS[index].compare_exchange(OWNER_USER, OWNER_FREE, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+impl Device {
+    /// M19.c: obszary MSI-X (tablica, PBA) w BAR-ze `bar` – (offset, długość).
+    /// Usługa nie może ich zmapować: zapis tam kieruje przerwanie na dowolny
+    /// wektor (np. IPI jądra).
+    pub fn msix_regions(&self, bar: usize) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        let Some(cap) = self.find_capability(CAP_MSIX) else { return out };
+        let entries = (read16(self.address, cap + 2) & 0x7FF) as u64 + 1;
+        let table = read32(self.address, cap + 4);
+        let pba = read32(self.address, cap + 8);
+        if (table & 7) as usize == bar {
+            out.push(((table & !7) as u64, entries * 16));
+        }
+        if (pba & 7) as usize == bar {
+            out.push(((pba & !7) as u64, entries.div_ceil(64) * 8));
+        }
+        out
     }
 }
 

@@ -10,6 +10,20 @@
 //   * alloc_frame: szukanie od podpowiedzi słowami po 64 bity.
 //   * alloc_frames(n, align): n CIĄGŁYCH ramek (bufory DMA).
 //   * Wolne ramki nie są już zapisywane – ich zawartość nie jest dotykana.
+//
+// P3 (v0.22.0): zapas wolnych ramek na każdym CPU (jak listy w heapie).
+// Legion v0.21.0: blokada `frames` – 48–60 mln czekań w minucie stressu,
+// 4–6% CPU (każdy proces bierze dziesiątki ramek: obraz, stos, tablice stron).
+//   * alloc_frame / free_frame: zdjęcie / dołożenie na tablicę ramek tego CPU
+//     przy IF = 0, bez blokady; pusto = paczka FCACHE_BATCH ramek spod
+//     blokady, pełno = paczka wraca.  Ramki w zapasach liczą się jako wolne
+//     (free_frame_count), ale w bitmapie są zajęte.
+//   * Ochrona przed double-free i oddaniem cudzej / zarezerwowanej ramki bez
+//     blokady: druga bitmapa „wydana” (atomowa, 1 = ramka u właściciela).
+//     free_frame najpierw zdejmuje ten bit (fetch_and) – gdy go nie było,
+//     odmowa.  Ustawia go każda ścieżka wydania ramki.
+//   * Ciągłe przedziały (DMA, alloc_frames*, alloc_frame_below) – jak dotąd
+//     spod blokady.
 
 use crate::bootinfo::BootInfo;
 use crate::serial_println;
@@ -329,11 +343,18 @@ impl FrameAllocator {
 
     /// `count` ciągłych wolnych ramek, pierwsza wyrównana do `align` ramek.
     fn alloc_run(&mut self, count: u64, align: u64) -> Option<u64> {
+        self.alloc_run_below(count, align, self.frames)
+    }
+
+    /// M19.e: jak alloc_run, ale cały przedział poniżej ramki `end` (bufory DMA
+    /// urządzeń z węższą szyną adresów – np. `edu`: 28 bitów).
+    fn alloc_run_below(&mut self, count: u64, align: u64, end: u64) -> Option<u64> {
         if count == 0 || count > self.free_frames || align == 0 || !align.is_power_of_two() {
             return None;
         }
+        let end = end.min(self.frames);
         let mut start = align;
-        while start + count <= self.frames {
+        while start + count <= end {
             // Szybki przeskok przez całkowicie zajęte słowa.
             if *self.word((start / BITS) as usize) == 0 {
                 start = ((start / BITS + 1) * BITS).next_multiple_of(align);
@@ -405,7 +426,8 @@ pub fn init(boot: &BootInfo) {
     }
     let frames = ram_end / PAGE_SIZE;
     let words = frames.div_ceil(BITS) as usize;
-    let bitmap_bytes = (words * 8) as u64;
+    // P3: dwie bitmapy jedna za drugą – wolne (pula) i wydane (atomowa).
+    let bitmap_bytes = (words * 8 * 2) as u64;
 
     let mut reservations = reservations;
     let mut reservations_len = reservations_len;
@@ -427,7 +449,9 @@ pub fn init(boot: &BootInfo) {
     log_reservation("frame bitmap", bitmap_phys, bitmap_phys + align_up(bitmap_bytes));
 
     let bitmap = phys_to_virt(bitmap_phys) as *mut u64;
-    unsafe { ptr::write_bytes(bitmap, 0, words) };
+    unsafe { ptr::write_bytes(bitmap, 0, words * 2) };
+    ISSUED.store(unsafe { bitmap.add(words) } as *mut core::sync::atomic::AtomicU64, core::sync::atomic::Ordering::SeqCst);
+    NFRAMES.store(frames, core::sync::atomic::Ordering::SeqCst);
 
     let mut alloc = FrameAllocator {
         bitmap,
@@ -466,6 +490,9 @@ pub fn init(boot: &BootInfo) {
     // zaczyna w trybie rzeczywistym) – zarezerwowana od razu, zanim zwykłe
     // alokacje zajmą niską pamięć.
     let tramp = alloc.alloc_below(0x10_0000);
+    if let Some(t) = tramp {
+        mark_issued(t);
+    }
     match tramp {
         Some(t) => serial_println!("[MM] Reserved AP trampoline frame: {:#x}", t),
         None => serial_println!("[MM] No free frame below 1 MiB - only one CPU will be used"),
@@ -487,7 +514,9 @@ pub fn trampoline_frame() -> Option<u64> {
 
 /// M17: ramka poniżej `limit` (np. tablice stron dla trybu 32-bit CR3).
 pub fn alloc_frame_below(limit: u64) -> Option<u64> {
-    unsafe { with_allocator(|alloc| alloc.alloc_below(limit))? }
+    let f = unsafe { with_allocator(|alloc| alloc.alloc_below(limit))? }?;
+    mark_issued(f);
+    Some(f)
 }
 
 // M5: przerwania wyłączone na czas operacji – handler IRQ nie może trafić
@@ -499,20 +528,37 @@ unsafe fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator) -> R) -> Option<
 }
 
 pub fn alloc_frame() -> Option<u64> {
-    unsafe { with_allocator(|alloc| alloc.alloc_one())? }
+    let f = if FCACHE_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        cached_alloc()
+    } else {
+        unsafe { with_allocator(|alloc| alloc.alloc_one())? }
+    }?;
+    mark_issued(f);
+    Some(f)
 }
 
 /// M11: `count` ciągłych ramek (np. bufor DMA), pierwsza wyrównana do
 /// `align` ramek (potęga dwójki; 1 = bez wymagań).  Zwraca adres pierwszej.
 #[allow(dead_code)]
 pub fn alloc_frames(count: usize, align: usize) -> Option<u64> {
-    unsafe { with_allocator(|alloc| alloc.alloc_run(count as u64, align as u64))? }
+    let f = unsafe { with_allocator(|alloc| alloc.alloc_run(count as u64, align as u64))? }?;
+    mark_issued_run(f, count as u64);
+    Some(f)
 }
 
 // Returns true only when `frame` was a valid, currently allocated frame.
 // Invalid addresses and double-frees are rejected (one bit test - O(1)).
 pub fn free_frame(frame: u64) -> bool {
-    unsafe {
+    // P3: tylko ramka wydana przez alokator (bit „wydana”) – inaczej odmowa:
+    // double-free, adres spoza RAM-u, rezerwacja, ramka w czyimś zapasie.
+    if !take_issued(frame) {
+        return false;
+    }
+    if FCACHE_ON.load(core::sync::atomic::Ordering::Relaxed) {
+        cached_free(frame);
+        return true;
+    }
+    let ok = unsafe {
         with_allocator(|alloc| {
             if !alloc.valid_frame(frame) || alloc.is_free(frame / PAGE_SIZE) {
                 return false;
@@ -522,7 +568,18 @@ pub fn free_frame(frame: u64) -> bool {
             true
         })
         .unwrap_or(false)
+    };
+    if !ok {
+        mark_issued(frame); // niespójność – nie zgub stanu
     }
+    ok
+}
+
+/// M19.e: `count` ciągłych ramek leżących całe poniżej adresu `limit`.
+pub fn alloc_frames_below(count: usize, align: usize, limit: u64) -> Option<u64> {
+    let f = unsafe { with_allocator(|alloc| alloc.alloc_run_below(count as u64, align as u64, limit / PAGE_SIZE))? }?;
+    mark_issued_run(f, count as u64);
+    Some(f)
 }
 
 /// Oddaje `count` ciągłych ramek od `first`.  Wszystko albo nic: gdy
@@ -537,11 +594,12 @@ pub fn free_frames(first: u64, count: usize) -> bool {
             }
             for k in 0..count {
                 let f = first + k * PAGE_SIZE;
-                if !alloc.valid_frame(f) || alloc.is_free(f / PAGE_SIZE) {
+                if !alloc.valid_frame(f) || alloc.is_free(f / PAGE_SIZE) || !is_issued(f) {
                     return false;
                 }
             }
             for k in 0..count {
+                take_issued(first + k * PAGE_SIZE);
                 alloc.set_free(first / PAGE_SIZE + k, true);
             }
             alloc.free_frames += count;
@@ -559,8 +617,131 @@ pub fn bitmap_info() -> (u64, u64) {
 
 #[allow(dead_code)]
 pub fn free_frame_count() -> u64 {
-    unsafe {
-        with_allocator(|alloc| alloc.free_frames).unwrap_or(0)
+    let global = unsafe { with_allocator(|alloc| alloc.free_frames).unwrap_or(0) };
+    global + FCACHED.iter().map(|c| c.load(core::sync::atomic::Ordering::Relaxed)).sum::<u64>()
+}
+
+// ------------------------------------------------------------
+// P3: bitmapa „wydana” i zapasy ramek per CPU
+// ------------------------------------------------------------
+
+static ISSUED: core::sync::atomic::AtomicPtr<core::sync::atomic::AtomicU64> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static NFRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Słowo bitmapy „wydana” i maska bitu ramki; None – adres spoza bitmapy.
+fn issued_bit(frame: u64) -> Option<(&'static core::sync::atomic::AtomicU64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let base = ISSUED.load(Relaxed);
+    let index = frame / PAGE_SIZE;
+    if base.is_null() || frame % PAGE_SIZE != 0 || frame == 0 || index >= NFRAMES.load(Relaxed) {
+        return None;
+    }
+    Some((unsafe { &*base.add((index / BITS) as usize) }, 1u64 << (index % BITS)))
+}
+
+fn mark_issued(frame: u64) {
+    if let Some((w, m)) = issued_bit(frame) {
+        w.fetch_or(m, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn mark_issued_run(first: u64, count: u64) {
+    for k in 0..count {
+        mark_issued(first + k * PAGE_SIZE);
+    }
+}
+
+fn is_issued(frame: u64) -> bool {
+    issued_bit(frame).is_some_and(|(w, m)| w.load(core::sync::atomic::Ordering::Acquire) & m != 0)
+}
+
+/// Zdejmuje bit „wydana”; false – ramka nie była wydana (odmowa oddania).
+fn take_issued(frame: u64) -> bool {
+    issued_bit(frame).is_some_and(|(w, m)| w.fetch_and(!m, core::sync::atomic::Ordering::AcqRel) & m != 0)
+}
+
+const FCACHE_MAX: usize = 64;
+const FCACHE_BATCH: usize = 32;
+
+struct FCache {
+    frames: [u64; FCACHE_MAX],
+    n: usize,
+}
+
+struct FCacheCell(core::cell::UnsafeCell<FCache>);
+// Dostęp tylko z własnego CPU przy IF = 0.
+unsafe impl Sync for FCacheCell {}
+
+static FCACHES: crate::arch::x86_64::percpu::PerCpu<FCacheCell> =
+    crate::per_cpu!(FCacheCell(core::cell::UnsafeCell::new(FCache { frames: [0; FCACHE_MAX], n: 0 })));
+/// Ile ramek leży w zapasie CPU (free_frame_count sumuje bez dotykania zapasów).
+static FCACHED: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicU64> =
+    crate::per_cpu!(core::sync::atomic::AtomicU64::new(0));
+/// Włączane po samotestach alokatora (sprawdzają dokładne liczniki bitmapy).
+static FCACHE_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn enable_frame_caches() {
+    FCACHE_ON.store(true, core::sync::atomic::Ordering::SeqCst);
+}
+
+fn cached_alloc() -> Option<u64> {
+    use crate::arch::x86_64::interrupts;
+    let irq = interrupts::are_enabled();
+    interrupts::disable();
+    let me = crate::arch::x86_64::cpu::id();
+    let c = unsafe { &mut *FCACHES[me].0.get() };
+    if c.n == 0 {
+        // Pusto: paczka spod blokady.
+        let mut slot = ALLOCATOR.lock();
+        if let Some(alloc) = slot.as_mut() {
+            while c.n < FCACHE_BATCH {
+                match alloc.alloc_one() {
+                    Some(f) => {
+                        c.frames[c.n] = f;
+                        c.n += 1;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    let f = if c.n > 0 {
+        c.n -= 1;
+        Some(c.frames[c.n])
+    } else {
+        None
+    };
+    FCACHED[me].store(c.n as u64, core::sync::atomic::Ordering::Relaxed);
+    if irq {
+        interrupts::enable();
+    }
+    f
+}
+
+fn cached_free(frame: u64) {
+    use crate::arch::x86_64::interrupts;
+    let irq = interrupts::are_enabled();
+    interrupts::disable();
+    let me = crate::arch::x86_64::cpu::id();
+    let c = unsafe { &mut *FCACHES[me].0.get() };
+    if c.n == FCACHE_MAX {
+        // Pełno: paczka wraca do bitmapy jedną wizytą pod blokadą.
+        let mut slot = ALLOCATOR.lock();
+        if let Some(alloc) = slot.as_mut() {
+            while c.n > FCACHE_MAX - FCACHE_BATCH {
+                c.n -= 1;
+                let f = c.frames[c.n];
+                alloc.set_free(f / PAGE_SIZE, true);
+                alloc.free_frames += 1;
+            }
+        }
+    }
+    c.frames[c.n] = frame;
+    c.n += 1;
+    FCACHED[me].store(c.n as u64, core::sync::atomic::Ordering::Relaxed);
+    if irq {
+        interrupts::enable();
     }
 }
 

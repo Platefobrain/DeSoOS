@@ -61,6 +61,13 @@ pub mod kind {
     pub const PIPE: u64 = 3;
     pub const CHANNEL: u64 = 4;
     pub const SHM: u64 = 5;
+    /// M19.c: dostęp do sprzętu (tylko init) i przejęte urządzenie PCI.
+    pub const HW_ROOT: u64 = 6;
+    pub const DEVICE: u64 = 7;
+    /// M19.d: przerwanie urządzenia przypięte do usługi.
+    pub const IRQ: u64 = 8;
+    /// M19.i: akcje systemowe (reboot, halt, sync, stress) – syscall sysctl.
+    pub const SYSCTL: u64 = 9;
 }
 
 /// M18.b: wpis tablicy uchwytów procesu – obiekt + prawa.
@@ -86,6 +93,14 @@ impl Handle {
             }
             Fd::Channel(_) => SEND | RECV,
             Fd::Shm(_) => MAP_READ | MAP_WRITE,
+            Fd::Device(_) => MAP_READ | MAP_WRITE,
+            Fd::Irq(_) => RECV,
+            // M19.c: bez DUP i TRANSFER – nie da się go skopiować, przekazać
+            // dziecku ani wysłać; zostaje tam, gdzie dało go jądro (init).
+            Fd::HwRoot => return Handle { obj, rights: 0 },
+            // M19.i: tylko DUP – init daje kopię shellowi (spawn_ex), ale nie
+            // da się go wysłać w komunikacie.
+            Fd::Sysctl => return Handle { obj, rights: DUP },
         };
         Handle { obj, rights: io | DUP | TRANSFER }
     }
@@ -97,6 +112,10 @@ impl Handle {
             Fd::Pipe(_) => kind::PIPE,
             Fd::Channel(_) => kind::CHANNEL,
             Fd::Shm(_) => kind::SHM,
+            Fd::HwRoot => kind::HW_ROOT,
+            Fd::Device(_) => kind::DEVICE,
+            Fd::Irq(_) => kind::IRQ,
+            Fd::Sysctl => kind::SYSCTL,
         }
     }
 }
@@ -113,6 +132,14 @@ pub enum Fd {
     Channel(Arc<super::channel::ChanEnd>),
     /// M18.e: obiekt pamięci współdzielonej.
     Shm(Arc<super::shm::ShmObj>),
+    /// M19.c: dostęp do sprzętu – z niego dev_claim; ma go tylko init.
+    HwRoot,
+    /// M19.c: urządzenie PCI przejęte przez usługę.
+    Device(Arc<super::device::DevClaim>),
+    /// M19.d: przerwanie urządzenia (licznik + pobudka w wait_many).
+    Irq(Arc<super::device::IrqObj>),
+    /// M19.i: prawo do akcji systemowych (sysctl) – tworzy je tylko jądro dla init.
+    Sysctl,
 }
 
 pub struct Process {
@@ -143,8 +170,17 @@ pub struct Process {
     /// bez tego koniec procesu pomija przegląd listy zadań (reparent).
     pub has_children: AtomicBool,
     /// M17a.g15: żywe dzieci (spawn +1, koniec dziecka −1, przejęte w
-    /// reparent +n) – zmiany i odczyt w `wait` pod blokadą ZOMBIES.
+    /// reparent +n).  Koniec dziecka zmienia go pod blokadą `zombies`
+    /// rodzica razem z wpisem zombie – `wait` czyta go pod tą blokadą.
     pub live_children: core::sync::atomic::AtomicU32,
+    /// P1: zakończone dzieci czekające na `wait` (dawniej jedna globalna
+    /// tablica ZOMBIES pod usypiającą blokadą – na Legionie 168 s czekania w
+    /// minucie pełnego obciążenia).  Teraz każdy rodzic ma swoją listę
+    /// (procs::ChildList – lekka blokada, patrz asercja niżej).
+    pub(super) zombies: super::procs::ChildList,
+    /// P1: rośnie przy każdym nowym zombie dla tego procesu (warunek czekania
+    /// w `wait` bez blokady).
+    pub child_gen: AtomicU64,
     /// M16: dekoder klawiszy dla readkey z bufora stdin (testy).
     pub(super) key_decoder: SerialDecoder,
 }
@@ -157,6 +193,11 @@ impl Drop for Process {
         self.mem.release_shared(&mut self.space);
     }
 }
+
+// P1 (v0.20.2): Process idzie szybką ścieżką heapa (klasy do 2 KiB, wyrównanie
+// do 16 B) – pole z wyrównaniem 64 (np. IrqSpinLock) przeniosłoby każdy
+// proces na wolną, globalną listę bloków.
+const _: () = assert!(core::mem::align_of::<Process>() <= 16 && core::mem::size_of::<Process>() <= 2048);
 
 impl Process {
     pub fn new(space: AddressSpace) -> Self {
@@ -181,6 +222,8 @@ impl Process {
             exiting: AtomicBool::new(false),
             has_children: AtomicBool::new(false),
             live_children: core::sync::atomic::AtomicU32::new(0),
+            zombies: super::procs::ChildList::new(),
+            child_gen: AtomicU64::new(0),
             key_decoder: SerialDecoder::new(),
         }
     }

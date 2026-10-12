@@ -321,7 +321,7 @@ static HEAP_LOCK: IrqSpinLock<Heap> = IrqSpinLock::new("heap", level::HEAP, Heap
 // bloków jest przeglądana pod blokadą przy każdym alloc i (wtedy dwa razy)
 // przy każdym dealloc, a jądro alokuje w każdym syscallu (ścieżki, bufory).
 //
-// Małe bloki (do 2 KiB, wyrównanie <= 16) mają klasy 16, 32, ..., 2048.
+// Małe bloki (do 2 KiB – od P2 do 32 KiB, wyrównanie <= 16) mają klasy 16, 32, ..., 2048 (32768).
 // Każdy CPU trzyma dla każdej klasy listę wolnych bloków (węzeł w samym
 // bloku); alloc / dealloc to zdjęcie / dołożenie na listę tego CPU przy
 // wyłączonych przerwaniach (przerwanie też alokuje) – bez blokady.  Pusta lista
@@ -330,8 +330,11 @@ static HEAP_LOCK: IrqSpinLock<Heap> = IrqSpinLock::new("heap", level::HEAP, Heap
 // pochodzi – klasa wynika z Layout, więc rozmiar się zgadza.
 // Bloki na listach liczą się w heapie jako zajęte (`used`).
 
-const CLASSES: usize = 8; // 16, 32, ..., 2048
-const MAX_CLASS: usize = 2048;
+// P2 (v0.21.0): klasy także 4, 8, 16, 32 KiB.  Pomiar (stress, v0.20.2):
+// 89% alokacji wolną ścieżką (globalna lista pod blokadą `heap`) to bloki
+// 2–8 KiB, dalsze 7% – 16–32 KiB (zadania, bufory, ELF przy spawn).
+const CLASSES: usize = 12; // 16, 32, ..., 2048, 4096, ..., 32768
+const MAX_CLASS: usize = 32768;
 
 struct CpuCache {
     head: [usize; CLASSES],
@@ -377,10 +380,16 @@ fn class_of(layout: Layout) -> Option<(usize, usize)> {
     Some((size.trailing_zeros() as usize - 4, size))
 }
 
-/// Ile bloków klasy trzyma lista jednego CPU (~16 KiB na klasę, 8..64).
+/// Ile bloków klasy trzyma lista jednego CPU (małe: ~16 KiB na klasę, 8..64).
 #[inline]
 fn class_limit(size: usize) -> u32 {
-    ((16 * 1024 / size) as u32).clamp(8, 64)
+    if size <= 2048 {
+        ((16 * 1024 / size) as u32).clamp(8, 64)
+    } else {
+        // P2: duże klasy – mniej bloków na CPU (4 KiB: 8, 8 KiB: 8, 16 KiB: 4,
+        // 32 KiB: 2; razem ≤ 224 KiB na CPU).
+        ((64 * 1024 / size) as u32).clamp(2, 8)
+    }
 }
 
 #[inline]

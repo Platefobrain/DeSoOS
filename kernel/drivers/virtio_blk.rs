@@ -559,6 +559,7 @@ pub fn init() -> usize {
         }
         match VirtioBlk::new(dev, added) {
             Ok(d) => {
+                pci::set_kernel_owner(dev.address); // M19.c: usługa go nie przejmie
                 serial_println!("[VIRTIO] {}: {}", d.name, d.description());
                 block::register(alloc::boxed::Box::new(d));
                 added += 1;

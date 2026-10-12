@@ -51,7 +51,7 @@ pub fn self_test() {
     use crate::arch::x86_64::{exceptions, syscall};
     serial_println!("[SYSCALL TEST] Starting syscall tests...");
     crate::selftest::begin();
-    let frames = crate::sched::stack::free_frames_flushed();
+    let frames = crate::selftest::settled_free_frames();
 
     // 1. MSR-y SYSCALL/SYSRET i blok per CPU.
     let (sce, star, lstar, fmask, kgs, krsp) = syscall::state();

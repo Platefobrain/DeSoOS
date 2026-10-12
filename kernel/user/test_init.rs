@@ -52,7 +52,7 @@ pub fn self_test() {
     use crate::arch::x86_64::gdt;
     serial_println!("[INIT TEST] Starting init / process family / user shell tests...");
     crate::selftest::begin();
-    let frames = crate::sched::stack::free_frames_flushed();
+    let frames = crate::selftest::settled_free_frames();
     let heap_mapped = crate::memory::heap::mapped_bytes();
 
     // 1. Stosy IST ze stronami-strażnikami.
@@ -127,8 +127,13 @@ args \"one two\" three\n\
 echo abc\x1b[D\x1b[DX\n\
 \x1b[A\n\
 ver\n\
-k uptime > /m16/up\n\
+uptime > /m16/up\n\
 stat /m16/up\n\
+mkfs 0\n\
+k mem\n\
+disk read 0 0\n\
+reboot\n\
+lspci -x\n\
 kill 1\n\
 exit 7\n";
     let sh = start("/bin/sh", &["sh"], script);
@@ -150,6 +155,11 @@ exit 7\n";
         "DeSoOS v",
         "/m16/up: file,",
         "kill: 1: no such process",
+        "sh: mkfs: only in the kernel emergency shell",
+        "sh: k: only in the kernel emergency shell",
+        "disk: only the list here",
+        "reboot: not allowed - this shell has no system control handle",
+        "lspci: unsupported arguments",
     ];
     for e in expect {
         check!(out.contains(e), "sh output lacks {:?}:\n{}", e, out);
@@ -157,7 +167,7 @@ exit 7\n";
     check!(out.matches("\naXbc\n").count() == 2, "history (Up) did not repeat the line:\n{}", out);
     check!(kind == ExitKind::Exit(7), "sh ended with {:?}", kind);
     check!(crate::fs::read_file("/m16/c").ok().as_deref() == Some(b"text\nmore\n".as_slice()), "cp content");
-    serial_println!("[INIT TEST] 4/9 user shell: builtins, /bin programs, > >> <, quotes, line editing, k PASS");
+    serial_println!("[INIT TEST] 4/9 user shell: builtins, /bin programs, > >> <, quotes, line editing, sysinfo, mkfs / reboot refused PASS");
 
     // 5. Bez zombie: shell odebrał status każdego dziecka.
     check!(procs::zombies().is_empty(), "zombies left: {:?}", procs::zombies());

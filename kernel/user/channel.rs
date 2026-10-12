@@ -11,6 +11,8 @@
 // * Koniec liczony przez Arc (uchwyty w tablicach i w komunikatach w drodze);
 //   gdy znika ostatni – Drop: koniec zamknięty, jego kolejka opróżniona
 //   (uchwyty w komunikatach zwolnione), druga strona budzona (EPIPE).
+// * M19.b: każda kolejka ma też listę obserwatorów `wait_many` – budzonych
+//   przy każdej zmianie (komunikat, miejsce, zamknięcie).
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -18,6 +20,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::process::Handle;
+use super::waitset::Observers;
 use super::syscalls::{EAGAIN, EINTR, EPIPE};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
@@ -46,6 +49,9 @@ struct Inbox {
     readable: WaitQueue,
     /// Nadawcy (druga strona) czekają na miejsce / zamknięcie tego końca.
     writable: WaitQueue,
+    /// M19.b: `wait_many` na tej kolejce (odbiorca – READABLE, nadawcy –
+    /// WRITABLE).
+    obs: Observers,
 }
 
 impl Inbox {
@@ -56,7 +62,19 @@ impl Inbox {
             closed: AtomicBool::new(false),
             readable: WaitQueue::new(),
             writable: WaitQueue::new(),
+            obs: Observers::new(),
         }
+    }
+
+    /// Po zmianie stanu: czekający w recv / send i w `wait_many`.
+    fn wake_readers(&self) {
+        self.readable.wake_all();
+        self.obs.notify();
+    }
+
+    fn wake_writers(&self) {
+        self.writable.wake_all();
+        self.obs.notify();
     }
 }
 
@@ -114,7 +132,7 @@ impl ChanEnd {
                     q.push_back(msg.take().unwrap());
                     peer.len.store(q.len(), Ordering::SeqCst);
                     drop(q);
-                    peer.readable.wake_all();
+                    peer.wake_readers();
                     return Ok(());
                 }
             }
@@ -154,7 +172,7 @@ impl ChanEnd {
                     let m = q.pop_front().unwrap();
                     mine.len.store(q.len(), Ordering::SeqCst);
                     drop(q);
-                    mine.writable.wake_all();
+                    mine.wake_writers();
                     return Ok(m);
                 }
             }
@@ -180,6 +198,25 @@ impl ChanEnd {
     }
 }
 
+/// M19.b: stan dla `wait_many`.
+impl ChanEnd {
+    /// Jest komunikat albo druga strona zamknięta (recv nie będzie czekać).
+    pub fn readable(&self) -> bool {
+        self.mine().len.load(Ordering::SeqCst) > 0 || self.peer().closed.load(Ordering::SeqCst)
+    }
+
+    /// Jest miejsce u drugiej strony albo jest zamknięta (send nie będzie czekać).
+    pub fn writable(&self) -> bool {
+        self.peer().len.load(Ordering::SeqCst) < QUEUE_MAX || self.peer().closed.load(Ordering::SeqCst)
+    }
+
+    /// Obserwatorzy: READABLE – własna kolejka, WRITABLE – kolejka drugiej
+    /// strony (zamknięcie drugiej strony budzi obie).
+    pub fn observers(&self, write: bool) -> &Observers {
+        if write { &self.peer().obs } else { &self.mine().obs }
+    }
+}
+
 impl Drop for ChanEnd {
     fn drop(&mut self) {
         let mine = self.mine();
@@ -196,7 +233,7 @@ impl Drop for ChanEnd {
         drop(left);
         // Nadawcy do tego końca – EPIPE; odbiorca po drugiej stronie – EPIPE,
         // gdy jego kolejka pusta.
-        mine.writable.wake_all();
-        self.peer().readable.wake_all();
+        mine.wake_writers();
+        self.peer().wake_readers();
     }
 }

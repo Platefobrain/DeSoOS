@@ -670,6 +670,7 @@ pub fn init() -> usize {
         }
         match Nvme::new(dev, added) {
             Ok(d) => {
+                pci::set_kernel_owner(dev.address); // M19.c: usługa go nie przejmie
                 serial_println!("[NVMe] {}: {}", d.name, d.description());
                 if !d.write_allowed {
                     serial_println!("[NVMe] {}: real SSD - write protection ON (nothing is ever written)", d.name);
