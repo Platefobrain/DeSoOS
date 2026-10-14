@@ -152,6 +152,119 @@ fn irq_obj(p: &Process, h: u64) -> Result<Arc<super::device::IrqObj>, i64> {
 
 /// M19.c: dev_claim(hw_root, bdf) -> uchwyt DEVICE; bdf = bus << 8 | urz. << 3 | fn.
 pub const SYS_DEV_CLAIM: u64 = 39;
+/// M20.b: dev_find(hw_root, klasa, nr) – init szuka urządzeń po klasie (np.
+/// kontrolerów xHCI 0C0330), nie po stałym adresie.  Tylko z HW_ROOT (EBADF);
+/// EINVAL – klasa > 24 bity; ENOENT – mniej niż nr + 1 pasujących.  Samo
+/// znalezienie niczego nie przejmuje – o dostępie decyduje dev_claim.
+fn sys_dev_find(p: &mut Process, root: u64, class: u64, nr: u64) -> SysResult {
+    if !matches!(p.fd(root)?, Fd::HwRoot) {
+        return Err(EBADF);
+    }
+    if class > 0xFF_FFFF {
+        return Err(EINVAL);
+    }
+    let d = crate::drivers::pci::devices()
+        .iter()
+        .filter(|d| ((d.class as u64) << 16 | (d.subclass as u64) << 8 | d.prog_if as u64) == class)
+        .nth(nr.min(usize::MAX as u64) as usize)
+        .ok_or(ENOENT)?;
+    let a = d.address;
+    Ok((a.bus as u64) << 8 | (a.device as u64) << 3 | a.function as u64)
+}
+
+/// M20.f: blk_attach – usbd rejestruje pendrive jako dysk jądra (ublk.rs).
+/// EBADF – nie BLK / nie kanał / nie SHM; EACCES – BLK bez WRITE, kanał bez
+/// SEND + RECV + TRANSFER, bufor bez MAP_READ; EINVAL – zły rozmiar bloku,
+/// 0 bloków, sloty spoza 1..8, bufor mniejszy niż sloty × 64 KiB; ENOSPC –
+/// 8 dysków USB naraz; EFAULT.  Jądro bierze własne referencje do kanału i
+/// bufora (usbd może zamknąć swoje uchwyty).
+fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysResult {
+    let hd = p.handle(h)?;
+    if !matches!(hd.obj, Fd::Blk) {
+        return Err(EBADF);
+    }
+    if hd.rights & rights::WRITE == 0 {
+        return Err(EACCES);
+    }
+    let hc = p.handle(ch)?;
+    let Fd::Channel(c) = &hc.obj else { return Err(EBADF) };
+    let need = rights::SEND | rights::RECV | rights::TRANSFER;
+    if hc.rights & need != need {
+        return Err(EACCES);
+    }
+    let c = c.clone();
+    let b = shm_obj(p, buf, rights::MAP_READ)?;
+    let raw = copy_from_user(p, info, 64)?;
+    let blocks = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+    let bs = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+    let slots = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
+    let timeout = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
+    if !matches!(bs, 512 | 4096) || blocks == 0 || blocks.checked_mul(bs as u64).is_none() {
+        return Err(EINVAL);
+    }
+    if slots == 0 || slots > super::ublk::SLOTS_MAX || b.len() < (slots * super::ublk::SLOT_BYTES) as u64 {
+        return Err(EINVAL);
+    }
+    let timeout = if timeout == 0 { super::ublk::TIMEOUT_MS } else { timeout.clamp(100, 30_000) };
+    let desc: String = raw[24..64]
+        .iter()
+        .take_while(|&&x| x != 0)
+        .map(|&x| if (0x20..0x7F).contains(&x) { x as char } else { '?' })
+        .collect();
+    super::ublk::attach(c, b, blocks, bs, slots, timeout, String::from(desc.trim()))
+}
+
+/// M20.e: input_inject – zdarzenia klawiatury / myszy z usługi (usbd) do
+/// podsystemu wejścia jądra (konsola, shell, readkey – bez zmian dla reszty).
+/// EBADF – nie INPUT; EACCES – bez WRITE; EINVAL – n = 0 / > 64 albo zły
+/// rodzaj (wtedy żadne zdarzenie nie przechodzi); EFAULT – zły wskaźnik.
+fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
+    {
+        let hd = p.handle(h)?;
+        if !matches!(hd.obj, Fd::Input(_)) {
+            return Err(EBADF);
+        }
+        if hd.rights & rights::WRITE == 0 {
+            return Err(EACCES);
+        }
+    }
+    if n == 0 || n > 64 {
+        return Err(EINVAL);
+    }
+    let data = copy_from_user(p, ptr, n * 8)?;
+    if data.chunks(8).any(|e| !matches!(e[0], 1 | 2)) {
+        return Err(EINVAL);
+    }
+    // M20.h: opóźnienie „przerwanie kontrolera -> znak w jądrze” – od
+    // ostatniego przerwania urządzeń tego procesu (usbd ma jedno: xHCI).
+    let irq_t = p.fds.iter().flatten().filter_map(|h| if let Fd::Irq(o) = &h.obj { Some(o.last_stamp()) } else { None }).max().unwrap_or(0);
+    let hd = p.handle(h)?;
+    let Fd::Input(src) = &hd.obj else { return Err(EBADF) };
+    let now = crate::time::ticks();
+    let mut measured = false;
+    for e in data.chunks(8) {
+        match e[0] {
+            1 => {
+                let usage = e[2]; // HID usage (strona 7 – klawiatura) mieści się w bajcie
+                let pressed = e[1] != 0;
+                // Puszczenie klawisza, którego to źródło nie wcisnęło – pomijamy.
+                if !pressed && !src.is_pressed(usage) {
+                    continue;
+                }
+                src.mark(usage, pressed);
+                crate::input::usb_key(src.id, usage, pressed, now);
+                if pressed && !measured && irq_t != 0 {
+                    measured = true;
+                    let us = crate::arch::x86_64::clock::us_between(irq_t, crate::arch::x86_64::clock::stamp());
+                    crate::input::hid_latency_record(us);
+                }
+            }
+            _ => crate::input::usb_mouse(e[2], e[1] as i8),
+        }
+    }
+    Ok(crate::input::led_bits())
+}
+
 /// M19.c: dev_info(dev, out) – out = 10 × u64: [vendor | device << 16,
 /// klasa << 16 | podklasa << 8 | prog_if, rozmiary BAR 0..5, maska BAR-ów I/O,
 /// flagi (1 = MSI, 2 = MSI-X)].
@@ -172,6 +285,18 @@ pub const SYS_DMA_PHYS: u64 = 45;
 pub const SYS_SYSINFO: u64 = 46;
 /// M19.i: sysctl(uchwyt SYSCTL, akcja, arg, fd) – 1 reboot, 2 halt, 3 sync, 4 stress.
 pub const SYS_SYSCTL: u64 = 47;
+/// M20.b: dev_find(hw_root, klasa, nr) -> bdf `nr`-tego urządzenia PCI o klasie
+/// (24 bity: klasa << 16 | podklasa << 8 | prog_if); ENOENT – nie ma dalszych.
+pub const SYS_DEV_FIND: u64 = 48;
+/// M20.e: input_inject(INPUT, zdarzenia, n) -> stan diod (bit 0 Num, 1 Caps,
+/// 2 Scroll); zdarzenie 8 B: rodzaj (1 klawisz, 2 mysz), wciśnięty / kółko,
+/// kod (HID usage / przyciski), dx, dy; n ≤ 64.
+pub const SYS_INPUT_INJECT: u64 = 49;
+/// M20.f: blk_attach(BLK, kanał, bufor, info) -> numer dysku USB (0 = sda);
+/// info 64 B: bloki u64, rozmiar bloku u32 (512 / 4096), sloty u32 (1..8,
+/// po 64 KiB w buforze), timeout_ms u32 (0 = 5000, inaczej 100..30000), 4 B
+/// zero, opis 40 B (ASCII).  Dysk zawsze tylko do odczytu.
+pub const SYS_BLK_ATTACH: u64 = 50;
 /// M18.d: najwięcej wpisów w mapie spawn_ex.
 pub const SPAWN_EX_MAX: u64 = 16;
 
@@ -214,6 +339,8 @@ pub const EROFS: i64 = -30;
 pub const ERANGE: i64 = -34;
 pub const ENOTEMPTY: i64 = -39;
 pub const ENOSYS: i64 = -38;
+/// M20.f: brak odpowiedzi w terminie (ublk – usbd nie odpowiedział).
+pub const ETIMEDOUT: i64 = -110;
 
 /// Największy pojedynczy write/read (dłuższe – kilka wywołań).
 const MAX_IO: u64 = 64 * 1024;
@@ -337,7 +464,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
     match p.fd(fd)? {
         // Kanał nie ma READ / WRITE (komunikaty – chan_send / chan_recv).
-        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl => Err(EBADF),
+        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => Err(EBADF),
         Fd::Pipe(e) => {
             if !e.write {
                 return Err(EBADF);
@@ -424,7 +551,7 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
         }
     } else {
         match p.fd(fd)? {
-            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl => return Err(EBADF),
+            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => return Err(EBADF),
             Fd::Pipe(e) => {
                 if e.write {
                     return Err(EBADF);
@@ -461,6 +588,10 @@ fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
     let name = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
     let path = fs::normalize(&p.cwd, name);
     let write = flags & O_WRITE != 0;
+    // M20.f: zapis na systemie plików tylko do odczytu (pendrive USB, SSD) – od razu.
+    if write && fs::is_read_only(&path) {
+        return Err(EROFS);
+    }
     match fs::stat(&path) {
         Ok(m) if m.kind == FileType::Directory => return Err(EISDIR),
         Ok(_) => {
@@ -1219,7 +1350,7 @@ fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult 
 // stat, readdir, mkdir, unlink, chdir, getcwd (e).  Dotykają tylko: własnego procesu (jednowątkowy –
 // deskryptory, cwd i pamięć zmienia tylko on, sched::current_unlocked),
 // licznika ticków, heapa, konsoli, bufora stdout (SpinLock) i VFS / warstwy
-// block (własne blokady FS_LOCK / block::LOCK – KMutex z compare_exchange).
+// block (własne blokady FS_LOCK / blokady dysków – KMutex z compare_exchange).
 // Czekanie na dysk (WaitQueue) – od f2 tylko blokada schedulera.
 // Procesy (e2): spawn, wait, kill, getppid – tablica zombie pod własną
 // blokadą.  Sleep i yield (f2) – tylko blokada schedulera.  Pod BKL
@@ -1346,6 +1477,9 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_WAIT_MANY => sys_wait_many(p, a0, a1, a2),
         SYS_DEV_CLAIM => sys_dev_claim(p, a0, a1),
         SYS_DEV_INFO => sys_dev_info(p, a0, a1),
+        SYS_DEV_FIND => sys_dev_find(p, a0, a1, a2),
+        SYS_INPUT_INJECT => sys_input_inject(p, a0, a1, a2),
+        SYS_BLK_ATTACH => sys_blk_attach(p, a0, a1, a2, frame.r10),
         SYS_DEV_MAP => sys_dev_map(p, a0, a1, a2),
         SYS_IRQ_BIND => dev_obj(p, a0, rights::MAP_WRITE)
             .and_then(super::device::IrqObj::bind)

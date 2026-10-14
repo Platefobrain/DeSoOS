@@ -1,6 +1,6 @@
 # Architektura DeSoOS
 
-Opis tego, jak system jest zbudowany i jak działa (stan: v0.22.0, M19 gotowe, poprawki wydajności w toku). Historia zmian: `CHANGELOG.md`,
+Opis tego, jak system jest zbudowany i jak działa (stan: v0.26.0 – M20 USB w toku: klawiatura i pendrive tylko do odczytu działają). Historia zmian: `CHANGELOG.md`,
 plan etapów: `roadmapa`.
 
 ## W skrócie
@@ -53,7 +53,7 @@ dowolną pamięć. Dlaczego nie monolit na zawsze: błąd w dużym, opcjonalnym 
 | VFS, page cache, FAT32, przyszły natywny FS | **kernel na stałe** | każde `open`/`read`/`write` |
 | init, shell, narzędzia | user space | od M16 |
 | sieć | user space | tylko z kolejkami (jak virtio/io_uring), nigdy IPC na pakiet |
-| USB + HID | do decyzji po M19 | klawiatura laptopa jest na USB – padnięta usługa = brak klawiatury |
+| USB + HID | user space (`/bin/usbd`, M20) | zdarzenia klawiatury do jądra syscallem `input_inject`; padnięty usbd = restart przez init |
 | audio, GUI, egzotyczne FS | user space | ring buffery / powierzchnie we wspólnej pamięci; FS przez VFS (jak FUSE) |
 
 **System plików zostaje w jądrze:** FS w user space to droga proces → kernel → serwer FS → kernel → dysk
@@ -267,7 +267,7 @@ I/O APIC + MSI: przerwania urządzeń IPI: resched, TLB shootdown, halt (panic)
   Linie ISA (zegar, klawiatura, serial, mysz) przez I/O APIC; PIC 8259 zamaskowany.
 - **Dyski** – virtio-blk, NVMe (kolejka admin + I/O), partycje GPT jako osobne dyski.
 - **Wejście/wyjście** – framebuffer z UEFI (konsola tekstowa z polskimi znakami, scrollback), serial, PS/2 (klawiatura, mysz).
-  USB dopiero w M20 (klawiatura Legiona jest na USB).
+  USB w user space (M20, `/bin/usbd`) – klawiatura Legiona działa od v0.25.1.
 
 **Ochrona danych na prawdziwym sprzęcie** – dwie niezależne bariery:
 
@@ -464,9 +464,294 @@ kosztuje ~2 przełączenia procesów (+29 µs w KVM). Na prawdziwym sprzęcie po
 usługę `edu` z init). Pomiaru nie ma w autostressie: tam `edu` trzyma `edud` uruchomiony przez init, a na
 Legionie edu nie ma.
 
+## USB (M20 – projekt 20.a, zaakceptowany 2026-10-12)
+
+Cel: wbudowana klawiatura Legiona (USB HID, ITE 8910), mysz USB i odczyt pendrive'a – przez **usługę w user
+space** `/bin/usbd`, na mechanizmach z M19. Jądro dostaje od USB tylko dwie rzeczy: **zdarzenia wejścia** i
+**sektory dysku**. Nic z protokołu USB nie trafia do jądra.
+
+```
+ jądro                                    init (HW_ROOT, INPUT, BLK)          usbd (jeden na kontroler)
+ ──────                                   ──────────────────────────          ─────────────────────────
+ dev_find(klasa 0C03/30) ───────────────► BDF kontrolerów ─ spawn_ex ──────► slot 3 DEVICE, 4 INPUT, 5 BLK
+ tablica PCI, MSI-X, ramki DMA  ◄──────── dev_claim / irq_bind / dma_alloc ─── pierścienie xHCI, TRB, konteksty
+ kernel/input.rs ◄── input_inject(INPUT, zdarzenia) ─────────────────────────── raporty HID → zdarzenia
+ ublk (BlockDevice) ◄─ kanał: żądanie / odpowiedź, dane w buforze DMA ────────── BOT + SCSI READ(10)
+ FAT32 /usbN (tylko odczyt)                                    klient ── "usb0" ──► init ──► lsusb, stan
+```
+
+### Granica bezpieczeństwa – DMA bez IOMMU (zapisane wprost)
+
+usbd sam wpisuje adresy fizyczne do struktur xHCI (DCBAA, pierścienie, TRB, konteksty). **Jądro nie ma jak
+tych adresów sprawdzić** – kontroler czyta je bezpośrednio z pamięci. Bez IOMMU błędny albo złośliwy usbd może
+zlecić kontrolerowi zapis w dowolne miejsce RAM, także w jądro.
+
+- Izolacja procesu usbd chroni przed: paniką, błędnym wskaźnikiem, zawieszeniem, wyciekiem, złym stanem
+  po awarii – to jądro sprząta i restartuje (M19).
+- **Nie chroni przed dzikim DMA.** usbd jest więc zaufanym kodem systemu (jak sterownik w jądrze), tylko
+  uruchomionym w procesie. Dlatego: `HW_ROOT` ma tylko init, usbd dostaje jedno urządzenie, a binarka usbd
+  jest wbudowana w obraz (initrd), nie ładowana z dysku.
+- Ograniczenia, które zostają: bufory tylko z `dma_alloc` (ciągłe, limit 16 MiB na urządzenie), żyją co
+  najmniej tak długo jak przejęcie; po śmierci usbd bus mastering wyłączany przed zwolnieniem ramek (M19.e).
+- Pełna izolacja DMA: **IOMMU (AMD-Vi na Legionie)** – osobny etap po M20 („Dalej”).
+
+### Nowe syscalle i uchwyty
+
+| Nr | Wywołanie | Uchwyt / prawa | Wynik, błędy |
+|---|---|---|---|
+| 48 | `dev_find(root, klasa, nr)` | `HW_ROOT` | BDF `nr`-tego urządzenia o klasie (24 bity: klasa, podklasa, prog-if); `ENOENT` – brak dalszych, `EBADF` |
+| 49 | `input_inject(h, zdarzenia, n)` | `INPUT`, `WRITE` | stan diod (Caps/Num/Scroll) – usbd ustawia je w klawiaturze; `EINVAL` (n > 64, zły rodzaj), `EFAULT`, `EBADF` |
+| 50 | `blk_attach(h, kanał, bufor, info)` | `BLK`, `WRITE`; kanał `SEND`+`RECV`+`TRANSFER`; bufor `MAP_READ` | numer dysku USB (0 = sda); `EINVAL` (blok ≠ 512/4096, 0 bloków, sloty spoza 1..8, bufor < sloty × 64 KiB), `ENOSPC` (8 dysków USB), `EACCES`, `EBADF`, `EFAULT` |
+
+Rodzaje uchwytów: **10 `INPUT`**, **11 `BLK`**. Jądro daje je init przy starcie (slot 5 i 6, jak `SYSCTL`
+w slocie 4), init przekazuje każdemu usbd kopię **bez `DUP`** (usbd nie puści ich dalej), shell ich nie dostaje.
+`INPUT` to w praktyce klawiatura systemu (może pisać do shella) – stąd tak wąsko. Profil (`prof.rs`) – 51 numerów.
+
+### Wejście – `input_inject` (49)
+
+Zdarzenie 8 B: `rodzaj u8`, `wciśnięty u8`, `kod u16` (HID usage, strona 7 – klawiatura), `dx i16`, `dy i16`
+(mysz: rodzaj 2, `kod` = przyciski, `wciśnięty` = kółko jako i8). Najwyżej 64 zdarzenia w wywołaniu.
+
+- Jądro tłumaczy HID usage → `KeyCode` (tablica w `kernel/input.rs`, obok tłumaczenia z PS/2), dalej jak dziś:
+  modyfikatory, Caps/Num, układ pl, konsola, `readkey`, `keys`.
+- **Autorepeat w jądrze** dla źródła USB (klawiatura USB, w przeciwieństwie do PS/2, nie powtarza sama):
+  500 ms, potem 30/s, z ticku zegara; kończy go puszczenie klawisza albo zniknięcie źródła.
+- Każdy uchwyt `INPUT` to osobne **źródło**: jądro pamięta, co z niego jest wciśnięte. Zamknięcie ostatniej kopii
+  (koniec usbd) = **puszczenie wszystkich klawiszy źródła** – po awarii nie zostaje wciśnięty Shift ani Ctrl.
+- Mysz: przewijanie konsoli (jak PS/2 dziś); kursor – razem z GUI.
+
+### Dysk – ublk (50) i protokół żądań
+
+usbd tworzy kanał i bufor (`dma_alloc` – ten sam, do którego pendrive pisze przez DMA, bez kopii w usbd) i woła
+`blk_attach(BLK, koniec_kanału, bufor, info)`; `info` = liczba sektorów, rozmiar sektora, nazwa (`usb0d1`).
+Jądro bierze **własne referencje** do kanału i bufora i rejestruje dysk `ublk` (zawsze `read_only`), potem
+skanuje partycje GPT / MBR jak przy NVMe.
+
+Komunikaty (32 B, kanał – sterowanie; dane – bufor, zasada z M18):
+
+| Kierunek | Pola |
+|---|---|
+| jądro → usbd | `id u32`, `op u32` (1 = READ; innych brak), `lba u64`, `sektory u32`, `slot u32` |
+| usbd → jądro | `id u32`, `status i32` (0, `EIO`, `ENODEV` – nośnik wyjęty), `sektory u32` |
+
+- **Sloty:** bufor dzielony na sloty po 64 KiB (domyślnie 4 = 256 KiB), jeden slot na żądanie; `id` rośnie
+  monotonicznie (64-bitowy licznik w jądrze, w komunikacie 32 bity – nie zawinie się w czasie życia dysku).
+- **Właściciel slotu w każdej chwili:** `wolny` (jądro) → `u usbd` (od wysłania żądania) → `wolny` po odpowiedzi
+  z tym samym `id`, `sektory` = żądane i `status` = 0 (dopiero wtedy jądro kopiuje dane). Każda inna odpowiedź
+  (nieznane `id`, zła liczba sektorów, za duży komunikat) = **odrzucona** + licznik błędów protokołu.
+- **Timeout:** 5 s na żądanie (pendrive potrafi się budzić sekundami). Po timeoucie: `EIO` dla wywołującego,
+  slot przechodzi w stan **kwarantanny** – nie wraca do puli, bo urządzenie może jeszcze do niego pisać. Wraca
+  dopiero po spóźnionej odpowiedzi z tym `id` (którą jądro wyrzuca) albo po śmierci usbd.
+- **3 timeouty pod rząd albo zamknięty kanał** (śmierć usbd) = dysk **znika**: kolejne operacje `ENODEV`/`EIO`,
+  FS zamontowany na nim zwraca `EIO`; zadanie `usb-disks` odmontowuje go i usuwa dysk z partycjami (v0.26.0: numer
+  w warstwie block wraca do puli dopiero po odmontowaniu – inaczej każdy restart usbd zostawiałby wpis na zawsze;
+  nazwy `sdX` rosną i się nie powtarzają).
+- **Śmierć usbd:** jądro najpierw wyłącza bus mastering (sprzątanie M19), ramki bufora żyją, dopóki ublk
+  trzyma referencję – zwalniane dopiero przy usunięciu dysku. Nic nie pisze do zwolnionej ramki.
+- **Dane z pendrive'a to dane z obcego źródła** – FAT32 i GPT już muszą być odporne na zepsute dyski (tak jak
+  dziś dla NVMe); nowe: test FAT32 na celowo zepsutym obrazie w QEMU.
+
+**Zmiany w jądrze, których to wymaga** (krok f):
+- **blokada per dysk** w warstwie block – dziś jedna globalna (`block layer`); czekanie do 5 s na USB
+  zatrzymałoby NVMe i virtio. Lista dysków: krótka blokada na wyszukanie, operacja pod blokadą dysku.
+- usuwanie dysku (wpis „zniknął”), dziś jest tylko `register`,
+- `ChanEnd::recv` z terminem (jądro czeka na odpowiedź z timeoutem).
+- (v0.28.0, M20.g: już nie – FAT32 na dysku USB ma własną blokadę `fs::Locked` i działa pod FS_LOCK do odczytu;
+  czekanie na pendrive zatrzymuje tylko ten system plików.) Pierwotnie: FAT32 zostaje pod `FS_LOCK` do zapisu: odczyt z `/usbN` blokuje na ten czas inne operacje na FAT32 (nie ramfs
+  w trybie odczytu współdzielonego). Dlatego **usbd po starcie nie używa VFS** (dostaje tylko uchwyty z init) –
+  inaczej czekałby na blokadę trzymaną w jego imieniu (zakleszczenie do timeoutu).
+
+**Tylko odczyt – trzy niezależne zamki (v0.26.0: cztery – FAT32 na dysku read-only odrzuca zmiany od razu, `open` do
+zapisu → EROFS):** usbd nie zawiera żadnej komendy zapisu SCSI (WRITE(6/10/12/16), FORMAT,
+MODE SELECT, SYNCHRONIZE CACHE – test: brak tych kodów w binarce), protokół ublk nie ma operacji zapisu, dysk
+`ublk` zgłasza `read_only`, warstwa block odrzuca zapis (EROFS).
+
+### Enumeracja – maszyna stanów portu
+
+```
+ Wolny ─podłączenie─► Debounce(100 ms) ─► Reset(500 ms) ─► Adres(Enable Slot + Address Device, 1 s/komendę)
+   ▲                                                                   │
+   │                       Deskryptory(GET_DESCRIPTOR: 8 B, całe urządzenie, 9 B konfiguracji, całość)
+   │                                                                   │
+   └── Wyłączony ◄── Błąd(≤ 3 próby, potem do odłączenia) ◄── Konfiguracja(Set Configuration, Configure Endpoint)
+                                                                       │
+                                                         Działa (klasa: hub / HID / pamięć masowa / nieznana)
+```
+
+- **Każdy stan ma timeout**; po błędzie: Disable Slot, port wyłączony, powrót do `Wolny` (3 próby, potem port
+  ignorowany do odłączenia). Odłączenie w dowolnym stanie → sprzątanie slotu i powrót do `Wolny`.
+- **Limity:** 32 urządzenia na kontroler (i nie więcej niż MaxSlots), deskryptor konfiguracji ≤ 4 KiB,
+  ≤ 8 zapamiętanych interfejsów (ustawienie alternatywne 0; ponad – pomijane, nie błąd), ≤ 64 deskryptory interfejsu
+  razem z ustawieniami alternatywnymi (kamery mają ich dziesiątki), ≤ 16 endpointów na urządzenie, głębokość hubów ≤ 5, MaxPacketSize zgodny z prędkością.
+- Komendy xHCI i transfery z timeoutem; STALL → Clear Halt raz, potem błąd urządzenia (nie całego usbd).
+- Nieznana klasa: urządzenie widoczne w `lsusb`, bez sterownika.
+
+### Parser deskryptorów i testy bez sprzętu
+
+`user/lib/usb_desc.rs` – czysty parser (bez MMIO, bez alokacji powyżej limitów), zwraca błąd zamiast paniki.
+`/bin/usbparse` (test w `test.sh`): tabela złośliwych przypadków – `bLength` 0, `bLength` większy niż reszta,
+`wTotalLength` większy niż bufor, `bNumEndpoints` niezgodny z treścią, MaxPacketSize 0, pętla deskryptorów,
+deskryptor HID z dziwnym raportem – plus 10 000 losowych mutacji z ustalonym ziarnem. Wymaganie: zero paniki,
+każdy przypadek kończy się błędem albo poprawnym wynikiem w limitach.
+
+### Restart usbd – co widzi użytkownik
+
+- Init przy restarcie wypisuje na ekran i COM1: `init: service usb0 restarted (n) – USB input back shortly`;
+  usbd po starcie: `usb0: xHCI <vendor:device>, N ports` i każde podłączone urządzenie.
+- Klawisze źródła puszczone od razu (patrz wyżej); klawiatura wraca po ponownej enumeracji (~0,1–1 s + odstęp
+  restartu 100 ms → 5 s).
+- 5 awarii w 30 s → `broken`: komunikat `USB disabled after 5 failures – keyboard unavailable (PS/2 still works)`;
+  potrzebny restart systemu (na Legionie przyciskiem zasilania); ręczne `services restart` – później.
+
+### Kontroler – start i koniec
+
+usbd: `dev_claim`, `dev_map` BAR0, **przejęcie od BIOS-u** (USB Legacy Support w rozszerzonych możliwościach xHCI:
+bit OS Owned, czekanie ≤ 1 s na zwolnienie przez BIOS, wyłączenie SMI), reset (HCRST, ≤ 1 s), DCBAA, bufory
+scratchpad, pierścień komend, jeden interrupter z pierścieniem zdarzeń, MSI-X (`irq_bind`), Run. 64-bitowe
+adresy DMA, jeśli kontroler ma AC64, inaczej `dma_alloc` z limitem 32 bitów. usbd przydziela kilka większych
+buforów DMA i dzieli je sam (limit 16 MiB na urządzenie, 2 MiB na bufor). Koniec: kill w dowolnym momencie →
+sprzątanie M19 (bus mastering off → wektor → ramki → przejęcie); nowa instancja robi pełny reset kontrolera.
+
+### Stan (v0.23.0, krok b)
+
+`dev_find` w jądrze; init dodaje `usbN` dla każdego kontrolera (klasa 0C0330, najwyżej 4); `/bin/usbd`: przejęcie
+od BIOS-u, reset, DCBAA (+ tablica segmentów zdarzeń w tej samej stronie, offset 0x400), scratchpad, pierścień
+komend i zdarzeń, MSI, No-Op z czekaniem na przerwanie (co 10 ms także sprawdzenie pierścienia – licznik `polled`),
+zdarzenia zmian portów, zasilanie portów. Klienci: `status`, `noop N`. Test: USB TEST 1/2, 2/2.
+
+### Stan (v0.24.0, krok c)
+
+usbd: maszyna stanów portu (`Free` → `Debounce` 100 ms → enumeracja → `Working`; błąd → `Failed` z ponowieniem za
+500 ms, po 3 próbach `Ignored` do odłączenia; odłączenie albo CSC przy `Working` → Disable Slot). Enumeracja: reset portu
+(USB 2; port USB 3 z PED pomijamy – łącze wytrenowane), Enable Slot, kontekst wejściowy (slot + EP0; 32/64 B wg CSZ),
+Address Device, GET_DESCRIPTOR urządzenia 8 B → Evaluate Context, gdy rozmiar pakietu EP0 inny, 18 B, konfiguracja 9 B →
+wTotalLength → całość, napisy (język z napisu 0, producent, produkt). Transfer sterujący: Setup (IDT) + Data (ISP) +
+Status (IOC), zdarzenia transferu w kolejce 16; krótki pakiet → reszta z TRB danych. STALL / błąd → Reset Endpoint + Set
+TR Dequeue. Strony urządzenia (kontekst wejściowy, wyjściowy, pierścień EP0) wracają do puli po odłączeniu; dane
+deskryptorów w jednej stronie DMA kontrolera. **Do urządzeń idą tylko prośby o odczyt deskryptorów** – bez Set
+Configuration (krok e/f, razem z Configure Endpoint). Klienci: `list` (lsusb). Parser: `user/lib/usb_desc.rs`.
+
+### Stan (v0.25.0, krok e – przed d)
+
+- Jądro: `Fd::Input` (rodzaj 10, prawa WRITE + DUP, bez TRANSFER), tworzony tylko w `exec` z `SpawnOptions.input`
+  (init: slot 5). **Kopia uchwytu = nowe źródło** (`impl Clone` w `inputsrc.rs`) z własną mapą wciśniętych klawiszy;
+  Drop (koniec usbd) przekazuje ją do `input::usb_release_all` – tylko atomiki, puszczenie robi zadanie jądra
+  `input-repeat` pod BKL (v0.25.1; w v0.25.0 tick zegara). Puszczenie klawisza niewciśniętego przez źródło – pomijane.
+- `input_inject` (pod BKL): najpierw walidacja wszystkich zdarzeń (zły rodzaj → EINVAL, nic nie przechodzi), potem
+  `usb_key` (HID usage → KeyCode → `handle_key`, budzenie konsoli) albo `usb_mouse` (kółko → `mouse::add_wheel`).
+  Wynik: diody (bit 0 Num, 1 Caps, 2 Scroll). Autorepeat: jeden klawisz naraz (ostatnio wciśnięty), modyfikatory i
+  blokady się nie powtarzają; koniec źródła zatrzymuje jego powtarzanie.
+- usbd: interfejs 03/01/01 albo 03/01/02 z endpointem przerwań IN → Configure Endpoint (DCI = numer·2+1, interwał:
+  HS/SS bInterval−1, FS/LS log2(ms·8) w 3..10), Set Configuration, Set Protocol(boot) i Set Idle(0) (błąd = ignorowany),
+  8 TRB Normal (bufor = indeks TRB % 16 w stronie danych). Zdarzenia transferu endpointów ≠ EP0 obsługiwane od razu w
+  `poll_events` (także w trakcie transferu sterującego); błąd endpointu → Reset Endpoint + Set TR Dequeue + nowe TRB w
+  pętli głównej (bez rekurencji komend). Raport klawiatury: ErrorRollOver pomijany, kolejność: modyfikatory, puszczenia,
+  wciśnięcia. Diody: Set Report (OUT, 1 B) z pętli głównej. Odłączenie klawiatury → puszczenie jej klawiszy.
+  `idle MS` – test potoku przerwań w QEMU. Pamięć masowa nadal bez konfiguracji.
+- **Legion (v0.25.1): wbudowana klawiatura ITE działa w shellu**, stress compare 431 023 (bez spadku).
+
+**Lockdep w przerwaniu (v0.25.1):** blokady wzięte w handlerze przerwania są oznaczone w tablicy trzymanych; w przerwaniu
+kolejność poziomów sprawdzana tylko względem nich (blokada przerwanego kodu nie jest złamaniem – przerwany kod nie czeka
+na handler), rekurencja zawsze. Wcześniej MSI usbd w trakcie stressu dawało fałszywy PANIC (`waiters` 45 przy
+`stress-counter` 210).
+
+### Stan (v0.26.0, krok f – przed d)
+
+- `info` dla `blk_attach` (64 B): bloki u64, rozmiar bloku u32, sloty u32, timeout_ms u32 (0 = 5 s; test podaje
+  krótszy, 100..30 000), 4 B zera, opis 40 B ASCII (producent + produkt z INQUIRY).
+- Protokół jak wyżej, „sektory” = **bloki urządzenia** (512 albo 4096 B; jądro przelicza z sektorów 512 B, czyta
+  pełne bloki i kopiuje fragment). Odczyt większy niż slot = kilka żądań po kolei (jedno w locie na dysk – i tak
+  pod blokadą dysku). Odpowiedź ≥ 12 B: id, status (0 / EIO / ENODEV), bloki.
+- Jądro: `ublk::Shared` (stan bez blokady dysku: zniknął, liczniki, punkty montowania) w rejestrze; `Ublk` w
+  warstwie block. Zadanie `usb-disks` (od startu jądra): nowy dysk → `scan_partitions` → FAT32 na partycjach (albo
+  na całym dysku / pierwszej partycji MBR) → `/usbN`; zamknięty kanał (sprawdzane co 200 ms przy obecnych dyskach)
+  albo `gone` → odmontowanie bez zapisu (`unmount_lost`), usunięcie partycji i dysku → bufor i kanał zwolnione.
+- Warstwa block: `Vec<Option<Arc<Disk>>>` pod SpinLockiem „block list” (poziom BLOCK), każdy `Disk` z własnym
+  `KMutex`; partycja → dysk-rodzic zawsze w tej kolejności; `partitions_of` bez blokad dysków.
+- usbd: `Storage` (bulk IN/OUT, pierścienie, strona komend: CBW 0, CSW 512, dane 1024), bufory DMA w puli
+  (`stor_bufs`, wracają po odłączeniu – limit 16 MiB DMA na urządzenie). Rejestracja w jądrze dopiero z pętli
+  głównej (`attach_pending`), bo jądro od razu czyta partycje, a usbd musi już odbierać żądania. Kanały dysków są
+  w `wait_many` obok przerwania i klientów. Zdarzenia transferu: HID od razu, reszta (EP0, bulk) do kolejki.
+- Granice: LUN 0, bez READ CAPACITY(16) (> 2 TiB – odmowa), bez UAS, MaxBurst 0 (SuperSpeed działa, bez serii).
+
+### Stan (v0.27.0, krok d)
+
+- `Dev.loc` (route string, głębokość, porty po drodze, TT) i `Dev.hub` (porty huba z tą samą maszyną stanów co porty
+  kontrolera, mapa zmian `pending`, endpoint przerwań IN). Kontekst slotu zawsze z `slot_ctx` (route string, port
+  kontrolera najwyższego huba, TT; dla huba bit Hub, liczba portów, TT think time) – Address Device i każdy
+  Configure Endpoint.
+- Konfiguracja huba: Configure Endpoint (endpoint mapy zmian, kontekst slotu jeszcze bez pól huba) + Set
+  Configuration → Set Hub Depth (USB 3, głębokość = liczba hubów nad nim) → deskryptor huba (0x29 / 0x2A) → drugi
+  Configure Endpoint tylko z kontekstem slotu (jak Linux `xhci_update_hub_device`) → SET_FEATURE(PORT_POWER) na
+  każdym porcie, czekanie bPwrOn2PwrGood × 2 ms → 2 TRB na mapę zmian, wszystkie porty do sprawdzenia.
+- Zdarzenie mapy zmian (z `poll_events`, także w trakcie innego transferu) tylko zaznacza porty; transfery do huba
+  (GET_STATUS, CLEAR_FEATURE C_PORT_*, reset portu) robi `service_hubs` z pętli głównej. Bit 0 (zmiana samego huba:
+  zasilanie / przeciążenie) – kasowany. Błąd endpointu → Reset Endpoint + Set TR Dequeue + wszystkie porty od nowa.
+- Prędkość urządzenia za hubem: hub USB 3 → SuperSpeed; USB 2 → bit 9 (low), 10 (high), inaczej full. TT: low / full
+  speed za hubem high speed → (slot huba, port); głębiej – TT dziedziczony po rodzicu.
+- Odłączenie: `detach` huba najpierw (rekurencyjnie) odłącza urządzenia z jego portów – dyski znikają w jądrze jak
+  przy wyjęciu pendrive'a. Hub na 5. poziomie – bez portów (route string ma 5 poziomów).
+- Test w locie: `test.sh` uruchamia QEMU z monitorem na gnieździe unix i `qemu-hotplug.py`, który wysyła do monitora
+  linie „[HOTPLUG] …” wypisane przez samotest jądra (`device_del` / `device_add`; dysk jako `-blockdev`, żeby
+  przetrwał `device_del`).
+
+### Stan (v0.28.0, krok g)
+
+- `fs::Locked<F>` – opakowanie systemu plików bez własnych blokad w jeden `Mutex` (usypiający); implementuje
+  `ConcurrentFs`, więc VFS woła go pod FS_LOCK do odczytu. `kind` / `source` / `read_only` kopiowane przy
+  montowaniu (`mount`, `open` nie czekają na dysk), `df` (`mount_stats`) przez ścieżkę współbieżną. Montowanie i
+  odmontowanie (FS_LOCK do zapisu) czeka na odczyt w toku – najwyżej timeout ublk (5 s).
+- usbd: `Loc.parent` / `hub_port`; transfer bulk za hubem przerywany, gdy hub-rodzic zgłosi zmianę na tym porcie
+  (`XferError::Interrupted` → EIO dla jądra, `needs_recovery` – reset recovery przed następną komendą, jeśli
+  urządzenie zostało). Port kontrolera – jak dotąd (CCS w pętli czekania).
+- init: komunikaty dla usbd – restart („USB keyboard and disks back in a moment”) i broken („USB controller usbN
+  disabled after 5 failures – its USB keyboard and disks are unavailable until reboot (PS/2 still works)”).
+- Autostress: zadanie `usb-stress` czyta w trakcie stressu największy plik (≤ 64 MiB) z pierwszego /usbN, sumy
+  kontrolne przejść porównywane; wynik w linii `usb:` i w [RESULT] (pass=0 przy błędzie albo różnicy).
+  `stress-qemu.sh` podłącza testowy pendrive (mkfat32.py).
+
+### Stan (v0.29.0, krok h – M20 zamknięte)
+
+- **FAT32 szybciej** (każde żądanie do pendrive'a to komenda SCSI, kilkaset µs – ms): FAT czytany blokami po 8
+  sektorów; cache klastrów (≤ 512 KiB / 64 wpisy, zapis przez cache) – odczyt pliku nie czyta katalogów ścieżki za
+  każdym razem; ciągłe klastry pliku jednym odczytem (≤ 1 MiB); odczyt z wyprzedzeniem 64 KiB dla małych odczytów
+  (klaster 512 B – 4 KiB, `cat` po 512 B); zapamiętana pozycja w łańcuchu (odczyt po kolei bez przechodzenia
+  łańcucha od początku; `fat_set` ją kasuje).
+- **ublk potokiem**: odczyt dłuższy niż slot wysyła do 4 żądań naraz (usbd bierze następne z kanału zaraz po
+  poprzednim); błąd odpowiedzi – nowe nie wychodzą, na wysłane czekamy (sloty wracają); timeout – wysłane sloty w
+  kwarantannie. Ta sama walidacja odpowiedzi co dotąd (id, liczba bloków).
+- **`df`**: wolne klastry liczone z FAT (raz, blokami po 64 KiB) na dysku tylko do odczytu – FSInfo bywa
+  nieaktualny. Obraz testowy ma celowo zły główny FSInfo (kopia w sektorze 7 – prawdziwa).
+- **usbd**: INQUIRY do 4 prób (przerwy 200 / 400 / 600 ms; licznik `stor_retries`); czas enumeracji urządzenia
+  (reset portu → sterownik klasy gotowy) w linii urządzenia („ready in N ms”) i w statusie (`enum_count`,
+  `enum_avg_ms`, `enum_max_ms`).
+- **Opóźnienie klawiatury**: handler MSI zapisuje znacznik czasu (HPET) ostatniego przerwania wektora;
+  `input_inject` przy wciśnięciu liczy czas od ostatniego przerwania urządzeń procesu do znaku w kolejce wejścia
+  jądra (`input::hid_latency` – liczba, średnia, min, max; > 1 s pomijane).
+- **Pomiary**: `[RESULT-USB]` w `test.sh` (+ `enum_avg_ms enum_max_ms kread_kbs kcat_kbs hid_n hid_avg_us
+  hid_max_us`; klawisze przez `sendkey` z monitora QEMU) i w autostressie (Legion: odczyt przed stressem buforem
+  256 KiB i 4 KiB, dane muszą być te same; klawiatura – wciśnięcia od startu).
+
+### Testy (każdy krok) i ponowne użycie M19
+
+- QEMU: `qemu-xhci` + `usb-kbd`, `usb-mouse`, `usb-hub`, drugi `usb-storage` z obrazem `readonly=on`; monitor QEMU:
+  `sendkey`, `device_add` / `device_del` (podłączanie w locie).
+- Te same sprawdzenia wycieków co w SVC TEST (ramki, uchwyty, wektory MSI, przejęcia) po każdym teście USB i po
+  każdym kill usbd; kill w trakcie: enumeracji, pisania, odczytu z pendrive'a.
+- Pełne kolejki: zalew zdarzeń HID (bufor wejścia pełny – licznik zgubionych, bez blokowania usbd), wszystkie sloty
+  ublk zajęte, timeouty (usbd celowo nie odpowiada – tryb testowy), odpowiedź spóźniona i z cudzym `id`.
+- Wynik: `[RESULT-USB]` (odczyt MB/s, przerwanie HID → znak w konsoli µs, czas enumeracji ms).
+
+### Numery (robocze) – bez kolizji
+
+Zajęte: 0–47 (21 = `ENOSYS`, dawne `kcmd`). Nowe: **48 `dev_find`** (od v0.23.0), **49 `input_inject`** (od v0.25.0),
+**50 `blk_attach`** (od v0.26.0).
+Uchwyty 1–9 zajęte; nowe **10 `INPUT`, 11 `BLK`**. Sloty init: 3 `HW_ROOT`, 4 `SYSCTL`, nowe 5 `INPUT`, 6 `BLK`.
+Błędy – istniejące (`EIO`, `ENODEV`, `EBUSY`, `ENOSPC`, `EINVAL`, `EBADF`, `EROFS`); nowego kodu nie trzeba.
+
 ## Pomiar i testy
 
-- `./test.sh` – 27 zestawów samotestów w QEMU (TCG albo `ACCEL=kvm`, 1–4 CPU): wyjątki, pamięć, scheduler,
+- `./test.sh` – 28 zestawów samotestów w QEMU (TCG albo `ACCEL=kvm`, 1–4 CPU): wyjątki, pamięć, scheduler,
   ring 3, FPU, urządzenia, FS, syscalle, ELF, procesy, SMP, blokady, TLB, alokatory, pliki, IPC, stress.
   Każda poprawka bezpieczeństwa ma test, który bez niej się wywraca.
 - **Autostress** (`DESOOS_AUTOSTRESS=60`) – skrypty shella, liczenie liczb pierwszych, zadania IPC (para

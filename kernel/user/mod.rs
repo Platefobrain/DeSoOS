@@ -48,6 +48,10 @@ pub mod waitset;
 pub mod device;
 pub mod pipe;
 pub mod shm;
+// M20.e: uchwyt INPUT (zdarzenia wejścia z usbd).
+pub mod inputsrc;
+// M20.f: dysk USB w jądrze (ublk) – żądania odczytu kanałem do usbd.
+pub mod ublk;
 pub mod prof;
 // M17b.d: pamięć procesu (brk, mmap, leniwe strony).
 pub mod vm;
@@ -59,6 +63,9 @@ mod test_ipc;
 // M19: usługi w user space (wait_many, urządzenia, menedżer usług).
 #[cfg(selftest)]
 mod test_svc;
+// M20: USB (xHCI, usbd).
+#[cfg(selftest)]
+mod test_usb;
 // M17a: stress test SMP (samotest i komenda `stress`).
 pub mod stress;
 
@@ -163,11 +170,15 @@ pub struct SpawnOptions {
     pub hw_root: bool,
     /// M19.i: uchwyt SYSCTL za HW_ROOT (slot 4) – tylko /bin/init i testy jądra.
     pub sysctl: bool,
+    /// M20.e: uchwyt INPUT za SYSCTL (slot 5 u init) – tylko /bin/init i testy jądra.
+    pub input: bool,
+    /// M20.f: uchwyt BLK za INPUT (slot 6 u init) – tylko /bin/init i testy jądra.
+    pub blk: bool,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false }
+        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false, input: false, blk: false }
     }
 }
 
@@ -234,6 +245,14 @@ pub fn spawn_elf(
     if opts.sysctl {
         // M19.i: jedyne miejsce, w którym powstaje SYSCTL (slot 4 u init).
         process.fds.push(Some(process::Handle::new(process::Fd::Sysctl)));
+    }
+    if opts.input {
+        // M20.e: jedyne miejsce, w którym powstaje INPUT (slot 5 u init).
+        process.fds.push(Some(process::Handle::new(process::Fd::Input(alloc::boxed::Box::new(inputsrc::InputEnd::new())))));
+    }
+    if opts.blk {
+        // M20.f: jedyne miejsce, w którym powstaje BLK (slot 6 u init).
+        process.fds.push(Some(process::Handle::new(process::Fd::Blk)));
     }
     apply_test_io(&mut process, opts);
     sched::spawn_user(name, user_task_entry, loaded.entry as usize, process, false)
@@ -352,7 +371,7 @@ pub const INIT_PATH: &str = "/bin/init";
 pub fn run_init() -> ! {
     let mut failures: Vec<u64> = Vec::new();
     loop {
-        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions { hw_root: true, sysctl: true, ..SpawnOptions::default() }) {
+        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions { hw_root: true, sysctl: true, input: true, blk: true, ..SpawnOptions::default() }) {
             Ok(pid) => pid,
             Err(e) => {
                 serial_println!("[INIT] cannot start {}: {} - starting the kernel shell", INIT_PATH, e);
@@ -707,6 +726,8 @@ pub use test_files::self_test as files_self_test;
 pub use test_ipc::self_test as ipc_self_test;
 #[cfg(selftest)]
 pub use test_svc::self_test as svc_self_test;
+#[cfg(selftest)]
+pub use test_usb::self_test as usb_self_test;
 #[cfg(selftest)]
 pub use test_smp::self_test as smp_self_test;
 #[cfg(selftest)]

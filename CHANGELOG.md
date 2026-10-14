@@ -2,6 +2,345 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.29.1 — 2026-10-14
+
+### ✅ M20 zamknięte – USB na Legionie (v0.29.0)
+- Pendrive startowy (SuperSpeed) przed stressem: **121 640 KiB/s** (bufor 256 KiB), **125 365 KiB/s** (bufor 4 KiB,
+  jak `cat`); w trakcie stressu **52 140 KiB/s** (v0.28.0: 4 586 KiB/s), 3056 MiB, 1519 przejść identycznych, 0 błędów.
+- Klawiatura USB: 37 wciśnięć, przerwanie → znak w jądrze śr. **275 µs** (min 28, maks. 695).
+- Enumeracja: kamera 88 ms, pendrive 2 ms, hub USB 2 201 ms, hub USB 3 137 ms, klawiatura 107 ms, mysz 95 ms.
+- Stress compare **432 210** (v0.28.0: 436 488, −1% – w tle 3 GiB czytane z pendrive'a), `pass=1`.
+- `df`: `/usb0` 2,0 MiB zajęte (= BOOTX64.EFI, 2,0 MiB), `/usb1` 25 651 MiB z 59 117 MiB.
+- Pendrive 59 GB w hubie USB 3 zgłosił się jako high speed (`port 1.1` – część USB 2 huba), działa.
+- Bez zmian w kodzie (tylko dokumentacja).
+
+## v0.29.0 — 2026-10-14
+
+### M20.h: szybszy odczyt z pendrive'a, `df`, pomiary – zamknięcie M20
+- **FAT32 dużo szybciej.** Wcześniej każde `read` czytało od nowa katalogi na ścieżce (na Legionie: 3 × 64 KiB z
+  pendrive'a przed każdym odczytem `/usb0/EFI/BOOT/BOOTX64.EFI`), każdy klaster osobnym żądaniem, a `cat` z buforem
+  512 B czytał ten sam klaster wiele razy. Teraz: FAT czytany blokami po 4 KiB, cache klastrów (katalogi, końcówki
+  plików; zapis przez cache), ciągłe klastry pliku jednym odczytem (do 1 MiB), odczyt z wyprzedzeniem 64 KiB dla
+  małych odczytów, zapamiętana pozycja w łańcuchu klastrów.
+- **ublk potokiem:** długi odczyt wysyła do 4 żądań naraz – usbd bierze następne zaraz po poprzednim, bez czekania
+  na obudzenie jądra. Walidacja odpowiedzi bez zmian (id, liczba bloków, timeout → kwarantanna).
+- **QEMU (TCG):** odczyt 4 MiB z pendrive'a w usbtest **716 → 70 620 KiB/s**; w jądrze buforem 256 KiB 74 369 KiB/s,
+  buforem 4 KiB (jak `cat`) 36 957 KiB/s (było 5 577 przed odczytem z wyprzedzeniem).
+- **`df` na pendrivie:** wolne miejsce liczone z FAT (raz), nie z FSInfo – ten bywa nieaktualny. Obraz testowy ma
+  celowo zły FSInfo; test porównuje z prawdziwą liczbą.
+- **INQUIRY do 4 prób** (przerwy 200 / 400 / 600 ms) – na Legionie raz `INQUIRY failed` na porcie 5.1; komunikat
+  błędu podaje przyczynę („no answer”, „STALL”…), licznik `stor_retries` w statusie usbd.
+- **Pomiary:**
+  - czas enumeracji urządzenia (reset portu → gotowe): na końcu linii urządzenia „ready in N ms”, w statusie usbd
+    `enum_avg_ms` / `enum_max_ms`; QEMU: śr. 23 ms, maks. 49 ms;
+  - opóźnienie klawiatury USB: od przerwania xHCI (znacznik w handlerze jądra) do znaku w kolejce wejścia jądra
+    (przez usbd); QEMU (`sendkey` z monitora): śr. 535 µs, min 278, maks. 1337;
+  - `[RESULT-USB]` w `test.sh`: `enum_avg_ms enum_max_ms kread_kbs kcat_kbs hid_n hid_avg_us hid_max_us`.
+- **Autostress (Legion):** przed stressem odczyt największego pliku z /usbN buforem 256 KiB i 4 KiB (dane muszą być
+  te same, inaczej `pass=0`) – linia `usb: … read before the stress`; linia `usb keyboard:` (wciśnięcia od startu –
+  warto nacisnąć kilka klawiszy w trakcie); osobna linia `[RESULT-USB]`.
+- Testy: USB TEST 7/7 sprawdza odczyt DATA.BIN obu buforami co do bajtu ze wzorem, `df` przy złym FSInfo i
+  klawiaturę przez `sendkey`. QEMU 28/28 (1 i 4 CPU).
+
+## v0.28.1 — 2026-10-14
+
+### ✅ M20.g na Legionie – odporność USB działa na sprzęcie
+- Autostress: compare **436 488** (v0.27.1: 431 338), `pass=1` – bez spadku, choć pendrive startowy był czytany w tle.
+- Linia `usb:` – `/usb0/EFI/BOOT/BOOTX64.EFI` czytany w trakcie stressu: **268 MiB, 4586 KiB/s, 134 pełne
+  przejścia, wszystkie identyczne, 0 błędów**.
+- Pendrive wyjęty w trakcie `cat /usb1/liczby.txt` → `cat: … I/O error`, `usb2 port 1.1: device disconnected`,
+  `[USB] sdb: removed, /usb1 unmounted (reads 6318, timeouts 0, protocol errors 0)` – bez zawieszenia.
+- Pisanie w trakcie stressu działa.
+- Uwaga do M20.h: raz `usb2 port 5.1: 13fe:6700 SuperSpeed … storage setup failed: INQUIRY failed` (ten sam
+  pendrive po przełożeniu działał na `port 1.1`; w v0.27.1 działał na 5.1) – dodać ponowienie INQUIRY.
+- Bez zmian w kodzie (tylko dokumentacja).
+
+## v0.28.0 — 2026-10-13
+
+### M20.g: odporność USB
+- **Zawieszony pendrive nie zatrzymuje systemu.** FAT32 na dysku USB działa teraz pod własną blokadą (`fs::Locked`,
+  VFS woła go jak `ConcurrentFs` pod FS_LOCK tylko do odczytu). Wcześniej każdy odczyt z `/usbN` trzymał FS_LOCK do
+  zapisu – pendrive czekający do 5 s na usbd zatrzymywał w tym czasie cały VFS (ramfs, `/bin`, uruchamianie
+  programów). `mount`, `open`, `df` też nie czekają na dysk (opis i „tylko do odczytu” zapamiętane przy montowaniu).
+- **Pendrive wyjęty z huba w trakcie odczytu:** usbd przerywa czekanie na transfer bulk, gdy hub zgłosi zmianę na
+  tym porcie (było: 4 s timeoutu transferu + reset recovery na nieistniejącym urządzeniu → jądro dostawało timeout
+  po 5 s, odmontowanie po ~7 s). Teraz czytający dostaje błąd w ~12 ms, dysk odmontowany w ~140 ms. Jeśli urządzenie
+  jednak zostało – reset recovery przed następną komendą.
+- **Restart i awarie usbd:** init pisze „init: usb0: USB keyboard and disks back in a moment” po restarcie usbd, a po
+  5 awariach w 30 s: „init: USB controller usb0 disabled after 5 failures - its USB keyboard and disks are
+  unavailable until reboot (PS/2 still works)”.
+- **usbd w autostressie:** jeśli jest zamontowany pendrive (/usbN – na Legionie startowy), zadanie `usb-stress`
+  czyta w kółko jego największy plik w trakcie stressu; każde pełne przejście liczy sumę kontrolną – wszystkie muszą
+  być równe. Linia `usb: … MiB, … KiB/s, N full passes (all identical), 0 errors`, w [RESULT] `usb_mib`, `usb_kbs`,
+  `usb_err`, `usb_bad` (błąd albo różnica = `pass=0`). `stress-qemu.sh` podłącza testowy pendrive.
+- **Testy (28 zestawów, USB TEST 1–7/7):** nowy 6/7 – (a) FAT32 na „zawieszonym” dysku testowym: odczyt `/bin/sh` i
+  `ls /bin` w tym czasie bez czekania (0 ms; z dawną blokadą – do zwolnienia dysku), (b) `init test /bin/usbtest
+  robust`: kill usbd w trakcie czytania pliku z `/usb0` – czytający dostaje EIO po kilku ms, init restartuje usbd,
+  dysk i klawiatura wracają w ~0,5 s, pliki dalej identyczne z `/bin`, (c) 4 kolejne kille → 5 awarii w 30 s →
+  `broken` + komunikat, kontroler oddany (bus mastering off), nic nie wycieka; 7/7 – wyjęcie dysku za hubem w trakcie
+  odczytu (zadanie jądra czyta `DATA.BIN`): błąd w ~12 ms.
+
+## v0.27.1 — 2026-10-13
+
+### ✅ M20.d na Legionie – huby, TT i podłączanie w locie działają
+- Huby Genesys: `usb2 port 1` 05e3:0610 „USB2.1 Hub” → `hub ready (2 ports, USB 2)`, `usb2 port 5` 05e3:0620
+  „USB3.2 Hub” → `hub ready (2 ports, USB 3)` (Set Hub Depth, SuperSpeed za hubem).
+- **Mysz Logitech G502 (full speed) za hubem high speed** (`port 1.2`) – `mouse ready`: translator transakcji (TT)
+  działa na prawdziwym sprzęcie (w QEMU nie dało się tego sprawdzić).
+- **Pendrive „Wilk USB DISK 3.0” 59 GB (SuperSpeed) za hubem USB 3** (`port 5.1`) → sdb → `/usb1` (FAT32 'USB DISK',
+  klaster 64 KiB); wyjęty w trakcie pracy → `device disconnected`, `/usb1 unmounted`; włożony → sdc → `/usb1`.
+- Stress bez spadku: compare **431 338** (v0.26.2: 434 164), `pass=1`, ping-pong 6,9 µs.
+- Jeden błąd: `usb2 port 1.1` przy starcie – `Address Device failed` 3 razy, port zignorowany (po wyjęciu urządzenia
+  port wrócił do normy). Wyjaśnienie (Dawid): w tym gnieździe był kabel do ładowania telefonu bez telefonu – kabel
+  z elektroniką (dioda / układ) wygląda dla huba jak podłączone urządzenie, które nie odpowiada. Zachowanie
+  poprawne (Linux: „unable to enumerate USB device”); po wyjęciu kabla w to samo gniazdo wszedł pendrive 59 GB
+  (port 5.1 = strona USB 3 tego samego gniazda, 1.1 – strona USB 2).
+
+### Diagnostyka i poprawka testu
+- usbd: „Address Device failed” z kodem zakończenia xHCI (np. `USB transaction error`, `split transaction error`,
+  `parameter error`), a komunikat o nieudanej enumeracji portu huba podaje prędkość urządzenia.
+- ALLOC TEST 4/5: ten sam fałszywy alarm „więcej wolnych ramek na końcu” (u mnie raz: 110629 -> 110727) – punkt
+  odniesienia po ustaleniu się licznika, koniec `>=`.
+
+## v0.27.0 — 2026-10-13
+
+### M20.d: huby USB (urządzenia za hubem, podłączanie w locie)
+- **usbd – huby USB 2 i USB 3** (także hub za hubem, do 5 poziomów): endpoint przerwań z mapą zmian portów,
+  Set Configuration, Set Hub Depth (USB 3), deskryptor huba (liczba portów, TT think time, czas włączenia zasilania),
+  drugi Configure Endpoint z polami huba w kontekście slotu, zasilanie portów.
+- **Porty huba** w tej samej maszynie stanów co porty kontrolera: debounce 100 ms, reset portu huba (≤ 500 ms),
+  3 próby, potem ignorowany do odłączenia; stan przez GET_STATUS, zmiany kasowane CLEAR_FEATURE. Zmiany zgłasza hub
+  (mapa bitów na endpoincie przerwań) – sprawdzane tylko zgłoszone porty.
+- **Urządzenie za hubem:** route string (port huba na każdym poziomie), port kontrolera najwyższego huba, prędkość z
+  portu huba, **TT** (slot i port najbliższego huba high speed) dla klawiatur / myszy low i full speed za hubem USB 2.
+  Kontekst slotu w jednym miejscu (`slot_ctx`) – Address Device i wszystkie Configure Endpoint (HID, dysk, hub).
+- **Odłączenie huba = odłączenie wszystkiego za nim** (dyski znikają w jądrze, klawisze puszczone).
+- `lsusb`: `usb0 port 11.2: … mass storage …` (port kontrolera . port huba), `hub ready (8 ports, USB 2)`;
+  status usbd: hubs, hub_events, hub_errors.
+- `init test /bin/x arg` – program testowy dostaje jeden argument.
+- **Testy (28 zestawów, USB TEST 1–6/6):** w QEMU hub w porcie 3, za nim mysz (3.1) i testowy pendrive (3.2);
+  2/6 i 5/6 – 5 urządzeń, hub i urządzenia za nim działają (pendrive za hubem montowany, pliki = /bin); **nowy 6/6 –
+  podłączanie w locie**: `qemu-hotplug.py` czyta z logu linie „[HOTPLUG] …” wypisane przez samotest i wysyła je do
+  monitora QEMU – dysk za hubem wyjęty (odmontowany w ~200 ms), włożony (zamontowany w ~280 ms), cały hub wyjęty
+  (hub, mysz i dysk znikają), usbtest widzi 5 → 4 → 5 → 2 urządzenia bez błędów, nic nie wycieka.
+- `HUB=1 ./run-qemu.sh` – hub w porcie 3, z `USB=1` klawiatura i mysz za hubem (pisanie przez hub działa), `usb.img`
+  w porcie 3.3. QEMU: `qemu-xhci,id=xhci` + stałe porty urządzeń; testowy pendrive jako `-blockdev`.
+- Uwaga: hub QEMU jest full speed – TT (hub high speed + klawiatura full speed) sprawdzi dopiero Legion.
+
+## v0.26.2 — 2026-10-13
+
+### ✅ M20.f na Legionie – pendrive startowy czytany przez DeSoOS
+- `lsusb`: pendrive „Wilk” 13fe:5500 (SuperSpeed, usb1 port 6) → `disk sda ready (7560 MiB, 512-byte blocks,
+  read-only)`; jądro: GPT → partycja @2048 → FAT32 'NOSNIK USB' (klaster 4 KiB) zamontowany w `/usb0`.
+- `ls /usb0` → `EFI/`, `df` → `/usb0 7544 MiB`, `echo x > /usb0/a.txt` → „read-only file system”.
+- Stress bez spadku: compare **434 164** (v0.25.1: 431 023), `pass=1`, ping-pong 6,6 µs. Klawiatura ITE dalej działa.
+
+### Porządki po M20.f
+- Ostrzeżenie kompilatora w zwykłym buildzie (`methods probed and mounts are never used`, `ublk.rs`) – obie metody
+  używa tylko samotest; oznaczone `cfg_attr(not(selftest), allow(dead_code))`. Oba buildy bez ostrzeżeń.
+- Monitor `usb-disks` nie czyta partycji dysku, który już zniknął (usbd zabity tuż po rejestracji) – bez mylącego
+  `[BLK] sdX: GPT: no such disk` w logu.
+- Wyniki v0.26.1 (Dawid): QEMU TCG 28/28 (odczyt z pendrive'a 1170 KiB/s), KVM 28/28 (828 KiB/s), stress KVM 8 CPU
+  **176 450** (v0.25.1: 179 713 – w granicach szumu), `pass=1`.
+
+## v0.26.1 — 2026-10-13
+
+### Poprawka testu: fałszywy „frames leaked” w IPC TEST
+- Objaw (Dawid, v0.26.0): `[IPC TEST] FAIL: frames leaked (111523 -> 111933)` – na końcu zestawu **więcej** wolnych
+  ramek niż na starcie (u mnie raz na kilka przebiegów: 111559 -> 111725). To nie wyciek: punkt odniesienia złapany,
+  zanim skończyło się sprzątanie po poprzednim zestawie (FILE TEST – procesy zabite przez #PF), resztki zwolniły się
+  w trakcie IPC TEST. Ten sam rodzaj fałszywego alarmu był już raz poprawiany (M19.c).
+- Poprawka: `settled_free_frames` czeka na 10 zgodnych próbek (50 ms) zamiast 3 (15 ms), a sprawdzenia wycieków w
+  IPC, SVC i USB (koniec zestawu i po każdym kroku) wymagają „wolnych ramek nie mniej niż na starcie” – prawdziwy
+  wyciek (mniej wolnych) dalej jest wykrywany. (Po pierwszej zmianie ten sam objaw raz w USB TEST 5/5:
+  110749 -> 110964.) QEMU: 28/28 w 4 kolejnych przebiegach.
+
+## v0.26.0 — 2026-10-13
+
+### M20.f: pendrive USB tylko do odczytu (przed krokiem d – pendrive Legiona też nie wisi za hubem)
+- **usbd – pamięć masowa:** interfejs 08/06/50 (SCSI, Bulk-Only) z endpointami bulk IN / OUT: Configure Endpoint,
+  Set Configuration, INQUIRY (tylko dysk – nie CD-ROM), TEST UNIT READY (do 10 prób, REQUEST SENSE kasuje UNIT
+  ATTENTION), READ CAPACITY(10). Transfery bulk: TRB dzielone na granicach 64 KiB (wymóg xHCI) i łączone w
+  łańcuch; STALL → Reset Endpoint + Set TR Dequeue + Clear Feature(HALT); timeout (4 s) / zły CSW → Bulk-Only
+  Reset (reset recovery). Odłączenie w trakcie transferu wykrywane od razu (port), nie po timeoucie.
+- **Zapisu nie ma:** jedyne komendy SCSI to `SCSI_ALLOWED` (TEST UNIT READY, REQUEST SENSE, INQUIRY, READ
+  CAPACITY(10), READ(10)) – sprawdzane przed każdą komendą, a asercja przy kompilacji pilnuje, że na liście nie ma
+  żadnej komendy zapisu (WRITE 6/10/12/16, FORMAT, MODE SELECT, SYNCHRONIZE CACHE, UNMAP…).
+- **Jądro – uchwyt `BLK` i syscall 50 `blk_attach`** (projekt M20.a): rodzaj uchwytu 11, tworzy go tylko jądro
+  dla init (slot 6), init daje kopię każdemu usbd. usbd tworzy kanał i bufor DMA (256 KiB = 4 sloty po 64 KiB) i
+  rejestruje pendrive; jądro bierze własne referencje. Błędy: EBADF, EACCES (BLK bez WRITE, kanał bez TRANSFER),
+  EINVAL (blok ≠ 512 / 4096, 0 bloków, sloty spoza 1..8, za mały bufor), ENOSPC (8 dysków).
+- **`ublk` (`kernel/user/ublk.rs`) – dysk „sda”, „sdb”…, zawsze tylko do odczytu:** odczyt = żądanie kanałem
+  (id, lba, bloki, slot), pendrive pisze DMA prosto do slotu, jądro kopiuje dopiero po poprawnej odpowiedzi.
+  Odpowiedź z cudzym id / złą liczbą bloków – odrzucona (licznik). Timeout 5 s → EIO i slot w **kwarantannie**
+  (urządzenie może jeszcze pisać) – wraca po spóźnionej odpowiedzi. 3 timeouty pod rząd, koniec usbd albo wyjęty
+  pendrive = **dysk znika**.
+- **Zadanie jądra `usb-disks`:** nowy dysk → partycje GPT (albo MBR / cały dysk) → FAT32 montowany w `/usb0`,
+  `/usb1`… (tylko odczyt); dysk zniknął → odmontowanie, usunięcie partycji i dysku, bufor i kanał zwolnione.
+- **Blokada per dysk w warstwie block** (było: jedna globalna „block layer”) – czekanie na pendrive (do 5 s) nie
+  zatrzymuje NVMe ani virtio. Lista dysków pod krótką blokadą, usunięty dysk zwalnia numer.
+- `ChanEnd::recv_timeout` (jądro czeka na odpowiedź z terminem); FAT32 na dysku tylko do odczytu odrzuca zmiany
+  od razu (zanim cokolwiek trafi do buforów); `open` do zapisu na takim systemie plików → EROFS.
+- Tylko odczyt – **cztery niezależne zamki**: brak komend zapisu w usbd, brak operacji zapisu w protokole, dysk
+  `read_only` (warstwa block i `ublk` odrzucają zapis), FAT32 / `open` → EROFS.
+- `lsusb`: „disk sda ready (… MiB, 512-byte blocks, read-only, "producent produkt")”; `usbd status`: storage,
+  disks, stor_reads, stor_bytes, stor_errors. `disk`, `mount`, `df`, `ls`, `cat` działają na `/usb0`.
+- Testy (28 zestawów, USB TEST 1–5/5): 2/5 – dwa pendrive'y w QEMU (startowy vvfat + nowy obraz FAT32), testowy
+  zamontowany przez jądro, kill usbd → dysk znika i wraca z nową instancją, bufory DMA wracają; 3/5 – nowy
+  `/bin/blktest` udaje usbd i psuje protokół (błędy blk_attach, odczyt 1 i 2 żądaniami, cudze id, zła liczba
+  bloków, timeout + kwarantanna, **odczyt virtio w tym czasie 8 ms – blokada per dysk**, spóźniona odpowiedź, EIO,
+  zapis odrzucony, 3 timeouty → dysk usunięty, nic nie wycieka); 5/5 – przez prawdziwy init: pliki z `/usb0`
+  identyczne z `/bin`, 4 MiB wzoru sprawdzone, zapis / `rm` / `mkdir` → EROFS. `[RESULT-USB]`: `mount_ms`,
+  `read_kbs` (QEMU TCG: ~685 KiB/s – FAT32 czyta klaster po klastrze, obraz ma klaster 512 B).
+- `mkfat32.py` – obraz testowego pendrive'a (MBR + FAT32) bez mtools i sudo (`test.sh`); `run-qemu.sh`
+  podłącza `usb.img` (jeśli jest) jako drugi pendrive tylko do odczytu. QEMU: `qemu-xhci,p2=8,p3=8` (więcej
+  portów – bez automatycznego huba).
+
+## v0.25.1 — 2026-10-12
+
+### ✅ M20.e na Legionie – wbudowana klawiatura działa
+- **Pierwszy raz w historii DeSoOS pisanie na Legionie**: `lsusb` pokazuje „keyboard ready (input to kernel)” dla
+  klawiatury ITE 048d:c100 (usb2 port 4), w shellu działają `help`, `lsusb`, `echo`, Caps Lock i polskie znaki
+  (AltGr: ąęśż…).
+- Stress bez spadku: compare **431 023** (v0.24.0: 434 021, v0.23.0: 436 765 – w granicach szumu), `pass=1`,
+  ping-pong 6,7 µs.
+- QEMU: samotesty 28/28 (TCG i KVM), stress KVM 8 CPU 179 713, `USB=1` autostress z pisaniem – PASS.
+
+### Poprawka: PANIC lockdep przy pisaniu na klawiaturze USB w trakcie stressu
+- Objaw (Dawid, `USB=1 ./run-qemu.sh`, pisanie w trakcie autostressu): `PANIC: spinlock order: 'waiters' (level 45)
+  taken at kernel/user/waitset.rs:68 while holding 'stress-counter' (level 210)`.
+- Przyczyna: przerwanie MSI kontrolera USB (raport klawiatury) budzi usbd czekającego w `wait_many` – handler bierze
+  `waiters` (IrqSpinLock). Przerwany kod na tym CPU trzymał `stress-counter` (zwykły SpinLock, przerwania włączone).
+  Lockdep sprawdzał kolejność względem **wszystkich** blokad CPU, także przerwanego kontekstu – fałszywy alarm: przerwany
+  kod nie może czekać na handler, a `waiters` nigdy nie jest trzymane z włączonymi przerwaniami. Błąd siedział od M19
+  (przerwania usług), ujawnił się, bo pierwszy raz urządzenie usługi przerywa w trakcie stressu.
+- Poprawka (`sched/spin.rs`): blokada wzięta w handlerze przerwania jest oznaczona (bit 0 adresu w tablicy trzymanych);
+  **w przerwaniu kolejność sprawdzana tylko względem blokad wziętych w przerwaniu**, rekurencja (ta sama blokada) –
+  zawsze. LOCK TEST 2/6 sprawdza oba przypadki (przerwanie: blokada przerwanego kodu nie jest złamaniem; zadanie:
+  złamanie nadal wykryte).
+- Przy okazji: autorepeat USB i puszczenie klawiszy zabitego źródła przeniesione z ticku zegara (kontekst przerwania)
+  do zadania jądra `input-repeat` (pod BKL; budzone przy wciśnięciu, generacja zapobiega przespaniu terminu) – mniej
+  pracy w przerwaniu. Tick zegara wrócił do stanu sprzed v0.25.0.
+- Test: autostress 20 s na 4 CPU (TCG, bez 8042) z ciągłym pisaniem przez `sendkey` – PASS, bez PANIC; samotesty 28/28
+  przy 1, 2 i 4 CPU.
+- Ta sama sytuacja mogła wystąpić przy przerwaniach PS/2 (IRQ1 / IRQ12) w trakcie stressu – poprawka lockdep obejmuje
+  wszystkie przerwania.
+
+## v0.25.0 — 2026-10-12
+
+### M20.e: klawiatura i mysz USB (przed krokiem d – klawiatura Legiona nie wisi za hubem)
+- **Jądro – uchwyt `INPUT` i syscall 49 `input_inject`** (projekt M20.a): rodzaj uchwytu 10, tworzy go tylko jądro
+  dla init (slot 5), init daje kopię każdemu `usbN` (nie shellowi). Prawa WRITE + DUP, bez TRANSFER. **Każda kopia
+  uchwytu to osobne źródło** z mapą wciśniętych klawiszy – gdy znika (koniec / kill usbd), jądro puszcza jej klawisze
+  (w ticku zegara pod BKL; w Drop tylko atomiki), więc po awarii nie wisi Shift ani Ctrl.
+- `input_inject(h, zdarzenia, n ≤ 64)`: zdarzenie 8 B – klawisz (HID usage, wciśnięty) albo mysz (przyciski,
+  kółko); najpierw walidacja całości (zły rodzaj → EINVAL, nic nie przechodzi), EBADF / EACCES jak przy innych
+  uchwytach. Wynik: stan diod (Num / Caps / Scroll) – usbd ustawia je w klawiaturze.
+- Jądro: tablica HID usage → `KeyCode` (litery, cyfry, F1–F12, nawigacja, klawiatura numeryczna, modyfikatory) – dalej
+  bez zmian: polski układ programisty, AltGr, Caps Lock, Ctrl+C, konsola, `readkey`. **Autorepeat w jądrze** dla źródeł
+  USB (klawiatura USB sama nie powtarza): 500 ms, potem co 33 ms (~30/s), jeden klawisz naraz, modyfikatory i blokady
+  bez powtarzania. Mysz USB: kółko przewija konsolę (jak PS/2).
+- usbd: dla interfejsu boot keyboard (03/01/01) i boot mouse (03/01/02) – Configure Endpoint (endpoint przerwań IN,
+  interwał wg prędkości), Set Configuration, Set Protocol (boot), Set Idle, 8 TRB czeka na raporty. Raport klawiatury
+  (modyfikatory + 6 klawiszy) → różnica z poprzednim → zdarzenia (ErrorRollOver pomijany). Zdarzenia endpointów HID
+  obsługiwane od razu, także w trakcie innego transferu; błąd endpointu → reset endpointu i nowe TRB. Diody: Set Report.
+  Odłączenie klawiatury → puszczenie jej klawiszy. `lsusb`: „keyboard ready (input to kernel)”. Nowa prośba
+  `idle MS` (test). **Pamięć masowa nadal bez żadnej konfiguracji** (krok f).
+- `USB=1 ./run-qemu.sh` – QEMU bez kontrolera 8042 (jak Legion), klawiatura i mysz tylko na USB.
+- Testy (28 zestawów): USB TEST 2/4 – klawiatura i mysz QEMU skonfigurowane, raporty przez endpointy przerwań (Set Idle
+  16 ms: 50 raportów w 400 ms); **3/4 – nowy `/bin/inputtest`** (16 sprawdzeń): prawa i błędy, „hiA” w kolejce jądra,
+  autorepeat (8 × „b” po 700 ms), dioda Caps Lock, dziecko z kopią uchwytu zabite z wciśniętym Shiftem i „q” – Shift
+  puszczony, „q” się nie powtarza (test mutacyjny: bez puszczania – „QQQQQQQQQQQ”, wykryte); 4/4 – init daje usbd
+  uchwyt INPUT.
+- QEMU u mnie: 28/28 przy 1, 2 i 4 CPU. Ręcznie przez monitor QEMU (`sendkey`, bez 8042): `echo Usb`, AltGr+s → „ś”,
+  Caps Lock, trzymanie „z” 1,2 s → 23 znaki (autorepeat).
+
+## v0.24.0 — 2026-10-12
+
+### ✅ M20.c na Legionie – wszystkie urządzenia rozpoznane
+- KVM 8 CPU: 28/28, stress 170 404 (w szumie: 174–178 tys.), start usbd z enumeracją ~150 ms.
+- **Legion: 7 urządzeń, 0 błędów enumeracji** (usb0 NVIDIA – pusty):
+  - `usb2 port 4: 048d:c100 full speed, USB 2.01, keyboard, interfaces 03/01/01, "ITE Tech. Inc." "ITE Device(8910)"` –
+    **wbudowana klawiatura, bezpośrednio na porcie kontrolera** (bez huba), interfejs boot keyboard,
+  - `usb2 port 3: 8087:0029` Intel Bluetooth (full speed), `usb1 port 3: 13d3:56ff` kamera Azurewave „Integrated Camera”
+    (high speed, IAD ef/02/01, interfejsy 0e/01 + 0e/02 – ustawienia alternatywne przyjęte bez błędu),
+  - `usb1 port 6: 13fe:5500` pendrive „Wilk” (SuperSpeed, mass storage 08/06/50),
+  - `usb2 port 1: 05e3:0610` i `port 5: 05e3:0620` – hub Genesys Logic (część USB 2.1 high speed + część USB 3.2
+    SuperSpeed tego samego huba); urządzenia za nim – krok d.
+- Prędkości po resecie portu prawdziwe (kamera i hub high speed, wcześniej przed resetem „full speed”).
+- Stress bez spadku: compare **434 021** (v0.23.0: 436 765, v0.22.0: 436 134), `pass=1`, ping-pong 6,75 µs.
+- Wniosek: klawiatura nie wymaga hubów – **kolejność zmieniona: najpierw M20.e (klawiatura i mysz HID), potem d**.
+
+### M20.c: rozpoznawanie urządzeń USB (enumeracja) + `lsusb`
+- usbd: **maszyna stanów portu** z projektu M20.a – podłączenie → debounce 100 ms → reset portu (USB 2, ≤ 500 ms; port
+  USB 3 z już wytrenowanym łączem bez resetu) → Enable Slot → Address Device → deskryptor urządzenia (8 B: rozmiar
+  pakietu EP0, w razie potrzeby Evaluate Context; potem 18 B) → konfiguracja (9 B, potem całość ≤ 4 KiB) → napisy
+  (producent, produkt) → „Działa”. Każda komenda i transfer z timeoutem 1 s. Błąd → Disable Slot, ponowienie za 500 ms,
+  po 3 próbach port ignorowany do odłączenia. Odłączenie w dowolnym stanie → Disable Slot, strony DMA wracają do puli.
+  STALL → Reset Endpoint + Set TR Dequeue (np. urządzenie bez napisu).
+- **Do urządzeń idą tylko prośby o odczyt deskryptorów** – bez Set Configuration i endpointów (krok e/f); na pendrive
+  nic nie jest wysyłane poza GET_DESCRIPTOR.
+- Nowy parser `user/lib/usb_desc.rs` (czysty kod: bez MMIO, alokacji i paniki): deskryptor urządzenia, konfiguracja
+  z interfejsami, endpointami i HID, napisy UTF-16 → ASCII. Limity: konfiguracja ≤ 4 KiB, 8 zapamiętanych interfejsów
+  (ustawienie 0; ponad – pomijane, nie błąd), ≤ 64 deskryptory interfejsu z ustawieniami alternatywnymi (kamery),
+  16 endpointów na interfejs; bLength < 2 (pętla bez końca), wyjście poza wTotalLength, więcej endpointów niż
+  zadeklarowano, bulk / przerwania z rozmiarem 0, endpoint przed interfejsem → błąd.
+- Nowy `/bin/usbparse` (USB TEST 1/3): poprawne próbki (klawiatura HID, pamięć masowa, kamera z 20 ustawieniami
+  alternatywnymi, 9 interfejsów), 21 złośliwych przypadków z oczekiwanym błędem, **10 000 mutacji** z ustalonym ziarnem
+  (4 497 przyjętych w limitach, 5 503 odrzuconych, zero paniki). Test mutacyjny: usunięcie sprawdzenia „poza
+  wTotalLength” – wykryte.
+- Nowa komenda **`lsusb`**: pyta każdą usługę `usbN` („list”), linia na urządzenie – port, VID:PID, prędkość, wersja USB,
+  adres, rodzaj (klawiatura, mysz, pamięć masowa, hub, Bluetooth, kamera…), klasy interfejsów, producent i produkt.
+  Porty z błędem też widać (powód, która próba).
+- `test.sh`: QEMU dostaje `usb-kbd` i `usb-mouse` obok pendrive'a. USB TEST 2/3 (29 sprawdzeń): 3 urządzenia (08/06/50,
+  03/01/01, 03/01/02) z nazwami „QEMU USB …”, kill w trakcie serii komend i **w trakcie enumeracji** → nowa instancja
+  znów rozpoznaje wszystko; 3/3: `lsusb` przez init. Po każdym: przejęcie, bus mastering, wektory i ramki – czyste.
+- QEMU TCG u mnie: 28/28 przy 1, 2 i 4 CPU; start usbd z enumeracją ~155 ms. Normalny start z hubem: hub QEMU
+  (0409:55aa) rozpoznany jako „hub” – urządzenia za nim to krok d.
+
+## v0.23.0 — 2026-10-12
+
+### ✅ M20.b na prawdziwym sprzęcie (KVM + Legion)
+- KVM 8 CPU: 28/28, stress 177 971 (v0.22.0: 174 257 – szum), No-Op 58–70 µs (każda komenda czeka na przerwanie,
+  a budzenie uśpionego wirtualnego CPU przez hosta kosztuje – jak 32 µs dla `edu` w M19), `polled=0`.
+- **Legion: 3 kontrolery xHCI znalezione po klasie i uruchomione** – `usb0` = 01:00.2 NVIDIA 10de:1aec (USB-C
+  karty graficznej; 6 portów, scratchpad 3, BIOS: not owned, No-Op 230 µs, nic nie podłączone), `usb1` = 05:00.3
+  i `usb2` = 05:00.4 AMD 1022:1639 (po 6 portów: USB 2 1–4, USB 3 5–6; scratchpad 2; **BIOS: handed over**; No-Op
+  5,0 µs). Podłączone: `usb1` port 3, `usb2` porty 1, 3, 4 – wśród nich wbudowana klawiatura ITE (rozpozna je M20.c).
+  Prędkość „full speed” na portach USB 2 przed resetem portu to nie ostateczna wartość – urządzenie high speed
+  ujawnia się dopiero w resecie (chirp), więc prawdziwe prędkości pokaże enumeracja.
+- Stress na Legionie bez spadku: compare **436 765** (v0.22.0: 436 134), `pass=1`, ping-pong 6,75 µs; trzy usbd
+  w tle nic nie kosztują.
+- Do sprawdzenia przy okazji: No-Op 230 µs na kontrolerze NVIDIA (przerwania dochodzą – przy odpytywaniu byłoby
+  ~10 ms; podejrzenie: wybudzanie łącza PCIe z oszczędzania energii).
+
+### M20.b: start kontrolera USB (xHCI) w usłudze `usbd`
+- Pierwszy krok M20 (USB w user space, projekt: `ARCHITEKTURA.md`, „USB (M20 – projekt 20.a)”). Jeszcze bez
+  urządzeń USB – kontroler startuje, przyjmuje komendy i widzi porty; enumeracja to M20.c.
+- Jądro: syscall **48 `dev_find(hw_root, klasa, nr)`** – adres `nr`-tego urządzenia PCI o klasie (24 bity), tylko
+  z `HW_ROOT` (`EBADF`), `EINVAL` dla klasy > 24 bity, `ENOENT` za ostatnim. Niczego nie przejmuje – o dostępie
+  decyduje `dev_claim`. Profil: 51 numerów (49 `input_inject`, 50 `blk_attach` zarezerwowane z projektu).
+- Init: kontrolery xHCI szuka po klasie 0C0330 i dla każdego dodaje usługę `usb0`, `usb1`, … (`/bin/usbd`,
+  restart z odstępem jak każda usługa z M19). Log: `init: usb0 = xHCI USB controller 00:03.0`.
+- Nowy `/bin/usbd` (jeden na kontroler): rejestry z BAR0; **przejęcie od BIOS-u** (USB Legacy Support: OS Owned,
+  ≤ 1 s, potem siłą jak w Linuksie; wyłączenie SMI); zatrzymanie i reset (HCRST, każdy krok z timeoutem 1 s);
+  DCBAA, bufory scratchpad, pierścień komend (Link + Toggle Cycle), pierścień zdarzeń (interrupter 0), MSI przez
+  `irq_bind`, Run; zasilanie portów (PPC); komendy **No-Op** z czekaniem na przerwanie (i licznikiem `polled`,
+  gdyby przerwania nie dochodziły – diagnostyka na Legiona); zdarzenia zmiany portów (kasowanie bitów RW1C bez
+  ruszania PED). Na konsolę: model, wersja, sloty, porty USB 2 / USB 3, stan BIOS-u, podłączone urządzenia
+  z prędkością, czas No-Op. Klienci przez `svc` („usb0”): `status`, `noop N`. Błąd kontrolera (HSE / HCE) →
+  koniec z kodem 3 → init restartuje, nowa instancja robi pełny reset.
+- DMA bez IOMMU zapisane w komentarzu usbd i w `ARCHITEKTURA.md` – izolacja procesu chroni przed crashem, nie
+  przed błędnym DMA.
+- Nowy zestaw **USB TEST** (28 zestawów): 1/2 `/bin/usbtest` (19 sprawdzeń: `dev_find`, start, No-Op, porty – pendrive
+  startowy QEMU widoczny, `noop 2000`, zła prośba, **kill w trakcie serii komend → pełny reset nowej instancji**,
+  samodzielny koniec, kontroler wolny); 2/2 `init test /bin/usbtest` – init sam znajduje kontroler i uruchamia
+  `usb0`, status przez `svc`. Po każdym: przejęcie wolne, bus mastering wyłączony, wektory MSI i ramki DMA wróciły.
+  Linia `[RESULT-USB]` w `test.sh` (start, No-Op, restart po kill).
+- QEMU TCG u mnie: 28/28 przy 1 i 4 CPU; start usbd ~115 ms (w tym 100 ms na zgłoszenia portów), No-Op 6–20 µs,
+  `polled=0` (przerwania działają), restart po kill ~110 ms. Normalny start: `usb0: port 1: device connected,
+  SuperSpeed (5 Gb/s), enabled` (pendrive startowy).
+
 ## v0.22.0 — 2026-10-12
 
 ### ✅ P3 zamknięte (KVM + Legion)

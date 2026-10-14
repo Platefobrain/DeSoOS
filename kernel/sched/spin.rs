@@ -94,8 +94,17 @@ pub const DEADLOCK_PANIC_US: u64 = 10_000_000;
 
 /// Najwięcej blokad trzymanych naraz przez jeden CPU.
 const MAX_HELD: usize = 8;
+const HELD_IN_IRQ: usize = 1;
 
 /// Trzymane blokady każdego CPU (adres `RawSpin`, 0 = puste miejsce).
+/// v0.25.1: bit 0 adresu (RawSpin jest wyrównany do 64 B) = blokada wzięta w
+/// handlerze przerwania.  Kolejność poziomów sprawdzamy tylko w obrębie jednego
+/// kontekstu: handler przerwania (IrqSpinLock) nie łamie kolejności względem
+/// blokady trzymanej przez przerwany kod – ten nie może jej trzymać z IF = 0 i
+/// czekać na handler.  Wcześniej przerwanie MSI usbd (pobudka wait_many,
+/// 'waiters' poziom 45) na CPU, którego przerwany kod trzymał 'stress-counter'
+/// (210), dawało fałszywy PANIC lockdep przy pisaniu na klawiaturze USB w
+/// trakcie stressu.  Rekurencja (ta sama blokada) – nadal sprawdzana zawsze.
 static HELD: crate::arch::x86_64::percpu::PerCpu<[AtomicUsize; MAX_HELD]> = crate::per_cpu!([const { AtomicUsize::new(0) }; MAX_HELD]);
 static HELD_COUNT: crate::arch::x86_64::percpu::PerCpu<AtomicUsize> = crate::per_cpu!(AtomicUsize::new(0));
 
@@ -118,7 +127,7 @@ pub fn held_count() -> usize {
 /// Pierwsza blokada trzymana przez ten CPU: (nazwa, miejsce wzięcia) – raporty.
 pub fn first_held() -> Option<(&'static str, &'static str, u32)> {
     for slot in HELD[cpu::id()].iter() {
-        let a = slot.load(Ordering::Relaxed);
+        let a = slot.load(Ordering::Relaxed) & !HELD_IN_IRQ;
         if a != 0 {
             let l = unsafe { &*(a as *const RawSpin) };
             let (f, line) = site_str(l.site.load(Ordering::Relaxed));
@@ -262,10 +271,12 @@ impl RawSpin {
         if n >= MAX_HELD {
             return Err(LockError::TooMany);
         }
+        let in_irq = cpu::in_interrupt();
         for slot in HELD[me].iter() {
             let a = slot.load(Ordering::Relaxed);
-            if a != 0 {
-                let other = unsafe { &*(a as *const RawSpin) };
+            // W przerwaniu porównujemy tylko z blokadami wziętymi w przerwaniu.
+            if a != 0 && (!in_irq || a & HELD_IN_IRQ != 0) {
+                let other = unsafe { &*((a & !HELD_IN_IRQ) as *const RawSpin) };
                 if other.level >= self.level {
                     return Err(LockError::Order { held: other.name, held_level: other.level });
                 }
@@ -358,7 +369,8 @@ impl RawSpin {
         let me = cpu::id();
         for slot in HELD[me].iter() {
             if slot.load(Ordering::Relaxed) == 0 {
-                slot.store(self as *const RawSpin as usize, Ordering::Relaxed);
+                let tag = if cpu::in_interrupt() { HELD_IN_IRQ } else { 0 };
+                slot.store(self as *const RawSpin as usize | tag, Ordering::Relaxed);
                 HELD_COUNT[me].fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -369,7 +381,7 @@ impl RawSpin {
         let me = cpu::id();
         let addr = self as *const RawSpin as usize;
         for slot in HELD[me].iter() {
-            if slot.load(Ordering::Relaxed) == addr {
+            if slot.load(Ordering::Relaxed) & !HELD_IN_IRQ == addr {
                 slot.store(0, Ordering::Relaxed);
                 HELD_COUNT[me].fetch_sub(1, Ordering::Relaxed);
                 return;

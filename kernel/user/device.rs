@@ -133,15 +133,19 @@ pub fn address(bdf: u64) -> Option<pci::Address> {
 
 pub struct IrqSlot {
     count: AtomicU64,
+    /// M20.h: znacznik czasu (`clock::stamp`) ostatniego przerwania – do
+    /// pomiaru „przerwanie klawiatury USB -> znak w jądrze”.
+    last: AtomicU64,
     obs: Observers,
 }
 
 static SLOTS: [IrqSlot; msi::MSI_VECTORS] =
-    [const { IrqSlot { count: AtomicU64::new(0), obs: Observers::new() } }; msi::MSI_VECTORS];
+    [const { IrqSlot { count: AtomicU64::new(0), last: AtomicU64::new(0), obs: Observers::new() } }; msi::MSI_VECTORS];
 
 fn user_irq(vector: u8) {
     let i = vector as usize - msi::MSI_BASE;
     if let Some(s) = SLOTS.get(i) {
+        s.last.store(crate::arch::x86_64::clock::stamp(), Ordering::Relaxed);
         s.count.fetch_add(1, Ordering::SeqCst);
         s.obs.notify();
     }
@@ -175,6 +179,7 @@ impl IrqObj {
         };
         let slot = &SLOTS[vector as usize - msi::MSI_BASE];
         slot.count.store(0, Ordering::SeqCst);
+        slot.last.store(0, Ordering::Relaxed);
         claim.bus_master.store(true, Ordering::SeqCst);
         d.set_bus_master(true);
         let ok = if has_msi { d.enable_msi(vector) } else { d.enable_msix(0, vector) };
@@ -194,6 +199,11 @@ impl IrqObj {
     /// Przerwania od ostatniego odczytu (zeruje licznik).
     pub fn take(&self) -> u64 {
         self.slot().count.swap(0, Ordering::SeqCst)
+    }
+
+    /// M20.h: znacznik ostatniego przerwania (0 – jeszcze nie było).
+    pub fn last_stamp(&self) -> u64 {
+        self.slot().last.load(Ordering::Relaxed)
     }
 
     pub fn pending(&self) -> bool {

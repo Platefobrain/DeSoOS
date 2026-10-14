@@ -128,6 +128,11 @@ pub trait FileSystem {
     fn concurrent(&self) -> Option<&dyn ConcurrentFs> {
         None
     }
+    /// M20.f: system plików tylko do odczytu (dysk read-only) – open do
+    /// zapisu kończy się EROFS od razu.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 /// M17a.g7: operacje systemu plików bezpieczne do wołania z wielu zadań naraz
@@ -148,6 +153,153 @@ pub trait ConcurrentFs {
     fn mkdir(&self, path: &str) -> Result<()>;
     fn remove(&self, path: &str) -> Result<()>;
     fn stats(&self) -> FsStats;
+}
+
+// ------------------------------------------------------------
+// M20.g: system plików z własną blokadą (dysk USB)
+// ------------------------------------------------------------
+
+/// Opakowanie systemu plików bez własnych blokad (FAT32) w jedną blokadę
+/// usypiającą – VFS woła go jak `ConcurrentFs`, czyli pod FS_LOCK tylko do
+/// odczytu.  Po co: odczyt z pendrive'a może czekać na usbd do 5 s (timeout
+/// ublk); pod FS_LOCK do zapisu stałby w tym czasie CAŁY VFS (ramfs, /bin,
+/// spawn).  Teraz czeka tylko ten jeden system plików.  Używane dla dysków USB
+/// (ublk.rs); /disk i /esp – jak dotąd.
+pub struct Locked<F: FileSystem> {
+    fs: crate::sched::sync::Mutex<F>,
+    /// Kopie z montowania – `mount` i `open` nie czekają na blokadę dysku.
+    kind: &'static str,
+    source: String,
+    read_only: bool,
+}
+
+impl<F: FileSystem + Send> Locked<F> {
+    pub fn new(fs: F) -> Self {
+        let (kind, source, read_only) = (fs.kind(), fs.source(), fs.read_only());
+        Locked { fs: crate::sched::sync::Mutex::new(fs), kind, source, read_only }
+    }
+}
+
+impl<F: FileSystem + Send> FileSystem for Locked<F> {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    fn source(&self) -> String {
+        self.source.clone()
+    }
+    fn stat(&mut self, path: &str) -> Result<Metadata> {
+        self.fs.lock().stat(path)
+    }
+    fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
+        self.fs.lock().read_dir(path)
+    }
+    fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.fs.lock().read(path, offset, buf)
+    }
+    fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+        self.fs.lock().write(path, offset, data)
+    }
+    fn truncate(&mut self, path: &str, size: u64) -> Result<()> {
+        self.fs.lock().truncate(path, size)
+    }
+    fn create(&mut self, path: &str) -> Result<()> {
+        self.fs.lock().create(path)
+    }
+    fn mkdir(&mut self, path: &str) -> Result<()> {
+        self.fs.lock().mkdir(path)
+    }
+    fn remove(&mut self, path: &str) -> Result<()> {
+        self.fs.lock().remove(path)
+    }
+    fn stats(&mut self) -> Option<FsStats> {
+        self.fs.lock().stats()
+    }
+    fn sync(&mut self) -> Result<()> {
+        self.fs.lock().sync()
+    }
+    fn concurrent(&self) -> Option<&dyn ConcurrentFs> {
+        Some(self)
+    }
+    fn read_only(&self) -> bool {
+        self.read_only
+    }
+}
+
+impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
+    fn stat(&self, path: &str) -> Result<Metadata> {
+        self.fs.lock().stat(path)
+    }
+    fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.fs.lock().read_dir(path)
+    }
+    fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.fs.lock().read(path, offset, buf)
+    }
+    fn read_all(&self, path: &str) -> Result<Vec<u8>> {
+        let mut fs = self.fs.lock();
+        let meta = fs.stat(path)?;
+        if meta.kind == FileType::Directory {
+            return Err(FsError::IsADirectory);
+        }
+        let mut data = alloc::vec![0u8; meta.size as usize];
+        let mut done = 0;
+        while done < data.len() {
+            let n = fs.read(path, done as u64, &mut data[done..])?;
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        data.truncate(done);
+        Ok(data)
+    }
+    fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+        self.fs.lock().write(path, offset, data)
+    }
+    fn write_whole(&self, path: &str, data: &[u8]) -> Result<()> {
+        let mut fs = self.fs.lock();
+        match fs.stat(path) {
+            Ok(m) if m.kind == FileType::Directory => return Err(FsError::IsADirectory),
+            Ok(_) => fs.truncate(path, 0)?,
+            Err(FsError::NotFound) => fs.create(path)?,
+            Err(e) => return Err(e),
+        }
+        if !data.is_empty() {
+            fs.write(path, 0, data)?;
+        }
+        fs.sync()
+    }
+    fn append(&self, path: &str, data: &[u8]) -> Result<()> {
+        let mut fs = self.fs.lock();
+        let end = match fs.stat(path) {
+            Ok(m) if m.kind == FileType::Directory => return Err(FsError::IsADirectory),
+            Ok(m) => m.size,
+            Err(FsError::NotFound) => {
+                fs.create(path)?;
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if !data.is_empty() {
+            fs.write(path, end, data)?;
+        }
+        fs.sync()
+    }
+    fn truncate(&self, path: &str, size: u64) -> Result<()> {
+        self.fs.lock().truncate(path, size)
+    }
+    fn create(&self, path: &str) -> Result<()> {
+        self.fs.lock().create(path)
+    }
+    fn mkdir(&self, path: &str) -> Result<()> {
+        self.fs.lock().mkdir(path)
+    }
+    fn remove(&self, path: &str) -> Result<()> {
+        self.fs.lock().remove(path)
+    }
+    fn stats(&self) -> FsStats {
+        self.fs.lock().stats().unwrap_or(FsStats { total_bytes: 0, free_bytes: 0 })
+    }
 }
 
 // ------------------------------------------------------------
@@ -199,7 +351,7 @@ static mut MOUNTS: Vec<Mount> = Vec::new();
 
 /// M12: VFS jest wspólny dla wszystkich zadań – każda operacja bierze
 /// FS_LOCK (reentrant: write_file -> stat itd. w tym samym zadaniu).
-/// Kolejność blokad: FS_LOCK, potem block::LOCK.
+/// Kolejność blokad: FS_LOCK, potem blokady dysków (block.rs).
 ///
 /// M17a.g6: blokada czytelnicy–pisarz.  stat / read / read_dir / read_file
 /// na systemie plików, który to umie (ramfs: `*_shared`), biorą ją do
@@ -299,6 +451,29 @@ pub fn unmount(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// M20.f: odmontowanie bez zapisu buforów – dysk zniknął (pendrive wyjęty,
+/// usbd zakończony); dysk USB i tak jest tylko do odczytu.
+pub fn unmount_lost(path: &str) -> Result<()> {
+    let _g = FsWrite::lock();
+    let path = normalize("/", path);
+    if path == "/" {
+        return Err(FsError::Busy);
+    }
+    let m = mounts();
+    let i = m.iter().position(|m| m.path == path).ok_or(FsError::NotFound)?;
+    m.remove(i);
+    Ok(())
+}
+
+/// M20.f: ścieżka leży na systemie plików tylko do odczytu.
+pub fn is_read_only(path: &str) -> bool {
+    let _g = FS_LOCK.read();
+    match find_mount(path) {
+        Ok((i, _)) => mounts()[i].fs.read_only(),
+        Err(_) => false,
+    }
+}
+
 /// (punkt montowania, typ, źródło)
 pub fn mount_list() -> Vec<(String, &'static str, String)> {
     let _g = FS_LOCK.read();
@@ -307,6 +482,15 @@ pub fn mount_list() -> Vec<(String, &'static str, String)> {
 
 /// Statystyki systemu plików zamontowanego dokładnie w `path`.
 pub fn mount_stats(path: &str) -> Option<FsStats> {
+    // M20.g: system z własną blokadą (dysk USB) – bez blokowania całego VFS.
+    {
+        let _g = FS_LOCK.read();
+        if let Some(m) = mounts().iter().find(|m| m.path == path) {
+            if let Some(c) = m.fs.concurrent() {
+                return Some(c.stats());
+            }
+        }
+    }
     let _g = FsWrite::lock();
     mounts().iter_mut().find(|m| m.path == path).and_then(|m| m.fs.stats())
 }
@@ -724,7 +908,7 @@ pub fn self_test() {
     let _ = unmount("/tmp/fat");
     let _ = remove("/tmp/fat");
     let _ = remove("/tmp/src.txt");
-    block::pop();
+    block::remove(disk);
 
     serial_println!("[FS TEST] =================================");
     crate::selftest::pass();

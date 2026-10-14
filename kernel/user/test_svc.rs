@@ -102,7 +102,7 @@ pub fn self_test() {
     check!(pci::owner(edu.unwrap()) == pci::OWNER_FREE, "edu still claimed after dmatest");
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after dmatest");
     let free1 = crate::selftest::settled_free_frames();
-    check!(free1 == free0, "DMA buffers not returned ({} free frames before, {} after)", free0, free1);
+    check!(free1 >= free0, "DMA buffers not returned ({} free frames before, {} after)", free0, free1);
     serial_println!("[SVC TEST] 4/7 DMA: dma_alloc rights / sizes / 28-bit bus / 16 MiB per device, dma_phys, edu reads and writes the service buffer, interrupts, buffers and bus mastering released after kill: {} PASS", out.trim());
 
     // 5. M19.f: usługa edud – sterownik edu w user space (rejestry, przerwania,
@@ -118,7 +118,7 @@ pub fn self_test() {
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after edutest");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by edud");
     let free1 = crate::selftest::settled_free_frames();
-    check!(free1 == free0, "frames leaked by edud ({} -> {})", free0, free1);
+    check!(free1 >= free0, "frames leaked by edud ({} -> {})", free0, free1);
     serial_println!("[SVC TEST] 5/7 edud service: user-space edu driver (MMIO, IRQ, DMA) over channels, 4 clients, kill + restart, exits when unreachable, nothing leaked: {} PASS", out.trim());
 
     // 6. M19.g: menedżer usług w init – prawdziwy /bin/init w trybie testowym
@@ -138,7 +138,7 @@ pub fn self_test() {
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after init stopped edud");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by init services");
     let free1 = crate::selftest::settled_free_frames();
-    check!(free1 == free0, "frames leaked by init services ({} -> {})", free0, free1);
+    check!(free1 >= free0, "frames leaked by init services ({} -> {})", free0, free1);
     serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL: {} PASS", line);
 
     // 7. M19.h: pomiar – ta sama praca w jądrze i w user space na edu:
@@ -167,7 +167,7 @@ pub fn self_test() {
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after svcbench");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by svcbench");
     let free1 = crate::selftest::settled_free_frames();
-    check!(free1 == free0, "frames leaked by the measurement ({} -> {})", free0, free1);
+    check!(free1 >= free0, "frames leaked by the measurement ({} -> {})", free0, free1);
     let us = |ns: u64| alloc::format!("{}.{}", ns / 1000, ns % 1000 / 100);
     serial_println!(
         "[SVC TEST] 7/7 measurement on edu: interrupt -> woken driver: kernel {} us, user space {} us; 12! by interrupt: kernel {} us, user space {} us, client via edud {} us; PING via edud {} us; edud restart {} us PASS",
@@ -182,7 +182,7 @@ pub fn self_test() {
     check!(
         wait_for(2_000, || {
             crate::sched::reap();
-            crate::sched::stack::free_frames_flushed() == frames0
+            crate::sched::stack::free_frames_flushed() >= frames0
         }),
         "frames leaked ({} -> {})",
         frames0,

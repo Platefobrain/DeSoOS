@@ -50,14 +50,39 @@ case "$ACCEL" in
 esac
 SMP="${SMP:-4}"
 
+# M20.e: USB=1 – jak laptop bez PS/2 (Legion): bez kontrolera 8042, klawiatura
+# i mysz tylko na USB (usbd -> jądro).  Pisanie w oknie QEMU idzie wtedy przez
+# klawiaturę USB.  Domyślnie jak dotąd: PS/2.
+# M20.d: HUB=1 – hub USB w porcie 3, a urządzenia z USB=1 i usb.img za nim
+# (porty 3.1, 3.2, 3.3) – jak gniazda laptopa podłączone przez wewnętrzny hub.
+MACHINE="q35"
+USB_ARGS=()
+AT=()
+if [ "${HUB:-0}" = 1 ]; then
+  USB_ARGS=(-device usb-hub,bus=xhci.0,port=3)
+  AT=(",bus=xhci.0,port=3.1" ",bus=xhci.0,port=3.2" ",bus=xhci.0,port=3.3")
+else
+  AT=("" "" "")
+fi
+if [ "${USB:-0}" = 1 ]; then
+  MACHINE="q35,i8042=off"
+  USB_ARGS+=(-device "usb-kbd${AT[0]}" -device "usb-mouse${AT[1]}")
+fi
+# M20.f: usb.img (jeśli jest) = drugi pendrive, TYLKO DO ODCZYTU – jądro
+# zamontuje go w /usb0.  Obraz testowy: python3 mkfat32.py usb.img plik1 plik2
+if [ -f "$ROOT/usb.img" ]; then
+  USB_ARGS+=(-drive if=none,id=usbimg,format=raw,file="$ROOT/usb.img",readonly=on -device "usb-storage,drive=usbimg${AT[2]}")
+fi
+
 exec qemu-system-x86_64 \
-  -machine q35 \
+  -machine "$MACHINE" \
   -smp "$SMP" "${ACCEL_ARGS[@]}" \
   -m 512M \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-  -device qemu-xhci \
+  -device qemu-xhci,id=xhci,p2=8,p3=8 \
   -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on \
-  -device usb-storage,drive=usbboot,bootindex=0 \
+  -device usb-storage,bus=xhci.0,port=1,drive=usbboot,bootindex=0 \
+  "${USB_ARGS[@]}" \
   -drive file="$DISK",format=raw,if=none,id=vd0 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$NVME",format=raw,if=none,id=nv0 \

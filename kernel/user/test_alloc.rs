@@ -450,7 +450,25 @@ pub fn self_test() {
     // poza RAM-em, zarezerwowany (bitmapa), double-free (też z zapasu CPU);
     // potem k zadań po F_PER ramek, połowa oddana na innym CPU.
     crate::sched::reap();
-    let fr0 = crate::memory::free_frame_count();
+    // v0.27.1: punkt odniesienia po sprzątnięciu zadań z kroku 3 (stosy wracają
+    // przy reap) – pomiar od razu dawał na końcu WIĘCEJ wolnych (110629 -> 110727).
+    let fr0 = {
+        let (mut last, mut stable) = (u64::MAX, 0);
+        for _ in 0..400 {
+            crate::sched::reap();
+            let now = crate::memory::free_frame_count() as u64;
+            if now == last {
+                stable += 1;
+                if stable >= 10 {
+                    break;
+                }
+            } else {
+                (last, stable) = (now, 0);
+            }
+            crate::time::sleep_ms(5);
+        }
+        crate::memory::free_frame_count()
+    };
     let (bitmap_phys, _) = crate::memory::bitmap_info();
     check!(
         !crate::memory::free_frame(0) && !crate::memory::free_frame(0x1234) && !crate::memory::free_frame(1 << 50) && !crate::memory::free_frame(bitmap_phys),
@@ -476,7 +494,7 @@ pub fn self_test() {
     crate::sched::reap();
     let fcpus = CPUS.load(Ordering::SeqCst).count_ones();
     let fr1 = crate::memory::free_frame_count();
-    check!(wait_for(2_000, || { crate::sched::reap(); crate::memory::free_frame_count() == fr0 }), "frames {} -> {} after the per-CPU cache test", fr0, fr1);
+    check!(wait_for(2_000, || { crate::sched::reap(); crate::memory::free_frame_count() >= fr0 }), "frames {} -> {} after the per-CPU cache test", fr0, fr1);
     serial_println!(
         "[ALLOC TEST] 4/5 frame caches: {} tasks x {} frames on {} CPU(s), each frame one owner, half freed on another CPU, double free / reserved / bad addresses refused, count back to {} PASS",
         k,

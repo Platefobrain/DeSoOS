@@ -20,6 +20,12 @@
 //     Nieznana / niedziałająca usługa – uchwyt zamknięty (klient: EPIPE).
 //   * Init czeka na kanał svc (wait_many, 100 ms) i zbiera dzieci (WNOHANG).
 //
+// M20.b: kontrolery USB xHCI znajduje po klasie (dev_find 0C0330) i dla
+// każdego dodaje usługę usb0, usb1, … (/bin/usbd z tym kontrolerem).
+//
+// M20.e: jądro daje init uchwyt INPUT (slot 5) – init przekazuje go tylko usbd.
+// M20.f: i uchwyt BLK (slot 6: rejestracja dysków USB) – też tylko dla usbd.
+//
 // M19.i: jądro daje init uchwyt SYSCTL (slot 4: reboot, halt, sync, stress);
 // init przekazuje go tylko shellowi.
 //
@@ -39,6 +45,7 @@ entry!(main);
 
 const SHELL: &str = "/bin/sh";
 
+#[derive(Clone, Copy)]
 struct Def {
     name: &'static str,
     path: &'static str,
@@ -46,11 +53,36 @@ struct Def {
     dev: Option<(u64, u64, u64)>,
 }
 
-/// M19.g: usługi uruchamiane przez init.
+/// M19.g: usługi uruchamiane przez init (stałe).
 const SERVICES: [Def; 2] = [
     Def { name: "edu", path: "/bin/edud", dev: Some((0, 6, 0)) },
     Def { name: "echo", path: "/bin/echod", dev: None },
 ];
+
+/// M20.b: najwięcej kontrolerów USB (usługi usb0..usb3).
+const USB_NAMES: [&str; 4] = ["usb0", "usb1", "usb2", "usb3"];
+const MAX_SERVICES: usize = SERVICES.len() + USB_NAMES.len();
+
+/// Tabela usług: stałe + po jednej usbd na każdy kontroler xHCI.
+fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
+    let mut n = 0;
+    for d in SERVICES {
+        defs[n] = d;
+        n += 1;
+    }
+    for (i, name) in USB_NAMES.iter().enumerate() {
+        let bdf = dev_find(HW_ROOT, CLASS_XHCI, i as u64);
+        if bdf < 0 {
+            break;
+        }
+        let b = bdf as u64;
+        let dev = (b >> 8, (b >> 3) & 31, b & 7);
+        println!("init: {} = xHCI USB controller {:02x}:{:02x}.{}", name, dev.0, dev.1, dev.2);
+        defs[n] = Def { name, path: "/bin/usbd", dev: Some(dev) };
+        n += 1;
+    }
+    n
+}
 
 const FAIL_WINDOW_MS: u64 = 30_000;
 const FAIL_LIMIT: usize = 5;
@@ -105,13 +137,23 @@ fn start_service(d: &Def, s: &mut Svc) {
         s.next_start = uptime_ms() + 1000;
         return;
     };
-    let mut map = [(1u64, 1u64), (listen_srv, 4), (0, 0)];
-    let n = if dev != 0 {
-        map[2] = (dev, 3);
-        3
-    } else {
-        2
-    };
+    let mut map = [(1u64, 1u64), (listen_srv, 4), (0, 0), (0, 0), (0, 0)];
+    let mut n = 2;
+    if dev != 0 {
+        map[n] = (dev, 3);
+        n += 1;
+    }
+    // M20.e: usbd dostaje kopię uchwytu INPUT (slot 5) – zdarzenia klawiatury /
+    // myszy do jądra.  Każda kopia to osobne źródło (koniec usbd puszcza klawisze).
+    if d.path == "/bin/usbd" && handle_info(INPUT).map(|(k, _)| k) == Ok(KIND_INPUT) {
+        map[n] = (INPUT, 5);
+        n += 1;
+    }
+    // M20.f: i kopię uchwytu BLK (slot 6) – pendrive'y jako dyski jądra.
+    if d.path == "/bin/usbd" && handle_info(BLK).map(|(k, _)| k) == Ok(KIND_BLK) {
+        map[n] = (BLK, 6);
+        n += 1;
+    }
     let pid = spawn_ex(d.path, &[d.name], &map[..n], 0);
     if dev != 0 {
         close(dev);
@@ -131,6 +173,10 @@ fn start_service(d: &Def, s: &mut Svc) {
         println!("init: service {} started (pid {})", d.name, pid);
     } else {
         println!("init: service {} restarted (pid {}, restart {})", d.name, pid, s.restarts);
+        if d.path == "/bin/usbd" {
+            // M20.g: co widzi użytkownik – klawiatura USB wróci po enumeracji.
+            println!("init: {}: USB keyboard and disks back in a moment", d.name);
+        }
     }
 }
 
@@ -164,6 +210,10 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     if s.nfails >= FAIL_LIMIT {
         s.state = State::Broken;
         println!("init: service {} {} - {} failures in 30 s, not restarting", d.name, describe_status(status), FAIL_LIMIT);
+        if d.path == "/bin/usbd" {
+            // M20.g: jasny komunikat – bez tego laptop bez PS/2 „po prostu” traci klawiaturę.
+            println!("init: USB controller {} disabled after {} failures - its USB keyboard and disks are unavailable until reboot (PS/2 still works)", d.name, FAIL_LIMIT);
+        }
         return;
     }
     println!("init: service {} {} - restart in {} ms", d.name, describe_status(status), s.delay);
@@ -184,7 +234,7 @@ fn state_name(s: State) -> &'static str {
 }
 
 /// Prośby na kanale svc (bez czekania – wszystkie, które są).
-fn serve_svc(svc: u64, svcs: &[Svc]) {
+fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
     let mut msg = [0u8; 128];
     let mut hs = [0u64; 1];
     let mut info = RecvInfo::default();
@@ -210,7 +260,7 @@ fn serve_svc(svc: u64, svcs: &[Svc]) {
         let h = hs[0];
         let text = core::str::from_utf8(&msg[..r as usize]).unwrap_or("");
         if let Some(name) = text.strip_prefix("connect ") {
-            let found = SERVICES.iter().position(|d| d.name == name);
+            let found = defs.iter().position(|d| d.name == name);
             match found {
                 Some(i) if svcs[i].state == State::Running && svcs[i].listen != 0 => {
                     // Uchwyt klienta idzie dalej; błąd – wraca do nas i go zamykamy.
@@ -225,7 +275,7 @@ fn serve_svc(svc: u64, svcs: &[Svc]) {
         } else if text == "list" {
             let mut out = [0u8; 1024];
             let mut n = 0;
-            for (d, s) in SERVICES.iter().zip(svcs.iter()) {
+            for (d, s) in defs.iter().zip(svcs.iter()) {
                 let mut line = Out2::new(&mut out[n..]);
                 let _ = core::fmt::write(
                     &mut line,
@@ -264,13 +314,17 @@ impl core::fmt::Write for Out2<'_> {
 }
 
 /// Shell (albo program testowy) z kanałem svc w slocie 3 i SYSCTL w slocie 4.
-fn start_shell(path: &str, svc_client: u64) -> u64 {
+fn start_shell(path: &str, extra: Option<&str>, svc_client: u64) -> u64 {
     loop {
         let name = path.rsplit('/').next().unwrap_or(path);
         // M19.i: shell dostaje też uchwyt SYSCTL (slot 4) – reboot, halt, sync, stress.
         let map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (SYSCTL, 4)];
         let n = if handle_info(SYSCTL).map(|(k, _)| k) == Ok(KIND_SYSCTL) { 5 } else { 4 };
-        let pid = spawn_ex(path, &[name], &map[..n], 0);
+        // M20.d: tryb testowy – jeden argument dla programu (`init test /bin/x arg`).
+        let pid = match extra {
+            Some(a) => spawn_ex(path, &[name, a], &map[..n], 0),
+            None => spawn_ex(path, &[name], &map[..n], 0),
+        };
         if pid > 0 {
             return pid as u64;
         }
@@ -282,6 +336,7 @@ fn start_shell(path: &str, svc_client: u64) -> u64 {
 fn main(args: Args) -> i32 {
     let test = if args.get(1) == Some("test") { args.get(2) } else { None };
     let shell_path = test.unwrap_or(SHELL);
+    let test_arg = if test.is_some() { args.get(3) } else { None };
     println!("init: started (pid {}), starting {}", getpid(), shell_path);
 
     // Kanał svc: init odbiera, klienci (shell i jego programy) tylko wysyłają.
@@ -289,19 +344,23 @@ fn main(args: Args) -> i32 {
     let svc_client = handle_dup(svc_any, R_SEND | R_DUP) as u64;
     close(svc_any);
 
-    let mut svcs = [const { Svc::new() }; SERVICES.len()];
-    for (d, s) in SERVICES.iter().zip(svcs.iter_mut()) {
+    let mut table = [SERVICES[0]; MAX_SERVICES];
+    let nsvc = service_table(&mut table);
+    let defs = &table[..nsvc];
+    let mut svcs_all = [const { Svc::new() }; MAX_SERVICES];
+    let svcs = &mut svcs_all[..nsvc];
+    for (d, s) in defs.iter().zip(svcs.iter_mut()) {
         start_service(d, s);
     }
 
-    let mut shell = start_shell(shell_path, svc_client);
+    let mut shell = start_shell(shell_path, test_arg, svc_client);
     let mut started_at = uptime_ms();
     let mut orphans = 0u64;
     loop {
         // Usługi czekające na restart.
         let now = uptime_ms();
         let mut timeout = 100;
-        for (d, s) in SERVICES.iter().zip(svcs.iter_mut()) {
+        for (d, s) in defs.iter().zip(svcs.iter_mut()) {
             if s.state == State::Waiting {
                 if now >= s.next_start {
                     start_service(d, s);
@@ -311,7 +370,7 @@ fn main(args: Args) -> i32 {
             }
         }
         if wait_many(&[(svc, W_READABLE)], timeout.max(1)) == Ok(1) {
-            serve_svc(svc, &svcs);
+            serve_svc(svc, defs, svcs);
         }
         // Zakończone dzieci: shell, usługi, sieroty.
         loop {
@@ -332,7 +391,7 @@ fn main(args: Args) -> i32 {
                     }
                     println!("init: test program ended, {} orphans reaped", orphans);
                     // Tryb testowy: koniec programu = koniec init (po usługach).
-                    for (d, s) in SERVICES.iter().zip(svcs.iter_mut()) {
+                    for (d, s) in defs.iter().zip(svcs.iter_mut()) {
                         s.state = State::Stopped;
                         if s.listen != 0 {
                             close(s.listen);
@@ -353,12 +412,12 @@ fn main(args: Args) -> i32 {
                     sleep_ms(1000);
                 }
                 println!("init: shell {} {} - starting a new one", pid, describe_status(status));
-                shell = start_shell(shell_path, svc_client);
+                shell = start_shell(shell_path, test_arg, svc_client);
                 started_at = uptime_ms();
                 continue;
             }
             if let Some(i) = svcs.iter().position(|s| s.pid == pid && pid != 0) {
-                service_ended(&SERVICES[i], &mut svcs[i], status);
+                service_ended(&defs[i], &mut svcs[i], status);
             } else {
                 // Sierota przekazana przez kernel – już sprzątnięta.
                 orphans += 1;

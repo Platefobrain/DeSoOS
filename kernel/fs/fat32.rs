@@ -16,6 +16,20 @@
 //
 // Bufory: sektory FAT w małym cache (zapis przy końcu każdej operacji
 // i przy sync), dane plików i katalogów zapisywane od razu.
+//
+// M20.h (szybszy odczyt – pendrive USB, każde żądanie to komenda SCSI):
+// * FAT czytany blokami po 8 sektorów (4 KiB = 1024 wpisy), nie po jednym,
+// * cache klastrów (katalogi, końcówki plików; zapis przez cache – zawsze
+//   zgodny z dyskiem): odczyt pliku nie czyta za każdym razem katalogów na
+//   ścieżce, `cat` z małym buforem nie czyta tego samego klastra 16 razy,
+// * ciągłe klastry pliku jednym odczytem (do RUN_MAX), z pominięciem cache,
+// * odczyt z wyprzedzeniem: mały odczyt z obszaru danych (klaster 512 B –
+//   4 KiB, `cat` czytający po 512 B) czyta od razu 64 KiB do bufora; kolejne
+//   odczyty z tego zakresu – z pamięci,
+// * pozycja w łańcuchu klastrów zapamiętana (odczyt po kolei nie przechodzi
+//   łańcucha od początku przy każdym wywołaniu),
+// * `df`: wolne klastry policzone z FAT (raz, blokami po 64 KiB) – FSInfo
+//   bywa nieaktualny (inny system nie musi go poprawiać).
 
 use alloc::format;
 use alloc::string::String;
@@ -42,7 +56,18 @@ const EOC: u32 = 0x0FFF_FFFF;
 const EOC_MIN: u32 = 0x0FFF_FFF8;
 const BAD: u32 = 0x0FFF_FFF7;
 
+/// Bloków FAT w cache; blok = FAT_BLOCK sektorów.
 const FAT_CACHE_SECTORS: usize = 16;
+const FAT_BLOCK: usize = 8;
+/// M20.h: cache klastrów – najwyżej tyle bajtów / wpisów.
+const CCACHE_BYTES: usize = 512 * 1024;
+const CCACHE_MAX: usize = 64;
+/// M20.h: najdłuższy ciągły odczyt klastrów naraz.
+const RUN_MAX: usize = 1024 * 1024;
+/// M20.h: odczyt z wyprzedzeniem – tyle sektorów naraz.
+const RA_SECTORS: usize = 128;
+/// M20.h: liczenie wolnych klastrów – tyle bajtów FAT jednym odczytem.
+const FREE_SCAN_BYTES: usize = 64 * 1024;
 const FSINFO_LEAD: u32 = 0x4161_5252;
 const FSINFO_STRUCT: u32 = 0x6141_7272;
 const FSINFO_TRAIL: u32 = 0xAA55_0000;
@@ -368,10 +393,18 @@ fn names_equal(a: &str, b: &str) -> bool {
 // System plików
 // ------------------------------------------------------------
 
+/// Blok FAT w cache (FAT_BLOCK sektorów od `sector`, przy końcu FAT mniej).
 struct FatSector {
     sector: u32,
-    data: [u8; SECTOR_SIZE],
+    data: Vec<u8>,
     dirty: bool,
+    used: u64,
+}
+
+/// M20.h: klaster w cache.
+struct CachedCluster {
+    cluster: u32,
+    data: Vec<u8>,
     used: u64,
 }
 
@@ -394,6 +427,20 @@ pub struct Fat32 {
     label: String,
     fat_cache: Vec<FatSector>,
     clock: u64,
+    /// M20.h: cache klastrów, pozycja w łańcuchu (pierwszy klaster, indeks,
+    /// klaster), wolne policzone z FAT (nie z FSInfo).
+    ccache: Vec<CachedCluster>,
+    ccache_max: usize,
+    hint: Option<(u32, usize, u32)>,
+    free_scanned: bool,
+    /// M20.h: bufor odczytu z wyprzedzeniem: pierwszy sektor (od partycji),
+    /// liczba ważnych sektorów (0 – pusty), dane.
+    ra_lba: u64,
+    ra_len: usize,
+    ra: Vec<u8>,
+    /// M20.f: dysk tylko do odczytu (pendrive USB, prawdziwy SSD) – zmiany
+    /// odrzucane od razu, zanim cokolwiek trafi do buforów w pamięci.
+    read_only: bool,
 }
 
 enum Located {
@@ -420,18 +467,121 @@ impl Fat32 {
         c >= 2 && c < self.total_clusters + 2
     }
 
-    fn read_cluster(&self, c: u32, buf: &mut [u8]) -> Result<()> {
+    /// Cały klaster `c` do `buf` (cluster_bytes) – przez cache klastrów.
+    fn read_cluster(&mut self, c: u32, buf: &mut [u8]) -> Result<()> {
         if !self.valid_cluster(c) {
             return Err(FsError::Corrupt("cluster number out of range"));
         }
-        self.read_sectors(self.cluster_lba(c), buf)
+        self.clock += 1;
+        if let Some(e) = self.ccache.iter_mut().find(|e| e.cluster == c) {
+            e.used = self.clock;
+            buf.copy_from_slice(&e.data);
+            return Ok(());
+        }
+        self.read_data(self.cluster_lba(c), buf)?;
+        self.cache_put(c, buf);
+        Ok(())
     }
 
-    fn write_cluster(&self, c: u32, buf: &[u8]) -> Result<()> {
+    /// M20.h: odczyt z obszaru danych; mały – przez bufor z wyprzedzeniem.
+    fn read_data(&mut self, lba: u64, out: &mut [u8]) -> Result<()> {
+        let ns = out.len() / SECTOR_SIZE;
+        if ns >= RA_SECTORS {
+            return self.read_sectors(lba, out);
+        }
+        let hit = self.ra_len > 0 && lba >= self.ra_lba && lba + ns as u64 <= self.ra_lba + self.ra_len as u64;
+        if !hit {
+            let end = self.data_start + self.total_clusters as u64 * self.spc as u64;
+            let n = (RA_SECTORS as u64).min(end.saturating_sub(lba)) as usize;
+            if n < ns {
+                return self.read_sectors(lba, out);
+            }
+            if self.ra.is_empty() {
+                self.ra = vec![0u8; RA_SECTORS * SECTOR_SIZE];
+            }
+            self.ra_len = 0;
+            let mut ra = core::mem::take(&mut self.ra);
+            let r = self.read_sectors(lba, &mut ra[..n * SECTOR_SIZE]);
+            self.ra = ra;
+            r?;
+            self.ra_lba = lba;
+            self.ra_len = n;
+        }
+        let off = (lba - self.ra_lba) as usize * SECTOR_SIZE;
+        out.copy_from_slice(&self.ra[off..off + out.len()]);
+        Ok(())
+    }
+
+    fn cache_put(&mut self, c: u32, data: &[u8]) {
+        if let Some(e) = self.ccache.iter_mut().find(|e| e.cluster == c) {
+            e.data.copy_from_slice(data);
+            e.used = self.clock;
+            return;
+        }
+        if self.ccache.len() >= self.ccache_max {
+            let (oldest, _) = self.ccache.iter().enumerate().min_by_key(|(_, e)| e.used).unwrap();
+            let mut e = self.ccache.swap_remove(oldest);
+            e.data.copy_from_slice(data);
+            e.cluster = c;
+            e.used = self.clock;
+            self.ccache.push(e);
+            return;
+        }
+        self.ccache.push(CachedCluster { cluster: c, data: data.to_vec(), used: self.clock });
+    }
+
+    /// Zapis klastra – na dysk i do cache (jeśli tam jest; zapis przez cache).
+    fn write_cluster(&mut self, c: u32, buf: &[u8]) -> Result<()> {
         if !self.valid_cluster(c) {
             return Err(FsError::Corrupt("cluster number out of range"));
         }
-        self.write_sectors(self.cluster_lba(c), buf)
+        let lba = self.cluster_lba(c);
+        if self.ra_len > 0 && lba < self.ra_lba + self.ra_len as u64 && lba + self.spc as u64 > self.ra_lba {
+            self.ra_len = 0; // zapis w zakresie bufora z wyprzedzeniem – unieważniony
+        }
+        let r = self.write_sectors(lba, buf);
+        if r.is_ok() {
+            if let Some(e) = self.ccache.iter_mut().find(|e| e.cluster == c) {
+                e.data.copy_from_slice(buf);
+            }
+        } else {
+            // Stan na dysku nieznany – bez kopii w cache.
+            self.ccache.retain(|e| e.cluster != c);
+        }
+        r
+    }
+
+    /// M20.h: następny klaster łańcucha (błąd, gdy łańcuch się kończy / zły).
+    fn next_cluster(&mut self, c: u32) -> Result<u32> {
+        let n = self.fat_get(c)?;
+        if n >= EOC_MIN {
+            return Err(FsError::Corrupt("file shorter than its size"));
+        }
+        if !self.valid_cluster(n) || n == BAD {
+            return Err(FsError::Corrupt("bad cluster in chain"));
+        }
+        Ok(n)
+    }
+
+    /// M20.h: klaster nr `idx` łańcucha od `first` – od zapamiętanej pozycji,
+    /// jeśli to ten sam łańcuch i nie dalej niż `idx`.
+    fn cluster_at(&mut self, first: u32, idx: usize) -> Result<u32> {
+        let (mut i, mut c) = match self.hint {
+            Some((f, hi, hc)) if f == first && hi <= idx => (hi, hc),
+            _ => (0, first),
+        };
+        if !self.valid_cluster(c) {
+            return Err(FsError::Corrupt("bad cluster in chain"));
+        }
+        if idx > self.total_clusters as usize {
+            return Err(FsError::Corrupt("cluster chain loop"));
+        }
+        while i < idx {
+            c = self.next_cluster(c)?;
+            i += 1;
+        }
+        self.hint = Some((first, idx, c));
+        Ok(c)
     }
 
     // ---------------- montowanie ----------------
@@ -502,6 +652,14 @@ impl Fat32 {
             label,
             fat_cache: Vec::new(),
             clock: 0,
+            ccache: Vec::new(),
+            ccache_max: (CCACHE_BYTES / (spc as usize * SECTOR_SIZE).max(1)).clamp(4, CCACHE_MAX),
+            hint: None,
+            free_scanned: false,
+            ra_lba: 0,
+            ra_len: 0,
+            ra: Vec::new(),
+            read_only: block::is_read_only(disk),
         };
         if !fs.valid_cluster(root_cluster) {
             return Err(FsError::Corrupt("bad root cluster"));
@@ -527,6 +685,7 @@ impl Fat32 {
 
     // ---------------- FAT ----------------
 
+    /// Blok FAT zaczynający się od sektora `sector` (wielokrotność FAT_BLOCK).
     fn fat_slot(&mut self, sector: u32) -> Result<usize> {
         self.clock += 1;
         if let Some(i) = self.fat_cache.iter().position(|s| s.sector == sector) {
@@ -538,7 +697,8 @@ impl Fat32 {
             self.write_fat_sector(oldest)?;
             self.fat_cache.remove(oldest);
         }
-        let mut data = [0u8; SECTOR_SIZE];
+        let n = (FAT_BLOCK as u32).min(self.fat_size.saturating_sub(sector)).max(1) as usize;
+        let mut data = vec![0u8; n * SECTOR_SIZE];
         self.read_sectors(self.reserved as u64 + sector as u64, &mut data)?;
         self.fat_cache.push(FatSector { sector, data, dirty: false, used: self.clock });
         Ok(self.fat_cache.len() - 1)
@@ -559,14 +719,18 @@ impl Fat32 {
 
     fn fat_get(&mut self, c: u32) -> Result<u32> {
         let off = c as usize * 4;
-        let i = self.fat_slot((off / SECTOR_SIZE) as u32)?;
-        Ok(le32(&self.fat_cache[i].data, off % SECTOR_SIZE) & FAT_MASK)
+        let blk = FAT_BLOCK * SECTOR_SIZE;
+        let i = self.fat_slot((off / blk * FAT_BLOCK) as u32)?;
+        Ok(le32(&self.fat_cache[i].data, off % blk) & FAT_MASK)
     }
 
     fn fat_set(&mut self, c: u32, value: u32) -> Result<()> {
+        // Łańcuchy się zmieniają – zapamiętana pozycja nieaktualna.
+        self.hint = None;
         let off = c as usize * 4;
-        let i = self.fat_slot((off / SECTOR_SIZE) as u32)?;
-        let o = off % SECTOR_SIZE;
+        let blk = FAT_BLOCK * SECTOR_SIZE;
+        let i = self.fat_slot((off / blk * FAT_BLOCK) as u32)?;
+        let o = off % blk;
         let old = le32(&self.fat_cache[i].data, o);
         put32(&mut self.fat_cache[i].data, o, (old & !FAT_MASK) | (value & FAT_MASK));
         self.fat_cache[i].dirty = true;
@@ -608,16 +772,44 @@ impl Fat32 {
 
     fn free_clusters(&mut self) -> Result<u32> {
         if let Some(n) = self.free_count {
-            return Ok(n);
-        }
-        let mut n = 0;
-        for c in 2..self.total_clusters + 2 {
-            if self.fat_get(c)? == 0 {
-                n += 1;
+            if self.free_scanned || !self.read_only {
+                return Ok(n);
             }
         }
+        let n = self.count_free()?;
+        self.free_scanned = true;
+        if self.free_count != Some(n) && !self.read_only {
+            self.fsinfo_dirty = true;
+        }
         self.free_count = Some(n);
-        self.fsinfo_dirty = true;
+        Ok(n)
+    }
+
+    /// M20.h: wolne klastry policzone z FAT (blokami po FREE_SCAN_BYTES, bez
+    /// cache FAT; najpierw zapis zmienionych bloków, żeby dysk był aktualny).
+    fn count_free(&mut self) -> Result<u32> {
+        if !self.read_only {
+            for i in 0..self.fat_cache.len() {
+                self.write_fat_sector(i)?;
+            }
+        }
+        let entries = self.total_clusters as usize + 2;
+        let mut buf = vec![0u8; FREE_SCAN_BYTES];
+        let mut n = 0u32;
+        let mut e = 0usize;
+        while e < entries {
+            let bytes = ((entries - e) * 4).min(FREE_SCAN_BYTES);
+            let sectors = bytes.div_ceil(SECTOR_SIZE);
+            let b = &mut buf[..sectors * SECTOR_SIZE];
+            self.read_sectors(self.reserved as u64 + (e * 4 / SECTOR_SIZE) as u64, b)?;
+            for k in 0..bytes / 4 {
+                let c = e + k;
+                if c >= 2 && le32(b, k * 4) & FAT_MASK == 0 {
+                    n += 1;
+                }
+            }
+            e += bytes / 4;
+        }
         Ok(n)
     }
 
@@ -931,6 +1123,10 @@ impl FileSystem for Fat32 {
         "fat32"
     }
 
+    fn read_only(&self) -> bool {
+        self.read_only
+    }
+
     fn source(&self) -> String {
         format!(
             "{}{}, label '{}', {} MiB, {} B clusters",
@@ -974,32 +1170,75 @@ impl FileSystem for Fat32 {
             return Ok(0);
         }
         let n = (out.len() as u64).min(size - offset) as usize;
-        let cb = self.cluster_bytes as u64;
-        let chain = self.chain(e.cluster)?;
-        let mut buf = vec![0u8; cb as usize];
+        let cb = self.cluster_bytes;
+        // M20.h: pozycja w łańcuchu od zapamiętanej, ciągłe klastry jednym
+        // odczytem, końcówki przez cache klastrów.
+        let mut idx = (offset / cb as u64) as usize;
+        let mut c = self.cluster_at(e.cluster, idx)?;
         let mut done = 0;
-        while done < n {
-            let pos = offset + done as u64;
-            let idx = (pos / cb) as usize;
-            let within = (pos % cb) as usize;
-            let c = *chain.get(idx).ok_or(FsError::Corrupt("file shorter than its size"))?;
-            let take = (cb as usize - within).min(n - done);
-            if within == 0 && take == cb as usize {
-                self.read_cluster(c, &mut out[done..done + take])?;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            let within = ((offset + done as u64) % cb as u64) as usize;
+            let left = n - done;
+            if within == 0 && left >= cb {
+                // Ciąg pełnych klastrów c, c+1, … (najwyżej RUN_MAX bajtów).
+                let max = (left / cb).min((RUN_MAX / cb).max(1));
+                let mut k = 1;
+                let mut next = None;
+                while k < max {
+                    let nx = self.next_cluster(c + k as u32 - 1)?;
+                    if nx != c + k as u32 {
+                        next = Some(nx);
+                        break;
+                    }
+                    k += 1;
+                }
+                if !self.valid_cluster(c + k as u32 - 1) {
+                    return Err(FsError::Corrupt("cluster number out of range"));
+                }
+                let lba = self.cluster_lba(c);
+                self.read_data(lba, &mut out[done..done + k * cb])?;
+                done += k * cb;
+                idx += k - 1;
+                c += k as u32 - 1;
+                if done >= n {
+                    break;
+                }
+                c = match next {
+                    Some(nx) => nx,
+                    None => self.next_cluster(c)?,
+                };
+                idx += 1;
             } else {
+                if buf.is_empty() {
+                    buf = vec![0u8; cb];
+                }
                 self.read_cluster(c, &mut buf)?;
+                let take = (cb - within).min(left);
                 out[done..done + take].copy_from_slice(&buf[within..within + take]);
+                done += take;
+                if done >= n {
+                    break;
+                }
+                c = self.next_cluster(c)?;
+                idx += 1;
             }
-            done += take;
         }
+        self.hint = Some((e.cluster, idx, c));
         Ok(n)
     }
 
     fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
         self.do_write(path, offset, data)
     }
 
     fn truncate(&mut self, path: &str, size: u64) -> Result<()> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
         let (mut dir, mut e) = self.file_entry(path)?;
         let old = e.size as u64;
         if size > old {
@@ -1022,6 +1261,9 @@ impl FileSystem for Fat32 {
     }
 
     fn create(&mut self, path: &str) -> Result<()> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
         let (parent, name) = split_parent(path);
         let dir = self.dir_cluster(parent)?;
         self.add_entry(dir, name, ATTR_ARCHIVE, 0)?;
@@ -1029,6 +1271,9 @@ impl FileSystem for Fat32 {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<()> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
         let (parent, name) = split_parent(path);
         if !valid_long_name(name) {
             return Err(FsError::InvalidName);
@@ -1063,6 +1308,9 @@ impl FileSystem for Fat32 {
     }
 
     fn remove(&mut self, path: &str) -> Result<()> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
         let (mut dir, e) = match self.locate(path)? {
             Located::Root => return Err(FsError::Busy),
             Located::Entry(buf, e) => (buf, e),

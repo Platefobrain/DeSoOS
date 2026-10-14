@@ -216,6 +216,13 @@ pub extern "sysv64" fn kernel_main(
     // M19: usługi w user space.
     #[cfg(selftest)]
     user::svc_self_test();
+    // M20.e: autorepeat klawiatur USB (zadanie jądra; przed samotestami USB).
+    input::start_repeat_task();
+    // M20.f: zadanie usb-disks (montowanie dysków USB) – od startu, przed samotestami.
+    user::ublk::start_monitor();
+    // M20: USB – kontroler xHCI i usbd w user space.
+    #[cfg(selftest)]
+    user::usb_self_test();
     #[cfg(selftest)]
     user::stress_self_test();
 

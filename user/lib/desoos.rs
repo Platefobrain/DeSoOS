@@ -66,6 +66,12 @@ pub const SYS_DMA_ALLOC: u64 = 44;
 pub const SYS_DMA_PHYS: u64 = 45;
 pub const SYS_SYSINFO: u64 = 46;
 pub const SYS_SYSCTL: u64 = 47;
+/// M20.b: dev_find(hw_root, klasa, nr) – urządzenie PCI po klasie.
+pub const SYS_DEV_FIND: u64 = 48;
+/// M20.e: input_inject(INPUT, zdarzenia, n) – klawiatura / mysz z usbd.
+pub const SYS_INPUT_INJECT: u64 = 49;
+/// M20.f: blk_attach(BLK, kanał, bufor, info) – usbd rejestruje pendrive.
+pub const SYS_BLK_ATTACH: u64 = 50;
 
 /// M19.b: sygnały wait_many.
 pub const W_READABLE: u64 = 1;
@@ -108,6 +114,13 @@ pub const KIND_IRQ: u64 = 8;
 /// M19.i: prawo do akcji systemowych (reboot, halt, sync, stress) – init slot 4,
 /// shell od init też slot 4 (programom go nie przekazuje).
 pub const KIND_SYSCTL: u64 = 9;
+/// M20.e: uchwyt INPUT (jądro -> init slot 5 -> usbd slot 5).
+pub const KIND_INPUT: u64 = 10;
+pub const INPUT: u64 = 5;
+/// M20.f: uchwyt BLK (rejestracja dysku USB) – u init i usbd w slocie 6.
+pub const KIND_BLK: u64 = 11;
+pub const BLK: u64 = 6;
+pub const ETIMEDOUT: i64 = -110;
 pub const HW_ROOT: u64 = 3;
 pub const SYSCTL: u64 = 4;
 pub const SYSCTL_REBOOT: u64 = 1;
@@ -138,6 +151,7 @@ pub const WNOHANG: u64 = 1;
 pub const STATUS_SIGNALED: u64 = 0x100;
 
 pub const ENOENT: i64 = -2;
+pub const EBADF: i64 = -9;
 pub const ECHILD: i64 = -10;
 pub const ERANGE: i64 = -34;
 
@@ -343,6 +357,76 @@ pub const fn bdf(bus: u64, dev: u64, func: u64) -> u64 {
 /// inna usługa; ENODEV: brak urządzenia).
 pub fn dev_claim(root: u64, bdf: u64) -> i64 {
     syscall3(SYS_DEV_CLAIM, root, bdf, 0)
+}
+
+/// M20.b: klasa PCI kontrolera xHCI (USB 3): 0C (szyna szeregowa), 03 (USB), 30 (xHCI).
+pub const CLASS_XHCI: u64 = 0x0C_03_30;
+
+/// M20.b: adres (bdf) `nr`-tego urządzenia PCI o klasie `class` (24 bity:
+/// klasa << 16 | podklasa << 8 | prog_if) – tylko z HW_ROOT.  ENOENT: nie ma
+/// dalszych; EBADF: uchwyt nie jest HW_ROOT.  Nie przejmuje urządzenia.
+pub fn dev_find(root: u64, class: u64, nr: u64) -> i64 {
+    syscall3(SYS_DEV_FIND, root, class, nr)
+}
+
+/// M20.e: zdarzenie dla input_inject (8 B): rodzaj 1 = klawisz (wciśnięty,
+/// HID usage), 2 = mysz (kółko, przyciski).
+pub fn key_event(usage: u8, pressed: bool) -> [u8; 8] {
+    [1, pressed as u8, usage, 0, 0, 0, 0, 0]
+}
+
+pub fn mouse_event(buttons: u8, wheel: i8) -> [u8; 8] {
+    [2, wheel as u8, buttons, 0, 0, 0, 0, 0]
+}
+
+/// M20.e: zdarzenia do podsystemu wejścia jądra (≤ 64) – stan diod (bit 0
+/// Num, 1 Caps, 2 Scroll) albo -errno (EBADF / EACCES / EINVAL).
+pub fn input_inject(h: u64, events: &[[u8; 8]]) -> i64 {
+    syscall3(SYS_INPUT_INJECT, h, events.as_ptr() as u64, events.len() as u64)
+}
+
+/// M20.f: opis dysku dla blk_attach (64 B).
+pub struct BlkInfo {
+    pub blocks: u64,
+    pub block_size: u32,
+    /// Sloty po 64 KiB w buforze (1..8).
+    pub slots: u32,
+    /// 0 = domyślny (5 s).
+    pub timeout_ms: u32,
+    pub desc: [u8; 40],
+}
+
+/// M20.f: rejestracja dysku USB (tylko odczyt) – numer (0 = sda) albo -errno.
+/// Jądro wysyła kanałem żądania 32 B (id, op 1 = READ, lba u64, bloki u32,
+/// slot u32), odpowiedź ≥ 12 B (id, status, bloki); dane – w slocie bufora.
+pub fn blk_attach(h: u64, chan: u64, buf: u64, info: &BlkInfo) -> i64 {
+    let mut raw = [0u8; 64];
+    raw[0..8].copy_from_slice(&info.blocks.to_le_bytes());
+    raw[8..12].copy_from_slice(&info.block_size.to_le_bytes());
+    raw[12..16].copy_from_slice(&info.slots.to_le_bytes());
+    raw[16..20].copy_from_slice(&info.timeout_ms.to_le_bytes());
+    raw[24..64].copy_from_slice(&info.desc);
+    syscall6(SYS_BLK_ATTACH, h, chan, buf, raw.as_ptr() as u64, 0, 0)
+}
+
+/// Nazwa dysku USB w jądrze: 0 -> sda, 26 -> sdaa.
+pub fn disk_name(mut n: u64, out: &mut [u8; 8]) -> &str {
+    let mut tmp = [0u8; 6];
+    let mut k = 0;
+    loop {
+        tmp[k] = b'a' + (n % 26) as u8;
+        k += 1;
+        if n < 26 || k == tmp.len() {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    out[0] = b's';
+    out[1] = b'd';
+    for i in 0..k {
+        out[2 + i] = tmp[k - 1 - i];
+    }
+    core::str::from_utf8(&out[..2 + k]).unwrap_or("sd?")
 }
 
 /// M19.c: opis przejętego urządzenia.

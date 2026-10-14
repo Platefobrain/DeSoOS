@@ -68,6 +68,10 @@ pub mod kind {
     pub const IRQ: u64 = 8;
     /// M19.i: akcje systemowe (reboot, halt, sync, stress) – syscall sysctl.
     pub const SYSCTL: u64 = 9;
+    /// M20.e: wstrzykiwanie zdarzeń wejścia (klawiatura / mysz USB) – input_inject.
+    pub const INPUT: u64 = 10;
+    /// M20.f: rejestracja dysku USB w jądrze (blk_attach) – tylko usbd.
+    pub const BLK: u64 = 11;
 }
 
 /// M18.b: wpis tablicy uchwytów procesu – obiekt + prawa.
@@ -101,6 +105,11 @@ impl Handle {
             // M19.i: tylko DUP – init daje kopię shellowi (spawn_ex), ale nie
             // da się go wysłać w komunikacie.
             Fd::Sysctl => return Handle { obj, rights: DUP },
+            // M20.e: WRITE (input_inject) + DUP (init daje kopie usbd); bez
+            // TRANSFER – nie da się go wysłać w komunikacie.
+            Fd::Input(_) => return Handle { obj, rights: WRITE | DUP },
+            // M20.f: jak INPUT – WRITE (blk_attach) + DUP (init daje kopie usbd).
+            Fd::Blk => return Handle { obj, rights: WRITE | DUP },
         };
         Handle { obj, rights: io | DUP | TRANSFER }
     }
@@ -116,6 +125,8 @@ impl Handle {
             Fd::Device(_) => kind::DEVICE,
             Fd::Irq(_) => kind::IRQ,
             Fd::Sysctl => kind::SYSCTL,
+            Fd::Input(_) => kind::INPUT,
+            Fd::Blk => kind::BLK,
         }
     }
 }
@@ -140,6 +151,12 @@ pub enum Fd {
     Irq(Arc<super::device::IrqObj>),
     /// M19.i: prawo do akcji systemowych (sysctl) – tworzy je tylko jądro dla init.
     Sysctl,
+    /// M20.e: źródło zdarzeń wejścia (input_inject) – tworzy je tylko jądro dla
+    /// init; każda kopia to osobne źródło (inputsrc.rs).
+    Input(alloc::boxed::Box<super::inputsrc::InputEnd>),
+    /// M20.f: prawo do rejestracji dysku (blk_attach) – tworzy je tylko jądro
+    /// dla init (slot 6), init daje kopię każdemu usbd.
+    Blk,
 }
 
 pub struct Process {

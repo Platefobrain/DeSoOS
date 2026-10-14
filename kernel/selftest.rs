@@ -32,7 +32,10 @@ pub fn pass() {
 /// #PF) sprząta reap w pętli idle chwilę po ich końcu; pomiar przed końcem
 /// sprzątania dawał na końcu zestawu WIĘCEJ wolnych ramek niż na starcie
 /// (fałszywy "frames leaked", IPC TEST u Dawida: 115418 -> 115478).
-/// Czeka, aż liczba się nie zmienia przez 3 kolejne próbki co 5 ms (max 2 s).
+/// Czeka, aż liczba się nie zmienia przez 10 kolejnych próbek co 5 ms (max 2 s).
+/// v0.26.1: 3 próbki (15 ms) bywały za krótkie (IPC TEST u Dawida: 111523 ->
+/// 111933 – na końcu WIĘCEJ wolnych), a koniec zestawu sprawdza „nie mniej niż
+/// na starcie” – zwolnienie resztek po poprzednim zestawie to nie wyciek.
 pub fn settled_free_frames() -> u64 {
     let mut last = u64::MAX;
     let mut stable = 0;
@@ -41,7 +44,7 @@ pub fn settled_free_frames() -> u64 {
         let now = crate::sched::stack::free_frames_flushed();
         if now == last {
             stable += 1;
-            if stable >= 3 {
+            if stable >= 10 {
                 return now;
             }
         } else {

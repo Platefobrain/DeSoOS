@@ -578,11 +578,115 @@ pub fn start_auto_from_build() {
     }
 }
 
+// ------------------------------------------------------------
+// M20.g: usbd w autostressie – w trakcie stressu zadanie czyta w kółko
+// największy plik z pendrive'a (/usbN, np. pendrive startowy na Legionie);
+// każde przejście liczy sumę kontrolną – wszystkie muszą być równe.
+// ------------------------------------------------------------
+
+static USB_STOP: AtomicBool = AtomicBool::new(false);
+static USB_DONE: AtomicBool = AtomicBool::new(false);
+static USB_BYTES: AtomicU64 = AtomicU64::new(0);
+static USB_ERRORS: AtomicU64 = AtomicU64::new(0);
+static USB_PASSES: AtomicU64 = AtomicU64::new(0);
+static USB_MISMATCH: AtomicU64 = AtomicU64::new(0);
+static USB_FILE: SpinLock<String> = SpinLock::new("autostress usb file", level::TEST_OUTER, String::new());
+
+/// Największy plik (≤ 64 MiB) pod `dir`, do 4 poziomów katalogów.
+fn largest_file(dir: &str, depth: u32, best: &mut (u64, String)) {
+    let Ok(entries) = crate::fs::read_dir(dir) else { return };
+    for e in entries {
+        if e.name == "." || e.name == ".." {
+            continue;
+        }
+        let path = format!("{}/{}", dir, e.name);
+        match e.kind {
+            crate::fs::FileType::Directory if depth < 4 => largest_file(&path, depth + 1, best),
+            crate::fs::FileType::File if e.size > best.0 && e.size <= 64 * 1024 * 1024 => *best = (e.size, path),
+            _ => {}
+        }
+    }
+}
+
+fn usb_stress_task(_: usize) {
+    let path = USB_FILE.lock().clone();
+    let mut buf = alloc::vec![0u8; 65536];
+    let mut first: Option<u64> = None;
+    while !USB_STOP.load(Ordering::SeqCst) {
+        let mut off = 0u64;
+        let mut sum = 0u64;
+        let mut ok = true;
+        loop {
+            if USB_STOP.load(Ordering::SeqCst) {
+                ok = false; // niepełne przejście – bez porównania
+                break;
+            }
+            match crate::fs::read(&path, off, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for (i, &b) in buf[..n].iter().enumerate() {
+                        sum = sum.wrapping_mul(31).wrapping_add(b as u64 ^ (off + i as u64));
+                    }
+                    off += n as u64;
+                    USB_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    USB_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    ok = false;
+                    crate::time::sleep_ms(100);
+                    break;
+                }
+            }
+        }
+        if ok {
+            USB_PASSES.fetch_add(1, Ordering::Relaxed);
+            match first {
+                None => first = Some(sum),
+                Some(f) if f != sum => {
+                    USB_MISMATCH.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+    USB_DONE.store(true, Ordering::SeqCst);
+}
+
+/// Start czytania z pendrive'a (jeśli jest zamontowany): Some(plik).
+fn usb_stress_start() -> Option<String> {
+    let mount = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb"))?;
+    let mut best = (0u64, String::new());
+    largest_file(&mount.0, 0, &mut best);
+    if best.0 == 0 {
+        return None;
+    }
+    *USB_FILE.lock() = best.1.clone();
+    for a in [&USB_BYTES, &USB_ERRORS, &USB_PASSES, &USB_MISMATCH] {
+        a.store(0, Ordering::SeqCst);
+    }
+    USB_STOP.store(false, Ordering::SeqCst);
+    USB_DONE.store(false, Ordering::SeqCst);
+    crate::sched::spawn("usb-stress", usb_stress_task, 0).ok()?;
+    Some(best.1)
+}
+
 fn auto_task(secs: usize) {
     crate::time::sleep_ms(5_000);
     let cpus = crate::arch::x86_64::smp::online_count();
     crate::serial_println!("[AUTOSTRESS v{}] {} s on {} CPU(s)...", crate::shell::VERSION, secs, cpus);
+    // M20.h: odczyt z pendrive'a na spokojnym systemie (przed stressem).
+    let usb_calm = usb_calm_bench();
+    let usb_file = usb_stress_start();
+    let t_usb = ticks();
     let result = run(secs as u64 * 1000);
+    let usb_ms = (ticks() - t_usb).max(1);
+    if usb_file.is_some() {
+        USB_STOP.store(true, Ordering::SeqCst);
+        let t0 = ticks();
+        while !USB_DONE.load(Ordering::SeqCst) && ticks() - t0 < 10_000 {
+            crate::time::sleep_ms(10);
+        }
+    }
     let mut out = String::new();
     crate::shell::cpus_report(&mut out);
     crate::shell::mem_report(&mut out);
@@ -604,12 +708,62 @@ fn auto_task(secs: usize) {
         Ok((human, _)) => crate::serial_println!("[AUTOSTRESS v{}]   {}", v, human),
         Err(e) => crate::serial_println!("[AUTOSTRESS v{}]   ipcbench FAIL: {}", v, e),
     }
+    let (ub, ue, up, um) = (
+        USB_BYTES.load(Ordering::SeqCst),
+        USB_ERRORS.load(Ordering::SeqCst),
+        USB_PASSES.load(Ordering::SeqCst),
+        USB_MISMATCH.load(Ordering::SeqCst),
+    );
+    let usb_kv = match &usb_file {
+        Some(f) => {
+            crate::serial_println!(
+                "[AUTOSTRESS v{}]   usb: {} read during the stress: {} MiB, {} KiB/s, {} full passes ({}), {} errors",
+                v,
+                f,
+                ub / (1024 * 1024),
+                ub * 1000 / 1024 / usb_ms,
+                up,
+                if up == 0 { String::from("none complete") } else if um == 0 { String::from("all identical") } else { format!("{} DIFFERENT", um) },
+                ue
+            );
+            format!(" usb_mib={} usb_kbs={} usb_err={} usb_bad={}", ub / (1024 * 1024), ub * 1000 / 1024 / usb_ms, ue, um)
+        }
+        None => {
+            crate::serial_println!("[AUTOSTRESS v{}]   usb: no USB disk mounted - USB read test skipped", v);
+            String::new()
+        }
+    };
+    // M20.h: klawiatura USB – od przerwania xHCI do znaku w jądrze (wszystkie
+    // wciśnięcia od startu, także w trakcie stressu).
+    let (hn, havg, hmin, hmax) = crate::input::hid_latency();
+    if hn == 0 {
+        crate::serial_println!("[AUTOSTRESS v{}]   usb keyboard: no USB key presses since boot - latency not measured", v);
+    } else {
+        crate::serial_println!("[AUTOSTRESS v{}]   usb keyboard: {} key presses, interrupt -> character avg {} us (min {}, max {})", v, hn, havg, hmin, hmax);
+    }
+    let mut usb_line = format!("[RESULT-USB] ver={} hid_n={} hid_avg_us={} hid_max_us={}", v, hn, havg, hmax);
+    if let Some((f, big, small, same)) = &usb_calm {
+        crate::serial_println!(
+            "[AUTOSTRESS v{}]   usb: {} read before the stress: {} KiB/s (256 KiB reads), {} KiB/s (4 KiB reads, like cat){}",
+            v,
+            f,
+            big,
+            small,
+            if *same { ", identical" } else { ", DIFFERENT DATA" }
+        );
+        usb_line.push_str(&format!(" read_kbs={} cat_kbs={} same={}", big, small, *same as u8));
+    }
+    if let Some(kv) = usb_kv.strip_prefix(' ') {
+        usb_line.push(' ');
+        usb_line.push_str(kv);
+    }
     // M18.f: jedna linia do maszynowego porównywania wersji (agent / skrypt).
     let mode = if pool_per_cpu() == 0 { String::from("compare") } else { format!("max{}", pool_per_cpu()) };
-    let pass = result.is_ok() && bench.is_ok();
+    let calm_ok = usb_calm.as_ref().map_or(true, |c| c.3);
+    let pass = result.is_ok() && bench.is_ok() && ue == 0 && um == 0 && calm_ok;
     let line = match &result {
         Ok(r) => format!(
-            "[RESULT] ver={} mode={} cpus={} ms={} scripts={} primes={} ipc={} idle={} {} pass={}",
+            "[RESULT] ver={} mode={} cpus={} ms={} scripts={} primes={} ipc={} idle={} {}{} pass={}",
             v,
             mode,
             r.cpus,
@@ -619,11 +773,36 @@ fn auto_task(secs: usize) {
             r.jobs[2],
             r.idle_pct,
             bench.as_ref().map(|(_, k)| k.clone()).unwrap_or_default(),
+            usb_kv,
             pass as u8
         ),
         Err(e) => format!("[RESULT] ver={} mode={} cpus={} pass=0 error=\"{}\"", v, mode, cpus, e),
     };
     crate::serial_println!("{}", line);
+    if usb_calm.is_some() || hn > 0 {
+        crate::serial_println!("{}", usb_line);
+    }
+}
+
+/// M20.h: największy plik z /usbN (najwyżej 64 MiB) buforem 256 KiB i 4 KiB:
+/// (plik, KiB/s, KiB/s, te same dane).  None – brak pendrive'a / błąd.
+fn usb_calm_bench() -> Option<(String, u64, u64, bool)> {
+    let mount = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb"))?;
+    let mut best = (0u64, String::new());
+    largest_file(&mount.0, 0, &mut best);
+    if best.0 == 0 {
+        return None;
+    }
+    let max = 64 << 20;
+    let big = crate::user::ublk::read_bench(&best.1, 256 * 1024, max);
+    let small = crate::user::ublk::read_bench(&best.1, 4096, max.min(16 << 20));
+    let kbs = |r: &Result<(u64, u64, u64), crate::fs::FsError>| r.as_ref().map(|&(b, us, _)| b * 1_000_000 / 1024 / us).unwrap_or(0);
+    // Ta sama długość -> sumy muszą być równe (4 KiB czyta najwyżej 16 MiB).
+    let same = match (&big, &small) {
+        (Ok((b1, _, s1)), Ok((b2, _, s2))) => b1 != b2 || s1 == s2,
+        _ => false,
+    };
+    Some((best.1, kbs(&big), kbs(&small), same))
 }
 
 /// M18.f: /bin/ipcbench – (linia dla ludzi, "k=v ..." do [RESULT]).

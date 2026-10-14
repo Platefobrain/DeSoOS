@@ -379,3 +379,256 @@ pub fn reset() {
 pub fn pending() -> usize {
     with_state(|s| s.len)
 }
+
+// ------------------------------------------------------------
+// M20.e: wejście z USB (usbd przez syscall input_inject)
+//
+// usbd przysyła kody HID (usage, strona 7) – tu tłumaczymy je na `KeyCode`
+// i dalej wszystko jak przy PS/2.  Klawiatura USB (w przeciwieństwie do PS/2)
+// sama nie powtarza klawiszy, więc autorepeat robi jądro: 500 ms, potem co
+// 33 ms (~30/s).  Jeden powtarzany klawisz naraz – ostatnio wciśnięty, jak na
+// zwykłej klawiaturze.  Puszczenie klawiszy źródła, które zniknęło (koniec
+// usbd), też tutaj.
+//
+// v0.25.1: robi to zadanie jądra "input-repeat" (pod BKL), NIE tick zegara.
+// W v0.25.0 był to tick: przerwanie zegara budziło czekających na wejście
+// (blokada 'waiters', poziom 45) na CPU, którego przerwany kod trzymał
+// 'stress-counter' (210) – lockdep: PANIC przy pisaniu w trakcie stressu.
+// ------------------------------------------------------------
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+pub const REPEAT_DELAY_MS: u64 = 500;
+pub const REPEAT_PERIOD_MS: u64 = 33;
+
+/// Powtarzany klawisz: HID usage (0 = brak), źródło, następna chwila (ms).
+static REPEAT_USAGE: AtomicU64 = AtomicU64::new(0);
+static REPEAT_SRC: AtomicU64 = AtomicU64::new(0);
+static REPEAT_NEXT: AtomicU64 = AtomicU64::new(0);
+/// Klawisze źródeł, które zniknęły – do puszczenia w ticku.
+static ORPHANS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ORPHANS_PENDING: AtomicBool = AtomicBool::new(false);
+/// Liczniki (testy, `sysinfo`): zdarzenia z USB i powtórzenia.
+static USB_EVENTS: AtomicU64 = AtomicU64::new(0);
+static USB_REPEATS: AtomicU64 = AtomicU64::new(0);
+
+/// HID usage (strona 7) -> KeyCode.
+pub fn hid_key(usage: u8) -> Option<KeyCode> {
+    use KeyCode::*;
+    const LETTERS: [KeyCode; 26] = [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z];
+    const DIGITS: [KeyCode; 10] = [Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9, Key0];
+    const FKEYS: [KeyCode; 12] = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12];
+    const KP: [KeyCode; 9] = [Kp1, Kp2, Kp3, Kp4, Kp5, Kp6, Kp7, Kp8, Kp9];
+    Some(match usage {
+        0x04..=0x1D => LETTERS[(usage - 0x04) as usize],
+        0x1E..=0x27 => DIGITS[(usage - 0x1E) as usize],
+        0x28 => Enter,
+        0x29 => Escape,
+        0x2A => Backspace,
+        0x2B => Tab,
+        0x2C => Space,
+        0x2D => Minus,
+        0x2E => Equals,
+        0x2F => LeftBracket,
+        0x30 => RightBracket,
+        0x31 | 0x32 => Backslash,
+        0x33 => Semicolon,
+        0x34 => Quote,
+        0x35 => Backtick,
+        0x36 => Comma,
+        0x37 => Period,
+        0x38 => Slash,
+        0x39 => CapsLock,
+        0x3A..=0x45 => FKEYS[(usage - 0x3A) as usize],
+        0x46 => PrintScreen,
+        0x47 => ScrollLock,
+        0x48 => Pause,
+        0x49 => Insert,
+        0x4A => Home,
+        0x4B => PageUp,
+        0x4C => Delete,
+        0x4D => End,
+        0x4E => PageDown,
+        0x4F => Right,
+        0x50 => Left,
+        0x51 => Down,
+        0x52 => Up,
+        0x53 => NumLock,
+        0x54 => KpSlash,
+        0x55 => KpStar,
+        0x56 => KpMinus,
+        0x57 => KpPlus,
+        0x58 => KpEnter,
+        0x59..=0x61 => KP[(usage - 0x59) as usize],
+        0x62 => Kp0,
+        0x63 => KpPeriod,
+        0x64 => NonUsBackslash,
+        0x65 => Menu,
+        0xE0 => LeftCtrl,
+        0xE1 => LeftShift,
+        0xE2 => LeftAlt,
+        0xE3 => LeftGui,
+        0xE4 => RightCtrl,
+        0xE5 => RightShift,
+        0xE6 => RightAlt,
+        0xE7 => RightGui,
+        _ => return None,
+    })
+}
+
+/// Klawisze, które się nie powtarzają (modyfikatory, blokady).
+fn no_repeat(k: KeyCode) -> bool {
+    use KeyCode::*;
+    matches!(k, LeftShift | RightShift | LeftCtrl | RightCtrl | LeftAlt | RightAlt | LeftGui | RightGui | CapsLock | NumLock | ScrollLock | Pause | PrintScreen)
+}
+
+/// Klawisz z USB (syscall input_inject – pod BKL).
+pub fn usb_key(src: u64, usage: u8, pressed: bool, now: u64) {
+    let Some(k) = hid_key(usage) else { return };
+    USB_EVENTS.fetch_add(1, Ordering::Relaxed);
+    handle_key(k, pressed);
+    if pressed && !no_repeat(k) {
+        REPEAT_SRC.store(src, Ordering::Relaxed);
+        REPEAT_NEXT.store(now + REPEAT_DELAY_MS, Ordering::Relaxed);
+        REPEAT_USAGE.store(usage as u64, Ordering::Release);
+        REPEAT_GEN.fetch_add(1, Ordering::Release);
+        REPEAT_WAIT.wake_all();
+    } else if !pressed && REPEAT_USAGE.load(Ordering::Relaxed) == usage as u64 && REPEAT_SRC.load(Ordering::Relaxed) == src {
+        REPEAT_USAGE.store(0, Ordering::Release);
+    }
+    crate::console::wake_input();
+}
+
+/// Mysz z USB: kółko przewija konsolę (jak PS/2; dodatnie = w dół).
+pub fn usb_mouse(_buttons: u8, wheel: i8) {
+    USB_EVENTS.fetch_add(1, Ordering::Relaxed);
+    if wheel != 0 {
+        crate::drivers::mouse::add_wheel(wheel as i32);
+    }
+}
+
+/// Źródło zniknęło (Drop uchwytu INPUT): jego klawisze do puszczenia przez
+/// zadanie input-repeat (tu tylko atomiki).
+pub fn usb_release_all(bits: [u64; 4], src: u64) {
+    if REPEAT_SRC.load(Ordering::Relaxed) == src {
+        REPEAT_USAGE.store(0, Ordering::Release);
+    }
+    if bits.iter().any(|&b| b != 0) {
+        for (o, b) in ORPHANS.iter().zip(bits) {
+            o.fetch_or(b, Ordering::Relaxed);
+        }
+        ORPHANS_PENDING.store(true, Ordering::Release);
+    }
+}
+
+/// Zadanie "input-repeat": czeka (WaitQueue) do terminu powtórzenia albo na
+/// pobudkę z usb_key; puszczenie klawiszy zniknięłych źródeł – co 100 ms (Drop
+/// uchwytu nie budzi zadania – może biec w kontekście z blokadami).
+static REPEAT_WAIT: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
+/// Rośnie przy każdej pobudce – zadanie przelicza termin (nowy klawisz).
+static REPEAT_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn repeat_task(_: usize) {
+    loop {
+        let now = crate::time::ticks();
+        if repeat_due(now) {
+            crate::sched::bkl::with(|| repeat_tick(now));
+        }
+        let usage = REPEAT_USAGE.load(Ordering::Acquire);
+        let timeout = if usage != 0 {
+            REPEAT_NEXT.load(Ordering::Relaxed).saturating_sub(now).max(1)
+        } else if USB_EVENTS.load(Ordering::Relaxed) == 0 {
+            1000 // jeszcze żadnej klawiatury USB – rzadko
+        } else {
+            100
+        };
+        let seen = REPEAT_GEN.load(Ordering::Acquire);
+        REPEAT_WAIT.wait_until(|| repeat_due(crate::time::ticks()) || REPEAT_GEN.load(Ordering::Acquire) != seen, Some(timeout));
+    }
+}
+
+/// Start zadania autorepeat (raz, przy starcie jądra – przed samotestami USB).
+pub fn start_repeat_task() {
+    if crate::sched::spawn("input-repeat", repeat_task, 0).is_err() {
+        crate::serial_println!("[INPUT] cannot start the USB key repeat task - no autorepeat for USB keyboards");
+    }
+}
+
+/// Czy zadanie ma coś do zrobienia (same atomiki).
+pub fn repeat_due(now: u64) -> bool {
+    ORPHANS_PENDING.load(Ordering::Acquire)
+        || (REPEAT_USAGE.load(Ordering::Acquire) != 0 && now >= REPEAT_NEXT.load(Ordering::Relaxed))
+}
+
+/// Zadanie input-repeat (pod BKL): puszczenie klawiszy po zniknięciu źródła, autorepeat.
+pub fn repeat_tick(now: u64) {
+    if ORPHANS_PENDING.swap(false, Ordering::AcqRel) {
+        for (w, o) in ORPHANS.iter().enumerate() {
+            let mut bits = o.swap(0, Ordering::Relaxed);
+            while bits != 0 {
+                let b = bits.trailing_zeros();
+                bits &= bits - 1;
+                if let Some(k) = hid_key((w as u32 * 64 + b) as u8) {
+                    handle_key(k, false);
+                }
+            }
+        }
+        crate::console::wake_input();
+    }
+    let usage = REPEAT_USAGE.load(Ordering::Acquire);
+    if usage != 0 && now >= REPEAT_NEXT.load(Ordering::Relaxed) {
+        if let Some(k) = hid_key(usage as u8) {
+            handle_key(k, true);
+            USB_REPEATS.fetch_add(1, Ordering::Relaxed);
+            crate::console::wake_input();
+        }
+        REPEAT_NEXT.store(now + REPEAT_PERIOD_MS, Ordering::Relaxed);
+    }
+}
+
+/// Diody klawiatury dla usbd: bit 0 Num Lock, 1 Caps Lock, 2 Scroll Lock (jak
+/// raport wyjściowy HID).
+pub fn led_bits() -> u64 {
+    let m = modifiers();
+    (m.num_lock() as u64) | (m.caps_lock() as u64) << 1 | (m.scroll_lock() as u64) << 2
+}
+
+// M20.h: opóźnienie klawiatury USB – od przerwania kontrolera xHCI (handler
+// jądra) do znaku w kolejce wejścia jądra (po usbd: obudzenie, zdarzenie z
+// pierścienia, raport HID, input_inject).  Tylko wciśnięcia; > 1 s pomijane
+// (to nie było przerwanie tego raportu).
+static HID_N: AtomicU64 = AtomicU64::new(0);
+static HID_SUM: AtomicU64 = AtomicU64::new(0);
+static HID_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+static HID_MAX: AtomicU64 = AtomicU64::new(0);
+
+pub fn hid_latency_record(us: u64) {
+    if us > 1_000_000 {
+        return;
+    }
+    HID_N.fetch_add(1, Ordering::Relaxed);
+    HID_SUM.fetch_add(us, Ordering::Relaxed);
+    HID_MIN.fetch_min(us, Ordering::Relaxed);
+    HID_MAX.fetch_max(us, Ordering::Relaxed);
+}
+
+/// (liczba, średnia, min, max) w µs; min = 0 przy braku pomiarów.
+pub fn hid_latency() -> (u64, u64, u64, u64) {
+    let n = HID_N.load(Ordering::Relaxed);
+    let min = HID_MIN.load(Ordering::Relaxed);
+    (n, HID_SUM.load(Ordering::Relaxed) / n.max(1), if n == 0 { 0 } else { min }, HID_MAX.load(Ordering::Relaxed))
+}
+
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn hid_latency_reset() {
+    HID_N.store(0, Ordering::Relaxed);
+    HID_SUM.store(0, Ordering::Relaxed);
+    HID_MIN.store(u64::MAX, Ordering::Relaxed);
+    HID_MAX.store(0, Ordering::Relaxed);
+}
+
+/// (zdarzenia z USB, powtórzenia) – testy i statystyki.
+#[allow(dead_code)]
+pub fn usb_stats() -> (u64, u64) {
+    (USB_EVENTS.load(Ordering::Relaxed), USB_REPEATS.load(Ordering::Relaxed))
+}

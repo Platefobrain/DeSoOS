@@ -55,6 +55,14 @@ TMP_NVME="$ROOT/build-stress-nvme.img"
 rm -f "$TMP_DISK" "$TMP_NVME" "$ROOT/build/NvVars"
 truncate -s 64M "$TMP_DISK"
 truncate -s 64M "$TMP_NVME"
+# M20.g: testowy pendrive (FAT32, tylko do odczytu) – autostress czyta z niego w
+# trakcie stressu (usbd + ublk pod obciążeniem); bez python3 – bez pendrive'a.
+TMP_USB="$ROOT/build-stress-usb.img"
+rm -f "$TMP_USB"
+USB_ARGS=()
+if command -v python3 >/dev/null 2>&1 && python3 "$ROOT/mkfat32.py" "$TMP_USB" "$ROOT/build/user/sh" 2>/dev/null; then
+  USB_ARGS=(-drive if=none,id=usbtest,format=raw,file="$TMP_USB",readonly=on -device usb-storage,drive=usbtest)
+fi
 
 LOG="$ROOT/stress-qemu.log"
 : > "$LOG"
@@ -65,9 +73,10 @@ echo "Autostress w QEMU: $ACCEL, $SMP CPU, stress $SECS s (limit ${LIMIT} s)..."
 qemu-system-x86_64 \
   -machine q35 -m 1G -smp "$SMP" "${ACCEL_ARGS[@]}" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-  -device qemu-xhci \
+  -device qemu-xhci,p2=8,p3=8 \
   -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on \
   -device usb-storage,drive=usbboot,bootindex=0 \
+  "${USB_ARGS[@]}" \
   -drive file="$TMP_DISK",format=raw,if=none,id=vd0 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$TMP_NVME",format=raw,if=none,id=nv0 \
@@ -89,7 +98,7 @@ done
 sleep 0.5
 kill "$QPID" 2>/dev/null
 wait "$QPID" 2>/dev/null
-rm -f "$TMP_DISK" "$TMP_NVME"
+rm -f "$TMP_DISK" "$TMP_NVME" "$TMP_USB"
 
 # Wynik: raport autostress (bez tabeli CPU – ta jest w logu).
 sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^.*\[AUTOSTRESS[^]]*\]/[AUTOSTRESS]/' "$LOG" | grep -a "^\[AUTOSTRESS\]" \

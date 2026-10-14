@@ -59,14 +59,24 @@ truncate -s 64M "$TEST_DISK"
 TEST_NVME="$ROOT/build-test-nvme.img"
 rm -f "$TEST_NVME"
 truncate -s 64M "$TEST_NVME"
+# M20.f: testowy pendrive (MBR + FAT32, tylko do odczytu w QEMU): znacznik,
+# 4 MiB wzoru i trzy programy z build/user (test porównuje je z /bin).
+TEST_USB="$ROOT/build-test-usb.img"
+rm -f "$TEST_USB"
+command -v python3 >/dev/null 2>&1 || { echo "Brak python3 (potrzebny do obrazu testowego pendrive'a)"; exit 3; }
+python3 "$ROOT/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "BLAD: mkfat32.py"; exit 3; }
 
 # M16b: build/ trafia do QEMU jako pendrive USB TYLKO DO ODCZYTU (jak
-# prawdziwy pendrive: DeSoOS nie ma sterownika USB, więc go nie widzi).
+# prawdziwy pendrive; od M20.f usbd widzi go jako dysk sdX tylko do odczytu).
 # Wcześniej był to dysk "fat:rw:" – OVMF zapisywał tam swoje NvVars, a QEMU
 # (vvfat) potrafił przy tym uszkodzić build/EFI/BOOT/BOOTX64.EFI.
 rm -f "$ROOT/build/NvVars"
 
 LOG="$ROOT/test.log"
+# M20.d: monitor QEMU dla podłączania w locie (USB TEST 6/6): qemu-hotplug.py
+# wysyła do niego linie „[HOTPLUG] …” z logu (hub z myszą i testowym pendrive'em).
+MON="${TMPDIR:-/tmp}/desoos-monitor-$$.sock"
+rm -f "$MON"
 echo "Uruchamiam samotesty w QEMU ($ACCEL, $SMP CPU, timeout ${TIMEOUT} s)..."
 START=$(date +%s)
 
@@ -78,9 +88,16 @@ QEMU=(qemu-system-x86_64
   -machine q35 -m 512M -smp "$SMP"
   "${ACCEL_ARGS[@]}"
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
-  -device qemu-xhci
+  -device qemu-xhci,id=xhci,p2=8,p3=8
   -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on
-  -device usb-storage,drive=usbboot,bootindex=0
+  -device usb-storage,bus=xhci.0,port=1,drive=usbboot,bootindex=0
+  -device usb-kbd,bus=xhci.0,port=2
+  -device usb-hub,bus=xhci.0,port=3,id=hub1
+  -device usb-mouse,bus=xhci.0,port=3.1
+  -blockdev driver=file,filename="$TEST_USB",node-name=usbtestf,read-only=on
+  -blockdev driver=raw,file=usbtestf,node-name=usbtest,read-only=on
+  -device usb-storage,bus=xhci.0,port=3.2,drive=usbtest,id=hubdisk
+  -monitor unix:"$MON",server=on,wait=off
   -drive file="$TEST_DISK",format=raw,if=none,id=vd0
   -device virtio-blk-pci,drive=vd0
   -drive file="$TEST_NVME",format=raw,if=none,id=nv0
@@ -90,6 +107,10 @@ QEMU=(qemu-system-x86_64
   -fw_cfg name=opt/desoos/autotest,string=1
   -serial stdio -display none -no-reboot)
 
+: > "$LOG"
+python3 "$ROOT/qemu-hotplug.py" "$LOG" "$MON" &
+HOTPLUG_PID=$!
+
 if [ "$VERBOSE" = 1 ]; then
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG"
   CODE=${PIPESTATUS[0]}
@@ -97,7 +118,9 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-rm -f "$TEST_DISK" "$TEST_NVME"
+kill "$HOTPLUG_PID" 2>/dev/null
+wait "$HOTPLUG_PID" 2>/dev/null
+rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
 TIME=$(( $(date +%s) - START ))
 
 PASSED=$(grep -c " PASS" "$LOG" || true)
@@ -105,6 +128,8 @@ SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | sed 's/^.*Self-tests: //')
 echo "Log: test.log (${TIME} s, ${PASSED} testow PASS)"
 # M19.h: pomiar usług (jądro vs user space) – linia [RESULT-SVC] z samotestu SVC.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
+# M20: kontroler USB (xHCI) i usbd – linia [RESULT-USB] z samotestu USB.
+grep -a "^\[RESULT-USB\]" "$LOG" | tail -n1 || true
 
 case "$CODE" in
   33)

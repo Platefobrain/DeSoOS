@@ -106,7 +106,7 @@ pub fn self_test() {
     check!(
         wait_for(2_000, || {
             crate::sched::reap();
-            crate::sched::stack::free_frames_flushed() == frames0
+            crate::sched::stack::free_frames_flushed() >= frames0
         }),
         "frames leaked ({} -> {})",
         frames0,

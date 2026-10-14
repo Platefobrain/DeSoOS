@@ -19,21 +19,21 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use crate::arch::x86_64::percpu::PerCpu;
 
 /// Kategorie 0..SYSCALLS to numery syscalli.
-pub const SYSCALLS: usize = 48; // M19.c: numery syscalli 0..48 (było 40)
-pub const PF_USER: usize = 48;
-pub const IRQ_PIT: usize = 49;
-pub const IRQ_TIMER: usize = 50;
-pub const IRQ_RESCHED: usize = 51;
-pub const REAP: usize = 52;
-pub const EXIT: usize = 53;
-pub const LOAD_ELF: usize = 54;
-pub const CTX_SWITCH: usize = 55;
-pub const DRV_EXEC: usize = 56;
+pub const SYSCALLS: usize = 51; // M20: numery syscalli 0..51 (48 dev_find, 49–50 zarezerwowane w projekcie)
+pub const PF_USER: usize = 51;
+pub const IRQ_PIT: usize = 52;
+pub const IRQ_TIMER: usize = 53;
+pub const IRQ_RESCHED: usize = 54;
+pub const REAP: usize = 55;
+pub const EXIT: usize = 56;
+pub const LOAD_ELF: usize = 57;
+pub const CTX_SWITCH: usize = 58;
+pub const DRV_EXEC: usize = 59;
 /// Pomiary z końcem przed początkiem (nie powinno się zdarzać – kontrola).
-const TSC_SKEW: usize = 57;
-pub const SP_READ: usize = 58;
-pub const SP_ELF: usize = 59;
-pub const SP_TASK: usize = 60;
+const TSC_SKEW: usize = 60;
+pub const SP_READ: usize = 61;
+pub const SP_ELF: usize = 62;
+pub const SP_TASK: usize = 63;
 const N: usize = 64;
 
 const NAMES: [&str; N] = [
@@ -41,8 +41,8 @@ const NAMES: [&str; N] = [
     "getppid", "kill", "chdir", "getcwd", "readdir", "stat", "mkdir", "unlink", "readkey", "tasks", "(21)",
     "dup", "dup2", "seek", "pipe", "brk", "mmap", "munmap", "handle_dup", "handle_info", "chan_create",
     "chan_send", "chan_recv", "shm_create", "shm_map", "spawn_ex", "shm_size", "wait_many", "dev_claim",
-    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "#PF user", "IRQ PIT", "LAPIC timer",
-    "resched IPI", "reap", "exit proc", " spawn:load", "ctx switch", "drv exec", "TSC skew", " sp:readfile", " sp:elf+pt", " sp:task", "?", "?", "?",
+    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "dev_find", "input_inject", "blk_attach", "#PF user", "IRQ PIT", "LAPIC timer",
+    "resched IPI", "reap", "exit proc", " spawn:load", "ctx switch", "drv exec", "TSC skew", " sp:readfile", " sp:elf+pt", " sp:task",
 ];
 
 /// Porównanie napisów w czasie kompilacji.
@@ -70,6 +70,7 @@ const _: () = assert!(
         && same(NAMES[36], "spawn_ex")
         && same(NAMES[38], "wait_many")
         && same(NAMES[41], "dev_map")
+        && same(NAMES[48], "dev_find")
         && same(NAMES[PF_USER], "#PF user")
         && same(NAMES[REAP], "reap")
         && same(NAMES[EXIT], "exit proc")

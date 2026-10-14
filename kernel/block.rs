@@ -4,8 +4,9 @@
 // `BlockDevice` i rejestruje się przez `register()`.  Wyżej (system plików
 // w M9, shell) używa się tylko tego interfejsu – nie wie, jaki to dysk.
 //
-// Jedno żądanie naraz (wywołanie czeka na zakończenie).  M12: dostęp
-// chroniony blokadą LOCK; zadanie czekające na dysk śpi (virtio: BLK_WAIT).
+// Jedno żądanie naraz na dysk (wywołanie czeka na zakończenie).  M12: dostęp
+// pod blokadą (od M20.f – osobna dla każdego dysku); zadanie czekające na
+// dysk śpi (virtio: BLK_WAIT).
 //
 // M16b:
 //   * Dysk tylko do odczytu jest pilnowany TUTAJ (niezależnie od sterownika
@@ -17,6 +18,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -71,6 +73,10 @@ pub trait BlockDevice {
     fn partition_kind(&self) -> Option<&'static str> {
         None
     }
+    /// M20.f: numer dysku-rodzica (partycja) albo None.
+    fn parent(&self) -> Option<usize> {
+        None
+    }
     /// Czyta `buf.len() / 512` sektorów od `lba`.
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError>;
     /// Zapisuje `buf.len() / 512` sektorów od `lba`.
@@ -91,37 +97,81 @@ pub fn check_range(dev_sectors: u64, lba: u64, len: usize) -> Result<u64, BlockE
     }
 }
 
-static mut DEVICES: Vec<Box<dyn BlockDevice>> = Vec::new();
+// M20.f: blokada PER DYSK (dawniej jedna globalna „block layer”) – odczyt z
+// pendrive'a może czekać na usbd do 5 s, a nie może przy tym zatrzymać NVMe
+// ani virtio.  Lista dysków pod krótką blokadą (wyszukanie wpisu, Arc),
+// operacja pod blokadą dysku (KMutex – reentrant, usypiająca).  Partycja
+// bierze swoją blokadę, potem blokadę dysku-rodzica (zawsze w tej kolejności).
+// Kolejność: FS_LOCK -> blokada partycji -> blokada dysku.
+//
+// Usuwanie (M20.f, dysk USB zniknął): wpis listy = None, numer wraca do puli
+// dopiero, gdy nic już go nie używa – usuwający najpierw odmontowuje systemy
+// plików z dysku i jego partycji (ublk.rs).  Operacja w toku trzyma Arc.
 
-/// M12: jedna operacja na dyskach naraz (zadania mogą się wywłaszczać).
-/// Reentrant, więc zagnieżdżone wywołania w tym samym zadaniu są OK.
-static LOCK: crate::sched::sync::KMutex = crate::sched::sync::KMutex::new_named("block layer");
-
-fn devices() -> &'static mut Vec<Box<dyn BlockDevice>> {
-    // Tylko pod LOCK (zadania), nigdy z przerwań.
-    unsafe { &mut *core::ptr::addr_of_mut!(DEVICES) }
+struct Disk {
+    /// Kopia nazwy – `find` bez brania blokady dysku.
+    name: String,
+    /// Dysk-rodzic (partycja) – `partitions_of` bez blokad dysków.
+    parent: Option<usize>,
+    lock: crate::sched::sync::KMutex,
+    dev: core::cell::UnsafeCell<Box<dyn BlockDevice>>,
 }
 
-/// Dodaje dysk; zwraca jego numer.
+// Urządzenie zmienia się tylko pod `lock` (KMutex – jedno zadanie naraz).
+unsafe impl Sync for Disk {}
+unsafe impl Send for Disk {}
+
+static DISKS: crate::sched::spin::SpinLock<Vec<Option<Arc<Disk>>>> =
+    crate::sched::spin::SpinLock::new("block list", crate::sched::spin::level::BLOCK, Vec::new());
+
+fn disk(index: usize) -> Option<Arc<Disk>> {
+    DISKS.lock().get(index).cloned().flatten()
+}
+
+/// Dodaje dysk; zwraca jego numer (pierwszy wolny – po usuniętym dysku USB).
 pub fn register(device: Box<dyn BlockDevice>) -> usize {
-    let _g = LOCK.lock();
-    let d = devices();
-    d.push(device);
-    d.len() - 1
-}
-
-pub fn count() -> usize {
-    let _g = LOCK.lock();
-    devices().len()
-}
-
-/// Operacja na dysku o numerze `index`.
-pub fn with_device<R>(index: usize, f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Result<R, BlockError> {
-    let _g = LOCK.lock();
-    match devices().get_mut(index) {
-        Some(d) => Ok(f(d.as_mut())),
-        None => Err(BlockError::NoDevice),
+    let d = Arc::new(Disk {
+        name: String::from(device.name()),
+        parent: device.parent(),
+        lock: crate::sched::sync::KMutex::new(),
+        dev: core::cell::UnsafeCell::new(device),
+    });
+    let mut list = DISKS.lock();
+    if list.capacity() == 0 {
+        // Bez przenoszenia tablicy przy kolejnych dyskach (testy liczą ramki).
+        list.reserve(32);
     }
+    if let Some(i) = list.iter().position(|e| e.is_none()) {
+        list[i] = Some(d);
+        return i;
+    }
+    list.push(Some(d));
+    list.len() - 1
+}
+
+/// M20.f: usuwa dysk (wpis wolny).  Wołający odmontował już systemy plików z
+/// niego i z jego partycji.
+pub fn remove(index: usize) {
+    let old = {
+        let mut list = DISKS.lock();
+        match list.get_mut(index) {
+            Some(e) => e.take(),
+            None => None,
+        }
+    };
+    drop(old); // Drop urządzenia poza blokadą listy
+}
+
+/// Liczba wpisów (numery 0..count; usunięte dają NoDevice).
+pub fn count() -> usize {
+    DISKS.lock().len()
+}
+
+/// Operacja na dysku o numerze `index` (pod blokadą tego dysku).
+pub fn with_device<R>(index: usize, f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Result<R, BlockError> {
+    let d = disk(index).ok_or(BlockError::NoDevice)?;
+    let _g = d.lock.lock();
+    Ok(f(unsafe { &mut **d.dev.get() }))
 }
 
 pub fn read(index: usize, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
@@ -150,8 +200,13 @@ pub fn is_read_only(index: usize) -> bool {
 /// Numer dysku o nazwie `name`.
 #[allow(dead_code)]
 pub fn find(name: &str) -> Option<usize> {
-    let _g = LOCK.lock();
-    devices().iter().position(|d| d.name() == name)
+    DISKS.lock().iter().position(|d| matches!(d, Some(d) if d.name == name))
+}
+
+/// M20.f: numery partycji dysku `parent` (rejestruje je scan_partitions).
+pub fn partitions_of(parent: usize) -> Vec<usize> {
+    let list = DISKS.lock();
+    (0..list.len()).filter(|&i| matches!(&list[i], Some(d) if d.parent == Some(parent))).collect()
 }
 
 // ------------------------------------------------------------
@@ -196,6 +251,9 @@ impl BlockDevice for Partition {
     }
     fn partition_kind(&self) -> Option<&'static str> {
         Some(self.kind)
+    }
+    fn parent(&self) -> Option<usize> {
+        Some(self.parent)
     }
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         check_range(self.sectors, lba, buf.len())?;
@@ -315,9 +373,4 @@ impl BlockDevice for RamDisk {
     }
 }
 
-/// Usuwa ostatnio dodany dysk (testy).
-#[cfg(selftest)]
-pub fn pop() {
-    let _g = LOCK.lock();
-    devices().pop();
-}
+

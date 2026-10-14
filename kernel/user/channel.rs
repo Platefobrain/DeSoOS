@@ -198,6 +198,52 @@ impl ChanEnd {
     }
 }
 
+/// M20.f: strona jądra (ublk) – odbiór z terminem.
+impl ChanEnd {
+    /// Zdejmuje pierwszy komunikat (dowolny rozmiar; uchwyty w nim jądro
+    /// zwalnia – wołający tylko czyta dane).  Czeka najwyżej `timeout_ms`.
+    /// Błędy: ETIMEDOUT, EPIPE (druga strona zamknięta, kolejka pusta),
+    /// EINTR (kill zadania, w którym czekamy).
+    pub fn recv_timeout(&self, timeout_ms: u64) -> Result<Message, i64> {
+        let mine = self.mine();
+        let deadline = crate::time::ticks() + crate::time::ms_to_ticks(timeout_ms);
+        loop {
+            {
+                let mut q = mine.q.lock();
+                if let Some(m) = q.pop_front() {
+                    mine.len.store(q.len(), Ordering::SeqCst);
+                    drop(q);
+                    mine.wake_writers();
+                    return Ok(m);
+                }
+            }
+            if self.peer().closed.load(Ordering::SeqCst) {
+                if mine.len.load(Ordering::SeqCst) == 0 {
+                    return Err(EPIPE);
+                }
+                continue;
+            }
+            if crate::sched::should_exit() {
+                return Err(EINTR);
+            }
+            let now = crate::time::ticks();
+            if now >= deadline {
+                return Err(super::syscalls::ETIMEDOUT);
+            }
+            let peer = self.peer();
+            mine.readable.wait_until(
+                || mine.len.load(Ordering::SeqCst) > 0 || peer.closed.load(Ordering::SeqCst) || crate::sched::should_exit(),
+                Some(((deadline - now) * 1000 / crate::time::HZ as u64).max(1)),
+            );
+        }
+    }
+
+    /// Druga strona zamknięta (np. proces usbd się skończył).
+    pub fn peer_closed(&self) -> bool {
+        self.peer().closed.load(Ordering::SeqCst)
+    }
+}
+
 /// M19.b: stan dla `wait_many`.
 impl ChanEnd {
     /// Jest komunikat albo druga strona zamknięta (recv nie będzie czekać).

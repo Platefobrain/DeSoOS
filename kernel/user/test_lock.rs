@@ -116,7 +116,22 @@ pub fn self_test() {
         let _o = OUTER.lock();
         check!(INNER.raw().check() == Ok(()), "valid order rejected");
     }
-    serial_println!("[LOCK TEST] 2/6 lock order and recursion detected (lockdep-lite) PASS");
+    // v0.25.1: w handlerze przerwania kolejność tylko względem blokad wziętych w
+    // przerwaniu – blokada przerwanego kodu nie jest złamaniem kolejności
+    // (fałszywy PANIC przy przerwaniu MSI w trakcie stressu); rekurencja nadal.
+    {
+        let _i = INNER.lock();
+        interrupts::disable();
+        cpu::set_in_interrupt(true);
+        let in_irq = OUTER.raw().check();
+        let rec = INNER.raw().check();
+        cpu::set_in_interrupt(false);
+        interrupts::enable();
+        check!(in_irq == Ok(()), "interrupt handler: lock of the interrupted context counted as an order violation: {:?}", in_irq);
+        check!(rec == Err(LockError::Recursive), "interrupt handler: recursion not detected");
+        check!(OUTER.raw().check().is_err(), "task context: order violation must still be detected");
+    }
+    serial_println!("[LOCK TEST] 2/6 lock order and recursion detected (lockdep-lite; in an interrupt only against interrupt locks) PASS");
 
     // 3. Wzajemne wykluczanie na wielu CPU, bez BKL.
     let n = smp::online_count();

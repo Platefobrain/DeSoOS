@@ -1,4 +1,4 @@
-# DeSoOS v0.22.0
+# DeSoOS v0.29.0
 
 Wlasny system operacyjny
 
@@ -10,7 +10,7 @@ UEFI/OVMF -> DSB -> DeSoOS kernel
 
 ```bash
 ./build.sh              # zwykly kernel (bez samotestow)
-./build.sh --selftest   # kernel z samotestami (27 zestawow, M1-M19 + etap P)
+./build.sh --selftest   # kernel z samotestami (28 zestawow, M1-M19 + etap P + USB)
 ./test.sh               # build --selftest + testy w QEMU, wynik PASS/FAIL
 ```
 
@@ -35,13 +35,26 @@ Po starcie kernel uruchamia `/bin/init`, a init - shell w user space (`desoos:/$
 QEMU i w terminalu jednoczesnie. Mozna pisac w oknie QEMU (klawiatura PS/2) albo w terminalu,
 z ktorego odpalono `run-qemu.sh`. Wpisz `help`, zeby zobaczyc komendy.
 
+`USB=1 ./run-qemu.sh` (v0.25.0) - jak laptop bez PS/2 (Legion): QEMU bez kontrolera 8042, klawiatura i mysz
+tylko na USB. Pisanie w oknie QEMU idzie wtedy przez sterownik USB w user space (`usbd` -> jadro).
+
+`HUB=1 ./run-qemu.sh` (v0.27.0) - hub USB w porcie 3; z `USB=1` klawiatura i mysz sa za hubem (porty 3.1, 3.2),
+`usb.img` - w porcie 3.3.
+
+Drugi pendrive w QEMU (v0.26.0): plik `usb.img` w katalogu DeSoOS - `run-qemu.sh` podlacza go tylko do odczytu,
+jadro montuje FAT32 w `/usb0`. Obraz z wlasnymi plikami: `python3 mkfat32.py usb.img plik1 plik2`.
+
 Shell (M16, `user/bin/sh.rs`, ring 3):
 
 - programy po nazwie: `ls /bin`, `primes 50000`, `args "jeden dwa" trzy`, albo sciezka: `cd /bin`, `./hello`
 - `> plik`, `>> plik`, `< plik`, `&` na koncu = w tle (`ps`, `kill <pid>`, `wait`)
 - wbudowane: `cd`, `pwd`, `echo`, `exit`, `help`, `history`, `clear`, `wait`, `sync`, `reboot`, `halt`, `stress`
 - informacje od jadra (tylko odczyt): `mem`, `cpus`, `irq`, `lspci`, `acpi`, `disk`, `mount`, `df`, `date`, `ver`, `uptime`
-- uslugi: `services` (stan uslug uruchomionych przez init)
+- uslugi: `services` (stan uslug uruchomionych przez init; od v0.23.0 takze `usb0`, `usb1`... - kontrolery USB xHCI)
+- `lsusb` (v0.24.0) - urzadzenia USB: port, VID:PID, predkosc, rodzaj (klawiatura, mysz, pamiec masowa, hub...),
+  klasy interfejsow, producent i produkt; od v0.25.0 dzialaja klawiatura i mysz USB (`keyboard ready`), od
+  v0.26.0 pendrive TYLKO DO ODCZYTU (`disk sda ready`, FAT32 samo montuje sie w `/usb0`: `ls /usb0`, `cat`);
+  od v0.27.0 takze urzadzenia za hubem (port `3.2` = port kontrolera 3, port huba 2; hub w hubie do 5 poziomow)
 - `mkfs`, zapis na dysk (`disk write`) i `run` - tylko w awaryjnym shellu kernela
 - `exit` albo zabicie shella (`kill <pid sh>`) - init uruchamia nowy shell
 - Ctrl+C konczy program na pierwszym planie, nie shell
@@ -64,8 +77,9 @@ Tak - DeSoOS na prawdziwym komputerze **niczego nie zapisuje na dyski**:
    aktualizacji firmware).
 2. **Warstwa dyskow** (`kernel/block.rs`) niezaleznie odrzuca kazdy zapis na dysk "tylko do odczytu" -
    takze `mkfs`, `disk write`, zapis plikow w `/esp`.
-3. **Pendrive** jest dla DeSoOS niewidoczny (nie ma jeszcze sterownika USB - M20); czyta go tylko firmware
-   przy starcie.
+3. **Pendrive** (od v0.26.0 widoczny jako `/usb0`) jest TYLKO DO ODCZYTU - cztery niezalezne zamki: sterownik
+   USB (`usbd`) nie ma zadnej komendy zapisu SCSI (sprawdzane przy kompilacji), protokol jadro-usbd nie ma
+   operacji zapisu, dysk USB jest "tylko do odczytu" w warstwie dyskow, a FAT32 / `open` odmawiaja zapisu (EROFS).
 4. Sprawdzone w QEMU na kopii ukladu dysku Ubuntu (GPT: ESP + swap + ext4), z kontrolerem udajacym
    prawdziwy SSD i sledzeniem polecen NVMe: po starcie DeSoOS **0 polecen zapisu**, mimo prob
    `echo > /esp/...`, `rm`, `mkfs`, `disk write`.
@@ -109,7 +123,7 @@ nie dziala). Wylaczenie: `k halt` i przytrzymaj przycisk zasilania, albo od razu
 Potem wyjmij pendrive - komputer startuje normalnie z dysku.
 
 Jesli wewnetrzna klawiatura nie dziala (laptopy bez kontrolera 8042), DeSoOS i tak wystartuje - widac
-logi, ale nie da sie pisac; klawiatura USB dojdzie w M20.
+logi, ale nie da sie pisac. Od v0.25.1 dziala klawiatura USB (wbudowana klawiatura Legiona - przez `usbd`).
 
 ## Pliki
 
@@ -138,6 +152,10 @@ logi, ale nie da sie pisac; klawiatura USB dojdzie w M20.
 - Stress test bez klawiatury (np. Legion z pendrive'a): `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/...`
   (albo `./build.sh --autostress=60`) - 5 s po starcie kernel sam robi stress test 60 s i wypisuje na
   ekranie `[AUTOSTRESS] PASS/FAIL`, `cpus` i `mem`. Zwykly `./make-usb.sh` - bez tego.
+  Od v0.28.0 w trakcie stressu czyta tez w kolko najwiekszy plik z pendrive'a (`/usb0`) - linia `usb:`
+  (MiB, KiB/s, sumy kontrolne przejsc, bledy). Od v0.29.0 takze przed stressem: odczyt tego pliku buforem
+  256 KiB i 4 KiB (KiB/s) i opoznienie klawiatury USB (przerwanie -> znak, us; nacisnij kilka klawiszy w trakcie),
+  linia `[RESULT-USB]`.
 - Procesy w ring 3 (M13a): `run` - lista programow testowych, `run sum` - pierwszy program
   uzytkownika (wynik 5050), `run pf` / `gp` / `ud` / `nx` / `sse` - bledy, ktore koncza tylko
   proces, `run loop` - petla bez konca (Ctrl+C konczy), `run loop &` - w tle (`ps`, `kill`).

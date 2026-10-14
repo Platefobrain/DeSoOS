@@ -96,6 +96,12 @@ pub fn init() -> bool {
 }
 
 /// Ruch kółka od ostatniego wywołania (ujemny = w górę / od siebie).
+/// M20.e: kółko myszy USB (usbd przez input_inject) – jak pakiet PS/2.
+pub fn add_wheel(dz: i32) {
+    WHEEL.fetch_add(dz, Ordering::Relaxed);
+    crate::console::wake_input();
+}
+
 pub fn take_wheel() -> i32 {
     WHEEL.swap(0, Ordering::Relaxed)
 }
