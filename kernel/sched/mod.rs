@@ -106,6 +106,26 @@ struct Task {
     sq: Link,
     in_sleepers: bool,
     id_next: *mut Task,
+    /// P4.b: lustro `state == Dead` dla czytających pod blokadą tablicy zadań
+    /// (bez blokady schedulera – `state` zmienia się pod nią).
+    dead: AtomicBool,
+    /// P4.c: zadanie jest (jeszcze) na jakimś CPU – od wybrania przez
+    /// schedule() do chwili, gdy CPU, który z niego schodzi, skończy
+    /// przełączenie (rejestry i FPU zapisane, stos opuszczony).  Inny CPU nie
+    /// przełączy się na zadanie z tą flagą, reap go nie zwolni.
+    on_cpu: AtomicBool,
+    /// P4.b: znacznik życia (testy: zwolnione zadanie widziane przez
+    /// czytającego tablicę = TASK_FREED).
+    magic: AtomicU64,
+}
+
+const TASK_MAGIC: u64 = 0x7a5c_7a5c_7a5c_7a5c;
+const TASK_FREED: u64 = 0xdead_dead_dead_dead;
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.magic.store(TASK_FREED, Ordering::SeqCst);
+    }
 }
 
 /// M17a.f3b: łącze listy dwukierunkowej (wskaźniki na Box<Task>).
@@ -334,6 +354,57 @@ fn sched() -> &'static mut Scheduler {
 }
 
 // ------------------------------------------------------------
+// P4.b: tablica zadań pod własną blokadą RW
+// ------------------------------------------------------------
+//
+// `tasks` + `ids` (lista zadań i kubełki numerów) zmieniają się pod blokadą
+// schedulera ORAZ zapisem tej blokady (dodanie: spawn, idle, init; usunięcie:
+// reap).  Czytający, którym wystarczy „zadanie o numerze X i jego proces”
+// (with_process, task_exists, children_of, for_each_process), biorą tylko ją
+// do odczytu – równolegle, bez blokady schedulera (Legion v0.29.0:
+// with_process 11 mln wzięć blokady schedulera na minutę).  reparent_with –
+// zapis (wyklucza with_process jak dotąd blokada schedulera).
+// * Kolejność: scheduler -> tablica.  Czytający / reparent NIE biorą blokady
+//   schedulera, trzymając tablicę.
+// * Zawsze z IF = 0 (także czytający): pisarz trzyma blokadę schedulera z
+//   IF = 0 i czeka na czytających – czytający przerwany przez pobudkę
+//   (wake_channel -> blokada schedulera) zakleszczyłby się z nim.
+// * Zadanie żyje, dopóki jest w tablicy (reap usuwa pod zapisem), więc
+//   referencja z odczytu jest ważna do zwolnienia blokady.  `state` czytający
+//   nie widzą – tylko lustro `dead`.
+static TABLE: spin::RwSpinLock = spin::RwSpinLock::new("task table");
+
+/// Stan schedulera do odczytu tablicy zadań (tylko `tasks`, `ids` i pola
+/// zadań niezmienne lub atomowe) – pod `TABLE` z IF = 0.
+/// P4.b (testy): zadania o złym znaczniku widziane pod blokadą tablicy.
+static TABLE_BAD: AtomicU64 = AtomicU64::new(0);
+
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn table_bad() -> u64 {
+    TABLE_BAD.load(Ordering::Relaxed)
+}
+
+/// P4.b: sprawdzenie znacznika zadania znalezionego w tablicy (build z
+/// samotestami: z chwilą kręcenia, żeby zwolnienie bez blokady tablicy miało
+/// okno, w którym test je złapie).
+#[inline]
+fn table_check(t: &Task) {
+    #[cfg(selftest)]
+    for _ in 0..64 {
+        core::hint::spin_loop();
+    }
+    if t.magic.load(Ordering::SeqCst) != TASK_MAGIC {
+        TABLE_BAD.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn table() -> &'static Scheduler {
+    debug_assert!(!interrupts::are_enabled());
+    debug_assert!(TABLE.state() != (false, 0), "task table read without its lock");
+    unsafe { &*core::ptr::addr_of!(SCHED) }
+}
+
+// ------------------------------------------------------------
 // M17a.f1: blokada schedulera
 // ------------------------------------------------------------
 //
@@ -352,6 +423,10 @@ fn sched() -> &'static mut Scheduler {
 // * Rekurencyjna na tym samym CPU (wake_channel -> kick, sleep_until ->
 //   block_current -> schedule), zawsze z IF = 0 (bierze ją też przerwanie
 //   zegara i pobudka z przerwania).
+// * P4.c (v0.32.0): NIE jest już trzymana przez przełączenie – schedule()
+//   oddaje ją po wyborze następnego zadania, a zadanie na CPU chroni flaga
+//   `on_cpu` (patrz finish_switch); strażniki sprzed przełączenia po powrocie
+//   zadania nic nie zwalniają (SCHED_SKIP).  Opis sprzed P4.c:
 // * Należy do CPU, nie do zadania, i jest trzymana PRZEZ przełączenie:
 //   schedule() bierze ją w starym zadaniu, a oddaje nowe zadanie (po powrocie
 //   ze swojego schedule() albo w sched_new_task_start).  Dzięki temu żaden
@@ -375,11 +450,57 @@ static SCHED_DEPTH: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::Atom
 static SCHED_ACQ: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static SCHED_CONT: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static SCHED_WAIT_US: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+/// v0.32.1 (diagnostyka spadku stressu): najdłuższe pojedyncze czekanie na
+/// blokadę schedulera (µs), miejsce tego czekania, ile czekań > 100 µs, ile
+/// czekań z przerwania (on_tick, pobudka z IRQ) i najdłuższe z nich.
+static SCHED_WAIT_MAX: AtomicU64 = AtomicU64::new(0);
+static SCHED_WAIT_MAX_SITE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SCHED_WAIT_LONG: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+static SCHED_WAIT_IRQ_MAX: AtomicU64 = AtomicU64::new(0);
+
+/// (najdłuższe czekanie µs, jego miejsce, czekania > 100 µs, najdłuższe w przerwaniu µs).
+pub fn sched_wait_extremes() -> (u64, &'static str, u64, u64) {
+    let site = SCHED_WAIT_MAX_SITE.load(Ordering::Relaxed);
+    let name: &'static str = if site == 0 { "-" } else { unsafe { *(site as *const &'static str) } };
+    (SCHED_WAIT_MAX.load(Ordering::Relaxed), name, SCHED_WAIT_LONG.get(), SCHED_WAIT_IRQ_MAX.load(Ordering::Relaxed))
+}
 /// M17a.g12: kto bierze blokadę schedulera (plik:linia), czekanie i trzymanie.
 static SCHED_SITES: bkl::SiteTable = bkl::SiteTable::new();
 /// Wpis (+1) i TSC wzięcia na tym CPU (zwalnia ten sam CPU – IF = 0).
 static SCHED_HOLD_SLOT: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicUsize> = crate::per_cpu!(core::sync::atomic::AtomicUsize::new(0));
 static SCHED_HOLD_TSC: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
+
+/// P4.c: przełączenia poza blokadą schedulera i czekania na `on_cpu`
+/// (wybrane zadanie jeszcze schodziło z innego CPU): liczba, takty TSC.
+static SWITCH_N: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+static ONCPU_WAITS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+static ONCPU_TSC: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+/// P4.c: zadanie, z którego ten CPU właśnie schodzi (zdejmuje mu `on_cpu`
+/// pierwsze, co wykona następne zadanie – `finish_switch`).
+static PREV_TASK: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicUsize> = crate::per_cpu!(core::sync::atomic::AtomicUsize::new(0));
+/// P4.c: strażniki blokady schedulera wzięte PRZED przełączeniem przez
+/// zadanie, które właśnie wróciło – blokada jest już zwolniona (schedule
+/// oddaje ją przed przełączeniem), więc ich Drop nic nie zwalnia.
+static SCHED_SKIP: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicU32> = crate::per_cpu!(core::sync::atomic::AtomicU32::new(0));
+
+/// (przełączenia, czekania na on_cpu, µs tych czekań) – `cpus`.
+pub fn switch_stats() -> (u64, u64, u64) {
+    let per_ms = crate::arch::x86_64::lapic::tsc_per_ms().max(1);
+    (SWITCH_N.get(), ONCPU_WAITS.get(), ONCPU_TSC.get() * 1000 / per_ms)
+}
+
+/// P4.c: po przełączeniu (nowe zadanie, IF = 0, bez blokady schedulera) –
+/// poprzednie zadanie tego CPU jest już zapisane: zdjęcie `on_cpu` (od teraz
+/// inny CPU może je uruchomić, reap – zwolnić).  `skip` – ile strażników
+/// blokady to zadanie wzięło przed swoim przełączeniem.
+fn finish_switch(skip: u32) {
+    let c = cpu();
+    SCHED_SKIP[c].store(skip, Ordering::Relaxed);
+    let prev = PREV_TASK[c].swap(0, Ordering::Relaxed);
+    if prev != 0 {
+        unsafe { (*(prev as *const Task)).on_cpu.store(false, Ordering::Release) };
+    }
+}
 
 fn sched_hold_end(me: usize) {
     let slot = SCHED_HOLD_SLOT[me].swap(0, Ordering::Relaxed);
@@ -415,6 +536,11 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
     interrupts::disable();
     let me = cpu();
     let tag = me as u32 + 1;
+    assert!(
+        SCHED_SKIP[me].load(Ordering::Relaxed) == 0,
+        "sched: scheduler lock taken on CPU {} before the guards from before a task switch were dropped",
+        me
+    );
     if SCHED_OWNER.load(Ordering::Relaxed) == tag {
         SCHED_DEPTH[me].fetch_add(1, Ordering::Relaxed);
         return SchedGuard { irq };
@@ -434,7 +560,18 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
         let mut start = 0u64;
         let mut n: u32 = 0;
         let mut reported = false;
-        while SCHED_OWNER.compare_exchange_weak(0, tag, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        // P4.0: czekanie samym ODCZYTEM (test-and-test-and-set) – próba
+        // przejęcia (instrukcja atomowa) dopiero, gdy blokada wygląda na wolną.
+        // Wcześniej każdy obrót pętli był compare_exchange: 15 czekających CPU
+        // zabierało sobie nawzajem i trzymającemu linię pamięci podręcznej z
+        // blokadą – trzymający wolniej ją oddawał (Legion v0.29.0: 41% wzięć
+        // czeka, 18,9 s).  Tak czekają już zwykłe spinlocki (spin.rs).
+        loop {
+            if SCHED_OWNER.load(Ordering::Relaxed) == 0
+                && SCHED_OWNER.compare_exchange_weak(0, tag, Ordering::Acquire, Ordering::Relaxed).is_ok()
+            {
+                break;
+            }
             core::hint::spin_loop();
             n = n.wrapping_add(1);
             if n % 64 == 0 {
@@ -459,6 +596,15 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
         }
         let waited = crate::arch::x86_64::clock::tsc_wait_us(tsc0, cpu0);
         SCHED_WAIT_US.add(waited);
+        if waited > 100 {
+            SCHED_WAIT_LONG.add(1);
+        }
+        if waited > SCHED_WAIT_MAX.fetch_max(waited, Ordering::Relaxed) {
+            SCHED_WAIT_MAX_SITE.store(site as *const &'static str as usize, Ordering::Relaxed);
+        }
+        if crate::arch::x86_64::cpu::in_interrupt() {
+            SCHED_WAIT_IRQ_MAX.fetch_max(waited, Ordering::Relaxed);
+        }
         if let Some(i) = slot {
             SCHED_SITES.entry(i).waited.fetch_add(1, Ordering::Relaxed);
             SCHED_SITES.entry(i).wait_us.fetch_add(waited, Ordering::Relaxed);
@@ -473,6 +619,15 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
 impl Drop for SchedGuard {
     fn drop(&mut self) {
         let me = cpu();
+        // P4.c: strażnik sprzed przełączenia – blokadę oddało już schedule().
+        let skip = SCHED_SKIP[me].load(Ordering::Relaxed);
+        if skip > 0 {
+            SCHED_SKIP[me].store(skip - 1, Ordering::Relaxed);
+            if self.irq {
+                interrupts::enable();
+            }
+            return;
+        }
         debug_assert!(sched_lock_held(), "scheduler lock released by a CPU that does not hold it");
         if SCHED_DEPTH[me].fetch_sub(1, Ordering::Relaxed) == 1 {
             sched_hold_end(me);
@@ -488,12 +643,9 @@ impl Drop for SchedGuard {
 /// schedulera wzięta przez schedule() poprzedniego zadania – oddajemy całą.
 #[unsafe(no_mangle)]
 extern "sysv64" fn sched_new_task_start() {
-    let me = cpu();
-    if SCHED_OWNER.load(Ordering::Relaxed) == me as u32 + 1 {
-        SCHED_DEPTH[me].store(0, Ordering::Relaxed);
-        sched_hold_end(me);
-        SCHED_OWNER.store(0, Ordering::Release);
-    }
+    // P4.c: blokada schedulera jest już wolna (schedule() oddaje ją przed
+    // przełączeniem); tylko poprzednie zadanie dostaje zdjęte `on_cpu`.
+    finish_switch(0);
     // M17a.f2: zadanie startuje z BKL (zadania kernela działają pod BKL,
     // procesy oddają go w enter_user) – poprzednie zadanie oddało go przy
     // przełączeniu.  Dopiero PO oddaniu blokady schedulera (kolejność).
@@ -652,8 +804,11 @@ fn id_remove(s: &mut Scheduler, p: *mut Task) {
 /// Nowe zadanie na listę (i do kolejki gotowych, jeśli gotowe).
 fn add_task(s: &mut Scheduler, mut t: Box<Task>) {
     let p: *mut Task = &mut *t;
-    s.tasks.push(t);
-    id_insert(s, p);
+    {
+        let _t = TABLE.write();
+        s.tasks.push(t);
+        id_insert(s, p);
+    }
     enqueue(s, p);
 }
 
@@ -800,6 +955,26 @@ fn schedule() {
         },
     };
     QUANTUM[me].store(QUANTUM_TICKS, Ordering::Relaxed);
+    // P4.c: wybrane zadanie mogło jeszcze schodzić z innego CPU (obudzone albo
+    // oddane do kolejki tuż przed jego przełączeniem) – czekamy, aż tamten CPU
+    // zapisze jego rejestry (zdejmuje flagę bez blokady schedulera: kilkaset ns).
+    if tm(nextp).on_cpu.load(Ordering::Acquire) {
+        let t0 = bkl::rdtsc();
+        let mut n: u32 = 0;
+        while tm(nextp).on_cpu.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+            n = n.wrapping_add(1);
+            if n % 64 == 0 {
+                crate::arch::x86_64::tlb::poll_from_wait();
+            }
+            if n % 4096 == 0 {
+                crate::arch::x86_64::smp::watchdog_poll();
+            }
+        }
+        ONCPU_WAITS.add(1);
+        ONCPU_TSC.add(bkl::rdtsc().wrapping_sub(t0) & ((1 << 48) - 1));
+    }
+    tm(nextp).on_cpu.store(true, Ordering::Relaxed);
     if cur.state == State::Running {
         cur.state = State::Ready;
         enqueue(s, curp); // na koniec kolejki (idle – nie)
@@ -816,6 +991,31 @@ fn schedule() {
     s.current[me] = next.id;
     CUR_TASK[me].store(nextp as usize, Ordering::Release);
     TOTAL_SWITCHES.add(1);
+    SWITCH_N.add(1);
+
+    // M17a.f1: zadanie nie może działać na dwóch CPU – następne nie jest
+    // bieżącym żadnego innego CPU.
+    debug_assert!(
+        !s.current.iter().enumerate().any(|(c, &id)| c != me && id == next.id),
+        "sched: task {} is already current on another CPU",
+        next.id
+    );
+    // Decyzje zależne od stanu – jeszcze pod blokadą (po jej oddaniu inny CPU
+    // może zmienić `state` bieżącego zadania, np. obudzić je).
+    let save_fpu = cur.process.is_some() && cur.state != State::Dead;
+    let idle_switch = (cur.idle_cpu.is_some(), next.idle_cpu.is_some());
+    let cr3 = next.cr3();
+    let cr3_changes = cr3 != cur.cr3();
+    // P4.c: blokada schedulera oddana PRZED przełączeniem – pod nią zostały
+    // tylko kolejki i stany.  Bieżące zadanie chroni `on_cpu` (nikt go nie
+    // uruchomi ani nie zwolni, zanim następne zadanie nie zdejmie flagi w
+    // finish_switch), następne – nasza flaga `on_cpu`.  Strażniki wzięte przez
+    // bieżące zadanie (głębokość) po jego powrocie nic nie zwalniają.
+    cur.sched_depth = SCHED_DEPTH[me].load(Ordering::Relaxed);
+    PREV_TASK[me].store(curp as usize, Ordering::Relaxed);
+    SCHED_DEPTH[me].store(0, Ordering::Relaxed);
+    sched_hold_end(me);
+    SCHED_OWNER.store(0, Ordering::Release);
 
     // M13a/M14: stos kernela dla przerwań z ring 3 (TSS.RSP0) i dla SYSCALL
     // (blok per CPU) oraz przestrzeń adresowa.
@@ -823,7 +1023,7 @@ fn schedule() {
     crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top());
     // M13b: FPU/SSE – zapis stanu procesu, który oddaje CPU, odtworzenie
     // stanu następnego; zadania kernela działają z CR0.TS = 1.
-    if cur.process.is_some() && cur.state != State::Dead {
+    if save_fpu {
         unsafe { fpu::save(&mut cur.fpu) };
     }
     if next.process.is_some() {
@@ -837,19 +1037,10 @@ fn schedule() {
     // SMP przeładowywany zawsze).  Zmiany górnej połowy unieważnia TLB
     // shootdown; dolnej – samo przeładowanie: CPU, który opuszcza proces,
     // zawsze ładuje inny CR3, a proces działa naraz na jednym CPU (tlb.rs).
-    let cr3 = next.cr3();
-    if cr3 != cur.cr3() {
+    if cr3_changes {
         unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
     }
 
-    // M17a.f1: zadanie nie może działać na dwóch CPU – następne nie jest
-    // bieżącym żadnego innego CPU (blokada trzymana przez przełączenie).
-    debug_assert!(
-        !s.current.iter().enumerate().any(|(c, &id)| c != me && id == next.id),
-        "sched: task {} is already current on another CPU",
-        next.id
-    );
-    cur.sched_depth = SCHED_DEPTH[me].load(Ordering::Relaxed);
     // M17a.f2: BKL nie przechodzi na następne zadanie – oddajemy go (weźmiemy
     // z powrotem w after_switch, po wyjściu ze schedulera).
     if bkl::held() {
@@ -857,15 +1048,15 @@ fn schedule() {
         cur.bkl_dropped = true;
     }
     // M17a.g2: czas w idle (statystyka "% idle").
-    if cur.idle_cpu.is_some() || next.idle_cpu.is_some() {
+    if idle_switch.0 || idle_switch.1 {
         let now = idle_tsc();
-        if cur.idle_cpu.is_some() {
+        if idle_switch.0 {
             let since = IDLE_SINCE[me].load(Ordering::Relaxed);
             if since != 0 {
                 IDLE_TSC[me].fetch_add(now.wrapping_sub(since), Ordering::Relaxed);
             }
         }
-        IDLE_SINCE[me].store(if next.idle_cpu.is_some() { now } else { 0 }, Ordering::Relaxed);
+        IDLE_SINCE[me].store(if idle_switch.1 { now } else { 0 }, Ordering::Relaxed);
     }
     let old: *mut u64 = &mut cur.rsp;
     let new = next.rsp;
@@ -880,11 +1071,10 @@ fn schedule() {
         crate::user::prof::add(crate::user::prof::CTX_SWITCH, now.saturating_sub(t_prof));
     }
     unsafe { sched_switch(old, new) };
-    // Wróciliśmy (może na innym CPU – tamten trzyma blokadę): głębokość tego
-    // CPU = nasza z chwili przełączenia; strażniki ją potem zdejmą.
-    if let Some(t) = current_task_unlocked() {
-        SCHED_DEPTH[cpu()].store(t.sched_depth, Ordering::Relaxed);
-    }
+    // Wróciliśmy (może na innym CPU): poprzednie zadanie tego CPU dostaje
+    // zdjęte `on_cpu`; nasze strażniki sprzed przełączenia nic nie zwalniają.
+    let depth = current_task_unlocked().map_or(0, |t| t.sched_depth);
+    finish_switch(depth);
 }
 
 // ------------------------------------------------------------
@@ -921,6 +1111,9 @@ fn new_task(id: TaskId, name: &str, stack: Option<TaskStack>, rsp: u64, state: S
         sq: Link::NONE,
         in_sleepers: false,
         id_next: core::ptr::null_mut(),
+        dead: AtomicBool::new(false),
+        magic: AtomicU64::new(TASK_MAGIC),
+        on_cpu: AtomicBool::new(state == State::Running),
     })
 }
 
@@ -941,6 +1134,7 @@ pub fn init() {
         let _g = lock_sched_at(&"init #2");
         let s = sched();
         if let Some(p) = find(s, id) {
+            let _t = TABLE.write();
             id_remove(s, p);
             // idle nie bywa w kolejce gotowych (spawn go tam wstawił)
             dequeue(s, p);
@@ -1063,6 +1257,7 @@ pub fn exit() -> ! {
     );
     if let Some(p) = find(s, cur) {
         tm(p).state = State::Dead;
+        tm(p).dead.store(true, Ordering::Release);
         DEAD_TASKS.fetch_add(1, Ordering::Relaxed);
     }
     schedule();
@@ -1242,11 +1437,12 @@ pub fn with_process<R>(pid: TaskId, f: impl FnOnce(&crate::user::Process) -> R) 
     if !active() {
         return None;
     }
+    // P4.b: tylko tablica zadań do odczytu (bez blokady schedulera).
     without_interrupts(|| {
-        let _g = lock_sched_at(&"with_process");
-        let s = sched();
-        let t = tm(find(s, pid)?);
-        if t.state == State::Dead {
+        let _t = TABLE.read();
+        let t = unsafe { &*find(table(), pid)? };
+        table_check(t);
+        if t.dead.load(Ordering::Acquire) {
             return None;
         }
         t.process.as_deref().map(f)
@@ -1261,9 +1457,9 @@ pub fn children_of(ppid: TaskId) -> Vec<TaskId> {
     }
     let mut out = Vec::new();
     without_interrupts(|| {
-        let _g = lock_sched_at(&"children_of");
-        for t in sched().tasks.iter() {
-            if t.state != State::Dead {
+        let _t = TABLE.read();
+        for t in table().tasks.iter() {
+            if !t.dead.load(Ordering::Acquire) {
                 if let Some(p) = t.process.as_deref() {
                     if p.ppid() == ppid {
                         out.push(t.id);
@@ -1287,12 +1483,13 @@ pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
         return 0;
     }
     without_interrupts(|| {
-        let _g = lock_sched_at(&"reparent");
+        // P4.b: zapis tablicy zadań (wyklucza with_process – patrz wyżej).
+        let _t = TABLE.write();
         first();
-        let s = sched();
+        let s = table();
         let mut n = 0;
         for t in s.tasks.iter() {
-            if t.state != State::Dead {
+            if !t.dead.load(Ordering::Acquire) {
                 if let Some(p) = t.process.as_deref() {
                     if p.ppid() == from {
                         p.ppid.store(to, Ordering::SeqCst);
@@ -1304,7 +1501,7 @@ pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
         // M17a.g11: nowy rodzic ma teraz dzieci (jego koniec musi je oddać).
         if n > 0 && to != 0 {
             if let Some(t) = find(s, to) {
-                if let Some(p) = tm(t).process.as_deref() {
+                if let Some(p) = unsafe { &*t }.process.as_deref() {
                     p.has_children.store(true, Ordering::SeqCst);
                     p.live_children.fetch_add(n as u32, Ordering::SeqCst);
                 }
@@ -1321,9 +1518,9 @@ pub fn for_each_process(mut f: impl FnMut(TaskId, &crate::user::Process)) {
         return;
     }
     without_interrupts(|| {
-        let _g = lock_sched_at(&"for_each_process");
-        for t in sched().tasks.iter() {
-            if t.state != State::Dead {
+        let _t = TABLE.read();
+        for t in table().tasks.iter() {
+            if !t.dead.load(Ordering::Acquire) {
                 if let Some(p) = t.process.as_deref() {
                     f(t.id, p);
                 }
@@ -1381,8 +1578,8 @@ pub fn tasks() -> Vec<TaskInfo> {
 /// pętla stressu pytała task_info o 48 zadań co 2 ms).
 pub fn task_exists(id: TaskId) -> bool {
     without_interrupts(|| {
-        let _g = lock_sched_at(&"task_exists");
-        find(sched(), id).is_some()
+        let _t = TABLE.read();
+        find(table(), id).map(|p| table_check(unsafe { &*p })).is_some()
     })
 }
 
@@ -1417,9 +1614,15 @@ pub fn reap() -> usize {
     without_interrupts(|| {
         let _g = lock_sched_at(&"reap");
         let s = sched();
+        let _t = TABLE.write();
         let mut i = 0;
         while i < s.tasks.len() {
-            if dead.len() < room && s.tasks[i].state == State::Dead && !s.current.contains(&s.tasks[i].id) {
+            // P4.c: martwe zadanie może jeszcze schodzić z CPU (on_cpu).
+            if dead.len() < room
+                && s.tasks[i].state == State::Dead
+                && !s.current.contains(&s.tasks[i].id)
+                && !s.tasks[i].on_cpu.load(Ordering::Acquire)
+            {
                 let id = s.tasks[i].id;
                 let p: *mut Task = &mut *s.tasks[i];
                 let _ = id;
@@ -1669,6 +1872,27 @@ pub fn idle_us(c: usize) -> u64 {
     IDLE_TSC[c % MAX_CPUS].load(Ordering::Relaxed).saturating_mul(1000) / per_ms
 }
 
+/// v0.32.2: ile µs bezczynny CPU kręci się przed `hlt` (z buildu:
+/// `DESOOS_IDLE_POLL_US`, domyślnie 50; 0 = od razu hlt).  Hipoteza: na
+/// prawdziwym sprzęcie `hlt` usypia rdzeń głębiej (AMD: C1 → CC6), pobudka
+/// trwa dziesiątki µs i wydłuża każde przekazanie zadania – od P4 rdzenie
+/// mniej kręcą się na blokadzie, a częściej śpią (Legion: idle 26 → 28–32%,
+/// stress −5%; KVM bez spadku).  Jak `haltpoll` w Linuksie.
+pub fn idle_poll_us() -> u64 {
+    match option_env!("DESOOS_IDLE_POLL_US") {
+        Some(s) => s.trim().parse::<u64>().unwrap_or(50).min(10_000),
+        None => 50,
+    }
+}
+
+/// (pobudki w trakcie kręcenia, wejścia w hlt) – `cpus`.
+static IDLE_POLL_HITS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+static IDLE_HALTS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+
+pub fn idle_poll_stats() -> (u64, u64) {
+    (IDLE_POLL_HITS.get(), IDLE_HALTS.get())
+}
+
 pub fn idle_loop() -> ! {
     // M17a.g1: pętla idle bez BKL.  Wcześniej trzymała go stale: oddawała na
     // czas `hlt` i brała z powrotem po każdej pobudce – także po IPI TLB
@@ -1704,6 +1928,40 @@ pub fn idle_loop() -> ! {
             }
             REAPER.store(false, Ordering::Release);
         }
+        // v0.32.2: najpierw krótkie kręcenie z IF = 1 – pobudka (IPI) trafia w
+        // działający rdzeń i od razu przełącza na zadanie (preempt na końcu
+        // przerwania); po kręceniu `hlt` jak dotąd.
+        let poll = idle_poll_us();
+        if poll > 0 {
+            let per_us = (crate::arch::x86_64::lapic::tsc_per_ms() / 1000).max(1);
+            let t0 = bkl::rdtsc();
+            let me = cpu();
+            let mut hit = false;
+            let mut reap_due = false;
+            while bkl::rdtsc().wrapping_sub(t0) < poll * per_us {
+                if NEED_RESCHED[me].load(Ordering::Relaxed) {
+                    hit = true;
+                    break;
+                }
+                if DEAD_TASKS.load(Ordering::Relaxed) > 0 && !REAPER.load(Ordering::Relaxed) {
+                    reap_due = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if reap_due {
+                continue;
+            }
+            if hit {
+                IDLE_POLL_HITS.add(1);
+                // Przełączenie zrobi przerwanie (IPI) albo następny obrót pętli.
+                if NEED_RESCHED[me].swap(false, Ordering::Relaxed) {
+                    yield_now();
+                }
+                continue;
+            }
+        }
+        IDLE_HALTS.add(1);
         interrupts::enable_and_hlt();
     }
 }

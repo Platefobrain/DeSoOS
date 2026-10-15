@@ -152,7 +152,7 @@ pub fn self_test() {
         }
     }
     check!(crate::sched::bkl::held(), "test task does not hold the Big Kernel Lock");
-    serial_println!("[SMP TEST] 1/5 {} CPU(s) online, LAPIC timers ticking PASS", n);
+    serial_println!("[SMP TEST] 1/7 {} CPU(s) online, LAPIC timers ticking PASS", n);
     if n == 1 {
         serial_println!("[SMP TEST] one CPU - skipping parallel tests");
         crate::selftest::pass();
@@ -197,7 +197,7 @@ pub fn self_test() {
     check!(mask.count_ones() >= 2, "kernel tasks ran only on CPU mask {:#b} in 10 s (other CPUs never took a task)", mask);
     let done_at = SPIN_DONE_AT.load(Ordering::SeqCst);
     serial_println!(
-        "[SMP TEST] 2/5 {} kernel tasks on CPU mask {:#b}, second CPU after {} ms PASS",
+        "[SMP TEST] 2/7 {} kernel tasks on CPU mask {:#b}, second CPU after {} ms PASS",
         k,
         mask,
         done_at.saturating_sub(1)
@@ -236,7 +236,7 @@ pub fn self_test() {
     // Przy 2 CPU drugi zajmuje to zadanie testowe – równoległość od 3.
     check!(n < 3 || max_parallel >= 2, "processes never ran at the same time (max {} CPUs)", max_parallel);
     serial_println!(
-        "[SMP TEST] 3/5 {} x primes: up to {} running at once, {} ms PASS",
+        "[SMP TEST] 3/7 {} x primes: up to {} running at once, {} ms PASS",
         n,
         max_parallel,
         wall
@@ -266,7 +266,7 @@ pub fn self_test() {
     let used = shells.iter().filter_map(|&(_, id)| exit_info(id)).count();
     check!(used == shells.len(), "exit info missing");
     check!(ipis > 0, "no wake-up IPIs were delivered");
-    serial_println!("[SMP TEST] 4/5 {} shells at once (spawn/wait/VFS), {} wake-up IPIs PASS", shells.len(), ipis);
+    serial_println!("[SMP TEST] 4/7 {} shells at once (spawn/wait/VFS), {} wake-up IPIs PASS", shells.len(), ipis);
 
     // 5. FPU/SSE przy migracji: 2n procesów xmm (więcej niż CPU – muszą się
     //    przełączać i przechodzić między rdzeniami), żaden rejestr nie wycieka.
@@ -308,11 +308,207 @@ pub fn self_test() {
     let migrations = crate::sched::user_migrations() - mig0;
     check!(migrated != 0 || migrations != 0, "no xmm process ever moved to another CPU");
     serial_println!(
-        "[SMP TEST] 5/5 {} x xmm (xmm0-15 + st0), {} seen on 2+ CPUs, {} migrations, no register leaked PASS",
+        "[SMP TEST] 5/7 {} x xmm (xmm0-15 + st0), {} seen on 2+ CPUs, {} migrations, no register leaked PASS",
         xmm.len(),
         migrated.count_ones(),
         migrations
     );
 
+    // 6. P4.b: tablica zadań pod blokadą RW – czytający (with_process,
+    //    task_exists) na innych CPU w trakcie spawn / exit / reap procesów;
+    //    zadanie zwolnione pod czytającym = zły znacznik = FAIL.
+    if !table_test(n) {
+        return;
+    }
+    // 7. P4.c: przełączanie poza blokadą schedulera – pary zadań na różnych CPU
+    //    budzą się nawzajem w kółko (zgubiona pobudka = czekanie do terminu
+    //    1 s = FAIL), obok zadania, które się kończą (reap vs on_cpu).
+    if !switch_test(n) {
+        return;
+    }
+
     crate::selftest::pass();
+}
+
+static T6_STOP: AtomicBool = AtomicBool::new(false);
+static T6_OPS: AtomicU64 = AtomicU64::new(0);
+static T6_FOUND: AtomicU64 = AtomicU64::new(0);
+static T6_DONE: AtomicU64 = AtomicU64::new(0);
+static T6_IDS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+fn table_reader(i: usize) {
+    crate::sched::bkl::unlocked(|| {
+        let mut k = i * 7;
+        while !T6_STOP.load(Ordering::Relaxed) {
+            let id = T6_IDS[k % 64].load(Ordering::Relaxed);
+            k = k.wrapping_add(1);
+            if id == 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if crate::sched::with_process(id, |p| p.ppid()).is_some() {
+                T6_FOUND.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = crate::sched::task_exists(id);
+            T6_OPS.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    T6_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn table_test(n: usize) -> bool {
+    macro_rules! ck {
+        ($cond:expr, $($msg:tt)*) => {
+            if !$cond {
+                serial_println!("[SMP TEST] FAIL: task table: {}", format_args!($($msg)*));
+                T6_STOP.store(true, Ordering::SeqCst);
+                return false;
+            }
+        };
+    }
+    let code = programs::code("pid");
+    ck!(code.is_some(), "no pid program");
+    let bad0 = crate::sched::table_bad();
+    T6_STOP.store(false, Ordering::SeqCst);
+    T6_DONE.store(0, Ordering::SeqCst);
+    T6_OPS.store(0, Ordering::SeqCst);
+    T6_FOUND.store(0, Ordering::SeqCst);
+    let readers = (n.max(2) - 1).min(4);
+    for i in 0..readers {
+        ck!(crate::sched::spawn("table-reader", table_reader, i).is_ok(), "spawn reader");
+    }
+    let end = ticks() + 1500;
+    let mut spawned = 0u64;
+    let mut live: Vec<TaskId> = Vec::new();
+    while ticks() < end {
+        // Żywy = ma proces, który się nie zakończył (task_exists widzi też
+        // zakończone, dopóki ich nie sprzątnięto – a sprząta spawn albo idle,
+        // którego przy zajętych CPU nie ma: KVM, v0.31.0 – 16 procesów).
+        live.retain(|&id| crate::sched::with_process(id, |_| ()).is_some());
+        if live.len() < 16 {
+            match spawn_process("pid", code.unwrap(), 0) {
+                Ok(id) => {
+                    T6_IDS[(spawned % 64) as usize].store(id, Ordering::Relaxed);
+                    live.push(id);
+                    spawned += 1;
+                }
+                Err(e) => ck!(false, "spawn pid: {}", e),
+            }
+        } else {
+            crate::sched::yield_now();
+        }
+    }
+    T6_STOP.store(true, Ordering::SeqCst);
+    ck!(wait_for(5_000, || T6_DONE.load(Ordering::SeqCst) == readers as u64), "readers did not stop");
+    ck!(wait_for(5_000, || live.iter().all(|&id| crate::sched::with_process(id, |_| ()).is_none())), "pid processes did not end");
+    for a in T6_IDS.iter() {
+        a.store(0, Ordering::Relaxed);
+    }
+    let bad = crate::sched::table_bad() - bad0;
+    let ops = T6_OPS.load(Ordering::SeqCst);
+    ck!(bad == 0, "{} freed task(s) seen by readers of the task table", bad);
+    ck!(spawned >= 20 && ops >= 1000, "too little churn: {} processes, {} lookups", spawned, ops);
+    serial_println!(
+        "[SMP TEST] 6/7 task table: {} lookups on {} CPU(s) ({} found a live process) while {} processes started, ended and were freed, no freed task seen PASS",
+        ops,
+        readers,
+        T6_FOUND.load(Ordering::SeqCst),
+        spawned
+    );
+    true
+}
+
+const PAIRS: usize = 4;
+static T7_STOP: AtomicBool = AtomicBool::new(false);
+static T7_TURN: [AtomicU64; PAIRS] = [const { AtomicU64::new(0) }; PAIRS];
+static T7_ROUNDS: AtomicU64 = AtomicU64::new(0);
+static T7_LOST: AtomicU64 = AtomicU64::new(0);
+static T7_DONE: AtomicU64 = AtomicU64::new(0);
+static T7_DYING: AtomicU64 = AtomicU64::new(0);
+static T7_WQ: [[crate::sched::sync::WaitQueue; 2]; PAIRS] =
+    [const { [const { crate::sched::sync::WaitQueue::new() }; 2] }; PAIRS];
+
+/// Zadanie `i` = para i / 2, strona i % 2: czeka na swoją kolej, oddaje ją
+/// drugiej stronie i ją budzi.
+fn pinger(i: usize) {
+    let (pair, side) = (i / 2, (i % 2) as u64);
+    while !T7_STOP.load(Ordering::Relaxed) {
+        let ok = T7_WQ[pair][side as usize].wait_until(
+            || T7_TURN[pair].load(Ordering::SeqCst) == side || T7_STOP.load(Ordering::Relaxed),
+            Some(1000),
+        );
+        if T7_STOP.load(Ordering::Relaxed) {
+            break;
+        }
+        if !ok {
+            T7_LOST.fetch_add(1, Ordering::SeqCst);
+        }
+        T7_ROUNDS.fetch_add(1, Ordering::Relaxed);
+        T7_TURN[pair].store(1 - side, Ordering::SeqCst);
+        T7_WQ[pair][1 - side as usize].wake_all();
+    }
+    // Druga strona może czekać – obudzić na koniec.
+    T7_WQ[pair][1 - side as usize].wake_all();
+    T7_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn dying(_: usize) {
+    T7_DYING.fetch_add(1, Ordering::Relaxed);
+}
+
+fn switch_test(n: usize) -> bool {
+    macro_rules! ck {
+        ($cond:expr, $($msg:tt)*) => {
+            if !$cond {
+                serial_println!("[SMP TEST] FAIL: switch outside the lock: {}", format_args!($($msg)*));
+                T7_STOP.store(true, Ordering::SeqCst);
+                return false;
+            }
+        };
+    }
+    let _ = n;
+    T7_STOP.store(false, Ordering::SeqCst);
+    T7_ROUNDS.store(0, Ordering::SeqCst);
+    T7_LOST.store(0, Ordering::SeqCst);
+    T7_DONE.store(0, Ordering::SeqCst);
+    T7_DYING.store(0, Ordering::SeqCst);
+    for t in T7_TURN.iter() {
+        t.store(0, Ordering::SeqCst);
+    }
+    let (sw0, ow0, us0) = crate::sched::switch_stats();
+    for i in 0..PAIRS * 2 {
+        ck!(crate::sched::spawn("pinger", pinger, i).is_ok(), "spawn pinger");
+    }
+    let end = ticks() + 1500;
+    let mut spawned = 0u64;
+    while ticks() < end {
+        if crate::sched::spawn("dying", dying, 0).is_ok() {
+            spawned += 1;
+        }
+        if spawned % 8 == 0 {
+            crate::time::sleep_ms(1);
+        }
+    }
+    T7_STOP.store(true, Ordering::SeqCst);
+    for p in T7_WQ.iter() {
+        p[0].wake_all();
+        p[1].wake_all();
+    }
+    ck!(wait_for(5_000, || T7_DONE.load(Ordering::SeqCst) == (PAIRS * 2) as u64), "pingers did not stop ({} of {})", T7_DONE.load(Ordering::SeqCst), PAIRS * 2);
+    ck!(wait_for(5_000, || T7_DYING.load(Ordering::SeqCst) == spawned), "short tasks did not all run ({} of {})", T7_DYING.load(Ordering::SeqCst), spawned);
+    let rounds = T7_ROUNDS.load(Ordering::SeqCst);
+    let lost = T7_LOST.load(Ordering::SeqCst);
+    let (sw1, ow1, ow_us) = crate::sched::switch_stats();
+    ck!(lost == 0, "{} wake-up(s) lost (waited the whole 1 s) in {} rounds", lost, rounds);
+    ck!(rounds >= 200, "too few rounds: {}", rounds);
+    serial_println!(
+        "[SMP TEST] 7/7 task switches outside the scheduler lock: {} wake-up rounds in {} pairs + {} short tasks ended and freed, none lost; {} switches, {} waited for a task still leaving another CPU ({} us) PASS",
+        rounds,
+        PAIRS,
+        spawned,
+        sw1 - sw0,
+        ow1 - ow0,
+        ow_us - us0
+    );
+    true
 }

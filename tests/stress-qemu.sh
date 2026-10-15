@@ -2,8 +2,8 @@
 # M17a: autostress w QEMU – ten sam test co na Legionie (DESOOS_AUTOSTRESS),
 # ale na tym komputerze, przed nagraniem pendrive'a.
 #
-#   ./stress-qemu.sh              build z autostress + QEMU, wynik na ekranie
-#   ./stress-qemu.sh --no-build   tylko uruchom (po własnym ./build.sh --autostress=S)
+#   tests/stress-qemu.sh              build z autostress + QEMU, wynik na ekranie
+#   tests/stress-qemu.sh --no-build   tylko uruchom (po własnym ./build.sh --autostress=S)
 #
 # Zmienne:
 #   SECS=60      długość stressu w s (jak na Legionie; domyślnie 60)
@@ -15,7 +15,9 @@
 # make-usb.sh i test.sh i tak budują własny.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Testy w tests/, reszta projektu katalog wyżej.
+T="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(dirname "$T")"
 cd "$ROOT"
 
 SECS="${SECS:-60}"
@@ -60,7 +62,7 @@ truncate -s 64M "$TMP_NVME"
 TMP_USB="$ROOT/build-stress-usb.img"
 rm -f "$TMP_USB"
 USB_ARGS=()
-if command -v python3 >/dev/null 2>&1 && python3 "$ROOT/mkfat32.py" "$TMP_USB" "$ROOT/build/user/sh" 2>/dev/null; then
+if command -v python3 >/dev/null 2>&1 && python3 "$T/mkfat32.py" "$TMP_USB" "$ROOT/build/user/sh" 2>/dev/null; then
   USB_ARGS=(-drive if=none,id=usbtest,format=raw,file="$TMP_USB",readonly=on -device usb-storage,drive=usbtest)
 fi
 

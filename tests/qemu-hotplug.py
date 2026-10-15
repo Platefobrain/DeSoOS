@@ -4,7 +4,7 @@
 # unix) – np. „device_del hubdisk”.  Samotest jądra (USB TEST 6/6) wypisuje te
 # linie i patrzy, czy dysk / hub naprawdę zniknął i wrócił.
 #
-#   python3 qemu-hotplug.py test.log /tmp/desoos-monitor.sock
+#   python3 tests/qemu-hotplug.py test.log /tmp/desoos-monitor.sock
 #
 # Kończy się sam, gdy QEMU zamknie monitor (koniec testów).
 import os

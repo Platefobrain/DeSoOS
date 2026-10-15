@@ -670,6 +670,10 @@ impl RwSpinLock {
         while !ready() {
             core::hint::spin_loop();
             n = n.wrapping_add(1);
+            // P4.b: czekający z IF = 0 (tablica zadań) potwierdza TLB shootdown.
+            if n % 64 == 0 {
+                crate::arch::x86_64::tlb::poll_from_wait();
+            }
             if n % 1024 != 0 {
                 continue;
             }

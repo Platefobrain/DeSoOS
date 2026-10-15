@@ -610,6 +610,28 @@ pub fn cpus_report(out: &mut dyn Write) {
             e.held_us / 1000
         );
     }
+    // P4.c: przełączenia zadań poza blokadą schedulera; czekania na zadanie,
+    // które jeszcze schodziło z innego CPU (flaga on_cpu).
+    let (wmax, wsite, wlong, wirq) = crate::sched::sched_wait_extremes();
+    let _ = writeln!(
+        out,
+        "scheduler lock: longest wait {} us ({}), {} waits over 100 us, longest wait in an interrupt {} us",
+        wmax, wsite, wlong, wirq
+    );
+    let (ph, ih) = crate::sched::idle_poll_stats();
+    let _ = writeln!(
+        out,
+        "idle: spins {} us before hlt (DESOOS_IDLE_POLL_US): {} wake-ups while spinning, {} halts",
+        crate::sched::idle_poll_us(),
+        ph,
+        ih
+    );
+    let (sw_n, ow_n, ow_us) = crate::sched::switch_stats();
+    let _ = writeln!(
+        out,
+        "scheduler: {} task switches outside the lock, {} waited for a task still leaving another CPU ({} us in total)",
+        sw_n, ow_n, ow_us
+    );
     // M17b.d: pamięć procesów – leniwe strony.
     let (traps, pf_pages, copy_pages, calls) = crate::user::vm::stats();
     let _ = writeln!(
@@ -640,8 +662,10 @@ pub fn cpus_report(out: &mut dyn Write) {
     );
     let _ = writeln!(
         out,
-        "clock: {} ticks added for lost PIT interrupts (caught up from HPET)",
-        crate::time::caught_up_ticks()
+        "clock: {} ticks added for lost PIT interrupts (caught up from HPET), longest gap between timer interrupts {} us, {} gaps over 2 ms",
+        crate::time::caught_up_ticks(),
+        crate::time::tick_gaps().0,
+        crate::time::tick_gaps().1
     );
     if let Some(m) = crate::acpi::madt() {
         if m.cpus.len() > smp::online_count() {

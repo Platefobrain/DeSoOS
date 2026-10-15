@@ -43,6 +43,11 @@ pub fn pit_tick_early() {
         let last = HPET_LAST.swap(now, Ordering::Relaxed);
         if last != 0 {
             let d = clock::diff_us(last, now).clamp(0, 10_000_000);
+            // v0.32.1: najdłuższa przerwa między przerwaniami PIT (CPU 0) i ile > 2 ms.
+            GAP_MAX_US.fetch_max(d as u64, Ordering::Relaxed);
+            if d > 2000 {
+                GAP_LONG.fetch_add(1, Ordering::Relaxed);
+            }
             let mut acc = HPET_ACC_US.load(Ordering::Relaxed) + d;
             let due = (acc / 1000).max(0) as u64;
             n = due.clamp(1, 10_000);
@@ -62,6 +67,13 @@ static HPET_LAST: AtomicU64 = AtomicU64::new(0);
 static HPET_ACC_US: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
 /// Ile ticków dodano za zgubione przerwania PIT (`cpus`, testy).
 static CAUGHT_UP: AtomicU64 = AtomicU64::new(0);
+static GAP_MAX_US: AtomicU64 = AtomicU64::new(0);
+static GAP_LONG: AtomicU64 = AtomicU64::new(0);
+
+/// v0.32.1: (najdłuższa przerwa między przerwaniami PIT w µs, ile przerw > 2 ms).
+pub fn tick_gaps() -> (u64, u64) {
+    (GAP_MAX_US.load(Ordering::Relaxed), GAP_LONG.load(Ordering::Relaxed))
+}
 
 /// Ticki dodane za zgubione przerwania PIT (doganianie HPET).
 pub fn caught_up_ticks() -> u64 {

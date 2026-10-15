@@ -7,7 +7,7 @@
 #                 (jądro / usbtest sprawdzają każdy bajt i mierzą MB/s),
 #   pliki z argumentów (nazwa 8.3 = nazwa pliku wielkimi literami).
 #
-#   python3 mkfat32.py obraz.img [plik ...]
+#   python3 tests/mkfat32.py obraz.img [plik ...]
 import struct
 import sys
 import os

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # M11: automatyczne samotesty w QEMU – wynik jako kod wyjścia.
 #
-#   ./test.sh              build --selftest + testy (wynik: PASS / FAIL)
-#   ./test.sh --no-build   tylko uruchom (np. po własnym ./build.sh --selftest)
-#   ./test.sh --verbose    pokaż cały log na bieżąco
+#   tests/test.sh              build --selftest + testy (wynik: PASS / FAIL)
+#   tests/test.sh --no-build   tylko uruchom (np. po własnym ./build.sh --selftest)
+#   tests/test.sh --verbose    pokaż cały log na bieżąco
 #
 # Kody wyjścia: 0 = PASS, 1 = FAIL, 2 = timeout (zawieszenie),
 #               3 = QEMU skończył się inaczej (np. triple fault / reboot).
 # Log zostaje w test.log.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Testy w tests/, reszta projektu katalog wyżej.
+T="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(dirname "$T")"
 cd "$ROOT"
 
 BUILD=1
@@ -64,7 +66,7 @@ truncate -s 64M "$TEST_NVME"
 TEST_USB="$ROOT/build-test-usb.img"
 rm -f "$TEST_USB"
 command -v python3 >/dev/null 2>&1 || { echo "Brak python3 (potrzebny do obrazu testowego pendrive'a)"; exit 3; }
-python3 "$ROOT/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "BLAD: mkfat32.py"; exit 3; }
+python3 "$T/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "BLAD: mkfat32.py"; exit 3; }
 
 # M16b: build/ trafia do QEMU jako pendrive USB TYLKO DO ODCZYTU (jak
 # prawdziwy pendrive; od M20.f usbd widzi go jako dysk sdX tylko do odczytu).
@@ -108,7 +110,7 @@ QEMU=(qemu-system-x86_64
   -serial stdio -display none -no-reboot)
 
 : > "$LOG"
-python3 "$ROOT/qemu-hotplug.py" "$LOG" "$MON" &
+python3 "$T/qemu-hotplug.py" "$LOG" "$MON" &
 HOTPLUG_PID=$!
 
 if [ "$VERBOSE" = 1 ]; then

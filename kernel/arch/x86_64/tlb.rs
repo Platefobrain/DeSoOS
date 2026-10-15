@@ -141,7 +141,8 @@ fn shootdown(start: u64, pages: u64) {
         let me = cpu_now as u32 + 1;
         // Jeden inicjator naraz.  Czekając, potwierdzamy cudze żądania –
         // inaczej dwaj inicjatorzy czekaliby na siebie nawzajem.
-        while LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        // P4.0: czekanie odczytem, próba przejęcia dopiero przy wolnej blokadzie.
+        while LOCK.load(Ordering::Relaxed) != 0 || LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
             poll_from_wait();
             core::hint::spin_loop();
         }

@@ -749,9 +749,63 @@ Zajęte: 0–47 (21 = `ENOSYS`, dawne `kcmd`). Nowe: **48 `dev_find`** (od v0.23
 Uchwyty 1–9 zajęte; nowe **10 `INPUT`, 11 `BLK`**. Sloty init: 3 `HW_ROOT`, 4 `SYSCTL`, nowe 5 `INPUT`, 6 `BLK`.
 Błędy – istniejące (`EIO`, `ENODEV`, `EBUSY`, `ENOSPC`, `EINVAL`, `EBADF`, `EROFS`); nowego kodu nie trzeba.
 
+## Scheduler – P4 (projekt 2026-10-14)
+
+**Dziś:** jedna globalna blokada schedulera (spinlock z właścicielem-CPU, rekurencyjna) chroni wszystko: listę zadań,
+kubełki numerów, kolejkę gotowych, kubełki kanałów (uśpieni), listę terminów, `current[]`. Przełączenie (`schedule`)
+dzieje się POD nią – blokadę zwalnia dopiero następne zadanie (po `sched_switch`, także `sched_new_task_start`).
+
+**Pomiar (Legion v0.29.0, autostress 60 s, 16 CPU):** 40,1 mln wzięć, 41% czeka, 18,9 s czekania; łączny czas trzymania
+~16 s na 60 s – blokada zajęta ~27% czasu, więc każdy dodatkowy rdzeń częściej trafia na zajętą.
+
+| miejsce | wzięcia | czeka | trzyma | co robi |
+|---|---|---|---|---|
+| `with_process` | 11,1 mln | 37% | 1,3 s | odczyt procesu po numerze (rodzic dziecka, `wait`, `kill`) |
+| `wait_event` | 10,6 mln | 48% | 6,3 s | warunek + uśpienie **+ przełączenie** |
+| `wake_channel` | 7,6 mln | 44% | 1,8 s | pobudka z kubełka |
+| `exit` | 3,3 mln | 37% | 3,4 s | Dead **+ przełączenie** |
+| `spawn_in` / `reap` | 3,3 / 1,6 mln | 33–42% | 1,0 / 1,1 s | lista zadań |
+| `task_exists` | 1,0 mln | 30% | 0,1 s | odczyt |
+
+**Co znaleźliśmy (2026-10-14):** blokada schedulera czekała najgorszym sposobem – `compare_exchange` w każdym
+obrocie (test-and-set): każdy czekający zabiera linię pamięci podręcznej z blokadą pozostałym i trzymającemu, koszt
+przekazania rośnie z liczbą czekających (MIT, „Non-scalable locks are dangerous”). Zwykłe spinlocki DeSoOS już
+czekały odczytem, BKL jest biletowy. BFS (Linux, jedna globalna kolejka) skalował się do ~16 CPU – Legion ma 16,
+więc kolejki per CPU to zapas, nie pilna potrzeba.
+
+**Wybór z innych systemów:** przełączanie bez globalnej blokady z flagą `on_cpu` – Linux; dostęp do procesów przez
+`Arc` (zamiast RCU) – Redox; jeśli kiedyś kolejki per CPU: ULE (FreeBSD – bezczynny CPU zabiera pracę, rzadkie
+wyrównanie), MuQSS (trylock przy wyborze), pobudka na cudzy CPU listą + IPI – Linux (`TTWU_QUEUE`, +26% w sembench).
+
+**Plan (kolejność od najbezpieczniejszego):**
+
+0. **Czekanie odczytem (P4.0, v0.30.0).** Pętla czekania czyta właściciela; `compare_exchange` dopiero, gdy blokada
+   wygląda na wolną (test-and-test-and-set). To samo: blokada listy zombie procesu, inicjator TLB shootdown.
+1. **Tablica zadań pod własną blokadą RW (P4.b, v0.31.0 – zrobione; `TABLE` w `sched/mod.rs`, test SMP 6/6).** `tasks` + `ids` – zapis: `spawn_in` (dodanie), `reap` (usunięcie),
+   `reparent_with` (zmiana rodziców – musi wykluczać `with_process`, jak dziś). Odczyt równolegle: `with_process`,
+   `task_exists`, `children_of`, `for_each_process`. Stan „Dead” dla czytających – lustro atomowe w zadaniu
+   (`state` zmienia się pod blokadą schedulera). Kolejność blokad: scheduler → tablica (spawn / reap biorą obie);
+   czytający biorą tylko tablicę. Zadanie żyje, dopóki jest w tablicy (reap usuwa pod zapisem), więc referencja w
+   `with_process` jest ważna. Zamknięcie `with_process` bierze `zombies` (spinlock) – poziom tablicy niżej.
+2. **Przełączenie poza blokadą (P4.c, v0.32.0 – zrobione; `on_cpu`, `finish_switch`, `SCHED_SKIP`, test SMP 7/7).** Zadanie ma flagę `on_cpu` (ustawiana przy wyborze, zdejmowana przez CPU
+   po zejściu z zadania – pierwsze, co robi następne zadanie). Pod blokadą: wybór następnego, stany, kolejki,
+   `current[]`; potem zwolnienie i dopiero FXSAVE/FXRSTOR, TSS / stos SYSCALL, CR3, `sched_switch`. CPU, który wybrał
+   zadanie z `on_cpu` (np. obudzone, zanim poprzedni CPU z niego zszedł), czeka na zdjęcie flagi (kilkaset ns) –
+   jak `on_cpu` w Linuksie. Reap pomija zadania z `on_cpu` (martwe zadanie jeszcze na swoim stosie). Pobudka bez
+   zmian (stan i kubełki pod blokadą), więc uśpienie / pobudka nie mogą się minąć. Znika przenoszenie blokady przez
+   przełączenie (`sched_depth`, zwalnianie w `sched_new_task_start`).
+3. **Dalej według pomiarów (P4.d):** kolejki gotowych per CPU z kradzieżą zadań albo osobne blokady kubełków kanałów
+   (protokół jak `try_to_wake_up`). Tylko jeśli po 1–2 blokada nadal wyraźnie czeka.
+
+**Testy:** wszystkie 28 zestawów (1 i 4 CPU, TCG i KVM) po każdym kroku; nowe w SCHED TEST: (b) zadania pytające
+`with_process` / `task_exists` w kółko w trakcie spawn / exit / reap (znacznik w zadaniu sprawdzany przy odczycie –
+zwolnione zadanie = FAIL), (c) burza uśpień i pobudek między CPU z terminem bezpieczeństwa (pobudka po terminie =
+zgubiona = FAIL), exit + reap w pętli (licznik czekań na `on_cpu`, asercja: reap nigdy nie zwalnia zadania z
+`on_cpu`), mutacja: bez czekania na `on_cpu` test musi się wywrócić. Na końcu autostress KVM i Legion (compare, max6).
+
 ## Pomiar i testy
 
-- `./test.sh` – 28 zestawów samotestów w QEMU (TCG albo `ACCEL=kvm`, 1–4 CPU): wyjątki, pamięć, scheduler,
+- `tests/test.sh` – 28 zestawów samotestów w QEMU (TCG albo `ACCEL=kvm`, 1–4 CPU): wyjątki, pamięć, scheduler,
   ring 3, FPU, urządzenia, FS, syscalle, ELF, procesy, SMP, blokady, TLB, alokatory, pliki, IPC, stress.
   Każda poprawka bezpieczeństwa ma test, który bez niej się wywraca.
 - **Autostress** (`DESOOS_AUTOSTRESS=60`) – skrypty shella, liczenie liczb pierwszych, zadania IPC (para

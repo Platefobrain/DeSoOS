@@ -69,7 +69,7 @@ if [ "${USB:-0}" = 1 ]; then
   USB_ARGS+=(-device "usb-kbd${AT[0]}" -device "usb-mouse${AT[1]}")
 fi
 # M20.f: usb.img (jeśli jest) = drugi pendrive, TYLKO DO ODCZYTU – jądro
-# zamontuje go w /usb0.  Obraz testowy: python3 mkfat32.py usb.img plik1 plik2
+# zamontuje go w /usb0.  Obraz testowy: python3 tests/mkfat32.py usb.img plik1 plik2
 if [ -f "$ROOT/usb.img" ]; then
   USB_ARGS+=(-drive if=none,id=usbimg,format=raw,file="$ROOT/usb.img",readonly=on -device "usb-storage,drive=usbimg${AT[2]}")
 fi

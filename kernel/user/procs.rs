@@ -75,7 +75,8 @@ impl ChildList {
         use crate::arch::x86_64::interrupts;
         let irq = interrupts::are_enabled();
         interrupts::disable();
-        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        // P4.0: czekanie odczytem, próba przejęcia dopiero przy wolnej blokadzie.
+        while self.locked.load(Ordering::Relaxed) || self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
         }
         ChildGuard { owner: self, irq }

@@ -1,4 +1,4 @@
-# DeSoOS v0.29.0
+# DeSoOS v0.33.0
 
 Wlasny system operacyjny
 
@@ -11,7 +11,7 @@ UEFI/OVMF -> DSB -> DeSoOS kernel
 ```bash
 ./build.sh              # zwykly kernel (bez samotestow)
 ./build.sh --selftest   # kernel z samotestami (28 zestawow, M1-M19 + etap P + USB)
-./test.sh               # build --selftest + testy w QEMU, wynik PASS/FAIL
+tests/test.sh           # build --selftest + testy w QEMU, wynik PASS/FAIL
 ```
 
 Nie uruchamiaj `build.sh` przez sudo.
@@ -42,7 +42,7 @@ tylko na USB. Pisanie w oknie QEMU idzie wtedy przez sterownik USB w user space 
 `usb.img` - w porcie 3.3.
 
 Drugi pendrive w QEMU (v0.26.0): plik `usb.img` w katalogu DeSoOS - `run-qemu.sh` podlacza go tylko do odczytu,
-jadro montuje FAT32 w `/usb0`. Obraz z wlasnymi plikami: `python3 mkfat32.py usb.img plik1 plik2`.
+jadro montuje FAT32 w `/usb0`. Obraz z wlasnymi plikami: `python3 tests/mkfat32.py usb.img plik1 plik2`.
 
 Shell (M16, `user/bin/sh.rs`, ring 3):
 
@@ -144,7 +144,7 @@ logi, ale nie da sie pisac. Od v0.25.1 dziala klawiatura USB (wbudowana klawiatu
 - Wiele rdzeni (M17): `cpus` - procesory, zadanie na kazdym, ticki timera, IPI. Kolumna `CPU` w `ps`
   pokazuje rdzen (`~2` = nie dziala teraz, ostatnio CPU 2). Np. `primes 3000000 &` dwa razy, potem `ps`
   - oba licza naraz na roznych rdzeniach. QEMU startuje z 4 rdzeniami (`-smp 4` w `run-qemu.sh`).
-- Szybciej i naprawdę równolegle (Linux z KVM): `ACCEL=kvm ./run-qemu.sh`, `ACCEL=kvm ./test.sh`
+- Szybciej i naprawdę równolegle (Linux z KVM): `ACCEL=kvm ./run-qemu.sh`, `ACCEL=kvm tests/test.sh`
   (potrzebny dostęp do /dev/kvm: `sudo usermod -aG kvm $USER`, potem wyloguj się). Liczba rdzeni: `SMP=8`.
 - Stress test (M17a): `stress` (10 s) albo `stress 300` - wiele procesow, pliki, spinlocki na wszystkich
   rdzeniach naraz; na koncu `stress PASS: ...`. Potem `cpus` pokazuje, ile razy rdzenie czekaly na
@@ -190,12 +190,12 @@ logi, ale nie da sie pisac. Od v0.25.1 dziala klawiatura USB (wbudowana klawiatu
 
 Uwaga: w terminalu QEMU (`-serial stdio`) Ctrl+C zamyka QEMU. W oknie QEMU Ctrl+C trafia do shella.
 
-## Samotesty (`--selftest`, `./test.sh`)
+## Samotesty (`--selftest`, `tests/test.sh`)
 
-`./test.sh` buduje kernel z samotestami, uruchamia QEMU bez okna i konczy sie wynikiem:
+`tests/test.sh` buduje kernel z samotestami, uruchamia QEMU bez okna i konczy sie wynikiem:
 `PASS` (kod 0), `FAIL` (1, z lista bledow), `TIMEOUT` (2, zawieszenie) albo blad QEMU (3).
 Pelny log: `test.log`. Testy dzialaja na osobnym, pustym dysku - `disk.img` zostaje nietkniety.
-Opcje: `--no-build` (bez budowania), `--verbose` (log na biezaco), `TIMEOUT=300 ./test.sh`.
+Opcje: `--no-build` (bez budowania), `--verbose` (log na biezaco), `TIMEOUT=300 tests/test.sh`.
 QEMU w testach dziala z `-cpu max` (NX, SMEP jak na nowym procesorze).
 Nie uruchamiaj `test.sh` rownoczesnie z `run-qemu.sh` (oba uzywaja katalogu `build/`).
 

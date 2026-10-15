@@ -1,6 +1,6 @@
 # Roadmapa DeSoOS
 
-Stan: 2026-10-14 – **M20 (USB) gotowe** (v0.29.1): klawiatura Legiona działa (v0.25.1), pendrive tylko do odczytu (v0.26.0, `/usb0`, potwierdzone na Legionie), huby i podłączanie w locie (v0.27.0), odporność (v0.28.0, potwierdzona na Legionie), szybszy FAT32 i pomiary (v0.29.0; Legion: pendrive 120 MB/s, klawiatura 275 µs, stress 432 210). Następne: **P4 (blokada schedulera)**. Wcześniej: **etap P (wydajność) zamknięty** (v0.22.0): zombie u rodziców, heap i ramki per CPU; Legion: 436 134 / 528 869 skryptów (+11% / +18% od M18). Następne: **M20 (USB)** – plan niżej. **M19 (usługi w user space) gotowe** (v0.19.7): sterownik `edu` jako proces (MMIO, przerwania, DMA), menedżer usług w init, `sysinfo` / `sysctl` zamiast `kcmd`. **M18 (IPC) gotowe** (v0.18.4): uchwyty z prawami, kanały, uchwyty w komunikatach + `spawn_ex`, pamięć współdzielona; ping-pong 6,6 µs. **M17b gotowe** (v0.17.35). **M17a gotowe** (v0.17.27). Architektura: `ARCHITEKTURA.md`.
+Stan: 2026-10-14 – **M20 (USB) gotowe** (v0.29.1): klawiatura Legiona działa (v0.25.1), pendrive tylko do odczytu (v0.26.0, `/usb0`, potwierdzone na Legionie), huby i podłączanie w locie (v0.27.0), odporność (v0.28.0, potwierdzona na Legionie), szybszy FAT32 i pomiary (v0.29.0; Legion: pendrive 120 MB/s, klawiatura 275 µs, stress 432 210). **P4 gotowe** (v0.33.0: stress 534 072, +23,6%). Następne: do wyboru (sekcja „Dalej”). Wcześniej: **etap P (wydajność) zamknięty** (v0.22.0): zombie u rodziców, heap i ramki per CPU; Legion: 436 134 / 528 869 skryptów (+11% / +18% od M18). Następne: **M20 (USB)** – plan niżej. **M19 (usługi w user space) gotowe** (v0.19.7): sterownik `edu` jako proces (MMIO, przerwania, DMA), menedżer usług w init, `sysinfo` / `sysctl` zamiast `kcmd`. **M18 (IPC) gotowe** (v0.18.4): uchwyty z prawami, kanały, uchwyty w komunikatach + `spawn_ex`, pamięć współdzielona; ping-pong 6,6 µs. **M17b gotowe** (v0.17.35). **M17a gotowe** (v0.17.27). Architektura: `ARCHITEKTURA.md`.
 Szczegóły ukończonych etapów: `CHANGELOG.md`.
 
 ```
@@ -579,9 +579,50 @@ Na podstawie pomiarów z Legiona (v0.19.7, pełne obciążenie, 16 CPU). Każdy 
 - [x] **P3.** ✅ (v0.22.0) Alokator ramek: zapas 64 ramek na CPU (paczki po 32) + atomowa bitmapa „wydana” (double-free
       bez blokady). ALLOC TEST 4/5. Legion: compare 436 134 (+5,7%), max6 528 869 (+11,8%); „frames” 48–60 mln
       czekań → ~20 tys., spawn 48 → 25 µs. Etap P od M18: +11% / +18%.
-- [ ] **P4.** Na później (po M20). Blokada schedulera – v0.22.0 na Legionie: 37–41% wzięć czeka, 15–19 s czekania
-      na 960 s CPU (≈1,6–1,9%); najwięcej `wait_event`, `with_process`, `wake_channel`, exit, `spawn_in`. Ryzyko:
-      zgubione pobudki – kilka wersji z testami. Heap w max6: 1,1 mln czekań (1%) – P2b (bloki 32–128 KiB) opcjonalnie.
+- [x] **P4.** ✅ (v0.33.0) Blokada schedulera – Legion: czekanie 18,9 s → ~4,6 s, stress 432 210 → **534 072 (+23,6%)**
+      (największy zysk: kręcenie przed `hlt`, v0.32.2). Plan i przebieg (2026-10-14; projekt: `ARCHITEKTURA.md`, „Scheduler – P4”). Legion v0.29.0:
+      40,1 mln wzięć w 60 s, 41% czeka, 18,9 s czekania; trzymana łącznie ~16 s z 60 s (jedna globalna blokada zajęta
+      ~27% czasu). Wzięcia: `with_process` 11,1 mln, `wait_event` 10,6 mln, `wake_channel` 7,6 mln, `exit` i
+      `spawn_in` po 3,3 mln, `reap` 1,6 mln, `task_exists` 1,0 mln. Czas trzymania: `wait_event` 6,3 s, `exit` 3,4 s –
+      oba kończą się przełączeniem zadania (FXSAVE/FXRSTOR, CR3, stos) POD blokadą.
+  - [x] **a.** Projekt na papierze (ten opis + ARCHITEKTURA.md; porównanie z Linuksem, Redoksem, FreeBSD ULE,
+        BFS/MuQSS – 2026-10-14).
+  - [ ] **0.** (v0.30.0) Blokada schedulera czeka samym odczytem (test-and-test-and-set) zamiast compare_exchange w
+        każdym obrocie – tak już czekają zwykłe spinlocki; to samo w blokadzie listy zombie i inicjatora TLB
+        shootdown. Legion: czekanie **18,9 → 14,3 s (−25%)**, nadal 41% wzięć czeka; wait_event 5,4 → 4,0 s,
+        with_process 4,9 → 3,7 s, wake_channel 4,2 → 3,4 s; stress 423 575 (v0.29.0: 432 210 – w granicach rozrzutu,
+        bez zysku). KVM 8 CPU: bez zmian (16%, ~1,1 s). Wniosek: główny koszt to czas TRZYMANIA – kroki b i c.
+  - [ ] **b.** (v0.31.0) Tablica zadań (`tasks` + `ids`) pod własną blokadą RW „task table”: `with_process`,
+        `task_exists`, `children_of`, `for_each_process` – odczyt (równolegle, bez blokady schedulera); spawn / idle /
+        reap – zapis (pod blokadą schedulera, kolejność scheduler → tablica); `reparent_with` – zapis. Lustro `dead`,
+        znacznik życia zadania. SMP TEST 6/6 (czytający na 3 CPU w trakcie spawn / exit / reap; mutacja bez zapisu w
+        reap – wykryta 2/2). Pomiar do c: linia `scheduler lock: task switches under it …` (QEMU TCG: 51% czasu
+        trzymania to samo przełączenie). v0.31.1: poprawka testu (KVM). KVM 8 CPU: wzięcia blokady schedulera
+        16,2 → 11,5 mln (−29%), przełączanie = 43% czasu trzymania (775 ns). Legion (v0.31.1): wzięcia 39,6 →
+        **27,2 mln (−31%)**, czekanie 14,3 → **11,1 s** (v0.29.0: 18,9 s), nadal 41% czeka; przełączanie = **36%**
+        czasu trzymania (5,6 s z 15,4 s, 624 ns); tablica: 11,6 mln odczytów + 5,0 mln zapisów, 22 ms czekania;
+        ale `spawn_in` trzyma blokadę 1,0 → 1,6 s, `reap` 1,0 → 1,3 s (zapis tablicy pod blokadą schedulera);
+        stress 416 610 (v0.30.0: 423 575, v0.29.0: 432 210) – bez zysku.
+  - [ ] **c.** (v0.32.0) Blokada schedulera oddawana PRZED przełączeniem: flaga `on_cpu` (ustawiana przy wyborze,
+        zdejmowana przez następne zadanie po przełączeniu – `finish_switch`); CPU, który wybrał zadanie jeszcze
+        schodzące z innego CPU, czeka na zdjęcie flagi (pod blokadą, bez czekania na nią po drugiej stronie); reap
+        pomija zadania z `on_cpu`; FPU / CR3 / stos / sched_switch już bez blokady; strażniki sprzed przełączenia
+        po powrocie nic nie zwalniają (`SCHED_SKIP`) – koniec przenoszenia blokady przez przełączenie. SMP TEST
+        7/7 (4 pary zadań budzących się nawzajem na różnych CPU + krótkie zadania kończące się obok; zgubiona
+        pobudka = FAIL); mutacja bez czekania na `on_cpu` – jądro pada od razu (SMP TEST 3). Raport: linia
+        `scheduler: N task switches outside the lock, M waited …`. Legion: czekanie **3,7 s** (od P4.0: 18,9 s, −80%),
+        32% czeka, trzymanie ~10,1 s; ale stress 409 018 (spada od v0.29.0: −5%), idle 32%, zgubione ticki 379 –
+        v0.32.1: diagnostyka + A/B z v0.29.0: Legion 434 178 vs 412 946 (−4,9%, nie z blokady – najdłuższe czekanie
+        65 µs), KVM 16 CPU 342 392 vs 346 764 (+1,3%). v0.32.2: kręcenie przed `hlt` (`DESOOS_IDLE_POLL_US`,
+        hipoteza: pobudka uśpionego rdzenia na sprzęcie). ✅ **Legion A/B: 0 µs – 412 315, 50 µs – 534 072 (+29,5%),
+        idle 32% → 7%** – rekord (v0.29.0: 434 178). Do dalszych kroków: dobór czasu (20/100/200 µs), bez IPI do
+        kręcącego się CPU, max6 na Legionie, wpływ na pobór prądu na baterii.
+  - [ ] **d.** Tylko gdy Legion po 0–c wciąż czeka albo przy > 16 CPU (BFS z jedną kolejką skalował się do ~16):
+        kolejki per CPU jak FreeBSD ULE (bezczynny CPU zabiera zadanie najbardziej zajętemu + rzadkie wyrównanie),
+        wybór jak MuQSS (trylock, zajęta kolejka – następna), pobudka na cudzy CPU jak Linux (lista pobudek + IPI,
+        bez blokady obcej kolejki), uśpieni pod osobnymi blokadami; dostęp do procesów przez `Arc`.
+  - [ ] **e.** Pomiar i zamknięcie: Legion (compare, max6), `cpus` – czekanie na blokadę schedulera.
+      Heap w max6: 1,1 mln czekań (1%) – P2b (bloki 32–128 KiB) opcjonalnie.
 
 ### ✅ M20 – USB (plan 2026-10-12, gotowe 2026-10-14, v0.29.1)
 

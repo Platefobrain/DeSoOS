@@ -2,6 +2,122 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.33.0 — 2026-10-15
+
+### ✅ P4 zamknięte + porządek w testach
+- **P4 (blokada schedulera) – podsumowanie na Legionie:** czekanie na blokadę schedulera 18,9 s → ~4,6 s na minutę,
+  najdłuższe czekanie < 100 µs; stress (tryb porównawczy) **432 210 → 534 072 (+23,6%)** – głównie dzięki kręceniu
+  przed `hlt` (v0.32.2), które wyszło przy szukaniu spadku po krokach 0–c.
+- **Testy w osobnym folderze `tests/`:** `tests/test.sh`, `tests/stress-qemu.sh`, `tests/mkfat32.py`,
+  `tests/qemu-hotplug.py` (wcześniej w głównym katalogu). Działają z dowolnego miejsca (`tests/test.sh`,
+  `ACCEL=kvm tests/test.sh`, `SMP=8 tests/stress-qemu.sh`); logi jak dotąd w głównym katalogu. Kod samotestów
+  w jądrze tylko w buildzie `--selftest` – kernel na pendrive go nie zawiera.
+- `build.sh` nie wypisuje już linii o kręceniu przed `hlt`, gdy jest domyślne (50 µs).
+
+## v0.32.2 — 2026-10-15
+
+### Hipoteza: pobudka uśpionego rdzenia – kręcenie przed `hlt`
+- **A/B na Legionie (jedno po drugim, ten sam pendrive):** v0.29.0 **434 178**, v0.32.1 **412 946 (−4,9%)** – spadek
+  prawdziwy. NIE z blokady: najdłuższe czekanie na blokadę schedulera 65 µs (0 czekań > 100 µs, w przerwaniu
+  19 µs), zgubione ticki 70 (v0.29.0: 56), czasy `spawn` / `exit` / `wait` / `reap` takie same lub krótsze.
+  Rośnie tylko bezczynność: 26% → 28%.
+- **KVM 16 CPU (komputer Dawida):** v0.29.0 342 392, v0.32.1 **346 764 (+1,3%)**, czekanie na blokadę 18,9 → 4,4 s,
+  zadania IPC +14% – na maszynie wirtualnej spadku nie ma.
+- Hipoteza: na prawdziwym sprzęcie `hlt` usypia rdzeń głębiej (AMD: C1 → CC6) i pobudka trwa dziesiątki µs.
+  Po P4 rdzenie mniej kręcą się na blokadzie, częściej śpią, a każde przekazanie zadania uśpionemu rdzeniowi
+  wydłuża łańcuch spawn → skrypt → wait.
+- **Test:** bezczynny CPU kręci się `DESOOS_IDLE_POLL_US` µs (domyślnie 50) przed `hlt` – pobudka (IPI) trafia w
+  działający rdzeń (jak `haltpoll` w Linuksie). `DESOOS_IDLE_POLL_US=0` = jak dotąd. Raport: `idle: spins N us
+  before hlt: X wake-ups while spinning, Y halts`; w [RESULT] `idlepoll=N`.
+- ✅ **Legion – hipoteza potwierdzona (A/B, ten sam build, tylko zmienna):**
+
+  | | `idlepoll=0` | **`idlepoll=50`** |
+  |---|---|---|
+  | skrypty (compare) | 412 315 | **534 072 (+29,5%)** |
+  | idle | 32% | **7%** |
+  | zadania IPC | 6 247 | **8 535 (+37%)** |
+  | ping-pong / kanał | 5,6 µs / 662 MB/s | **5,0 µs / 1001 MB/s** |
+  | pendrive w trakcie stressu | 48 MB/s | **68 MB/s** |
+
+  Pobudki w trakcie kręcenia: 742 747 (wejść w `hlt`: 53 441). **Rekord Legiona w trybie porównawczym** – o 23%
+  więcej niż v0.29.0 (434 178), więcej niż dotychczasowy rekord pełnego obciążenia (max6 528 869). Najdłuższe
+  czekanie na blokadę schedulera 83 µs. Wniosek: przed P4 rdzenie „przypadkiem” nie spały, bo kręciły się na
+  blokadzie; po P4 zasypiały i każde przekazanie zadania czekało na wybudzenie rdzenia.
+
+## v0.32.1 — 2026-10-15
+
+### Diagnostyka: dlaczego stress spada, choć blokada schedulera przestała hamować
+- **Legion v0.32.0 (P4.c):** czekanie na blokadę schedulera **3,7 s** (v0.31.1: 11,1 s; v0.29.0: 18,9 s – **−80%**),
+  czeka 32% wzięć (było 41%), blokada trzymana ~10,1 s (15,4 s); `on_cpu`: 430 czekań na 9,1 mln przełączeń (0,5 ms).
+  KVM 8 CPU: czekanie 1083 → 333 ms, trzymanie 7,0 → 4,0 s.
+- **Ale stress na Legionie spada z każdą wersją P4:** 432 210 → 423 575 → 416 610 → 409 018 (−5%), rośnie idle
+  (26 → 32%) i liczba zgubionych przerwań zegara na CPU 0 (44 → 379).
+- Nowe linie raportu `cpus`, żeby znaleźć przyczynę:
+  - `scheduler lock: longest wait X us (miejsce), N waits over 100 us, longest wait in an interrupt Y us`,
+  - `clock: …, longest gap between timer interrupts X us, N gaps over 2 ms` (CPU 0).
+- Porównanie A/B z v0.29.0 (kod z `~/Pulpit/DeSoOS-github`) na tym samym pendrivie, jedno po drugim.
+
+## v0.32.0 — 2026-10-14
+
+### P4.c: przełączanie zadań poza blokadą schedulera
+- **Blokada schedulera oddawana przed przełączeniem.** Pod nią zostaje tylko wybór następnego zadania, stany i
+  kolejki; zapis / odczyt FPU, zmiana przestrzeni adresowej (CR3), stos i samo przełączenie dzieją się już bez niej
+  (Legion v0.31.1: przełączanie to 36% czasu trzymania blokady – 5,6 s na minutę, 624 ns na przełączenie).
+- **Flaga `on_cpu`** w zadaniu (jak w Linuksie): ustawiana, gdy CPU wybiera zadanie, zdejmowana przez CPU, który z
+  niego schodzi – zaraz po przełączeniu, gdy rejestry i FPU są zapisane. CPU, który wybrał zadanie jeszcze
+  schodzące z innego CPU (obudzone tuż przed jego przełączeniem), czeka na zdjęcie flagi; sprzątanie (reap) nie
+  zwalnia zadania z flagą. Pobudka bez zmian – stan i kolejki dalej pod blokadą, więc uśpienie i pobudka nie
+  mogą się minąć.
+- Koniec „blokady przenoszonej przez przełączenie” (zwalniało ją następne zadanie, także nowe – w
+  `sched_new_task_start`): strażniki wzięte przed przełączeniem po powrocie zadania nic nie zwalniają.
+- Raport `cpus`: `scheduler: N task switches outside the lock, M waited for a task still leaving another CPU`.
+- Test SMP 7/7: 4 pary zadań na różnych CPU budzą się nawzajem w kółko (pobudka zgubiona = czekanie do terminu
+  1 s = FAIL), obok setki krótkich zadań kończy się i jest sprzątanych. Bez czekania na `on_cpu` jądro pada od
+  razu (sprawdzone). QEMU 28/28 (1 i 4 CPU).
+- Legion v0.31.1 (P4.b): wzięcia blokady schedulera 39,6 → 27,2 mln (−31%), czekanie 14,3 → 11,1 s; stress
+  416 610 – bez zysku (zapis tablicy zadań wydłużył `spawn_in` i `reap` pod blokadą schedulera).
+
+## v0.31.1 — 2026-10-14
+
+### Poprawka testu SMP 6/6
+- Pod KVM test przerywał się „too little churn: 16 processes”: uznawał proces za żywy, dopóki zadanie było na liście
+  (`task_exists`), a zakończone zadania sprząta dopiero `spawn` albo pętla idle – której przy CPU zajętych przez
+  czytających nie było. Teraz „żywy” = ma proces, który się nie zakończył (`with_process`). Błąd testu, nie jądra.
+- KVM 8 CPU (v0.31.0): wzięcia blokady schedulera 16,2 → **11,5 mln (−29%)**, `with_process` zniknął z listy
+  miejsc; tablica zadań: 4,9 mln odczytów + 2,0 mln zapisów, 7 ms czekania. Przełączanie zadań to **43%** czasu
+  trzymania blokady schedulera (3,0 s z 7,0 s, 775 ns na przełączenie) – tyle może odzyskać krok c.
+
+## v0.31.0 — 2026-10-14
+
+### P4.b: lista zadań pod własną blokadą
+- **Pytania „jaki proces ma numer X” nie stoją już w kolejce do blokady schedulera.** Lista zadań (i kubełki
+  numerów) ma własną blokadę RW „task table”: `with_process`, `task_exists`, `children_of`, `for_each_process`
+  czytają ją równolegle (Legion v0.30.0: `with_process` 10,8 mln wzięć blokady schedulera na minutę, 3,7 s
+  czekania). Zapis: dodanie zadania (spawn), usunięcie (reap) – pod blokadą schedulera i tej; zmiana rodziców
+  (`reparent_with`) – tylko ta, do zapisu (wyklucza `with_process` jak dotąd).
+- Czytający widzą „zakończone” przez lustro atomowe `dead`; zadanie ma znacznik życia (zwolnione = inny znacznik).
+- Czekanie na blokady RW potwierdza teraz TLB shootdown (czytający tablicę czekają z wyłączonymi przerwaniami).
+- **Pomiar do kroku c:** nowa linia `scheduler lock: task switches under it X ms of Y ms held (Z%)` – ile czasu
+  trzymania blokady schedulera to samo przełączenie zadań. QEMU (TCG, 4 CPU): 51%.
+- Test: SMP TEST 6/6 – czytający na kilku CPU pytają o procesy w trakcie uruchamiania, kończenia i zwalniania
+  setek procesów; zwolnione zadanie widziane przez czytającego = FAIL. Bez blokady zapisu w reap test wykrywa
+  błąd (2 na 2 próby). QEMU 28/28 (1 i 4 CPU).
+
+## v0.30.0 — 2026-10-14
+
+### P4.0: blokada schedulera czeka odczytem
+- **Plan P4 (blokada schedulera)** spisany: `roadmapa` i `ARCHITEKTURA.md` („Scheduler – P4”), z porównaniem do
+  Linuksa, Redoksa, FreeBSD ULE i BFS/MuQSS.
+- **Pierwszy krok, najprostszy:** CPU czekający na blokadę schedulera przy każdym obrocie pętli wykonywał
+  `compare_exchange` (instrukcja atomowa) – 15 czekających zabierało sobie nawzajem i trzymającemu linię pamięci
+  podręcznej z blokadą, więc trzymający wolniej ją oddawał. Teraz czeka samym odczytem i próbuje przejąć dopiero,
+  gdy blokada wygląda na wolną (test-and-test-and-set) – tak czekają już zwykłe spinlocki. To samo w blokadzie
+  listy zombie procesu i w blokadzie inicjatora TLB shootdown.
+- **Legion:** czekanie na blokadę schedulera **18,9 → 14,3 s (−25%)**; nadal 41% wzięć czeka (wait_event 5,4 → 4,0 s,
+  with_process 4,9 → 3,7 s, wake_channel 4,2 → 3,4 s). Stress 423 575 (v0.29.0: 432 210 – rozrzut, bez zysku).
+  KVM 8 CPU bez zmian. Wniosek: blokada jest za długo TRZYMANA – następne kroki P4.b i P4.c.
+- QEMU 28/28.
+
 ## v0.29.1 — 2026-10-14
 
 ### ✅ M20 zamknięte – USB na Legionie (v0.29.0)
