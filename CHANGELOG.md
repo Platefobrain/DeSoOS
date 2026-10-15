@@ -2,6 +2,44 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.34.1 — 2026-10-15
+
+### Wyniki Legiona dla v0.34.0 + drobna poprawka raportu
+- **Legion A/B (16 CPU, stress 60 s):**
+
+  | Okno kręcenia | Skrypty | Idle | Ping-pong | Pobudki w kręceniu (bez IPI) | Uśpienia (`hlt`) |
+  |---|---|---|---|---|---|
+  | dobierane do 200 µs (domyślne) | 535 827 | 7% | 4,35 µs | 831 103 (632 102) | 42 817 |
+  | stałe 200 µs | 535 300 | 3% | 4,45 µs | 819 500 (623 851) | 27 504 |
+  | stałe 50 µs (jak v0.33.0) | 534 027 | 3% | 4,4 µs | 862 796 (655 029) | 58 382 |
+  | stałe 20 µs | 536 961 | 2% | 4,35 µs | 739 641 (546 652) | 83 748 |
+
+  Wszystkie w granicach szumu (~0,5%) – długość okna między 20 a 200 µs nie ma znaczenia. **Zostaje dobierane**:
+  tak samo szybkie, a bezczynny system się nie kręci (bateria). Pobudka bez IPI działa: ~75% pobudek bez przerwania,
+  ping-pong 5,0 µs (v0.33.0) → 4,35 µs. Średnie okno pod obciążeniem 85 µs.
+- **Legion, pełne obciążenie (`DESOOS_STRESS_POOL=6`, 96 procesów): 533 725 skryptów + 266 863 primes** – rekord
+  (v0.22.0: 528 869, +0,9%), idle 2%, ping-pong 4,45 µs, pendrive w tle 26 MB/s (764 przejścia identyczne), pass=1.
+  Blokada schedulera: 25,0 mln wzięć, 24% czeka, 2,4 s czekania, najdłużej 121 µs. Pełne obciążenie daje już tyle
+  samo co tryb porównawczy (535 827) – teraz ogranicza sam stress: licznik `stress-counter` to 7,9% CPU w czekaniu
+  na spinlock (68,7 mln czekań), a `spawn` (wczytanie ELF) ~17% czasu.
+- Raport `cpus` przy stałym oknie pokazywał „now avg 50 us” (startowa wartość) zamiast ustawionej – poprawione.
+
+## v0.34.0 — 2026-10-15
+
+### Kręcenie przed `hlt`: okno dobierane samo + pobudka bez przerwania
+- **Okno kręcenia dobiera się per CPU** (jak `haltpoll` w Linuksie): gdy praca przyszła w ciągu 200 µs od uśpienia
+  rdzenia, okno rośnie ×2 (kręcenie by ją złapało); po dłuższej bezczynności maleje /2, aż do 0. Pod obciążeniem
+  rdzenie kręcą się do 200 µs, bezczynny system wcale – nie traci prądu na baterii.
+- **Pobudka bez IPI:** rdzeń, który się kręci, ma flagę „kręcę się”; budzący tylko ustawia mu „przełącz się”, bez
+  przerwania międzyprocesorowego. Kolejność flag (jak algorytm Dekkera) gwarantuje, że pobudka nie przepada, gdy
+  rdzeń właśnie kończy kręcenie i idzie spać.
+- Ustawienia przy budowaniu: `DESOOS_IDLE_POLL_US` – górna granica okna (domyślnie 200, 0 = bez kręcenia),
+  `DESOOS_IDLE_POLL_ADAPT=0` – stałe okno (jak v0.32.2–v0.33.0 z 50 µs). W [RESULT] `idlepoll=a200` (dobierane) albo
+  `idlepoll=50` (stałe).
+- Raport: `idle: spins before hlt (adaptive up to 200 us, now avg N us): X wake-ups while spinning (Y without IPI),
+  Z halts, window A x up / B x down`.
+- QEMU 28/28 (1 i 4 CPU).
+
 ## v0.33.0 — 2026-10-15
 
 ### ✅ P4 zamknięte + porządek w testach

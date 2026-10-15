@@ -1,4 +1,4 @@
-# DeSoOS v0.33.0
+# DeSoOS v0.34.1
 
 Wlasny system operacyjny
 
@@ -156,6 +156,8 @@ logi, ale nie da sie pisac. Od v0.25.1 dziala klawiatura USB (wbudowana klawiatu
   (MiB, KiB/s, sumy kontrolne przejsc, bledy). Od v0.29.0 takze przed stressem: odczyt tego pliku buforem
   256 KiB i 4 KiB (KiB/s) i opoznienie klawiatury USB (przerwanie -> znak, us; nacisnij kilka klawiszy w trakcie),
   linia `[RESULT-USB]`.
+  Od v0.34.0 bezczynny rdzeń kreci sie chwile przed `hlt` (okno dobierane samo, do 200 us) - szybsza pobudka.
+  Ustawienia przy budowaniu: `DESOOS_IDLE_POLL_US=N` (granica, 0 = bez krecenia), `DESOOS_IDLE_POLL_ADAPT=0` (stale N).
 - Procesy w ring 3 (M13a): `run` - lista programow testowych, `run sum` - pierwszy program
   uzytkownika (wynik 5050), `run pf` / `gp` / `ud` / `nx` / `sse` - bledy, ktore koncza tylko
   proces, `run loop` - petla bez konca (Ctrl+C konczy), `run loop &` - w tle (`ps`, `kill`).

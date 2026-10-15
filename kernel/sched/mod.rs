@@ -981,6 +981,10 @@ fn schedule() {
     }
     let next = tm(nextp);
     next.state = State::Running;
+    // v0.34.0: koniec bezczynności tego CPU – dopasowanie okna kręcenia.
+    if cur.idle_cpu.is_some() && next.idle_cpu.is_none() {
+        idle_feedback(me);
+    }
     // Statystyka: proces wznowiony na innym CPU niż ostatnio (SMP TEST 5).
     if next.process.is_some() && next.switches > 0 && next.last_cpu != me as u8 {
         USER_MIGRATIONS.fetch_add(1, Ordering::Relaxed);
@@ -1757,9 +1761,14 @@ fn kick_idle(s: &mut Scheduler) -> bool {
             && s.idle[c] != NO_TASK
             && s.current[c] == s.idle[c]
             && crate::arch::x86_64::smp::online(c)
-            && !NEED_RESCHED[c].swap(true, Ordering::Relaxed)
+            && !NEED_RESCHED[c].swap(true, Ordering::SeqCst)
         {
-            crate::arch::x86_64::smp::send_resched(c);
+            // v0.34.0: CPU kręci się w idle – zobaczy flagę sam, bez przerwania.
+            if POLLING[c].load(Ordering::SeqCst) {
+                IPI_SKIPPED.add(1);
+            } else {
+                crate::arch::x86_64::smp::send_resched(c);
+            }
             return true;
         }
     }
@@ -1878,19 +1887,66 @@ pub fn idle_us(c: usize) -> u64 {
 /// trwa dziesiątki µs i wydłuża każde przekazanie zadania – od P4 rdzenie
 /// mniej kręcą się na blokadzie, a częściej śpią (Legion: idle 26 → 28–32%,
 /// stress −5%; KVM bez spadku).  Jak `haltpoll` w Linuksie.
+/// v0.34.0: to jest GÓRNA granica okna; okno każdego CPU dobiera się samo
+/// (`DESOOS_IDLE_POLL_ADAPT`, domyślnie 1), patrz `idle_adapt`.
 pub fn idle_poll_us() -> u64 {
     match option_env!("DESOOS_IDLE_POLL_US") {
-        Some(s) => s.trim().parse::<u64>().unwrap_or(50).min(10_000),
-        None => 50,
+        Some(s) => s.trim().parse::<u64>().unwrap_or(200).min(10_000),
+        None => 200,
     }
 }
+
+/// v0.34.0: okno kręcenia dobierane per CPU (jak `haltpoll` w Linuksie):
+/// praca przyszła w ciągu `idle_poll_us()` od uśpienia – okno ×2 (kręcenie
+/// by ją złapało); dłuższa bezczynność – okno /2, aż do 0 (bezczynny system
+/// nie kręci się – bateria).  0 – stałe okno = `idle_poll_us()`.
+pub fn idle_adapt() -> bool {
+    !matches!(option_env!("DESOOS_IDLE_POLL_ADAPT").map(|s| s.trim()), Some("0"))
+}
+
+const POLL_GROW_MIN_US: u64 = 10;
 
 /// (pobudki w trakcie kręcenia, wejścia w hlt) – `cpus`.
 static IDLE_POLL_HITS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static IDLE_HALTS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+/// v0.34.0: CPU kręci się w pętli idle – pobudka bez IPI (wystarczy flaga).
+static POLLING: crate::arch::x86_64::percpu::PerCpu<AtomicBool> = crate::per_cpu!(AtomicBool::new(false));
+static IPI_SKIPPED: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+/// v0.34.0: bieżące okno kręcenia (µs) każdego CPU i TSC pierwszego `hlt`
+/// w obecnym okresie bezczynności (0 = nie spał).
+static POLL_WIN: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(50));
+static HLT_AT: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
+static POLL_GROWS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
+static POLL_SHRINKS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 
-pub fn idle_poll_stats() -> (u64, u64) {
-    (IDLE_POLL_HITS.get(), IDLE_HALTS.get())
+/// (pobudki w kręceniu, hlt, pominięte IPI, wzrosty okna, spadki okna, średnie okno µs).
+pub fn idle_poll_stats() -> (u64, u64, u64, u64, u64, u64) {
+    let n = crate::arch::x86_64::smp::online_count().max(1);
+    let sum: u64 = (0..n).map(|c| POLL_WIN[c].load(Ordering::Relaxed)).sum();
+    // Stałe okno: pokaż faktyczną wartość, nie startowe POLL_WIN.
+    let avg = if idle_adapt() { sum / n as u64 } else { idle_poll_us() };
+    (IDLE_POLL_HITS.get(), IDLE_HALTS.get(), IPI_SKIPPED.get(), POLL_GROWS.get(), POLL_SHRINKS.get(), avg)
+}
+
+/// v0.34.0: CPU `me` zaczyna pracę po bezczynności – jeśli spał (`hlt`),
+/// dopasuj okno: praca przyszła szybko – większe, po długim śnie – mniejsze.
+fn idle_feedback(me: usize) {
+    let t = HLT_AT[me].swap(0, Ordering::Relaxed);
+    if t == 0 || !idle_adapt() {
+        return;
+    }
+    let max = idle_poll_us();
+    let per_us = (crate::arch::x86_64::lapic::tsc_per_ms() / 1000).max(1);
+    let slept = bkl::rdtsc().wrapping_sub(t) / per_us;
+    let w = POLL_WIN[me].load(Ordering::Relaxed);
+    if slept <= max {
+        POLL_WIN[me].store((w * 2).max(POLL_GROW_MIN_US).min(max), Ordering::Relaxed);
+        POLL_GROWS.add(1);
+    } else if w > 0 {
+        let nw = w / 2;
+        POLL_WIN[me].store(if nw < POLL_GROW_MIN_US { 0 } else { nw }, Ordering::Relaxed);
+        POLL_SHRINKS.add(1);
+    }
 }
 
 pub fn idle_loop() -> ! {
@@ -1931,15 +1987,21 @@ pub fn idle_loop() -> ! {
         // v0.32.2: najpierw krótkie kręcenie z IF = 1 – pobudka (IPI) trafia w
         // działający rdzeń i od razu przełącza na zadanie (preempt na końcu
         // przerwania); po kręceniu `hlt` jak dotąd.
-        let poll = idle_poll_us();
+        let me = cpu();
+        let max = idle_poll_us();
+        let poll = if idle_adapt() { POLL_WIN[me].load(Ordering::Relaxed).min(max) } else { max };
         if poll > 0 {
             let per_us = (crate::arch::x86_64::lapic::tsc_per_ms() / 1000).max(1);
             let t0 = bkl::rdtsc();
-            let me = cpu();
             let mut hit = false;
             let mut reap_due = false;
+            // v0.34.0: flaga „kręcę się” – budzący nie wysyła IPI.  Kolejność
+            // (Dekker): budzący ustawia NEED_RESCHED, potem czyta POLLING; my
+            // zdejmujemy POLLING, potem jeszcze raz czytamy NEED_RESCHED –
+            // jedno z dwojga zawsze zobaczy drugie, pobudka nie przepada.
+            POLLING[me].store(true, Ordering::SeqCst);
             while bkl::rdtsc().wrapping_sub(t0) < poll * per_us {
-                if NEED_RESCHED[me].load(Ordering::Relaxed) {
+                if NEED_RESCHED[me].load(Ordering::SeqCst) {
                     hit = true;
                     break;
                 }
@@ -1949,17 +2011,33 @@ pub fn idle_loop() -> ! {
                 }
                 core::hint::spin_loop();
             }
-            if reap_due {
-                continue;
+            POLLING[me].store(false, Ordering::SeqCst);
+            if !hit && NEED_RESCHED[me].load(Ordering::SeqCst) {
+                hit = true;
             }
             if hit {
                 IDLE_POLL_HITS.add(1);
-                // Przełączenie zrobi przerwanie (IPI) albo następny obrót pętli.
                 if NEED_RESCHED[me].swap(false, Ordering::Relaxed) {
                     yield_now();
                 }
                 continue;
             }
+            if reap_due {
+                continue;
+            }
+        }
+        // Przed hlt: ostatnie sprawdzenie z IF = 0 (pobudka bez IPI mogła
+        // przyjść tuż przed zdjęciem POLLING); IPI po tym punkcie obudzi hlt.
+        interrupts::disable();
+        if NEED_RESCHED[me].load(Ordering::SeqCst) {
+            interrupts::enable();
+            if NEED_RESCHED[me].swap(false, Ordering::Relaxed) {
+                yield_now();
+            }
+            continue;
+        }
+        if HLT_AT[me].load(Ordering::Relaxed) == 0 {
+            HLT_AT[me].store(bkl::rdtsc().max(1), Ordering::Relaxed);
         }
         IDLE_HALTS.add(1);
         interrupts::enable_and_hlt();

@@ -41,14 +41,17 @@ else
   echo "Build: $MODE"
 fi
 
-# v0.32.2: DESOOS_IDLE_POLL_US=N – bezczynny CPU kręci się N µs przed `hlt`
-# (szybsza pobudka: IPI do działającego rdzenia zamiast wybudzania z uśpienia);
-# 0 = od razu `hlt` (jak do v0.32.1).  Domyślnie 50.
-export DESOOS_IDLE_POLL_US="${DESOOS_IDLE_POLL_US:-50}"
-case "$DESOOS_IDLE_POLL_US" in
-  ''|*[!0-9]*) echo "DESOOS_IDLE_POLL_US: podaj liczbe mikrosekund (jest: $DESOOS_IDLE_POLL_US)"; exit 1 ;;
+# v0.32.2 / v0.34.0: kręcenie bezczynnego CPU przed `hlt` (szybsza pobudka).
+# DESOOS_IDLE_POLL_US=N – górna granica okna w µs (0 = od razu hlt), domyślnie 200;
+# DESOOS_IDLE_POLL_ADAPT=1 – okno dobiera się samo per CPU (domyślnie), 0 – stałe N.
+export DESOOS_IDLE_POLL_US="${DESOOS_IDLE_POLL_US:-200}"
+export DESOOS_IDLE_POLL_ADAPT="${DESOOS_IDLE_POLL_ADAPT:-1}"
+case "$DESOOS_IDLE_POLL_US$DESOOS_IDLE_POLL_ADAPT" in
+  ''|*[!0-9]*) echo "DESOOS_IDLE_POLL_US / DESOOS_IDLE_POLL_ADAPT: podaj liczby"; exit 1 ;;
 esac
-[ "$DESOOS_IDLE_POLL_US" != 50 ] && echo "Idle: ${DESOOS_IDLE_POLL_US} us krecenia przed hlt (DESOOS_IDLE_POLL_US)"
+if [ "$DESOOS_IDLE_POLL_US" != 200 ] || [ "$DESOOS_IDLE_POLL_ADAPT" != 1 ]; then
+  echo "Idle: krecenie przed hlt do ${DESOOS_IDLE_POLL_US} us, $([ "$DESOOS_IDLE_POLL_ADAPT" = 1 ] && echo dobierane || echo stale)"
+fi
 
 # Wersja z Cargo.toml -> kernel (komenda 'ver', baner shella).
 DESOOS_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"

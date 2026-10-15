@@ -763,9 +763,10 @@ fn auto_task(secs: usize) {
     let pass = result.is_ok() && bench.is_ok() && ue == 0 && um == 0 && calm_ok;
     let line = match &result {
         Ok(r) => format!(
-            "[RESULT] ver={} mode={} idlepoll={} cpus={} ms={} scripts={} primes={} ipc={} idle={} {}{} pass={}",
+            "[RESULT] ver={} mode={} idlepoll={}{} cpus={} ms={} scripts={} primes={} ipc={} idle={} {}{} pass={}",
             v,
             mode,
+            if crate::sched::idle_adapt() { "a" } else { "" },
             crate::sched::idle_poll_us(),
             r.cpus,
             r.ms,

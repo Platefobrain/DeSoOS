@@ -618,13 +618,18 @@ pub fn cpus_report(out: &mut dyn Write) {
         "scheduler lock: longest wait {} us ({}), {} waits over 100 us, longest wait in an interrupt {} us",
         wmax, wsite, wlong, wirq
     );
-    let (ph, ih) = crate::sched::idle_poll_stats();
+    let (ph, ih, skip, grow, shrink, avg) = crate::sched::idle_poll_stats();
     let _ = writeln!(
         out,
-        "idle: spins {} us before hlt (DESOOS_IDLE_POLL_US): {} wake-ups while spinning, {} halts",
+        "idle: spins before hlt ({} up to {} us, now avg {} us): {} wake-ups while spinning ({} without IPI), {} halts, window {} x up / {} x down",
+        if crate::sched::idle_adapt() { "adaptive" } else { "fixed" },
         crate::sched::idle_poll_us(),
+        avg,
         ph,
-        ih
+        skip,
+        ih,
+        grow,
+        shrink
     );
     let (sw_n, ow_n, ow_us) = crate::sched::switch_stats();
     let _ = writeln!(
