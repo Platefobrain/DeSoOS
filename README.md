@@ -1,4 +1,4 @@
-# DeSoOS v0.34.1
+# DeSoOS v0.34.3
 
 Wlasny system operacyjny
 
@@ -196,7 +196,7 @@ Uwaga: w terminalu QEMU (`-serial stdio`) Ctrl+C zamyka QEMU. W oknie QEMU Ctrl+
 
 `tests/test.sh` buduje kernel z samotestami, uruchamia QEMU bez okna i konczy sie wynikiem:
 `PASS` (kod 0), `FAIL` (1, z lista bledow), `TIMEOUT` (2, zawieszenie) albo blad QEMU (3).
-Pelny log: `test.log`. Testy dzialaja na osobnym, pustym dysku - `disk.img` zostaje nietkniety.
+Pelny log: `logs/test.log` (stress w QEMU: `logs/stress-qemu.log`, budowanie z make-usb: `logs/build-usb.log`). Testy dzialaja na osobnym, pustym dysku - `disk.img` zostaje nietkniety.
 Opcje: `--no-build` (bez budowania), `--verbose` (log na biezaco), `TIMEOUT=300 tests/test.sh`.
 QEMU w testach dziala z `-cpu max` (NX, SMEP jak na nowym procesorze).
 Nie uruchamiaj `test.sh` rownoczesnie z `run-qemu.sh` (oba uzywaja katalogu `build/`).

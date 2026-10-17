@@ -102,6 +102,12 @@ impl core::fmt::Display for Report {
     }
 }
 
+/// v0.34.3: operacje na wspólnym liczniku w jednej rundzie (potem alokacje i
+/// sen 1 ms).  Było 500: 16 zadań kręciło się na jednej blokadzie – na Legionie
+/// 7,9% CPU w samym czekaniu, stress mierzył bardziej siebie niż system.  50
+/// nadal daje miliony operacji z tłokiem (test gubienia zwiększeń zostaje).
+const HAMMER_OPS: usize = 50;
+
 /// Zadanie kernela: pętle na spinlockach bez BKL, co chwilę krótki sen.
 fn hammer(i: usize) {
     // M17a.g3: cała pętla bez BKL – także sen (scheduler bez BKL od f2).
@@ -109,7 +115,7 @@ fn hammer(i: usize) {
     // Legionie 187 tys. wzięć "end of bkl::unlocked", 10,6 s czekania.
     bkl::unlocked(|| while !STOP.load(Ordering::Relaxed) {
         {
-            for _ in 0..500 {
+            for _ in 0..HAMMER_OPS {
                 {
                     let mut g = SPIN_COUNTER.lock();
                     // Nieatomowe czytaj-zmień-zapisz: bez wzajemnego

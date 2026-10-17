@@ -11,7 +11,7 @@
 #   ACCEL=kvm    kvm (domyślnie, jeśli jest /dev/kvm) albo tcg
 #
 # Kody wyjścia: 0 = PASS, 1 = FAIL, 2 = timeout / zawieszenie, 3 = błąd.
-# Log: stress-qemu.log.  Uwaga: build/ zawiera potem kernel z autostress –
+# Log: logs/stress-qemu.log.  Uwaga: build/ zawiera potem kernel z autostress –
 # make-usb.sh i test.sh i tak budują własny.
 set -uo pipefail
 
@@ -66,7 +66,8 @@ if command -v python3 >/dev/null 2>&1 && python3 "$T/mkfat32.py" "$TMP_USB" "$RO
   USB_ARGS=(-drive if=none,id=usbtest,format=raw,file="$TMP_USB",readonly=on -device usb-storage,drive=usbtest)
 fi
 
-LOG="$ROOT/stress-qemu.log"
+mkdir -p "$ROOT/logs"
+LOG="$ROOT/logs/stress-qemu.log"
 : > "$LOG"
 # Start + 5 s opóźnienia + stress + sprzątanie; zapas na wolne TCG.
 LIMIT=$(( SECS + 180 ))  # M18.f: + ipcbench po stressie
@@ -107,7 +108,7 @@ sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/^.*\[AUTOSTRESS[^]]*\]/[AUTOSTRESS]/' 
   | grep -avE "^\[AUTOSTRESS\] +[0-9]+ +[0-9]+ " | sed 's/^\[AUTOSTRESS\] //'
 sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" | grep -ao "\[RESULT\].*" | tail -n 1
 case "$RESULT" in
-  0) echo "== PASS ($(( $(date +%s) - START )) s, log: stress-qemu.log)"; exit 0 ;;
+  0) echo "== PASS ($(( $(date +%s) - START )) s, log: logs/stress-qemu.log)"; exit 0 ;;
   1) echo "== FAIL – ostatnie linie logu:"; grep -aE "FAIL|PANIC|panicked|\[LOCK\]|\[WATCHDOG\]" "$LOG" | tail -n 15; exit 1 ;;
   *) echo "== TIMEOUT / zawieszenie – ostatnie linie logu:"; tail -n 15 "$LOG"; exit 2 ;;
 esac

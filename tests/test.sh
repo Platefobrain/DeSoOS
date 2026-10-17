@@ -7,7 +7,7 @@
 #
 # Kody wyjścia: 0 = PASS, 1 = FAIL, 2 = timeout (zawieszenie),
 #               3 = QEMU skończył się inaczej (np. triple fault / reboot).
-# Log zostaje w test.log.
+# Log zostaje w logs/test.log.
 set -uo pipefail
 
 # Testy w tests/, reszta projektu katalog wyżej.
@@ -74,7 +74,8 @@ python3 "$T/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd
 # (vvfat) potrafił przy tym uszkodzić build/EFI/BOOT/BOOTX64.EFI.
 rm -f "$ROOT/build/NvVars"
 
-LOG="$ROOT/test.log"
+mkdir -p "$ROOT/logs"
+LOG="$ROOT/logs/test.log"
 # M20.d: monitor QEMU dla podłączania w locie (USB TEST 6/6): qemu-hotplug.py
 # wysyła do niego linie „[HOTPLUG] …” z logu (hub z myszą i testowym pendrive'em).
 MON="${TMPDIR:-/tmp}/desoos-monitor-$$.sock"
@@ -127,7 +128,7 @@ TIME=$(( $(date +%s) - START ))
 
 PASSED=$(grep -c " PASS" "$LOG" || true)
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | sed 's/^.*Self-tests: //')
-echo "Log: test.log (${TIME} s, ${PASSED} testow PASS)"
+echo "Log: logs/test.log (${TIME} s, ${PASSED} testow PASS)"
 # M19.h: pomiar usług (jądro vs user space) – linia [RESULT-SVC] z samotestu SVC.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # M20: kontroler USB (xHCI) i usbd – linia [RESULT-USB] z samotestu USB.

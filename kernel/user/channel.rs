@@ -128,6 +128,14 @@ impl ChanEnd {
             }
             {
                 let mut q = peer.q.lock();
+                // Ponownie pod blokadą kolejki: odbiorca mógł się zamknąć po
+                // sprawdzeniu wyżej.  Drop ustawia `closed` przed wzięciem tej
+                // blokady i opróżnia kolejkę pod nią – więc albo widzimy
+                // `closed`, albo nasz komunikat zabierze jego opróżnianie.
+                if peer.closed.load(Ordering::SeqCst) {
+                    drop(q);
+                    return Err((EPIPE, msg.take().unwrap()));
+                }
                 if q.len() < QUEUE_MAX {
                     q.push_back(msg.take().unwrap());
                     peer.len.store(q.len(), Ordering::SeqCst);

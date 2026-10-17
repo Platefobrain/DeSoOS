@@ -113,6 +113,12 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
+/// Długość z procesu zaokrąglona do strony – `None` przy przepełnieniu
+/// (jądro buduje z overflow-checks: `page_up(u64::MAX)` = panika).
+fn page_up_user(x: u64) -> Option<u64> {
+    Some(x.checked_add(PAGE - 1)? & !(PAGE - 1))
+}
+
 impl ProcMem {
     /// `image_end` – pierwszy adres za obrazem programu (sterta zaczyna się
     /// stronę dalej – strona-strażnik).
@@ -218,6 +224,10 @@ impl ProcMem {
         if len == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 {
             return Err(EINVAL);
         }
+        // Długość od procesu: najpierw limit, potem zaokrąglenie (bez przepełnień).
+        if len > MAX_MAPPED {
+            return Err(ENOMEM);
+        }
         let len = page_up(len);
         if self.mapped_total() + len > MAX_MAPPED {
             return Err(ENOMEM);
@@ -300,7 +310,7 @@ impl ProcMem {
         if addr % PAGE != 0 || len == 0 || addr < MMAP_BASE {
             return Err(EINVAL);
         }
-        let end = addr.checked_add(page_up(len)).ok_or(EINVAL)?;
+        let end = page_up_user(len).and_then(|l| addr.checked_add(l)).ok_or(EINVAL)?;
         let shared_hit = |v: &Vma| v.kind == VmaKind::Shared && v.end > addr && v.start < end;
         if self.vmas.iter().any(|v| shared_hit(v) && (v.start < addr || v.end > end)) {
             return Err(EINVAL);

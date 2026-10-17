@@ -1260,6 +1260,11 @@ pub fn encode_key(k: crate::console::Key) -> u64 {
 
 fn sys_readkey(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     use crate::console;
+    // Klawiatura tylko dla procesu, którego uchwyt 0 to konsola z prawem READ
+    // (jak `read(0)`); np. proces z plikiem albo potokiem na 0 – EBADF.
+    if !p.is_console(0) || p.handle(0)?.rights & rights::READ == 0 {
+        return Err(EBADF);
+    }
     // Testy: klawisze z bufora (bajty jak z terminala).
     if let Some(input) = p.stdin.clone() {
         let mut input = input.lock();

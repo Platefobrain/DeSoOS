@@ -2,6 +2,39 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.34.3 — 2026-10-16
+
+### Stress mniej mierzy sam siebie
+- Zadania `stress-spin` (test poprawności spinlocków: 16 zadań zwiększa wspólny licznik, na końcu suma musi się
+  zgadzać) robiły 500 operacji na rundę – na Legionie 68,7 mln czekań, **7,9% CPU w samym kręceniu** na blokadzie
+  `stress-counter`. Teraz 50 na rundę: nadal miliony operacji z tłokiem, test gubienia zwiększeń zostaje, ale CPU
+  idzie na właściwą pracę (skrypty, procesy, IPC).
+- **Legion (v0.34.3):** tryb porównawczy **599 726 skryptów** (v0.34.1: 535 827, +11,9%), pełne obciążenie (max6)
+  **593 119** (533 725, +11,1%); idle 5%, ping-pong 4,5 µs, pass=1; `stress-counter` 7,9% → 0,0% CPU; pendrive w tle
+  73,7 MB/s w trybie porównawczym (było 26 MB/s). Nadal max6 ≈ porównawczy; najdroższe teraz: `spawn` (wczytanie ELF)
+  ~9% CPU, heap 0,6–1,0%. Zegar: nadal 45–51 zgubionych ticków PIT i przerwy do 40 ms – następny krok.
+- **Logi w folderze `logs/`:** `logs/test.log` (tests/test.sh), `logs/stress-qemu.log` (tests/stress-qemu.sh),
+  `logs/build-usb.log` (make-usb.sh). Stare `test.log`, `stress-qemu.log`, `build-usb.log` w głównym folderze można usunąć.
+- **Liczby skryptów od v0.34.3 są wyższe przez samą zmianę testu** – porównywać z v0.34.2 tylko z tym zastrzeżeniem.
+- QEMU 28/28.
+
+## v0.34.2 — 2026-10-16
+
+### Poprawki bezpieczeństwa (z przeglądu kodu od Pawła)
+- **`mmap` / `munmap` z długością bliską 2^64 wywracały jądro.** Zaokrąglenie do strony (`page_up`) przepełniało
+  się przed sprawdzeniem limitu, a jądro jest budowane z kontrolą przepełnień – więc dowolny program jednym
+  `mmap(u64::MAX)` robił PANIC całego systemu (sprawdzone: stara wersja pada w MemTest). Teraz najpierw limit,
+  potem zaokrąglenie; `munmap` zaokrągla bez przepełnienia → `ENOMEM` / `EINVAL`. FILE TEST 4/4: memtest 25
+  sprawdzeń (było 23).
+- **Wyścig `chan_send` z zamknięciem odbiorcy.** Nadawca sprawdzał „druga strona zamknięta” przed blokadą kolejki;
+  gdy odbiorca zamknął się dokładnie w tej chwili, komunikat (z uchwytami w środku) trafiał do martwej kolejki, a
+  `send` zwracał sukces. Teraz drugie sprawdzenie pod blokadą kolejki – nadawca dostaje `EPIPE` i uchwyty wracają.
+- **`readkey` bez sprawdzania uprawnień.** Czytał klawiaturę każdemu procesowi. Teraz tylko, gdy uchwyt 0 to
+  konsola z prawem READ (jak `read(0)`); inaczej `EBADF`. Przy okazji proces z plikiem / potokiem na wejściu nie
+  podbiera już klawiszy shellowi. IPC TEST 1/5: handletest sprawdza to w dziecku z plikiem na uchwycie 0.
+- Znany brak bez zmian: cykl uchwytów przez kolejki kilku kanałów zostaje w pamięci (opisany w roadmapie).
+- QEMU 28/28.
+
 ## v0.34.1 — 2026-10-15
 
 ### Wyniki Legiona dla v0.34.0 + drobna poprawka raportu

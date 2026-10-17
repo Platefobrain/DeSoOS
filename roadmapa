@@ -586,6 +586,7 @@ Na podstawie pomiarów z Legiona (v0.19.7, pełne obciążenie, 16 CPU). Każdy 
       ~75% pobudek bez IPI, ping-pong 5,0 → 4,35 µs.
       Pełne obciążenie (max6, v0.34.1): **533 725** (v0.22.0: 528 869) – stress ogranicza teraz sam siebie
       (spinlock `stress-counter` 7,9% CPU).
+      v0.34.3: lżejszy test spinlocków w stressie → Legion compare **599 726**, max6 **593 119** (nowy punkt odniesienia).
       Plan i przebieg (2026-10-14; projekt: `ARCHITEKTURA.md`, „Scheduler – P4”). Legion v0.29.0:
       40,1 mln wzięć w 60 s, 41% czeka, 18,9 s czekania; trzymana łącznie ~16 s z 60 s (jedna globalna blokada zajęta
       ~27% czasu). Wzięcia: `with_process` 11,1 mln, `wait_event` 10,6 mln, `wake_channel` 7,6 mln, `exit` i

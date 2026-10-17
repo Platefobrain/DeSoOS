@@ -110,7 +110,8 @@ install_to() {
   else
     echo "Buduję zwykły kernel (bez samotestów)..."
   fi
-  ./build.sh > build-usb.log 2>&1 || { tail -n 20 build-usb.log; die "build nie powiódł się (log: build-usb.log)"; }
+  mkdir -p logs
+  ./build.sh > logs/build-usb.log 2>&1 || { tail -n 20 logs/build-usb.log; die "build nie powiódł się (log: logs/build-usb.log)"; }
 
   mkdir -p "$mnt/EFI/BOOT"
   cp build/EFI/BOOT/BOOTX64.EFI "$target"

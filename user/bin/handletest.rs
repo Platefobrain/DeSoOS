@@ -39,7 +39,9 @@ fn child() -> i32 {
         let h = handle_dup(0, R_ALL);
         h >= 0 && handle_info(h as u64) == Ok((KIND_FILE, R_READ | R_DUP))
     };
-    if ok_info && ok_read && ok_write && ok_amplify { 0 } else { 3 }
+    // Uchwyt 0 to plik, nie konsola – klawiatura niedostępna.
+    let ok_key = readkey("").err() == Some(EBADF);
+    if ok_info && ok_read && ok_write && ok_amplify && ok_key { 0 } else { 3 }
 }
 
 fn main(args: Args) -> i32 {
