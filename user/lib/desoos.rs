@@ -142,6 +142,9 @@ pub const SEEK_END: u64 = 2;
 
 /// spawn: Ctrl+C terminates the child (foreground process).
 pub const SPAWN_FOREGROUND: u64 = 1;
+/// File sandbox: the child (and its descendants) cannot use paths (open, stat,
+/// readdir, mkdir, unlink, chdir, spawn give EACCES) – only the handles passed in.
+pub const SPAWN_NO_FILES: u64 = 2;
 /// spawn: the child gets the parent's 0, 1, 2.
 pub const STDIO: u64 = fds(0, 1, 2);
 /// wait: any child / do not wait.

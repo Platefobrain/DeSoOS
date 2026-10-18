@@ -196,6 +196,16 @@ impl IrqObj {
         &SLOTS[self.vector as usize - msi::MSI_BASE]
     }
 
+    /// MSI vector (`caps`).
+    pub fn vector(&self) -> u8 {
+        self.vector
+    }
+
+    /// The claimed device (`caps`).
+    pub fn device(&self) -> &'static crate::drivers::pci::Device {
+        self.claim.dev()
+    }
+
     /// Interrupts since the last read (resets the counter).
     pub fn take(&self) -> u64 {
         self.slot().count.swap(0, Ordering::SeqCst)

@@ -384,7 +384,7 @@ impl Device {
     }
 }
 
-fn class_name(class: u8, subclass: u8) -> &'static str {
+pub fn class_name(class: u8, subclass: u8) -> &'static str {
     match (class, subclass) {
         (0x01, 0x00) => "SCSI storage",
         (0x01, 0x01) => "IDE controller",

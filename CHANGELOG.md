@@ -2,6 +2,41 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.36.1 — 2026-10-18
+
+### Permissions (DCP), step 2: file sandbox
+- `spawn` / `spawn_ex` flag **`SPAWN_NO_FILES`**: the process gets no file system access by path. `open` (every
+  mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `EACCES`. The check is in one
+  place, before the call is decoded (`is_path_call`), so no path parsing or VFS code runs for a sandboxed caller.
+  File handles it was given keep working with exactly their rights. Inherited by every child, never cleared.
+- Shell: `nofiles <program> [args]` – `nofiles cat < notes.txt` prints the file (the shell opens it and passes the
+  handle), `nofiles cat notes.txt` gets "permission denied", `nofiles ls /` too. A sandboxed program gets only its
+  stdio (no service channel).
+- `secinfo` / `caps`: FILES `none` for sandboxed processes, and the number of refused path calls.
+- `sysfuzz`: every other child runs in the sandbox with one file handle – random path calls must all be refused.
+- FILE TEST 7/7: `/bin/sandtest` – the sandboxed child tries 11 path calls (every open mode, relative path, stat,
+  readdir, mkdir, unlink, chdir, spawn, spawn_ex), uses the read-only handle it was given (read OK, write EBADF,
+  no rights added), checks that pipes / channels / getcwd still work and that `caps` shows `files: none`; the parent
+  checks nothing changed on disk, unknown spawn flags give EINVAL, and an unsandboxed child still reads files.
+
+## v0.36.0 — 2026-10-18
+
+### Permissions (DCP), step 1: seeing the capabilities
+DeSoOS has no users, groups or `rwx` bits – a process may do exactly what its handles allow (rights per handle,
+reduce-only, enforced in every syscall – in place since channels and devices). Until now nobody could see another
+process's handles. Before networking the model gets a view, then a file sandbox (the only gap: files are still
+opened by path, without a handle).
+- `secinfo` – one line per process: handle count, hardware (`hw-root` / N devices), system powers
+  (`sysctl`, `input`, `blk`), file access (`all` for now).
+- `caps <pid>` – every handle: slot, kind, rights (`read write send recv map-r map-w dup transfer`) and a detail
+  (PCI device and class, MSI vector, shared memory size / DMA).
+- How: a process changes its handle table without locks, so other CPUs must never touch its handles. The table is
+  now a type (`FdTable`) whose every change also publishes a 64-bit summary of the slot in an atomic (kind, rights,
+  detail); `caps` reads only those, under the scheduler lock (a process is freed only after its task is removed
+  under that lock). One atomic store per handle change; no lock on the hot path.
+- handletest (IPC TEST 1/5): 6 new checks – the kernel's view of its own table (via `caps <pid>`) shows the same
+  kinds and reduced rights, and a closed handle disappears from it (29 checks).
+
 ## v0.35.5 — 2026-10-18
 
 ### Clock gaps: is it the USB BIOS handoff?

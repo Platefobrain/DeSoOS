@@ -159,14 +159,99 @@ pub enum Fd {
     Blk,
 }
 
+/// Handle table: the slots plus a published summary of each slot (kind,
+/// rights, a detail – `caps::summary`) in atomics.  Only the owning process
+/// changes its table (no lock); other CPUs (`caps`, `secinfo`) read just the
+/// summary, never the handles themselves – no locking on the hot path, no
+/// shared references to objects being closed.  Every change goes through a
+/// method here, so the summary cannot go stale.
+pub struct FdTable {
+    v: Vec<Option<Handle>>,
+    summary: alloc::boxed::Box<[AtomicU64; super::caps::SLOTS]>,
+}
+
+impl FdTable {
+    pub fn new() -> FdTable {
+        FdTable { v: Vec::new(), summary: alloc::boxed::Box::new([const { AtomicU64::new(0) }; super::caps::SLOTS]) }
+    }
+
+    pub fn from_vec(v: Vec<Option<Handle>>) -> FdTable {
+        let mut t = FdTable::new();
+        t.v = v;
+        for i in 0..t.v.len() {
+            t.publish(i);
+        }
+        t
+    }
+
+    fn publish(&self, i: usize) {
+        if let Some(s) = self.summary.get(i) {
+            let val = self.v.get(i).and_then(|h| h.as_ref()).map_or(0, super::caps::summary);
+            s.store(val, Ordering::Release);
+        }
+    }
+
+    pub fn get(&self, i: usize) -> Option<&Option<Handle>> {
+        self.v.get(i)
+    }
+
+    pub fn iter(&self) -> core::slice::Iter<'_, Option<Handle>> {
+        self.v.iter()
+    }
+
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.v.len()
+    }
+
+    /// Puts `h` into slot `i` (the table grows as needed); returns the old
+    /// handle – the caller drops it (closes the object).
+    pub fn set(&mut self, i: usize, h: Option<Handle>) -> Option<Handle> {
+        if self.v.len() <= i {
+            if h.is_none() {
+                return None;
+            }
+            self.v.resize_with(i + 1, || None);
+        }
+        let old = core::mem::replace(&mut self.v[i], h);
+        self.publish(i);
+        old
+    }
+
+    pub fn take(&mut self, i: usize) -> Option<Handle> {
+        self.set(i, None)
+    }
+
+    pub fn push(&mut self, h: Option<Handle>) {
+        self.v.push(h);
+        self.publish(self.v.len() - 1);
+    }
+
+    pub fn clear(&mut self) {
+        self.v.clear();
+        for s in self.summary.iter() {
+            s.store(0, Ordering::Release);
+        }
+    }
+
+    /// Published summary of every slot (other CPUs; see `caps`).
+    pub fn summary(&self) -> [u64; super::caps::SLOTS] {
+        core::array::from_fn(|i| self.summary[i].load(Ordering::Acquire))
+    }
+}
+
 pub struct Process {
     /// Child of init (shell, services) – may dip into the process reserve.
     pub(super) trusted: bool,
+    /// File sandbox: no file system access by path (open, stat, readdir,
+    /// mkdir, unlink, chdir, spawn) – only the handles it was given.  Set by
+    /// `spawn` with SPAWN_NO_FILES, inherited by every child, never cleared.
+    pub no_files: bool,
     pub space: AddressSpace,
     /// Memory areas (heap, mmap, stack) – lazy page allocation.
     pub mem: super::vm::ProcMem,
     /// Handle table (formerly descriptors) – number = index.
-    pub(super) fds: Vec<Option<Handle>>,
+    pub(super) fds: FdTable,
     pub(super) stdin: Option<InBuf>,
     pub(super) stdout: Option<OutBuf>,
     /// This process created the stdout buffer (children only inherit it) –
@@ -230,7 +315,7 @@ const _: () = assert!(core::mem::align_of::<Process>() <= 16 && core::mem::size_
 
 impl Process {
     pub fn new(space: AddressSpace) -> Self {
-        let mut fds = Vec::new();
+        let mut fds = FdTable::new();
         fds.push(Some(Handle::new(Fd::Console))); // 0 stdin
         fds.push(Some(Handle::new(Fd::Console))); // 1 stdout
         fds.push(Some(Handle::new(Fd::Console))); // 2 stderr
@@ -255,6 +340,7 @@ impl Process {
             child_gen: AtomicU64::new(0),
             key_decoder: SerialDecoder::new(),
             trusted: false,
+            no_files: false,
         }
         .counted()
     }
@@ -280,6 +366,11 @@ impl Process {
 
     pub(super) fn is_console(&self, fd: u64) -> bool {
         matches!(self.fds.get(fd as usize), Some(Some(Handle { obj: Fd::Console, .. })))
+    }
+
+    /// Published summary of the handle table (other CPUs – `caps`).
+    pub fn handle_summary(&self) -> [u64; super::caps::SLOTS] {
+        self.fds.summary()
     }
 
     /// Number of open files (3+).

@@ -1547,6 +1547,30 @@ pub fn should_exit() -> bool {
     active() && without_interrupts(should_exit_unlocked)
 }
 
+/// Published handle summaries of user processes (`caps`, `secinfo`):
+/// (pid, ppid, name, file sandbox, summary of each slot).  Read under the scheduler lock – a
+/// process is freed only after its task is removed under the same lock, and only
+/// atomics are read (the owner changes its table without locks).
+pub fn process_caps() -> Vec<(TaskId, TaskId, String, bool, [u64; crate::user::caps::SLOTS])> {
+    if !active() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    without_interrupts(|| {
+        let _g = lock_sched_at(&"process_caps");
+        let s = sched();
+        for t in s.tasks.iter() {
+            if t.state == State::Dead {
+                continue;
+            }
+            if let Some(p) = t.process.as_deref() {
+                out.push((t.id, p.ppid(), t.name.clone(), p.no_files, p.handle_summary()));
+            }
+        }
+    });
+    out
+}
+
 /// List of tasks (excluding finished ones).
 pub fn tasks() -> Vec<TaskInfo> {
     if !active() {

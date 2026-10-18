@@ -19,6 +19,7 @@
 // tasks run with CR0.TS = 1: FPU/SSE in the kernel = #NM = kernel bug.
 
 pub mod elf_loader;
+pub mod caps;
 pub mod process;
 pub mod procs;
 pub mod programs;
@@ -327,6 +328,7 @@ pub fn spawn_child(
     path: &str,
     args: &[&str],
     foreground: bool,
+    no_files: bool,
     fds: Vec<Option<process::Handle>>,
 ) -> Result<TaskId, ExecError> {
     // Process limit; init and its children (shell, services) have a reserve.
@@ -347,13 +349,15 @@ pub fn spawn_child(
     child.initial_rsp = loaded.rsp;
     child.cwd = parent.cwd.clone();
     child.foreground = foreground;
+    // The sandbox is inherited and can only be added, never removed.
+    child.no_files = parent.no_files || no_files;
     child.stdin = parent.stdin.clone();
     child.stdout = parent.stdout.clone();
     child.ppid.store(parent_pid, Ordering::SeqCst);
     child.trusted = parent_pid == procs::init_pid();
     // Before the child becomes visible (the parent's on_exit checks this).
     parent.has_children.store(true, Ordering::SeqCst);
-    child.fds = fds;
+    child.fds = process::FdTable::from_vec(fds);
     let name = path.rsplit('/').next().unwrap_or(path);
     // Loading the program and building the address space happen without the BKL; the
     // foreground entry is made by spawn under the scheduler lock, before the task becomes

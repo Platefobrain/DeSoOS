@@ -301,6 +301,11 @@ pub const SYS_BLK_ATTACH: u64 = 50;
 pub const SPAWN_EX_MAX: u64 = 16;
 
 pub const SPAWN_FOREGROUND: u64 = 1;
+/// The child (and all its descendants) gets no file system access by path –
+/// only the handles passed to it (file sandbox).
+pub const SPAWN_NO_FILES: u64 = 2;
+/// Spawn flags a process may pass.
+const SPAWN_FLAGS: u64 = SPAWN_FOREGROUND | SPAWN_NO_FILES;
 
 pub const O_READ: u64 = 1;
 pub const O_WRITE: u64 = 2;
@@ -622,10 +627,7 @@ fn install_fd(p: &mut Process, from: usize, fd: Fd) -> SysResult {
 /// The lowest free number >= `from` gets handle `h` (with its rights).
 fn install_handle(p: &mut Process, from: usize, h: Handle) -> SysResult {
     let slot = (from..MAX_FDS).find(|&i| p.fds.get(i).map_or(true, |f| f.is_none())).ok_or(EMFILE)?;
-    if p.fds.len() <= slot {
-        p.fds.resize_with(slot + 1, || None);
-    }
-    p.fds[slot] = Some(h);
+    p.fds.set(slot, Some(h));
     Ok(slot as u64)
 }
 
@@ -778,7 +780,7 @@ fn sys_channel_create(p: &mut Process, out: u64) -> SysResult {
     let hb = match install_fd(p, 0, Fd::Channel(b)) {
         Ok(h) => h,
         Err(e) => {
-            p.fds[ha as usize] = None;
+            p.fds.take(ha as usize);
             return Err(e);
         }
     };
@@ -825,14 +827,14 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
             nums.push(n as usize);
         }
     }
-    let handles: Vec<Handle> = nums.iter().map(|&n| p.fds[n].take().unwrap()).collect();
+    let handles: Vec<Handle> = nums.iter().map(|&n| p.fds.take(n).unwrap()).collect();
     let msg = super::channel::Message { data, handles, sender: sched::current_id() };
     match end.send(msg, flags & CHAN_NONBLOCK != 0) {
         Ok(()) => Ok(0),
         Err((e, msg)) => {
             // The process is single-threaded – the slots are still free.
             for (n, hd) in nums.into_iter().zip(msg.handles) {
-                p.fds[n] = Some(hd);
+                p.fds.set(n, Some(hd));
             }
             Err(e)
         }
@@ -1012,7 +1014,7 @@ fn sys_pipe(p: &mut Process, out: u64) -> SysResult {
     let wfd = match install_fd(p, 0, Fd::Pipe(w)) {
         Ok(fd) => fd,
         Err(e) => {
-            p.fds[rfd as usize] = None;
+            p.fds.take(rfd as usize);
             return Err(e);
         }
     };
@@ -1038,10 +1040,7 @@ fn sys_dup2(p: &mut Process, old: u64, new: u64) -> SysResult {
         return Err(EBADF);
     }
     if old as usize != new {
-        if p.fds.len() <= new {
-            p.fds.resize_with(new + 1, || None);
-        }
-        p.fds[new] = Some(f);
+        p.fds.set(new, Some(f));
     }
     Ok(new as u64)
 }
@@ -1070,12 +1069,9 @@ fn sys_seek(p: &mut Process, fd: u64, offset: u64, whence: u64) -> SysResult {
 }
 
 fn sys_close(p: &mut Process, fd: u64) -> SysResult {
-    match p.fds.get_mut(fd as usize) {
-        Some(slot @ Some(_)) => {
-            *slot = None;
-            Ok(0)
-        }
-        _ => Err(EBADF),
+    match p.fds.take(fd as usize) {
+        Some(_) => Ok(0),
+        None => Err(EBADF),
     }
 }
 
@@ -1108,7 +1104,7 @@ fn exec_error(e: super::ExecError) -> i64 {
 
 fn sys_spawn(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let (flags, fds) = (f.r8, f.r9);
-    if flags & !SPAWN_FOREGROUND != 0 {
+    if flags & !SPAWN_FLAGS != 0 {
         return Err(EINVAL);
     }
     // The child gets copies of the handles with their rights (requires DUP).
@@ -1122,7 +1118,7 @@ fn sys_spawn(p: &mut Process, f: &SyscallFrame) -> SysResult {
 /// provides it.
 fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let (map, n, flags) = (f.r8, f.r9 & 0xFFFF_FFFF, f.r9 >> 32);
-    if flags & !SPAWN_FOREGROUND != 0 || n > SPAWN_EX_MAX {
+    if flags & !SPAWN_FLAGS != 0 || n > SPAWN_EX_MAX {
         return Err(EINVAL);
     }
     let raw = if n > 0 { copy_from_user(p, map, n * 16)? } else { Vec::new() };
@@ -1160,7 +1156,7 @@ fn spawn_common(p: &mut Process, f: &SyscallFrame, flags: u64, child_fds: Vec<Op
     }
     let me = sched::current_id();
     let t_load = super::prof::start();
-    let pid = super::spawn_child(me, p, &path, &args, flags & SPAWN_FOREGROUND != 0, child_fds)
+    let pid = super::spawn_child(me, p, &path, &args, flags & SPAWN_FOREGROUND != 0, flags & SPAWN_NO_FILES != 0, child_fds)
         .map_err(exec_error)?;
     super::prof::stop(super::prof::LOAD_ELF, t_load);
     Ok(pid)
@@ -1411,6 +1407,14 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
     }
 }
 
+/// System calls that take a path – refused in the file sandbox.
+pub fn is_path_call(nr: u64) -> bool {
+    matches!(nr, SYS_OPEN | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_SPAWN | SYS_SPAWN_EX)
+}
+
+/// Path calls refused in the file sandbox (`secinfo`, tests).
+pub static SANDBOX_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Called from syscall_entry (assembly) – on the task's kernel stack.
 #[unsafe(no_mangle)]
 extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
@@ -1434,7 +1438,14 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         panic!("syscall from a task without a process");
     };
     let (a0, a1, a2) = (frame.rdi, frame.rsi, frame.rdx);
+    // File sandbox: every call that names a path is refused before it is
+    // decoded (one place – a new path syscall must be added to `is_path_call`).
+    let sandboxed = p.no_files && is_path_call(frame.rax);
     let result: SysResult = match frame.rax {
+        _ if sandboxed => {
+            SANDBOX_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Err(EACCES)
+        }
         SYS_EXIT => {
             record_exit(ExitKind::Exit(a0 as i64), frame.rip, frame.rax, frame.rbx);
             exit_current();

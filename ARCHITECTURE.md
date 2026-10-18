@@ -214,6 +214,25 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 
 **Rights can only be reduced** (`handle_dup(h, mask)`); no operation adds them.
 
+**This is the whole permission model (capabilities).** A process has no user or group; what it may do is exactly
+the handles it holds. Unlike Linux (UID/GID + `rwx` bits, root may do everything), a program started from the shell
+gets only the handles its parent passes; `usbd` holds one claimed controller, `INPUT` and `BLK`, nothing else.
+Files are the exception: by default a process may open any path.
+
+**File sandbox:** `spawn` / `spawn_ex` with `SPAWN_NO_FILES` starts a process with no file system access by
+path. `open` (every mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `EACCES`,
+refused in one place before the call is decoded (`is_path_call` in syscalls.rs; a new path syscall must be added
+there). File handles it was given keep working with their rights. The flag is inherited by every child and can
+never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
+passes the handle), `nofiles cat file` gets "permission denied". Half of the `sysfuzz` children run in it.
+
+**Viewing it:** `secinfo` (one line per process: handle count, hardware, system powers, file access) and
+`caps <pid>` (every handle: kind, rights, detail such as the PCI device, MSI vector or shared memory size; file
+access `all` or `none`). A
+process changes its own table without locks, so other CPUs never touch its handles: the table (`FdTable`) publishes
+a 64-bit summary per slot in atomics on every change (kind, rights, detail), and `caps` reads only those under the
+scheduler lock (`user/caps.rs`, `sched::process_caps`).
+
 ## IPC
 
 Processes talk through **channels** (small messages, control) and **shared memory** (data).

@@ -5,7 +5,9 @@
 // but the KERNEL MUST NOT CRASH or hang.
 //
 // Children start without any handles (spawn_ex with an empty map): no console,
-// HW_ROOT, SYSCTL, INPUT, BLK – they cannot break anything but themselves.  Skipped:
+// HW_ROOT, SYSCTL, INPUT, BLK – they cannot break anything but themselves.
+// Every other child runs in the file sandbox (SPAWN_NO_FILES) with one file
+// handle from the parent – path calls must be refused, whatever the arguments.  Skipped:
 // exit, spawn / spawn_ex (fork bomb – limits are handled separately), kill
 // (could kill the parent or init).  A child stuck in a blocking
 // call (sleep, wait_many, recv) is killed by the parent after a deadline – this also
@@ -246,6 +248,13 @@ fn main(args: Args) -> i32 {
     let mut live: [(i64, u64); PARALLEL] = [(0, 0); PARALLEL];
     let (mut started, mut done, mut killed, mut faulted, mut ok) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut kinds_max = 0u64;
+    let mut sandboxed = 0u64;
+    let shared = open("/fuzz/shared", O_READ | O_WRITE | O_CREATE);
+    if shared < 0 {
+        println!("sysfuzz: FAIL cannot create /fuzz/shared");
+        return 1;
+    }
+    let shared = shared as u64;
     let t0 = uptime_ms();
     while done < children {
         // Fill the free slots.
@@ -254,7 +263,16 @@ fn main(args: Args) -> i32 {
                 let n = cstr(started + 1, &mut cbuf);
                 let seed = core::str::from_utf8(&cbuf[..n]).unwrap();
                 let c = core::str::from_utf8(&calls_s.0[..calls_s.1]).unwrap();
-                let pid = spawn_ex("/bin/sysfuzz", &["sysfuzz", "child", seed, c], &[], 0);
+                // Odd children: file sandbox, a shared file handle in slot 0.
+                let sandbox = started % 2 == 1;
+                let pid = if sandbox {
+                    spawn_ex("/bin/sysfuzz", &["sysfuzz", "child", seed, c], &[(shared, 0)], SPAWN_NO_FILES)
+                } else {
+                    spawn_ex("/bin/sysfuzz", &["sysfuzz", "child", seed, c], &[], 0)
+                };
+                if sandbox && pid > 0 {
+                    sandboxed += 1;
+                }
                 if pid <= 0 {
                     println!("sysfuzz: FAIL spawn: {}", pid);
                     return 1;
@@ -310,8 +328,9 @@ fn main(args: Args) -> i32 {
     let _ = chdir("/");
     let _ = unlink(ELF_PATH);
     println!(
-        "sysfuzz: {} children x up to {} calls in {} ms: {} finished (up to {} syscall kinds succeeded), {} killed by the kernel (fault), {} stuck and killed; {} broken ELF files: {} rejected, {} ran ({} stuck and killed) - kernel survived",
+        "sysfuzz: {} children ({} in the file sandbox) x up to {} calls in {} ms: {} finished (up to {} syscall kinds succeeded), {} killed by the kernel (fault), {} stuck and killed; {} broken ELF files: {} rejected, {} ran ({} stuck and killed) - kernel survived",
         children,
+        sandboxed,
         calls,
         uptime_ms() - t0,
         ok,

@@ -62,7 +62,7 @@ const BUILTINS: &[(&str, &str)] = &[
 const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress"];
 
 /// Information from the kernel (sysinfo syscall, read-only).
-const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "secinfo", "caps"];
 
 /// Commands that remain only in the kernel's emergency shell.
 const KERNEL_ONLY: &[&str] = &["mkfs", "run", "hexdump", "write", "spawn", "colors", "keys", "k"];
@@ -522,6 +522,10 @@ static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i64 {
+    // A sandboxed program gets only its stdio – no service channel either.
+    if flags & desoos::SPAWN_NO_FILES != 0 {
+        return desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2)], flags);
+    }
     if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
         desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (desoos::SVC, desoos::SVC)], flags)
     } else {
@@ -576,14 +580,28 @@ impl Shell {
             self.pipeline(&cmds);
             return;
         }
-        let cmd = cmds.remove(0);
+        let mut cmd = cmds.remove(0);
+        // `nofiles prog args` – run prog in the file sandbox: it cannot open any
+        // path, only use the handles the shell gives it (stdio and redirections).
+        if cmd.args[0] == "nofiles" {
+            cmd.args.remove(0);
+            let Some(name) = cmd.args.first().cloned() else {
+                eprintln!("usage: nofiles <program> [args]   (e.g. nofiles cat < file)");
+                return;
+            };
+            match find_program(&name) {
+                Some(path) => self.external(&path, &cmd, true),
+                None => eprintln!("sh: nofiles: {}: no such program in /bin", name),
+            }
+            return;
+        }
         let name = cmd.args[0].clone();
         if BUILTINS.iter().any(|(n, _)| *n == name) {
             self.builtin(&cmd);
             return;
         }
         if let Some(path) = find_program(&name) {
-            self.external(&path, &cmd);
+            self.external(&path, &cmd, false);
             return;
         }
         // Information from the kernel (sysinfo), or a command that now exists only in the kernel.
@@ -601,7 +619,7 @@ impl Shell {
         }
     }
 
-    fn external(&mut self, path: &str, cmd: &Command) {
+    fn external(&mut self, path: &str, cmd: &Command, nofiles: bool) {
         let (fin, fout) = match open_redirects(cmd) {
             Ok(f) => f,
             Err(e) => {
@@ -610,7 +628,7 @@ impl Shell {
             }
         };
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
-        let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND };
+        let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { desoos::SPAWN_NO_FILES } else { 0 };
         let pid = spawn_child(path, &args, flags, fin, fout);
         close_redirects(fin, fout);
         if pid < 0 {
@@ -768,6 +786,7 @@ impl Shell {
                 let _ = writeln!(o, "  {}", bin.join("  "));
                 let _ = writeln!(o, "System information (read-only, from the kernel):");
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
+                let _ = writeln!(o, "File sandbox: nofiles <program> [args] - no file access by path, only < > redirections");
                 let _ = writeln!(o, "Only in the kernel emergency shell: mkfs, disk read/write, run");
                 let _ = writeln!(o, "Syntax: cmd args  > file  >> file  < file  a | b  &   (\"quotes\" group words)");
             }

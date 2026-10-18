@@ -272,6 +272,8 @@ static COMMANDS: &[Command] = &[
     Command { name: "sleep", usage: "sleep <ms>", help: "wait (the shell task sleeps)", run: cmd_sleep },
     Command { name: "ps", usage: "ps", help: "list tasks (id, state, CPU, CPU time)", run: cmd_ps },
     Command { name: "cpus", usage: "cpus", help: "processors: online, current task, timer ticks, IPIs", run: cmd_cpus },
+    Command { name: "secinfo", usage: "secinfo", help: "what every process may do (handles: hardware, system, files)", run: cmd_secinfo },
+    Command { name: "caps", usage: "caps <pid>", help: "handles of one process: kind, rights, detail", run: cmd_caps },
     Command { name: "stress", usage: "stress [s]", help: "SMP stress test: processes, files, spinlocks (default 10 s)", run: cmd_stress },
     Command { name: "spawn", usage: "spawn <spin|tick>", help: "start a demo task: spin = busy loop, tick = wakes every 1 s", run: cmd_spawn },
     Command { name: "kill", usage: "kill <id>", help: "ask a task to end", run: cmd_kill },
@@ -713,6 +715,23 @@ pub fn cpus_report(out: &mut dyn Write) {
     if let Some(m) = crate::acpi::madt() {
         if m.cpus.len() > smp::online_count() {
             let _ = writeln!(out, "MADT lists {} CPU(s); {} not started", m.cpus.len(), m.cpus.len() - smp::online_count());
+        }
+    }
+}
+
+/// What every process may do (user/caps.rs).
+fn cmd_secinfo(_: &str, out: &mut dyn Write, _: &mut Context) {
+    let _ = write!(out, "{}", crate::user::caps::secinfo());
+}
+
+/// Handles of one process (user/caps.rs).
+fn cmd_caps(args: &str, out: &mut dyn Write, _: &mut Context) {
+    match args.trim().parse::<u64>() {
+        Ok(pid) => {
+            let _ = write!(out, "{}", crate::user::caps::caps(pid));
+        }
+        Err(_) => {
+            let _ = writeln!(out, "usage: caps <pid>  (pids: ps or secinfo)");
         }
     }
 }
@@ -1643,7 +1662,7 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 /// Read-only commands for user space (sysinfo syscall) –
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
 /// (sector read / write, mkfs, run – only in the kernel fallback shell).
-pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "secinfo", "caps"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
     let line = line.trim();
@@ -1655,6 +1674,7 @@ pub fn sysinfo(line: &str) -> Option<String> {
     }
     let args_ok = match name {
         "lspci" => args.is_empty() || args == ["-v"],
+        "caps" => args.len() == 1 && args[0].parse::<u64>().is_ok(),
         _ => args.is_empty(),
     };
     if !args_ok {

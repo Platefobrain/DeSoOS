@@ -1,7 +1,8 @@
 // Test of handles with rights – handle_dup (rights can only shrink),
 // handle_info, read / write without the right (EBADF), copies without R_DUP (EACCES),
 // a child after spawn gets the handle with the same (reduced) rights,
-// the 64-handle limit.  Result: "handletest: N checks OK" and code 0, or a description
+// the 64-handle limit, and the kernel's view of the table (`caps <pid>` – the
+// published summary other processes see) follows every change.  Result: "handletest: N checks OK" and code 0, or a description
 // of the first failure and code 1.  Run by IPC TEST (self-tests).
 //
 // `handletest child` – child mode: handle 0 must be a read-only file
@@ -42,6 +43,41 @@ fn child() -> i32 {
     // Handle 0 is a file, not the console – keyboard unavailable.
     let ok_key = readkey("").err() == Some(EBADF);
     if ok_info && ok_read && ok_write && ok_amplify && ok_key { 0 } else { 3 }
+}
+
+static mut CAPS: [u8; 8192] = [0; 8192];
+
+/// `caps <own pid>` as the kernel shows it to others (sysinfo); "" on error.
+fn my_caps() -> &'static str {
+    let mut topic = *b"caps                    ";
+    let mut pid = getpid();
+    let mut digits = [0u8; 20];
+    let mut k = 0;
+    loop {
+        digits[k] = b'0' + (pid % 10) as u8;
+        k += 1;
+        pid /= 10;
+        if pid == 0 {
+            break;
+        }
+    }
+    for i in 0..k {
+        topic[5 + i] = digits[k - 1 - i];
+    }
+    let topic = core::str::from_utf8(&topic[..5 + k]).unwrap_or("caps");
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(CAPS) };
+    match sysinfo(topic, buf) {
+        Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
+        Err(_) => "",
+    }
+}
+
+/// The line of slot `slot` in `caps` output (columns: slot, kind, rights).
+fn caps_line(text: &str, slot: u64) -> Option<&str> {
+    text.lines().find(|l| {
+        let mut w = l.split_whitespace();
+        w.next().and_then(|s| s.parse::<u64>().ok()) == Some(slot)
+    })
 }
 
 fn main(args: Args) -> i32 {
@@ -96,6 +132,16 @@ fn main(args: Args) -> i32 {
     let nodup = nodup as u64;
     check!(n, dup(nodup) == -13 && dup2(nodup, 41) == -13 && handle_dup(nodup, R_READ) == -13, "copy without R_DUP must be EACCES");
     check!(n, spawn("/bin/hello", &["hello"], 0, fds(nodup, 1, 2)) == -13, "spawn with a handle without R_DUP must be EACCES");
+
+    // 4b. The kernel's view for other processes (`caps <pid>`) shows the same
+    // kinds and rights – the summary is published on every change.
+    let t = my_caps();
+    check!(n, t.contains("handletest (pid"), "caps header: {:?}", t.lines().next());
+    check!(n, caps_line(t, 1).map_or(false, |l| l.contains("console") && l.contains("read write dup transfer")), "caps console slot: {:?}", caps_line(t, 1));
+    check!(n, caps_line(t, ro).map_or(false, |l| l.contains("file") && l.contains("read dup") && !l.contains("write")), "caps reduced file slot: {:?}", caps_line(t, ro));
+    check!(n, caps_line(t, nodup).map_or(false, |l| l.contains("file") && l.contains(" read ") && !l.contains("dup")), "caps no-DUP slot: {:?}", caps_line(t, nodup));
+    check!(n, caps_line(t, pw).map_or(false, |l| l.contains("pipe") && l.contains("write dup transfer")), "caps pipe slot: {:?}", caps_line(t, pw));
+    check!(n, close(pw) == 0 && caps_line(my_caps(), pw).is_none(), "caps still shows a closed handle");
 
     // 5. The child gets the handle with the same (reduced) rights.
     seek(ro, 0, SEEK_SET);

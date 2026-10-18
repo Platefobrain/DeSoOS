@@ -51,7 +51,7 @@ pub fn self_test() {
     check!(r.is_some(), "handletest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "handletest: {:?} {:?}", kind, out.trim());
-    serial_println!("[IPC TEST] 1/5 handle rights: reduce only, EBADF / EACCES, inherited by a child, 64 per process: {} PASS", out.trim());
+    serial_println!("[IPC TEST] 1/5 handle rights: reduce only, EBADF / EACCES, inherited by a child, 64 per process, caps view follows every change: {} PASS", out.trim());
 
     // 2. Channels – both ends, sender from the kernel, EAGAIN, EMSGSIZE,
     // SEND / RECV rights, EPIPE after close, ping-pong with a child, kill
