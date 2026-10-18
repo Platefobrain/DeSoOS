@@ -41,12 +41,16 @@ pub fn pit_tick_early() {
     } else if clock::hpet() {
         let now = clock::stamp();
         let last = HPET_LAST.swap(now, Ordering::Relaxed);
+        // Interrupts CPU 0 took since the previous PIT tick, besides this one.
+        let ints = INTS0.load(Ordering::Relaxed);
+        let others = ints.wrapping_sub(INTS0_AT_TICK.swap(ints, Ordering::Relaxed)).saturating_sub(1);
         if last != 0 {
             let d = clock::diff_us(last, now).clamp(0, 10_000_000);
             // Longest gap between PIT interrupts (CPU 0) and how many are > 2 ms.
             GAP_MAX_US.fetch_max(d as u64, Ordering::Relaxed);
             if d > 2000 {
                 GAP_LONG.fetch_add(1, Ordering::Relaxed);
+                record_gap(last, d as u64, others);
             }
             let mut acc = HPET_ACC_US.load(Ordering::Relaxed) + d;
             let due = (acc / 1000).max(0) as u64;
@@ -69,6 +73,188 @@ static HPET_ACC_US: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI6
 static CAUGHT_UP: AtomicU64 = AtomicU64::new(0);
 static GAP_MAX_US: AtomicU64 = AtomicU64::new(0);
 static GAP_LONG: AtomicU64 = AtomicU64::new(0);
+
+// ------------------------------------------------------------
+// Long gaps between PIT interrupts: who kept CPU 0 from taking them
+// ------------------------------------------------------------
+//
+// The PIT interrupt goes to CPU 0 only.  A gap > 2 ms means CPU 0 ran with
+// interrupts disabled (or was stalled by firmware, e.g. an SMI) for that long.
+// To find the culprit, another CPU watches the age of the last PIT interrupt
+// from its own timer tick (`gap_probe`, every 10 ms); when it is older than
+// PROBE_AFTER_US it sends an NMI to CPU 0 (delivered even with IF = 0).  The NMI
+// handler records where CPU 0 was (RIP, IF and kernel-code addresses found on
+// its stack – resolve them with `addr2line -e build/kernel.elf <address>`).
+// When the gap ends, the PIT handler stores it with the probe attached.
+
+/// Probe a gap after this long (well below the 40 ms gaps seen on real hardware,
+/// well above normal jitter).
+const PROBE_AFTER_US: u64 = 6_000;
+/// Recorded gaps (the first GAP_LOG of a boot).
+const GAP_LOG: usize = 16;
+const GAP_STACK: usize = 6;
+
+/// Interrupts (any vector >= 32) taken by CPU 0, and the value at the last PIT tick.
+static INTS0: AtomicU64 = AtomicU64::new(0);
+static INTS0_AT_TICK: AtomicU64 = AtomicU64::new(0);
+
+static GAP_N: AtomicUsize = AtomicUsize::new(0);
+/// Other interrupts CPU 0 took during the gap: > 0 = CPU 0 was running with
+/// interrupts enabled and only the PIT interrupt did not arrive; 0 = CPU 0 was
+/// stuck with IF = 0 or stopped entirely (firmware SMI).
+static GAP_INTS: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+static GAP_CS: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+static GAP_START_MS: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+static GAP_US: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+/// RIP of CPU 0 caught by the probe (0 = no probe for this gap).
+static GAP_RIP: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+static GAP_FLAGS: [AtomicU64; GAP_LOG] = [const { AtomicU64::new(0) }; GAP_LOG];
+static GAP_STK: [AtomicU64; GAP_LOG * GAP_STACK] = [const { AtomicU64::new(0) }; GAP_LOG * GAP_STACK];
+
+/// Probe state: the gap being probed (HPET stamp of the last PIT interrupt
+/// before it), whether CPU 0 expects the NMI, and what the NMI found.
+static PROBE_FOR: AtomicU64 = AtomicU64::new(0);
+static PROBE_NMI: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static PROBE_DONE_FOR: AtomicU64 = AtomicU64::new(0);
+static PROBE_RIP: AtomicU64 = AtomicU64::new(0);
+static PROBE_FLAGS: AtomicU64 = AtomicU64::new(0);
+static PROBE_CS: AtomicU64 = AtomicU64::new(0);
+static PROBE_STK: [AtomicU64; GAP_STACK] = [const { AtomicU64::new(0) }; GAP_STACK];
+static PROBES: AtomicU64 = AtomicU64::new(0);
+
+/// From the interrupt entry (every vector >= 32): counts CPU 0's interrupts.
+pub fn count_interrupt() {
+    if crate::arch::x86_64::cpu::id() == 0 {
+        INTS0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_gap(start: u64, us: u64, others: u64) {
+    let i = GAP_N.fetch_add(1, Ordering::Relaxed);
+    if i >= GAP_LOG {
+        return;
+    }
+    GAP_INTS[i].store(others, Ordering::Relaxed);
+    // No ticks were counted during the gap yet (they are added after this),
+    // so the uptime is the moment the gap began.
+    GAP_START_MS[i].store(uptime_ms(), Ordering::Relaxed);
+    GAP_US[i].store(us, Ordering::Relaxed);
+    if PROBE_DONE_FOR.load(Ordering::Acquire) == start {
+        GAP_RIP[i].store(PROBE_RIP.load(Ordering::Relaxed), Ordering::Relaxed);
+        GAP_FLAGS[i].store(PROBE_FLAGS.load(Ordering::Relaxed), Ordering::Relaxed);
+        GAP_CS[i].store(PROBE_CS.load(Ordering::Relaxed), Ordering::Relaxed);
+        for k in 0..GAP_STACK {
+            GAP_STK[i * GAP_STACK + k].store(PROBE_STK[k].load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+}
+
+/// From the timer tick of CPUs other than 0: is CPU 0 late with the PIT
+/// interrupt?  Then one NMI per gap to see what it is doing.
+pub fn gap_probe() {
+    use crate::arch::x86_64::{clock, cpu, lapic, smp};
+    if cpu::id() == 0 || !clock::hpet() {
+        return;
+    }
+    let last = HPET_LAST.load(Ordering::Relaxed);
+    if last == 0 || clock::elapsed_us(last) < PROBE_AFTER_US {
+        return;
+    }
+    let prev = PROBE_FOR.load(Ordering::Relaxed);
+    if prev == last || PROBE_FOR.compare_exchange(prev, last, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        return;
+    }
+    PROBE_NMI.store(true, Ordering::SeqCst);
+    lapic::send_nmi_to(smp::apic_id(0));
+}
+
+/// From the NMI handler (before everything else): the probe NMI on CPU 0.
+/// `true` = handled.  No locks, no allocation, no printing.
+pub fn gap_nmi(rip: u64, cs: u64, rflags: u64, rsp: u64) -> bool {
+    if crate::arch::x86_64::cpu::id() != 0 || !PROBE_NMI.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    PROBE_RIP.store(rip, Ordering::Relaxed);
+    PROBE_FLAGS.store(rflags, Ordering::Relaxed);
+    PROBE_CS.store(cs, Ordering::Relaxed);
+    let mut found = 0;
+    // Only inside the current task's kernel stack (below TSS.RSP0): right at
+    // system call entry CPU 0 runs kernel code still on the user's RSP, which may
+    // point anywhere (unmapped, even into the kernel half).  RSP exactly on a page
+    // boundary = empty stack, the page at RSP may be the guard page above it.
+    // During a task switch the check may fail – then just no stack addresses.
+    let top = crate::arch::x86_64::gdt::rsp0();
+    let size = if top >= crate::sched::stack::TASK_STACKS_BASE { crate::sched::stack::STACK_SIZE } else { 256 * 1024 };
+    if cs & 3 == 0 && rsp < top && top - rsp <= size && rsp & 0xfff != 0 {
+        // Kernel-code addresses on the interrupted stack (return addresses),
+        // from RSP up to the stack top (at most 16 KiB) – a kernel stack is mapped
+        // as a whole.
+        unsafe extern "C" {
+            static __kernel_start: u8;
+            static __text_end: u8;
+        }
+        let (lo, hi) = (core::ptr::addr_of!(__kernel_start) as u64, core::ptr::addr_of!(__text_end) as u64);
+        let mut p = rsp & !7;
+        let end = top.min(p + 16 * 1024);
+        while p < end && found < GAP_STACK {
+            let v = unsafe { core::ptr::read_volatile(p as *const u64) };
+            if v >= lo && v < hi {
+                PROBE_STK[found].store(v, Ordering::Relaxed);
+                found += 1;
+            }
+            p += 8;
+        }
+    }
+    for k in found..GAP_STACK {
+        PROBE_STK[k].store(0, Ordering::Relaxed);
+    }
+    PROBE_DONE_FOR.store(PROBE_FOR.load(Ordering::Relaxed), Ordering::Release);
+    PROBES.fetch_add(1, Ordering::Release);
+    true
+}
+
+/// One recorded long gap between PIT interrupts.
+pub struct Gap {
+    /// Uptime when the gap began (ms).
+    pub start_ms: u64,
+    pub us: u64,
+    /// Other interrupts CPU 0 took during the gap.
+    pub ints: u64,
+    /// Where the probe NMI caught CPU 0; rip 0 = not probed (e.g. before the
+    /// other CPUs started, or too short).
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    /// Kernel-code addresses found on CPU 0's stack.
+    pub stack: [u64; GAP_STACK],
+}
+
+pub fn gap_log() -> alloc::vec::Vec<Gap> {
+    let n = GAP_N.load(Ordering::Relaxed).min(GAP_LOG);
+    (0..n)
+        .map(|i| {
+            let mut stack = [0u64; GAP_STACK];
+            for (k, s) in stack.iter_mut().enumerate() {
+                *s = GAP_STK[i * GAP_STACK + k].load(Ordering::Relaxed);
+            }
+            Gap {
+                start_ms: GAP_START_MS[i].load(Ordering::Relaxed),
+                us: GAP_US[i].load(Ordering::Relaxed),
+                ints: GAP_INTS[i].load(Ordering::Relaxed),
+                rip: GAP_RIP[i].load(Ordering::Relaxed),
+                cs: GAP_CS[i].load(Ordering::Relaxed),
+                rflags: GAP_FLAGS[i].load(Ordering::Relaxed),
+                stack,
+            }
+        })
+        .collect()
+}
+
+/// (probe NMIs handled by CPU 0, RIP caught by the last one) – tests.
+#[allow(dead_code)]
+pub fn gap_probes() -> (u64, u64) {
+    (PROBES.load(Ordering::Acquire), PROBE_RIP.load(Ordering::Relaxed))
+}
 
 /// (longest gap between PIT interrupts in µs, number of gaps > 2 ms).
 pub fn tick_gaps() -> (u64, u64) {

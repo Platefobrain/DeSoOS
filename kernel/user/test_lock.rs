@@ -200,6 +200,7 @@ pub fn self_test() {
     //    waits with interrupts enabled, giving up the BKL (other CPUs keep running).
     if n > 1 {
         let before = smp::watchdog_reports();
+        let (probes0, _) = crate::time::gap_probes();
         let start = crate::arch::x86_64::clock::stamp();
         crate::arch::x86_64::irq::mask(0);
         bkl::unlocked(|| {
@@ -209,7 +210,14 @@ pub fn self_test() {
         });
         crate::arch::x86_64::irq::unmask(0);
         check!(smp::watchdog_reports() > before, "watchdog did not report a stopped PIT clock");
-        serial_println!("[LOCK TEST] 6/6 lockup watchdog: stopped PIT clock reported with NMI RIPs PASS");
+        // The long gap also triggered the gap probe (NMI to CPU 0, time.rs).
+        let (probes1, rip) = crate::time::gap_probes();
+        let hpet = crate::arch::x86_64::clock::hpet();
+        check!(!hpet || probes1 > probes0, "no gap probe NMI during a 10 s PIT gap");
+        serial_println!(
+            "[LOCK TEST] 6/6 lockup watchdog: stopped PIT clock reported with NMI RIPs; gap probe caught CPU 0 at {:#x} PASS",
+            rip
+        );
     } else {
         serial_println!("[LOCK TEST] 6/6 lockup watchdog skipped (1 CPU) PASS");
     }

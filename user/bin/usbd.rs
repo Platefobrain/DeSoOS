@@ -544,6 +544,12 @@ struct Hc {
     usb2: (u32, u32),
     usb3: (u32, u32),
     bios: &'static str,
+    /// Uptime when the BIOS handoff started, how long it took and how long
+    /// halt + reset took (ms) – firmware may stop the whole machine (SMI) for tens
+    /// of ms while it gives up the controller.
+    bios_at: u64,
+    bios_ms: u64,
+    reset_ms: u64,
     irq: u64,
     pool: Pool,
     dcbaa: u64,
@@ -2519,7 +2525,7 @@ impl Hc {
         use core::fmt::Write;
         let _ = writeln!(
             out,
-            "{}: xHCI {:04x}:{:04x} v{:x}.{:02x}, {} slots ({} used), {} ports (USB2 {}, USB3 {}), scratchpad {}, {}-bit DMA, {}-byte contexts, BIOS: {}",
+            "{}: xHCI {:04x}:{:04x} v{:x}.{:02x}, {} slots ({} used), {} ports (USB2 {}, USB3 {}), scratchpad {}, {}-bit DMA, {}-byte contexts, BIOS: {} (from {} ms, {} ms; reset {} ms)",
             self.name,
             self.info.vendor,
             self.info.device,
@@ -2533,7 +2539,10 @@ impl Hc {
             self.scratch,
             if self.ac64 { 64 } else { 32 },
             self.ctx,
-            self.bios
+            self.bios,
+            self.bios_at,
+            self.bios_ms,
+            self.reset_ms
         );
         if !machine {
             return;
@@ -2818,6 +2827,9 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         usb2: (0, 0),
         usb3: (0, 0),
         bios: "no legacy support capability",
+        bios_at: 0,
+        bios_ms: 0,
+        reset_ms: 0,
         irq: 0,
         pool,
         dcbaa: dcbaa_va,
@@ -2862,7 +2874,10 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
     };
 
     // BIOS -> OS.
+    hc.bios_at = uptime_ms();
     extended_caps(&mut hc, bar, hcc1);
+    let t_reset = uptime_ms();
+    hc.bios_ms = t_reset - hc.bios_at;
 
     // Halt and reset.
     if hc.op_rd(USBSTS) & STS_HCH == 0 {
@@ -2876,6 +2891,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
     if !wait_until(|| hc.op_rd(USBCMD) & CMD_HCRST == 0 && hc.op_rd(USBSTS) & STS_CNR == 0) {
         return Err("controller reset timed out");
     }
+    hc.reset_ms = uptime_ms() - t_reset;
     if hc.op_rd(PAGESIZE) & 1 == 0 {
         return Err("controller does not support 4 KiB pages");
     }

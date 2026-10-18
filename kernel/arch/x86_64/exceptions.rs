@@ -149,6 +149,10 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
             unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
         }
     }
+    // Interrupts taken by CPU 0 (clock-gap diagnostics: was CPU 0 alive during a gap?).
+    if frame.vector >= 32 {
+        crate::time::count_interrupt();
+    }
     // TLB shootdown – without the BKL (the initiator usually holds it and waits
     // for our acknowledgement) and without any locks.
     if frame.vector == super::tlb::TLB_VECTOR as u64 {
@@ -158,6 +162,10 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
     // Kernel entry – the Big Kernel Lock (coming from ring 3 or from `hlt`
     // the processor does not hold it).  Interrupt gates have cleared IF.
     // Hang watchdog – before the BKL (the BKL itself may be what is stuck).
+    // Probe of a long gap between PIT interrupts (time.rs) – before everything.
+    if frame.vector == 2 && crate::time::gap_nmi(frame.rip, frame.cs, frame.rflags, frame.rsp) {
+        return;
+    }
     if frame.vector == 2 && super::smp::watchdog_nmi(frame.rip, frame.rflags) {
         return;
     }

@@ -75,6 +75,21 @@ fn filler() -> i32 {
     0
 }
 
+/// spawn of /bin/limtest that waits for resources freed by the previous check:
+/// after `wait` the kernel may still be tearing the process down on another CPU
+/// (process slot, its memory frames are released by the idle reaper), so
+/// EAGAIN / ENOMEM right after a limit test is retried for up to 2 s.
+fn spawn_retry(argv: &[&str], map: &[(u64, u64)]) -> i64 {
+    let t = uptime_ms();
+    loop {
+        let pid = spawn_ex("/bin/limtest", argv, map, 0);
+        if (pid != EAGAIN && pid != ENOMEM) || uptime_ms() - t > 2000 {
+            return pid;
+        }
+        sleep_ms(10);
+    }
+}
+
 fn hog() -> i32 {
     // 4 GiB region, touched page by page – the kernel eventually refuses a frame
     // (reserve) and kills the process.  If it did not: exit code 0 = test failure.
@@ -122,7 +137,7 @@ fn main(args: Args) -> i32 {
     for &pid in kids[..k].iter() {
         let _ = wait(pid, 0);
     }
-    let pid = spawn_ex("/bin/limtest", &["limtest", "sleep"], &[], 0);
+    let pid = spawn_retry(&["limtest", "sleep"], &[]);
     check!(n, pid > 0, "spawn must work again after the bomb: {}", pid);
     kill(pid as u64);
     let _ = wait(pid as u64, 0);
@@ -150,7 +165,7 @@ fn main(args: Args) -> i32 {
     close(h as u64);
 
     // 3. Memory hog – it dies, not the system.
-    let pid = spawn_ex("/bin/limtest", &["limtest", "hog"], &[], 0);
+    let pid = spawn_retry(&["limtest", "hog"], &[]);
     check!(n, pid > 0, "spawn hog: {}", pid);
     let st = wait(pid as u64, 0);
     check!(n, matches!(st, Ok((_, s)) if s & STATUS_SIGNALED != 0), "memory hog must be killed by the kernel: {:?}", st);
@@ -202,7 +217,7 @@ fn main(args: Args) -> i32 {
     // 5. IPC buffers until ENOMEM.  One process has 64 handles (~16 MiB of queues),
     // so part of the budget is taken by a helper (`limtest fill`), the rest by us.
     let (p, q) = channel_create().unwrap_or((0, 0));
-    let fpid = spawn_ex("/bin/limtest", &["limtest", "fill"], &[(q, 0)], 0);
+    let fpid = spawn_retry(&["limtest", "fill"], &[(q, 0)]);
     check!(n, fpid > 0, "spawn filler: {}", fpid);
     close(q);
     let mut info = RecvInfo::default();

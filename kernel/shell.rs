@@ -688,6 +688,28 @@ pub fn cpus_report(out: &mut dyn Write) {
         crate::time::tick_gaps().0,
         crate::time::tick_gaps().1
     );
+    // Where CPU 0 was during each long gap (addr2line -e build/kernel.elf <address>).
+    // "ints": other interrupts CPU 0 took during the gap (> 0: CPU 0 was alive,
+    // only the PIT interrupt was missing; 0: stuck with IF = 0 or stopped by firmware).
+    for (i, g) in crate::time::gap_log().iter().enumerate().take(8) {
+        let _ = write!(out, "clock gap {}: from {} ms, {} us, {} other interrupts, ", i + 1, g.start_ms, g.us, g.ints);
+        if g.rip == 0 {
+            let _ = writeln!(out, "not probed");
+            continue;
+        }
+        let mut stack = String::new();
+        for a in g.stack.iter().filter(|&&a| a != 0) {
+            let _ = write!(stack, " {:#x}", a);
+        }
+        let _ = writeln!(
+            out,
+            "CPU 0 at {:#x} ({}) IF={} stack:{}",
+            g.rip,
+            if g.cs & 3 == 3 { "user" } else { "kernel" },
+            (g.rflags >> 9) & 1,
+            if stack.is_empty() { String::from(" -") } else { stack }
+        );
+    }
     if let Some(m) = crate::acpi::madt() {
         if m.cpus.len() > smp::online_count() {
             let _ = writeln!(out, "MADT lists {} CPU(s); {} not started", m.cpus.len(), m.cpus.len() - smp::online_count());

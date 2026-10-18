@@ -370,6 +370,12 @@ execute `hlt`.
 - **Time:** the HPET is the only shared counter – **TSCs of different cores are not guaranteed to be
   synchronized** on real hardware, so measurements are taken on one CPU (task CPU time). PIT ticks catch up with
   the HPET; wall clock = RTC at boot + uptime.
+- **Clock gaps:** the PIT interrupt goes to CPU 0 only. A gap > 2 ms is recorded (`cpus`: start, length, other
+  interrupts CPU 0 took meanwhile); after 6 ms another CPU sends CPU 0 an NMI that records RIP, IF and return
+  addresses (`gap_probe` / `gap_nmi` in time.rs). On the test laptop the only long gaps (33–40 ms) start exactly
+  when `usbd` asks the firmware to hand over an xHCI controller: firmware SMM work (SMI), not the kernel – the NMI
+  lands only after the machine resumes, inside the interrupted MSI handler. Linux sees the same. The ticks are
+  caught up from the HPET.
 - **Per-CPU data** lives in separate cache lines (`PerCpu`, `PerCpuCounter`) – dense arrays of atomics caused
   false sharing (7–15% of throughput).
 - **Watchdog:** if the clock stalls for 10 s → NMI to all CPUs and a report (BKL owner, RIP, IF, spinlocks).

@@ -2,6 +2,60 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.35.5 — 2026-10-18
+
+### Clock gaps: is it the USB BIOS handoff?
+- Test laptop, v0.35.4: again 4 gaps, all during boot – from 362 ms (17.2 ms, 1 other interrupt), **from 379 ms
+  (40.2 ms, 0 other interrupts, not probed)**, 1241 ms (2.5 ms) and 1836 ms (2.1 ms); none during the stress.
+  The probe NMI did not get in during the 40 ms gap – NMIs are held back only while CPU 0 is already in an NMI or in
+  firmware System Management Mode, and an SMI stops all CPUs. Together with v0.35.3 (the NMI landed right at an MSI
+  stub, i.e. right after both were held back) this points to the firmware stopping the machine (SMI) for ~40 ms.
+- The prime suspect is the xHCI handoff from the BIOS (usbd starts ~330 ms after boot in QEMU): firmware commonly
+  spends tens of ms in SMM tearing down legacy USB emulation. usbd now measures it: `lsusb -v` prints the
+  controller line with `BIOS: handed over (from X ms, Y ms; reset Z ms)` – uptime when the handoff started, its
+  length, and the halt + reset time.
+- **Result on the test laptop:** it has three xHCI controllers, one `usbd` each, started together. Handoffs:
+  usb0 not BIOS-owned (reset 33 ms from 353 ms), usb1 handed over from 354 ms (73 ms), usb2 from 387 ms (42 ms).
+  Clock gaps: from **354 ms (33.3 ms)** and from **387 ms (40.1 ms)** – starting exactly with the handoffs. The
+  second gap was probed: CPU 0 in `user_irq` ← `msi::dispatch` ← `exception_dispatch` ← `isr_common`, i.e. the NMI
+  landed in the MSI handler that was running when the firmware froze the machine (v0.35.3: at the MSI stub
+  entry). Conclusion: firmware SMI during the xHCI BIOS→OS handoff; nothing to fix in the kernel (the ticks are
+  caught up from the HPET, and Linux pays the same at boot). Documented in README and ARCHITECTURE; the
+  diagnostics stay (they cost one counter per interrupt on CPU 0).
+- limtest: every spawn right after a limit check (process bomb, memory hog) is retried for up to 2 s on `EAGAIN` /
+  `ENOMEM` – the killed process's slot and frames are released asynchronously by the idle reaper, so under KVM the
+  helper spawn sometimes came too early (`spawn filler: -12`).
+
+## v0.35.4 — 2026-10-18
+
+### Clock-gap probe: crash fix and deeper stack
+- **Bug in v0.35.3:** the probe NMI could catch CPU 0 at system call entry – kernel code still running on the
+  user's stack pointer – and reading that stack faulted in the NMI handler (kernel panic; seen once in QEMU in the
+  NOBKL test). The stack is now scanned only when RSP lies inside the current task's kernel stack (below TSS.RSP0).
+- The scan covers up to 16 KiB from RSP towards the stack top, not just the page of RSP (v0.35.3 on the test laptop
+  caught a 40.8 ms gap with `IF=0` but found no return addresses in that page).
+- `cpus`: `clock gap N: from X ms, Y us, K other interrupts, CPU 0 at 0x… (user|kernel) IF=… stack: …`. The uptime
+  is when the gap began (ticks for the gap are added after it is recorded). **K** = other interrupts CPU 0 took during
+  the gap (counted at interrupt entry): K > 0 means CPU 0 was running with interrupts enabled and only the PIT
+  interrupt was missing; K = 0 means it was stuck with interrupts disabled or stopped by firmware (SMI).
+- v0.35.3 caught the 40.8 ms gap at the very first instruction of an MSI interrupt stub (`msi_1`) – CPU 0 was taking a
+  device interrupt right then, so it was probably not stuck with interrupts disabled; K tells for sure.
+- Test laptop, v0.35.3: all 4 long gaps are during boot (from 354, 378, 1240 and 1867 ms; 24.7 ms, 40.8 ms, 2.2 ms,
+  2.1 ms), none during the 60 s stress – the 40.8 ms one with CPU 0 running with interrupts disabled.
+
+## v0.35.3 — 2026-10-18
+
+### Diagnostics: long gaps between clock interrupts
+- On real hardware CPU 0 sometimes misses PIT interrupts for up to ~40 ms (time is caught up from the HPET, but
+  the cause was unknown). Now another CPU watches the age of the last PIT interrupt from its own timer tick;
+  after 6 ms it sends an NMI to CPU 0 (delivered even with interrupts disabled). The NMI handler records where
+  CPU 0 was: RIP, IF and kernel-code addresses found on its stack.
+- `cpus`: up to 8 lines `clock gap N: at X ms, Y us, CPU 0 at 0x… IF=… stack: 0x… …` (uptime at the end of the gap,
+  length, location). Resolve the addresses with `addr2line -e build/kernel.elf <address>` – same build only.
+- LOCK TEST 6/6 also checks that the 10 s stopped-clock test triggers the gap probe.
+- limtest: after the process bomb, spawn is retried for up to 2 s – the last process slots are freed
+  asynchronously (idle reaper), so an immediate `EAGAIN` was a rare false failure.
+
 ## v0.35.2 — 2026-10-17
 
 ### Security, step 3: limits – stage closed

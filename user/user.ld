@@ -1,7 +1,7 @@
-/* M15: programy użytkownika – statyczny ELF pod 0x400000 (dolna połowa).
- * Sekcje wyrównane do 4 KiB: kod (R+X), stałe (R), dane i bss (R+W) w osobnych
- * stronach – kernel mapuje je z prawami W^X (nic nie jest zapisywalne
- * i wykonywalne naraz). */
+/* User programs – a static ELF at 0x400000 (lower half).
+ * Sections are 4 KiB aligned: code (R+X), constants (R), data and bss (R+W) on
+ * separate pages – the kernel maps them W^X (nothing is writable and
+ * executable at once). */
 ENTRY(_start)
 
 SECTIONS

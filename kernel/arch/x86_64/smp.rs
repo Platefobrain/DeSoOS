@@ -130,6 +130,7 @@ const WD_FULL_REPORTS: u64 = 3;
 /// From exception_dispatch, before the BKL: timer tick (PIT on the BSP, LAPIC on APs).
 pub fn watchdog_tick(rip: u64) {
     LAST_RIP[cpu::id()].store(rip, Ordering::Relaxed);
+    crate::time::gap_probe();
     watchdog_poll();
 }
 

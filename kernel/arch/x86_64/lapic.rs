@@ -312,6 +312,11 @@ pub fn send_nmi_others() {
     send_icr(0, (0b11 << 18) | 0x0000_4400);
 }
 
+/// NMI to one processor (gap probe – works even with interrupts disabled).
+pub fn send_nmi_to(apic_id: u32) {
+    send_icr(apic_id, 0x0000_4400);
+}
+
 /// Interrupt `vector` to all processors except the current one.
 pub fn send_ipi_others(vector: u8) {
     send_icr(0, (0b11 << 18) | 0x0000_4000 | vector as u32);

@@ -1,4 +1,4 @@
-# DeSoOS v0.35.2
+# DeSoOS v0.35.5
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -238,6 +238,12 @@ keyboard latency (interrupt to character, in us; press a few keys meanwhile), pr
 from `/usb0` (a `usb:` line with MiB, KiB/s, per-pass checksums and errors), and finally prints
 `[AUTOSTRESS] PASS/FAIL`, `cpus` and `mem`. Use `DESOOS_STRESS_POOL=P` for full load.
 
+`cpus` also lists long gaps between clock (PIT) interrupts as `clock gap N: from X ms, Y us, ...`.
+A few during boot are expected on laptops: when `usbd` takes each xHCI controller over from the
+firmware (`lsusb -v` shows `BIOS: handed over (from X ms, Y ms; ...)`), the firmware stops the
+machine for tens of milliseconds (SMI). Lost ticks are caught up from the HPET, so time stays
+correct; an occasional ~2 ms gap later on is also firmware.
+
 ## Using the shell
 
 The user-space shell (`user/bin/sh.rs`, ring 3):
@@ -254,6 +260,7 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   `usb1`, ...).
 - `lsusb` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
   (keyboard, mouse, mass storage, hub, ...), interface classes, manufacturer and product.
+  `lsusb -v` also prints each controller (version, ports, BIOS handoff and its timing).
 - Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`
   start a new one.
 - `mkfs`, disk writes (`disk write`) and `run` are available only in the kernel emergency shell.

@@ -2,6 +2,7 @@
 // usbN service (via init, svc channel in slot 3); usbd replies with one line per
 // device: port, VID:PID, speed, USB version, address, kind, interface
 // classes, manufacturer and product (from the device's strings).
+// `lsusb -v`: also the controller line (version, ports, BIOS handoff and its timing).
 #![no_std]
 #![no_main]
 
@@ -13,7 +14,8 @@ use desoos::*;
 
 entry!(main);
 
-fn main(_args: Args) -> i32 {
+fn main(args: Args) -> i32 {
+    let verbose = args.get(1) == Some("-v");
     if handle_info(SVC).map(|(k, _)| k) != Ok(KIND_CHANNEL) {
         eprintln!("lsusb: no service manager channel (slot 3) - run from the shell started by init");
         return 1;
@@ -45,6 +47,15 @@ fn main(_args: Args) -> i32 {
             println!("{}: no connection", name);
             continue;
         };
+        if verbose && chan_send(c, b"status", 0) == 0 {
+            let mut info = RecvInfo::default();
+            let r = chan_recv(c, &mut out, 0, &mut info);
+            if r >= 0 {
+                let t = core::str::from_utf8(&out[..r as usize]).unwrap_or("");
+                // The first line is the description; the rest is for tests.
+                println!("{}", t.lines().next().unwrap_or(""));
+            }
+        }
         let mut ok = false;
         if chan_send(c, b"list", 0) == 0 {
             let mut info = RecvInfo::default();

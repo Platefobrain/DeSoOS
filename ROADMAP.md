@@ -644,6 +644,13 @@ Before networking: no program (buggy or malicious) may bring down the kernel or 
       (`/bin/limtest`: fork bomb, shm, memory hog, ramfs, IPC – 17 checks). Test laptop: compare 600 637, max6
       593 350 (unchanged vs v0.34.3), 0 refusals in normal operation. **Stage closed.**
 
+### Clock gaps (v0.35.3–v0.35.5, 2026-10-18)
+
+- [x] Diagnostics for long gaps between PIT interrupts (up to ~40 ms on the test laptop): gap log in `cpus` (start,
+      length, other interrupts on CPU 0), NMI probe from another CPU (RIP, IF, return addresses), `lsusb -v` with the
+      xHCI BIOS handoff timing. Result: the two long gaps (33 ms, 40 ms) start exactly with the BIOS→OS handoff of the
+      two AMD xHCI controllers – firmware SMI, not the kernel; the ticks are caught up from the HPET. Nothing to fix.
+
 ### ✅ M20 – USB (plan 2026-10-12, done 2026-10-14, v0.29.1)
 
 **Goal:** DeSoOS on hardware without PS/2 – on the test laptop (16 threads) the built-in keyboard works (USB HID, ITE 8910, AMD xHCI
@@ -813,6 +820,8 @@ Number in parentheses = the stage in which the gap goes away.
 **Scheduler and concurrency**
 - TLB shootdown only for the upper half (kernel); process address spaces rely on processes being single-threaded (threads – later)
 - device interrupts only to the BSP; no priorities or balancing (a task takes the first free CPU)
+- on laptops the firmware stops the machine (SMI) for 30–70 ms while each xHCI controller is handed over at boot,
+  and for ~2 ms now and then later; PIT ticks are caught up from the HPET
 - CPU time on APs is sampled (the LAPIC tick every 10 ms assigns 10 ms to the task that happens to be running)
 - at most 16 CPUs (Ryzen 7 4800H = 16 threads); SMP requires RDTSCP, MADT and I/O APIC
 - no priorities; `kill` of a kernel task is cooperative (the task itself checks `should_exit`)
