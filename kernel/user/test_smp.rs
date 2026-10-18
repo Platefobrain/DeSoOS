@@ -1,5 +1,5 @@
-// M17: samotesty SMP – rdzenie online, zadania na wielu CPU, procesy
-// równolegle, syscalle z kilku CPU naraz (tylko build z --cfg selftest).
+// SMP self-tests – cores online, tasks on many CPUs, processes
+// in parallel, syscalls from several CPUs at once (only builds with --cfg selftest).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -33,28 +33,28 @@ fn wait_for(ms: u64, mut cond: impl FnMut() -> bool) -> bool {
     true
 }
 
-// Spinnery testu 2 kończą się SAME (po >= 2 CPU albo po 10 s zegara HPET) –
-// wcześniej czekały na STOP od zadania testowego, które bywało zagładzane.
-/// CPU, na których kręciły się spinnery (zapisują je same).
+// The test 2 spinners finish ON THEIR OWN (after >= 2 CPUs or after 10 s of HPET time) –
+// waiting for a STOP from the test task was unreliable, since that task could be starved.
+/// CPUs the spinners ran on (they record them themselves).
 static SPIN_CPUS: AtomicU64 = AtomicU64::new(0);
-/// Ile CPU muszą razem odwiedzić spinnery, żeby skończyć wcześniej.
+/// How many CPUs the spinners must visit in total to finish early.
 static SPIN_GOAL: AtomicU64 = AtomicU64::new(2);
-/// Po ilu ms (+1) od startu cel został osiągnięty (0 = jeszcze nie).
+/// After how many ms (+1) from the start the goal was reached (0 = not yet).
 static SPIN_DONE_AT: AtomicU64 = AtomicU64::new(0);
-/// Znacznik zegara (clock::stamp) startu spinnerów – czas rzeczywisty w zrzucie.
+/// Clock timestamp (clock::stamp) of the spinners' start – real time in the dump.
 static SPIN_CLOCK: AtomicU64 = AtomicU64::new(0);
 
-/// Spinnery startują razem (po utworzeniu wszystkich).
+/// The spinners start together (after all have been created).
 static SPIN_GO: AtomicBool = AtomicBool::new(false);
 const SPIN_LIMIT_US: u64 = 10_000_000;
 
 fn spinner(i: usize) {
-    // Kręcimy się BEZ Big Kernel Lock (tylko atomiki).  Wcześniej spinner
-    // trzymał BKL cały czas, oddając go tylko w ticku: zadanie testowe
-    // tworzyło kolejne spinnery po kawałku co 10 ms, BSP czekał na BKL
-    // z wyłączonymi przerwaniami i gubił ticki PIT – u Dawida "10 s" testu
-    // trwało 99 s, a spinnery 1–3 wystartowały już po terminie (maska 0b1000).
-    // Termin liczony zegarem HPET (czas rzeczywisty), nie tickami.
+    // We spin WITHOUT the Big Kernel Lock (atomics only).  If the spinner
+    // held the BKL all the time, releasing it only in the tick, the test task
+    // would create the spinners bit by bit every 10 ms, the BSP would wait for the BKL
+    // with interrupts disabled and lose PIT ticks – on real hardware a "10 s" test
+    // took 99 s, and spinners 1–3 started only after the deadline (mask 0b1000).
+    // The deadline is measured with the HPET clock (real time), not ticks.
     crate::sched::bkl::unlocked(|| {
         while !SPIN_GO.load(Ordering::Acquire) && !STOP.load(Ordering::Relaxed) {
             core::hint::spin_loop();
@@ -65,8 +65,8 @@ fn spinner(i: usize) {
             SPINS[i].fetch_add(1, Ordering::Relaxed);
             let me = crate::arch::x86_64::cpu::id();
             let cpus = SPIN_CPUS.fetch_or(1 << me, Ordering::Relaxed) | (1 << me);
-            // Koniec, gdy razem byliśmy na dość wielu CPU – szybki sprzęt
-            // kończy w milisekundach, wolny emulator ma czas do 10 s.
+            // Done once together we have been on enough CPUs – fast hardware
+            // finishes in milliseconds, a slow emulator has up to 10 s.
             if cpus.count_ones() as u64 >= SPIN_GOAL.load(Ordering::Relaxed) {
                 let ms = crate::arch::x86_64::clock::elapsed_us(start) / 1000 + 1;
                 let _ = SPIN_DONE_AT.compare_exchange(0, ms, Ordering::SeqCst, Ordering::SeqCst);
@@ -81,7 +81,7 @@ fn spinner(i: usize) {
     });
 }
 
-/// M17a: stan wszystkich CPU, BKL i spinnerów (tylko przy kłopotach).
+/// State of all CPUs, the BKL and the spinners (only when in trouble).
 fn dump_state(why: &str, ids: &[TaskId], k: usize) {
     use crate::arch::x86_64::{clock, cpu};
     use crate::sched::bkl;
@@ -137,7 +137,7 @@ pub fn self_test() {
     crate::selftest::begin();
     STOP.store(false, Ordering::SeqCst);
 
-    // 1. Rdzenie z MADT działają, timery LAPIC tykają.
+    // 1. Cores from the MADT are running, LAPIC timers are ticking.
     let expected = crate::acpi::madt().map(|m| m.cpus.len().min(MAX_CPUS)).unwrap_or(1);
     let n = smp::online_count();
     check!(n == expected, "{} CPU(s) online, MADT lists {}", n, expected);
@@ -159,9 +159,9 @@ pub fn self_test() {
         return;
     }
 
-    // 2. Zadania kernela trafiają na różne CPU (BKL przekazywany w ticku).
-    //    Spinnery kończą się same: gdy razem były na >= 2 CPU albo po 10 s;
-    //    test tylko patrzy (i mierzy, po jakim czasie inne CPU przejęły pracę).
+    // 2. Kernel tasks land on different CPUs (BKL handed over in the tick).
+    //    The spinners finish on their own: once together they have been on >= 2 CPUs or after 10 s;
+    //    the test only watches (and measures how long it took other CPUs to take over the work).
     let k = n.min(MAX_CPUS);
     SPIN_CPUS.store(0, Ordering::SeqCst);
     SPIN_DONE_AT.store(0, Ordering::SeqCst);
@@ -176,8 +176,8 @@ pub fn self_test() {
     }
     SPIN_CLOCK.store(crate::arch::x86_64::clock::stamp(), Ordering::SeqCst);
     SPIN_GO.store(true, Ordering::SeqCst);
-    // Po 3 s bez drugiego CPU – zrzut stanu (diagnostyka rzadkiego FAIL
-    // pod TCG: kto trzyma BKL, kto czeka, czy timery tykają).
+    // After 3 s without a second CPU – state dump (diagnostics for a rare FAIL
+    // under TCG: who holds the BKL, who waits, whether timers tick).
     let mut dumped = false;
     let all_gone = wait_for(20_000, || {
         if !dumped && SPIN_DONE_AT.load(Ordering::Relaxed) == 0 && crate::arch::x86_64::clock::elapsed_us(SPIN_CLOCK.load(Ordering::Relaxed)) > 3_000_000 {
@@ -203,7 +203,7 @@ pub fn self_test() {
         done_at.saturating_sub(1)
     );
 
-    // 3. Procesy naprawdę równolegle: kilka `primes` naraz na różnych CPU.
+    // 3. Truly parallel processes: several `primes` at once on different CPUs.
     let t0 = ticks();
     let mut procs = Vec::new();
     for _ in 0..n {
@@ -233,7 +233,7 @@ pub fn self_test() {
         let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
         check!(out.contains("33860 primes below 400000"), "primes {} output: {:?}", id, out);
     }
-    // Przy 2 CPU drugi zajmuje to zadanie testowe – równoległość od 3.
+    // With 2 CPUs the second one is occupied by this test task – parallelism from 3.
     check!(n < 3 || max_parallel >= 2, "processes never ran at the same time (max {} CPUs)", max_parallel);
     serial_println!(
         "[SMP TEST] 3/7 {} x primes: up to {} running at once, {} ms PASS",
@@ -242,7 +242,7 @@ pub fn self_test() {
         wall
     );
 
-    // 4. Syscalle z wielu CPU naraz: kilka shelli (spawn/wait, VFS, pliki).
+    // 4. Syscalls from many CPUs at once: several shells (spawn/wait, VFS, files).
     let mut shells = Vec::new();
     for i in 0..n * 2 {
         let script = alloc::format!(
@@ -268,8 +268,8 @@ pub fn self_test() {
     check!(ipis > 0, "no wake-up IPIs were delivered");
     serial_println!("[SMP TEST] 4/7 {} shells at once (spawn/wait/VFS), {} wake-up IPIs PASS", shells.len(), ipis);
 
-    // 5. FPU/SSE przy migracji: 2n procesów xmm (więcej niż CPU – muszą się
-    //    przełączać i przechodzić między rdzeniami), żaden rejestr nie wycieka.
+    // 5. FPU/SSE during migration: 2n xmm processes (more than CPUs – they must
+    //    switch and move between cores), no register leaks.
     let code = programs::code("xmm");
     check!(code.is_some(), "no xmm program");
     let mut xmm = Vec::new();
@@ -279,9 +279,9 @@ pub fn self_test() {
         xmm.push(id.unwrap());
     }
     let mut migrated = 0u16;
-    // Licznik schedulera – próbkowanie cpu_mask co 5 ms gubiło migracje
-    // procesów, które zdążyły się zakończyć (KVM po v0.17.12: procesy
-    // startują bez BKL i kończą się w kilkadziesiąt ms).
+    // Scheduler counter – sampling cpu_mask every 5 ms missed migrations
+    // of processes that had already finished (under KVM processes
+    // start without the BKL and finish within tens of ms).
     let mig0 = crate::sched::user_migrations();
     let end = ticks() + 120_000;
     while xmm.iter().any(|&id| crate::sched::task_info(id).is_some()) && ticks() < end {
@@ -314,15 +314,15 @@ pub fn self_test() {
         migrations
     );
 
-    // 6. P4.b: tablica zadań pod blokadą RW – czytający (with_process,
-    //    task_exists) na innych CPU w trakcie spawn / exit / reap procesów;
-    //    zadanie zwolnione pod czytającym = zły znacznik = FAIL.
+    // 6. Task table under an RW lock – readers (with_process,
+    //    task_exists) on other CPUs during process spawn / exit / reap;
+    //    a task freed under a reader = bad tag = FAIL.
     if !table_test(n) {
         return;
     }
-    // 7. P4.c: przełączanie poza blokadą schedulera – pary zadań na różnych CPU
-    //    budzą się nawzajem w kółko (zgubiona pobudka = czekanie do terminu
-    //    1 s = FAIL), obok zadania, które się kończą (reap vs on_cpu).
+    // 7. Switching outside the scheduler lock – pairs of tasks on different CPUs
+    //    wake each other in a loop (a lost wake-up = waiting until the deadline
+    //    1 s = FAIL), next to tasks that are exiting (reap vs on_cpu).
     if !switch_test(n) {
         return;
     }
@@ -381,9 +381,9 @@ fn table_test(n: usize) -> bool {
     let mut spawned = 0u64;
     let mut live: Vec<TaskId> = Vec::new();
     while ticks() < end {
-        // Żywy = ma proces, który się nie zakończył (task_exists widzi też
-        // zakończone, dopóki ich nie sprzątnięto – a sprząta spawn albo idle,
-        // którego przy zajętych CPU nie ma: KVM, v0.31.0 – 16 procesów).
+        // Alive = has a process that has not finished (task_exists also sees
+        // finished ones until they are reaped – and reaping is done by spawn or idle,
+        // which is absent when CPUs are busy: KVM, 16 processes).
         live.retain(|&id| crate::sched::with_process(id, |_| ()).is_some());
         if live.len() < 16 {
             match spawn_process("pid", code.unwrap(), 0) {
@@ -428,8 +428,8 @@ static T7_DYING: AtomicU64 = AtomicU64::new(0);
 static T7_WQ: [[crate::sched::sync::WaitQueue; 2]; PAIRS] =
     [const { [const { crate::sched::sync::WaitQueue::new() }; 2] }; PAIRS];
 
-/// Zadanie `i` = para i / 2, strona i % 2: czeka na swoją kolej, oddaje ją
-/// drugiej stronie i ją budzi.
+/// Task `i` = pair i / 2, side i % 2: waits for its turn, hands it over to
+/// the other side and wakes it.
 fn pinger(i: usize) {
     let (pair, side) = (i / 2, (i % 2) as u64);
     while !T7_STOP.load(Ordering::Relaxed) {
@@ -447,7 +447,7 @@ fn pinger(i: usize) {
         T7_TURN[pair].store(1 - side, Ordering::SeqCst);
         T7_WQ[pair][1 - side as usize].wake_all();
     }
-    // Druga strona może czekać – obudzić na koniec.
+    // The other side may be waiting – wake it at the end.
     T7_WQ[pair][1 - side as usize].wake_all();
     T7_DONE.fetch_add(1, Ordering::SeqCst);
 }

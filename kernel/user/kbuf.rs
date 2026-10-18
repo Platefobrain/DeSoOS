@@ -1,20 +1,20 @@
-// v0.35.2: budżet buforów jądra zajmowanych przez procesy – komunikaty w
-// kolejkach kanałów i dane w potokach.  Leżą na heapie jądra (64 MiB): bez
-// budżetu kilka procesów zapełniłoby heap kolejkami (64 komunikaty × 4 KiB na
-// kolejkę, 64 uchwyty na proces) i jądro padłoby przy następnej alokacji.
-// Ponad budżetem: chan_send / zapis do potoku – ENOMEM (nic nie ginie, proces
-// może spróbować później).
+// Budget of kernel buffers occupied by processes – messages in
+// channel queues and data in pipes.  They live on the kernel heap (64 MiB): without
+// a budget a few processes could fill the heap with queues (64 messages × 4 KiB per
+// queue, 64 handles per process) and the kernel would crash on the next allocation.
+// Over budget: chan_send / pipe write – ENOMEM (nothing is lost, the process
+// can try again later).
 
 use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 pub const KBUF_MAX: u64 = 16 * 1024 * 1024;
-/// Narzut na komunikat (struktura, wektory) doliczany do danych.
+/// Per-message overhead (structure, vectors) added to the data.
 pub const MSG_OVERHEAD: u64 = 64;
 
 static USED: AtomicU64 = AtomicU64::new(0);
 static DENIED: AtomicU64 = AtomicU64::new(0);
 
-/// Całe `n` albo nic.
+/// All of `n` or nothing.
 pub fn try_take(n: u64) -> bool {
     let ok = USED.fetch_update(SeqCst, SeqCst, |u| u.checked_add(n).filter(|&x| x <= KBUF_MAX)).is_ok();
     if !ok {
@@ -23,7 +23,7 @@ pub fn try_take(n: u64) -> bool {
     ok
 }
 
-/// Do `n` bajtów (ile się mieści) – zwraca zarezerwowane.
+/// Up to `n` bytes (as much as fits) – returns the amount reserved.
 pub fn take_upto(n: u64) -> u64 {
     let mut got = 0;
     let _ = USED.fetch_update(SeqCst, SeqCst, |u| {
@@ -40,7 +40,7 @@ pub fn give(n: u64) {
     USED.fetch_sub(n, SeqCst);
 }
 
-/// (zajęte bajty, odmowy).
+/// (bytes in use, refusals).
 pub fn stats() -> (u64, u64) {
     (USED.load(SeqCst), DENIED.load(SeqCst))
 }

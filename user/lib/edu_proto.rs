@@ -1,26 +1,26 @@
-// M19.f: protokół usługi `edud` (sterownik urządzenia `edu` w user space).
+// Protocol of the `edud` service (user-space driver for the `edu` device).
 //
-// Klient rozmawia z usługą przez własny kanał.  Każda prośba i odpowiedź to
-// jeden komunikat: nagłówek 16 B (little-endian) + dane.
+// A client talks to the service over its own channel.  Each request and reply is
+// one message: a 16 B header (little-endian) + data.
 //
-//   prośba:     [op: u32, 0: u32, arg: u64] + dane
-//   odpowiedź:  [status: i32, op: u32, wartość: u64] + dane   (status < 0 = -errno)
+//   request:  [op: u32, 0: u32, arg: u64] + data
+//   reply:    [status: i32, op: u32, value: u64] + data   (status < 0 = -errno)
 //
-// Połączenie: kanał „połączeń” usługi (slot 4) przyjmuje komunikat z jednym
-// uchwytem – końcem kanału klienta (dane: nazwa usługi, np. "edu").
+// Connecting: the service's "connections" channel (slot 4) accepts a message with one
+// handle – the client's end of a channel (data: service name, e.g. "edu").
 #![allow(dead_code)]
 
-/// Identyfikacja urządzenia (rejestr 0x00 edu) – wartość: 0x010000ed.
+/// Device identification (edu register 0x00) – value: 0x010000ed.
 pub const OP_PING: u32 = 1;
-/// Silnia `arg` liczona przez urządzenie (koniec zgłoszony przerwaniem).
+/// Factorial of `arg` computed by the device (completion signalled by an interrupt).
 pub const OP_FACT: u32 = 2;
-/// Dane przez DMA: bufor usługi -> urządzenie -> bufor (urządzenie kopiuje).
+/// Data via DMA: service buffer -> device -> buffer (the device copies).
 pub const OP_COPY: u32 = 3;
-/// Statystyka usługi – wartość: prośby; dane: [prośby, przerwania, klienci].
+/// Service statistics – value: requests; data: [requests, interrupts, clients].
 pub const OP_STATS: u32 = 4;
 
 pub const HDR: usize = 16;
-/// Najwięcej danych w OP_COPY (komunikat ≤ 4096 B razem z nagłówkiem).
+/// Maximum data in OP_COPY (message ≤ 4096 B including the header).
 pub const COPY_MAX: usize = 4000;
 
 pub fn request(op: u32, arg: u64, data: &[u8], out: &mut [u8]) -> usize {

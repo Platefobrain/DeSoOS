@@ -1,4 +1,4 @@
-// M16: mv <źródło> <cel> – przenosi plik (kopia + usunięcie; także między / i /disk).
+// mv <source> <target> – moves a file (copy + delete; also between / and /disk).
 #![no_std]
 #![no_main]
 

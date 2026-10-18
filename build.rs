@@ -1,6 +1,6 @@
-// Wbudowuje kernel w DSB (include_bytes! w boot/dsb.rs).
-// M10: kernel to ELF (build/kernel.boot.elf = build/kernel.elf bez symboli),
-// a nie płaski kernel.bin.
+// Embeds the kernel into the DSB (include_bytes! in boot/dsb.rs).
+// The kernel is an ELF (build/kernel.boot.elf = build/kernel.elf without symbols),
+// not a flat kernel.bin.
 fn main() {
     let kernel = std::path::Path::new("build/kernel.boot.elf");
     println!("cargo:rerun-if-changed={}", kernel.display());

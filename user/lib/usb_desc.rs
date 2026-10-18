@@ -1,13 +1,13 @@
-// M20.c: parser deskryptorów USB – czysty kod (bez MMIO, bez alokacji, bez
-// paniki).  Dane przychodzą z urządzenia, więc są obce: każdy błąd kończy się
-// Err, nigdy odczytem poza buforem, pętlą bez końca ani przepełnieniem.
-// Testy złośliwych danych bez sprzętu: /bin/usbparse (USB TEST 1/3).
+// USB descriptor parser – pure code (no MMIO, no allocation, no
+// panics).  The data comes from the device, so it is untrusted: every error ends in
+// Err, never in a read past the buffer, an endless loop or an overflow.
+// Malicious-data tests without hardware: /bin/usbparse (USB TEST 1/3).
 //
-// Limity (ARCHITEKTURA.md, „Enumeracja”): deskryptor konfiguracji ≤ 4 KiB,
-// zapamiętanych interfejsów (ustawienie alternatywne 0) ≤ 8, endpointów na
-// interfejs ≤ 16, wszystkich deskryptorów interfejsu (z ustawieniami
-// alternatywnymi – kamery mają ich dziesiątki) ≤ 64.  Ponad limit interfejsów
-// i endpointów – pomijane (flaga `truncated`), nie błąd.
+// Limits (ARCHITECTURE.md, "Enumeration"): configuration descriptor ≤ 4 KiB,
+// remembered interfaces (alternate setting 0) ≤ 8, endpoints per
+// interface ≤ 16, all interface descriptors (including alternate
+// settings – cameras have dozens of them) ≤ 64.  Interfaces and endpoints
+// beyond the limit – skipped (the `truncated` flag), not an error.
 #![allow(dead_code)]
 
 pub const DESC_DEVICE: u8 = 1;
@@ -24,25 +24,25 @@ pub const IFACE_DESCS_MAX: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DescError {
-    /// Bufor krótszy niż deskryptor / niż nagłówek.
+    /// Buffer shorter than the descriptor / than the header.
     Truncated,
-    /// Zły typ deskryptora.
+    /// Wrong descriptor type.
     WrongType,
-    /// bLength za mały dla typu (w tym 0 – bez sprawdzenia byłaby pętla bez końca).
+    /// bLength too small for the type (including 0 – without the check it would loop forever).
     BadLength,
-    /// Deskryptor wychodzi poza wTotalLength.
+    /// Descriptor extends past wTotalLength.
     Overrun,
-    /// wTotalLength mniejsze niż nagłówek albo większe niż 4 KiB / niż bufor.
+    /// wTotalLength smaller than the header or larger than 4 KiB / than the buffer.
     BadTotal,
-    /// bMaxPacketSize0 spoza 8/16/32/64 (USB 3: 9 = 512 B).
+    /// bMaxPacketSize0 not in 8/16/32/64 (USB 3: 9 = 512 B).
     BadMaxPacket0,
-    /// Endpoint przerwań / bulk z wMaxPacketSize 0.
+    /// Interrupt / bulk endpoint with wMaxPacketSize 0.
     BadMaxPacket,
-    /// Endpoint przed pierwszym interfejsem.
+    /// Endpoint before the first interface.
     OrphanEndpoint,
-    /// Więcej endpointów niż bNumEndpoints interfejsu.
+    /// More endpoints than the interface's bNumEndpoints.
     TooManyEndpoints,
-    /// Ponad 64 deskryptory interfejsu.
+    /// More than 64 interface descriptors.
     TooManyInterfaces,
 }
 
@@ -73,7 +73,7 @@ pub struct DeviceDesc {
     pub class: u8,
     pub subclass: u8,
     pub protocol: u8,
-    /// Rozmiar pakietu EP0 w bajtach (USB 3: 512).
+    /// EP0 packet size in bytes (USB 3: 512).
     pub mps0: u16,
     pub vendor: u16,
     pub product: u16,
@@ -84,8 +84,8 @@ pub struct DeviceDesc {
     pub configs: u8,
 }
 
-/// Pierwsze 8 bajtów deskryptora urządzenia: bMaxPacketSize0 (do ustawienia EP0
-/// przed odczytem całości).  `usb3` – urządzenie na porcie USB 3 (wykładnik).
+/// First 8 bytes of the device descriptor: bMaxPacketSize0 (to set up EP0
+/// before reading the whole descriptor).  `usb3` – device on a USB 3 port (exponent).
 pub fn max_packet0(b: &[u8], usb3: bool) -> Result<u16, DescError> {
     if b.len() < 8 {
         return Err(DescError::Truncated);
@@ -157,7 +157,7 @@ pub struct Interface {
     pub declared_eps: u8,
     pub eps: [Endpoint; EPS_MAX],
     pub n_eps: usize,
-    /// Długość raportu HID (0 – brak deskryptora HID).
+    /// HID report length (0 – no HID descriptor).
     pub hid_report_len: u16,
 }
 
@@ -169,13 +169,13 @@ pub struct Config {
     pub max_power: u8,
     pub ifaces: [Interface; IFACES_MAX],
     pub n_ifaces: usize,
-    /// Wszystkie deskryptory interfejsu (także ustawienia alternatywne).
+    /// All interface descriptors (including alternate settings).
     pub iface_descs: usize,
-    /// Część interfejsów / endpointów pominięta (limit), nie błąd.
+    /// Some interfaces / endpoints were skipped (limit), not an error.
     pub truncated: bool,
 }
 
-/// Pierwsze 9 bajtów deskryptora konfiguracji: wTotalLength (≤ 4 KiB).
+/// First 9 bytes of the configuration descriptor: wTotalLength (≤ 4 KiB).
 pub fn config_total(b: &[u8]) -> Result<u16, DescError> {
     if b.len() < 9 {
         return Err(DescError::Truncated);
@@ -193,14 +193,14 @@ pub fn config_total(b: &[u8]) -> Result<u16, DescError> {
     Ok(total)
 }
 
-/// Cała konfiguracja (bufor = dokładnie to, co przyszło z urządzenia).
+/// Whole configuration (buffer = exactly what came from the device).
 pub fn parse_config(b: &[u8]) -> Result<Config, DescError> {
     let total = config_total(b)? as usize;
     if total > b.len() {
         return Err(DescError::BadTotal);
     }
     let mut c = Config { total: total as u16, value: b[5], attributes: b[7], max_power: b[8], ..Config::default() };
-    // Bieżący interfejs: Some(indeks w tablicy) albo None (alternatywny / ponad limit).
+    // Current interface: Some(index in the array) or None (alternate / over the limit).
     let mut cur: Option<usize> = None;
     let mut cur_seen = 0usize;
     let mut cur_declared = 0usize;
@@ -284,14 +284,14 @@ pub fn parse_config(b: &[u8]) -> Result<Config, DescError> {
                     }
                 }
             }
-            _ => {} // IAD, specyficzne dla klasy, SS companion – pomijane
+            _ => {} // IAD, class-specific, SS companion – skipped
         }
         off += len;
     }
     Ok(c)
 }
 
-/// Lista języków (deskryptor napisu 0): pierwszy identyfikator języka.
+/// Language list (string descriptor 0): the first language ID.
 pub fn first_langid(b: &[u8]) -> Option<u16> {
     if b.len() < 4 || b[1] != DESC_STRING || (b[0] as usize) < 4 {
         return None;
@@ -299,8 +299,8 @@ pub fn first_langid(b: &[u8]) -> Option<u16> {
     Some(u16_at(b, 2))
 }
 
-/// Napis UTF-16LE -> ASCII (inne znaki jako '?', sterujące pominięte);
-/// zwraca liczbę bajtów w `out`.
+/// UTF-16LE string -> ASCII (other characters as '?', control characters skipped);
+/// returns the number of bytes in `out`.
 pub fn string_ascii(b: &[u8], out: &mut [u8]) -> usize {
     if b.len() < 2 || b[1] != DESC_STRING {
         return 0;
@@ -319,7 +319,7 @@ pub fn string_ascii(b: &[u8], out: &mut [u8]) -> usize {
         out[n] = c;
         n += 1;
     }
-    // Bez spacji na końcu (niektóre urządzenia dopełniają spacjami).
+    // No trailing spaces (some devices pad with spaces).
     while n > 0 && out[n - 1] == b' ' {
         n -= 1;
     }

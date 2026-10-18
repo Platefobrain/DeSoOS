@@ -1,12 +1,12 @@
-// M19.f: edud – sterownik urządzenia `edu` (QEMU) jako usługa w user space.
-// Pierwsza prawdziwa usługa DeSoOS: rejestry przez dev_map, przerwania przez
-// irq_bind + wait_many, DMA przez dma_alloc; klienci przez kanały.
+// edud – driver for the QEMU `edu` device as a user-space service.
+// The first real DeSoOS service: registers via dev_map, interrupts via
+// irq_bind + wait_many, DMA via dma_alloc; clients via channels.
 //
-// Uchwyty na starcie (daje je ten, kto uruchamia usługę – w 19.g menedżer w init):
-//   1 = konsola (komunikaty), 3 = urządzenie (DEVICE), 4 = kanał połączeń.
-// Protokół: user/lib/edu_proto.rs.  Usługa obsługuje prośby po kolei (urządzenie
-// jest jedno); czekając na urządzenie, inne prośby czekają w kolejkach kanałów.
-// Koniec: kanał połączeń zamknięty i żaden klient nie został -> kod 0.
+// Handles at startup (given by whoever starts the service – the service manager in init):
+//   1 = console (messages), 3 = device (DEVICE), 4 = connection channel.
+// Protocol: user/lib/edu_proto.rs.  The service handles requests one at a time (there is
+// one device); while waiting on the device, other requests wait in the channel queues.
+// Exit: connection channel closed and no clients left -> code 0.
 #![no_std]
 #![no_main]
 
@@ -23,7 +23,7 @@ entry!(main);
 
 const DEV: u64 = 3;
 const LISTEN: u64 = 4;
-/// wait_many: kanał połączeń + przerwanie + klienci.
+/// wait_many: connection channel + interrupt + clients.
 const MAX_CLIENTS: usize = WAIT_MAX - 2;
 
 const REG_ID: u64 = 0x00;
@@ -63,8 +63,8 @@ impl Edu {
         unsafe { core::ptr::write_volatile((self.regs + reg) as *mut u64, v) }
     }
 
-    /// Czeka, aż urządzenie zgłosi `bit` w statusie przerwań (pobudka przez
-    /// przerwanie; licznik to tylko „coś przyszło” – decyduje status).
+    /// Waits until the device reports `bit` in the interrupt status (woken by the
+    /// interrupt; the counter only means "something arrived" – the status decides).
     fn wait_dev(&mut self, bit: u32) -> Result<(), i64> {
         let t0 = uptime_ms();
         while self.rd(REG_IRQ_STATUS) & bit == 0 {
@@ -82,7 +82,7 @@ impl Edu {
 
     fn fact(&mut self, n: u64) -> Result<u64, i64> {
         if n > 12 {
-            return Err(-22); // 13! nie mieści się w 32-bitowym rejestrze edu
+            return Err(-22); // 13! does not fit in the 32-bit edu register
         }
         self.wr(REG_FACT, n as u32);
         self.wait_dev(IRQ_FACT)?;
@@ -97,7 +97,7 @@ impl Edu {
         self.wait_dev(IRQ_DMA)
     }
 
-    /// Dane klienta -> bufor DMA -> urządzenie -> druga połowa bufora.
+    /// Client data -> DMA buffer -> device -> second half of the buffer.
     fn copy(&mut self, data: &[u8]) -> Result<usize, i64> {
         let n = data.len();
         self.buf[..n].copy_from_slice(data);
@@ -109,7 +109,7 @@ impl Edu {
 }
 
 fn main(_args: Args) -> i32 {
-    // Urządzenie: rejestry, przerwanie (silnia kończy się przerwaniem), bufor DMA.
+    // Device: registers, interrupt (factorial completion raises an interrupt), DMA buffer.
     let Ok(regs) = dev_map(DEV, 0, PROT_READ | PROT_WRITE) else {
         println!("edud: no device in slot 3");
         return 2;
@@ -159,11 +159,11 @@ fn main(_args: Args) -> i32 {
         }
         let Ok(ready) = wait_many(&list[..k], FOREVER) else { return 5 };
 
-        // Przerwanie bez prośby (spóźnione) – tylko zdejmij licznik.
+        // Interrupt with no request pending (late) – just consume the counter.
         if ready & (1 << irq_at) != 0 {
             edu.irqs += irq_read(edu.irq) as u64;
         }
-        // Nowy klient: komunikat z końcem jego kanału.
+        // New client: a message carrying its end of the channel.
         if listening && ready & 1 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
@@ -174,11 +174,11 @@ fn main(_args: Args) -> i32 {
                     clients[nclients] = hs[0];
                     nclients += 1;
                 } else {
-                    close(hs[0]); // za dużo klientów – klient dostanie EPIPE
+                    close(hs[0]); // too many clients – the client will get EPIPE
                 }
             }
         }
-        // Prośby klientów (od końca – usuwanie zamkniętych nie psuje indeksów).
+        // Client requests (iterated from the end – removing closed ones keeps indices valid).
         for j in (0..nclients).rev() {
             if ready & (1 << (first_client + j)) == 0 {
                 continue;

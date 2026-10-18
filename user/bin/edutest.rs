@@ -1,14 +1,14 @@
-// M19.f: test usługi edud – uruchamia ją jak przyszły menedżer usług (przejęcie
-// urządzenia z HW_ROOT, spawn_ex z uchwytami 3 = urządzenie, 4 = kanał połączeń),
-// łączy się jako klient: PING, silnia, kopiowanie przez DMA, zła prośba,
-// 4 klientów naraz (osobne procesy), statystyka; potem zabija usługę w trakcie
-// pracy klienta – klient dostaje EPIPE, urządzenie wraca, nowa instancja usługi
-// działa i klient łączy się ponownie; na koniec zamknięcie – usługa kończy się
-// sama (kod 0).  Wynik: "edutest: N checks OK, ..." i kod 0.
-// Uruchamia go SVC TEST z uchwytem HW_ROOT (QEMU z `-device edu,addr=06`).
+// Test of the edud service – starts it the way the service manager does (claiming the
+// device via HW_ROOT, spawn_ex with handles 3 = device, 4 = connection channel),
+// connects as a client: PING, factorial, DMA copy, bad request,
+// 4 clients at once (separate processes), statistics; then kills the service while
+// a client is working – the client gets EPIPE, the device comes back, a new service instance
+// works and the client reconnects; finally shutdown – the service exits
+// by itself (code 0).  Result: "edutest: N checks OK, ..." and code 0.
+// Started by SVC TEST with the HW_ROOT handle (QEMU with `-device edu,addr=06`).
 //
-// Tryb dziecka: `edutest client <n>` (uchwyt 4 = kanał połączeń usługi) –
-// łączy się i robi n próśb o silnię.
+// Child mode: `edutest client <n>` (handle 4 = the service's connection channel) –
+// connects and makes n factorial requests.
 #![no_std]
 #![no_main]
 
@@ -39,7 +39,7 @@ macro_rules! check {
     };
 }
 
-/// Połączenie z usługą przez jej kanał połączeń – koniec własnego kanału.
+/// Connects to the service via its connection channel – returns the end of our own channel.
 fn connect(listen: u64) -> Result<u64, i64> {
     let (mine, theirs) = channel_create()?;
     let r = chan_send_h(listen, b"edu", &[theirs], 0);
@@ -51,7 +51,7 @@ fn connect(listen: u64) -> Result<u64, i64> {
     Ok(mine)
 }
 
-/// Prośba i odpowiedź: (status, wartość, długość danych w `out`).
+/// Request and reply: (status, value, length of data in `out`).
 fn call(c: u64, op: u32, arg: u64, data: &[u8], out: &mut [u8]) -> Result<(i32, u64, usize), i64> {
     let mut req = [0u8; MSG_MAX];
     let n = request(op, arg, data, &mut req);
@@ -86,7 +86,7 @@ fn client(rounds: u64) -> i32 {
     0
 }
 
-/// Uruchamia usługę: przejęcie edu, kanał połączeń, spawn_ex.  (pid, kanał połączeń)
+/// Starts the service: claim edu, connection channel, spawn_ex.  (pid, connection channel)
 fn start_edud() -> Result<(i64, u64), &'static str> {
     let dev = dev_claim(HW_ROOT, EDU);
     if dev < 0 {
@@ -106,7 +106,7 @@ fn main(args: Args) -> i32 {
     let mut n = 0;
     let mut out = [0u8; MSG_MAX];
 
-    // 1. Start usługi; urządzenie należy teraz do niej.
+    // 1. Service start; the device now belongs to it.
     let (pid, listen) = match start_edud() {
         Ok(x) => x,
         Err(e) => {
@@ -116,7 +116,7 @@ fn main(args: Args) -> i32 {
     };
     check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device must belong to the service");
 
-    // 2. Klient: PING, silnia, kopiowanie przez DMA, zła prośba.
+    // 2. Client: PING, factorial, DMA copy, bad request.
     let c = connect(listen);
     check!(n, c.is_ok(), "connect: {:?}", c);
     let c = c.unwrap_or(0);
@@ -139,7 +139,7 @@ fn main(args: Args) -> i32 {
     let r = chan_recv(c, &mut out, 0, &mut info);
     check!(n, r == HDR as i64 && u32_at(&out, 0) as i32 == -22, "short request must be answered with EINVAL");
 
-    // 3. 4 klientów naraz (osobne procesy) – każdy po 50 silni.
+    // 3. 4 clients at once (separate processes) – 50 factorials each.
     let mut pids = [0i64; CLIENTS];
     for p in pids.iter_mut() {
         *p = spawn_ex("/bin/edutest", &["edutest", "client", "50"], &[(1, 1), (listen, 4)], 0);
@@ -153,8 +153,8 @@ fn main(args: Args) -> i32 {
     let served = r.map(|(_, v, _)| v).unwrap_or(0);
     check!(n, served >= 18 + CLIENTS as u64 * CLIENT_ROUNDS, "stats: {} requests served", served);
 
-    // 4. Usługa zabita – klient dostaje EPIPE, urządzenie wraca; nowa instancja
-    //    (jak restart przez menedżer usług) działa, klient łączy się ponownie.
+    // 4. Service killed – the client gets EPIPE, the device comes back; a new instance
+    //    (as on a restart by the service manager) works, the client reconnects.
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill edud");
     let r = call(c, OP_PING, 0, &[], &mut out);
     check!(n, r == Err(EPIPE), "client of a killed service must get EPIPE: {:?}", r);
@@ -170,7 +170,7 @@ fn main(args: Args) -> i32 {
     let c = connect(listen).unwrap_or(0);
     check!(n, matches!(call(c, OP_FACT, 12, &[], &mut out), Ok((0, 479001600, 0))), "restarted service answers");
 
-    // 5. Zamknięcie: kanał połączeń i klient zamknięte – usługa kończy się sama.
+    // 5. Shutdown: connection channel and client closed – the service exits by itself.
     close(c);
     close(listen);
     check!(n, wait(pid as u64, 0) == Ok((pid as u64, 0)), "edud exits when nobody can reach it");

@@ -1,4 +1,4 @@
-// M16: sleep <ms> – czeka (Ctrl+C przerywa).
+// sleep <ms> – waits (Ctrl+C interrupts).
 #![no_std]
 #![no_main]
 

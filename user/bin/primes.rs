@@ -1,5 +1,5 @@
-// M15: primes [N] – liczy liczby pierwsze poniżej N (domyślnie 100000);
-// zajmuje CPU, więc dobrze widać wywłaszczanie ('primes 3000000 &' + 'ps').
+// primes [N] – counts the primes below N (default 100000);
+// it keeps the CPU busy, so preemption is easy to see ('primes 3000000 &' + 'ps').
 #![no_std]
 #![no_main]
 

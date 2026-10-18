@@ -1,14 +1,14 @@
-// M15: programy użytkownika wbudowane w obraz kernela (jak initramfs).
+// User programs embedded in the kernel image (like an initramfs).
 //
-// build.sh kompiluje user/bin/*.rs do plików ELF (build/user/<nazwa>)
-// i generuje build/user/initrd.rs z listą (nazwa, bajty).  Przy starcie
-// kernel zapisuje je do ramfs jako /bin/<nazwa> – od tej chwili to zwykłe
-// pliki: `run hello` czyta /bin/hello z VFS i ładuje go loaderem ELF, a
-// `cp /bin/hello /disk/` kopiuje program na dysk.
+// build.sh compiles user/bin/*.rs into ELF files (build/user/<name>)
+// and generates build/user/initrd.rs with a list of (name, bytes).  At boot
+// the kernel writes them to ramfs as /bin/<name> – from then on they are ordinary
+// files: `run hello` reads /bin/hello from the VFS and loads it with the ELF loader, and
+// `cp /bin/hello /disk/` copies the program to disk.
 
 include!("../build/user/initrd.rs");
 
-/// Tworzy /bin i zapisuje programy.  Zwraca ich liczbę.
+/// Creates /bin and writes the programs.  Returns their count.
 pub fn install() -> usize {
     use crate::fs;
     if fs::stat("/bin").is_err() && fs::mkdir("/bin").is_err() {

@@ -1,14 +1,14 @@
-// M20.e: test uchwytu INPUT i syscalla input_inject (USB TEST 3/4) – ścieżka
-// usbd -> jądro bez sprzętu.  Uruchamia go jądro z uchwytem INPUT; jądro po
-// teście czyta kolejkę wejścia i sprawdza znaki, autorepeat i modyfikatory.
-//   1. błędy: nie-INPUT (EBADF), bez WRITE (EACCES), n = 0 / 65, zły rodzaj
-//      (EINVAL – żadne zdarzenie nie przechodzi), puszczenie niewciśniętego,
-//   2. "hi" + Shift+a -> jądro: "hiA",
-//   3. 'b' trzymane 700 ms -> autorepeat jądra (500 ms, potem ~30/s),
-//   4. Caps Lock -> stan diod (bit 1), drugi raz -> zgaszona,
-//   5. dziecko z kopią uchwytu wciska Shift i 'q', zostaje zabite -> jądro
-//      puszcza jego klawisze (Shift nie wisi, 'q' się nie powtarza).
-// Wynik: "inputtest: N checks OK".
+// Test of the INPUT handle and the input_inject syscall (USB TEST 3/4) – the
+// usbd -> kernel path without hardware.  The kernel runs it with an INPUT handle; after the
+// test the kernel reads the input queue and checks characters, autorepeat and modifiers.
+//   1. errors: non-INPUT (EBADF), no WRITE (EACCES), n = 0 / 65, bad kind
+//      (EINVAL – no event gets through), releasing a key that is not pressed,
+//   2. "hi" + Shift+a -> kernel: "hiA",
+//   3. 'b' held for 700 ms -> kernel autorepeat (500 ms, then ~30/s),
+//   4. Caps Lock -> LED state (bit 1), a second time -> off,
+//   5. a child with a copy of the handle presses Shift and 'q', gets killed -> the kernel
+//      releases its keys (Shift does not stick, 'q' does not repeat).
+// Result: "inputtest: N checks OK".
 #![no_std]
 #![no_main]
 
@@ -44,7 +44,7 @@ fn tap(h: u64, usage: u8) -> i64 {
 }
 
 fn main(args: Args) -> i32 {
-    // Dziecko: Shift + 'q' wciśnięte, potem czeka na kill.
+    // Child: Shift + 'q' pressed, then waits for kill.
     if args.get(1) == Some("child") {
         let h = find_input().unwrap_or(5);
         input_inject(h, &[key_event(SHIFT, true), key_event(0x14, true)]);
@@ -57,7 +57,7 @@ fn main(args: Args) -> i32 {
     check!(n, h.is_some(), "no INPUT handle");
     let h = h.unwrap();
 
-    // 1. Błędy.
+    // 1. Errors.
     check!(n, input_inject(1, &[key_event(4, true)]) == EBADF, "console handle -> EBADF");
     let ro = handle_dup(h, 0);
     check!(n, ro >= 0 && input_inject(ro as u64, &[key_event(4, true)]) == EACCES, "INPUT without WRITE -> EACCES");
@@ -72,18 +72,18 @@ fn main(args: Args) -> i32 {
     check!(n, tap(h, 0x0B) >= 0 && tap(h, 0x0C) >= 0, "h, i");
     check!(n, input_inject(h, &[key_event(SHIFT, true), key_event(0x04, true), key_event(0x04, false), key_event(SHIFT, false)]) >= 0, "Shift+a");
 
-    // 3. Autorepeat: 'b' trzymane 700 ms.
+    // 3. Autorepeat: 'b' held for 700 ms.
     check!(n, input_inject(h, &[key_event(0x05, true)]) >= 0, "b down");
     sleep_ms(700);
     check!(n, input_inject(h, &[key_event(0x05, false)]) >= 0, "b up");
 
-    // 4. Caps Lock -> dioda.
+    // 4. Caps Lock -> LED.
     let on = tap(h, CAPS);
     check!(n, on >= 0 && on & 2 != 0, "Caps Lock on -> LED bit 1: {}", on);
     let off = tap(h, CAPS);
     check!(n, off >= 0 && off & 2 == 0, "Caps Lock off -> LED clear: {}", off);
 
-    // 5. Dziecko z kopią uchwytu (osobne źródło) – zabite z wciśniętym Shiftem i 'q'.
+    // 5. Child with a copy of the handle (separate source) – killed with Shift and 'q' pressed.
     let Ok((r, w)) = pipe() else { return 2 };
     let pid = spawn_ex("/bin/inputtest", &["inputtest", "child"], &[(w, 1), (h, 5)], 0);
     close(w);
@@ -91,12 +91,12 @@ fn main(args: Args) -> i32 {
     let mut buf = [0u8; 64];
     let k = read(r, &mut buf);
     check!(n, k > 0, "child pressed keys");
-    sleep_ms(100); // < 500 ms – 'q' jeszcze się nie powtarza
+    sleep_ms(100); // < 500 ms – 'q' does not repeat yet
     kill(pid as u64);
     let st = wait(pid as u64, 0);
     check!(n, matches!(st, Ok((_, s)) if s & STATUS_SIGNALED != 0), "child killed: {:?}", st);
     close(r);
-    sleep_ms(700); // tick puszcza klawisze; 'q' nie może się powtarzać
+    sleep_ms(700); // the tick releases the keys; 'q' must not repeat
     println!("inputtest: {} checks OK, errors, hiA, autorepeat, Caps Lock LED, keys of a killed source released", n);
     0
 }

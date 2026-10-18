@@ -1,50 +1,50 @@
-// M17a krok b: TLB shootdown.
+// TLB shootdown.
 //
-// Każdy CPU trzyma w TLB tłumaczenia adresów.  Gdy jeden CPU zdejmuje albo
-// zmienia mapowanie w GÓRNEJ połowie (kernel: heap, stosy zadań, MMIO –
-// wspólna dla wszystkich PML4), pozostałe mogą mieć stary wpis i pisać do
-// ramki, którą alokator oddał już komuś innemu.  Dlatego:
+// Every CPU caches address translations in its TLB.  When one CPU removes or
+// changes a mapping in the UPPER half (kernel: heap, task stacks, MMIO –
+// shared by all PML4s), the others may still hold a stale entry and write to a
+// frame the allocator has already handed to someone else.  Hence:
 //
-//     wyczyść PTE  ->  shootdown (IPI + czekanie na potwierdzenie)  ->  free_frame
+//     clear PTE  ->  shootdown (IPI + wait for acknowledgement)  ->  free_frame
 //
-// Dolna połowa (proces) shootdownu nie potrzebuje, dopóki procesy są
-// jednowątkowe: proces działa naraz na jednym CPU, a CPU, który go opuszcza,
-// zawsze ładuje inny CR3 (inne zadanie, zadanie kernela, idle), co bez PCID
-// i bez stron global czyści wszystkie jego wpisy.  Wątki / wspólna pamięć
-// (M17b) – maska `active_cpus` przestrzeni adresowej, patrz ARCHITEKTURA.md.
+// The lower half (process) does not need a shootdown as long as processes are
+// single-threaded: a process runs on one CPU at a time, and a CPU that leaves it
+// always loads a different CR3 (another task, a kernel task, idle), which without PCID
+// and without global pages flushes all its entries.  Threads / shared memory
+// – the address space's `active_cpus` mask, see ARCHITECTURE.md.
 //
-// Mechanizm: jedno żądanie naraz (blokada `LOCK`), zakres w atomikach,
-// `PENDING` = maska CPU, które jeszcze nie potwierdziły.  Odbiorca: wektor
-// 0x43 – BEZ BKL (inicjator zwykle trzyma BKL, czekałby na nas w nieskończoność)
-// i bez blokad.  Pułapka: CPU czekający z IF = 0 (na BKL, na spinlock, na
-// samą blokadę shootdown) nie odbierze IPI – każda taka pętla woła `poll()`,
-// który obsługuje żądanie skierowane do tego CPU.
+// Mechanism: one request at a time (the `LOCK` lock), range in atomics,
+// `PENDING` = mask of CPUs that have not acknowledged yet.  Receiver: vector
+// 0x43 – WITHOUT the BKL (the initiator usually holds the BKL and would wait for us forever)
+// and without locks.  Pitfall: a CPU waiting with IF = 0 (for the BKL, a spinlock, or
+// the shootdown lock itself) will not receive the IPI – every such loop calls `poll()`,
+// which handles a request directed to this CPU.
 
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use super::cpu::{self, MAX_CPUS};
 use super::{clock, interrupts, lapic, smp};
 
-/// Wektor IPI "unieważnij TLB" (0x40 timer, 0x41 resched, 0x42 halt).
+/// "Invalidate TLB" IPI vector (0x40 timer, 0x41 resched, 0x42 halt).
 pub const TLB_VECTOR: u8 = 0x43;
 
-/// Powyżej tylu stron – pełny flush (przeładowanie CR3) zamiast `invlpg`.
+/// Above this many pages – a full flush (CR3 reload) instead of `invlpg`.
 const MAX_INVLPG: u64 = 32;
 
-/// Po tylu µs czekania na potwierdzenie – raport (kto nie odpowiada).
+/// After this many µs of waiting for acknowledgement – a report (who is not responding).
 const REPORT_US: u64 = 1_000_000;
 
 const PAGE: u64 = 4096;
 
-/// Właściciel żądania (numer CPU + 1; 0 = wolne).
+/// Request owner (CPU number + 1; 0 = free).
 static LOCK: AtomicU32 = AtomicU32::new(0);
-/// Zakres żądania: początek i liczba stron (0 = pełny flush).
+/// Request range: start and number of pages (0 = full flush).
 static REQ_START: AtomicU64 = AtomicU64::new(0);
 static REQ_PAGES: AtomicU64 = AtomicU64::new(0);
-/// CPU, które jeszcze nie unieważniły wpisów.
+/// CPUs that have not invalidated their entries yet.
 static PENDING: AtomicU16 = AtomicU16::new(0);
 
-// Statystyka (`cpus`, testy).
+// Statistics (`cpus`, tests).
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 static IPIS_SENT: AtomicU64 = AtomicU64::new(0);
 static FULL_FLUSHES: AtomicU64 = AtomicU64::new(0);
@@ -58,8 +58,8 @@ fn invlpg(va: u64) {
     unsafe { core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags)) };
 }
 
-/// Przeładowanie CR3 – czyści wszystkie wpisy TLB (kernel nie używa stron
-/// global, więc także górnej połowy).
+/// CR3 reload – flushes all TLB entries (the kernel does not use global
+/// pages, so the upper half too).
 #[inline]
 pub fn flush_all_local() {
     unsafe {
@@ -77,13 +77,13 @@ fn flush_local(start: u64, pages: u64) {
     }
 }
 
-/// Obsługuje żądanie skierowane do tego CPU (jeśli jest).  Bez blokad i bez
-/// BKL – wołane z handlera 0x43 i z każdej pętli czekania z IF = 0.
+/// Handles a request directed to this CPU (if any).  No locks and no
+/// BKL – called from the 0x43 handler and from every wait loop with IF = 0.
 #[inline]
 pub fn poll() -> bool {
-    // Z IF = 0: część pętli czekania (SpinLock, konsola) działa z IF = 1 –
-    // IPI w środku obsłużyłby żądanie drugi raz, a powrót tutaj skasowałby
-    // bit NASTĘPNEGO żądania bez unieważnienia jego zakresu.
+    // With IF = 0: some wait loops (SpinLock, console) run with IF = 1 –
+    // an IPI in the middle would handle the request a second time, and returning here would clear
+    // the bit of the NEXT request without invalidating its range.
     interrupts::without_interrupts(|| {
         let me = cpu::id();
         let bit = 1u16 << me;
@@ -97,19 +97,19 @@ pub fn poll() -> bool {
     })
 }
 
-/// Handler wektora 0x43 (exceptions.rs, przed BKL).
+/// Handler of vector 0x43 (exceptions.rs, before the BKL).
 pub fn on_ipi() {
     poll();
     lapic::eoi();
 }
 
-/// Unieważnia `pages` stron od `start` (0 stron = wszystko) w GÓRNEJ połowie
-/// na wszystkich CPU – po powrocie żaden CPU nie ma starego wpisu, więc
-/// ramkę wolno oddać alokatorowi.  Można wołać z IF = 0 i z BKL.
+/// Invalidates `pages` pages from `start` (0 pages = everything) in the UPPER half
+/// on all CPUs – on return no CPU has a stale entry, so the
+/// frame may be returned to the allocator.  May be called with IF = 0 and with the BKL.
 pub fn flush_kernel(start: u64, pages: u64) {
-    // Także w trakcie startu AP (zanim SMP jest "active"): AP, który już
-    // jest online, mógł zapamiętać wpisy.  AP zaczyna od pełnego flusha
-    // pod BKL (smp::ap_entry), a ONLINE ustawia, wciąż trzymając BKL.
+    // Also during AP startup (before SMP is "active"): an AP that is already
+    // online might have cached entries.  An AP starts with a full flush
+    // under the BKL (smp::ap_entry) and sets ONLINE while still holding the BKL.
     if smp::panicking() {
         flush_local(start, pages);
         return;
@@ -117,16 +117,16 @@ pub fn flush_kernel(start: u64, pages: u64) {
     shootdown(start, pages);
 }
 
-/// Pełny flush górnej połowy na wszystkich CPU (np. zwolniona tablica stron).
+/// Full flush of the upper half on all CPUs (e.g. a freed page table).
 pub fn flush_kernel_all() {
     flush_kernel(0, 0);
 }
 
 fn shootdown(start: u64, pages: u64) {
     interrupts::without_interrupts(|| {
-        // Cele liczone z IF = 0: wcześniej (z IF = 1) zadanie mogło się
-        // przenieść na inny CPU i czekać na potwierdzenie od samego siebie
-        // (znalezione TLB TEST 4: "CPU 0 waits ... from CPU mask 0b1").
+        // Targets computed with IF = 0: before (with IF = 1) the task could
+        // migrate to another CPU and wait for an acknowledgement from itself
+        // (found by TLB TEST 4: "CPU 0 waits ... from CPU mask 0b1").
         let cpu_now = cpu::id();
         let mut targets: u16 = 0;
         for c in 0..MAX_CPUS {
@@ -139,9 +139,9 @@ fn shootdown(start: u64, pages: u64) {
             return;
         }
         let me = cpu_now as u32 + 1;
-        // Jeden inicjator naraz.  Czekając, potwierdzamy cudze żądania –
-        // inaczej dwaj inicjatorzy czekaliby na siebie nawzajem.
-        // P4.0: czekanie odczytem, próba przejęcia dopiero przy wolnej blokadzie.
+        // One initiator at a time.  While waiting we acknowledge other requests –
+        // otherwise two initiators would wait for each other.
+        // Wait by reading; try to acquire only when the lock is free.
         while LOCK.load(Ordering::Relaxed) != 0 || LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
             poll_from_wait();
             core::hint::spin_loop();
@@ -189,8 +189,8 @@ fn shootdown(start: u64, pages: u64) {
     });
 }
 
-/// (żądania, wysłane IPI, pełne flushe, µs czekania na potwierdzenia,
-///  obsłużone przez wszystkie CPU) – `cpus`, testy.
+/// (requests, IPIs sent, full flushes, µs spent waiting for acknowledgements,
+///  handled by all CPUs) – `cpus`, tests.
 pub fn stats() -> (u64, u64, u64, u64, u64) {
     let handled = HANDLED.iter().map(|h| h.load(Ordering::Relaxed)).sum();
     (
@@ -202,13 +202,13 @@ pub fn stats() -> (u64, u64, u64, u64, u64) {
     )
 }
 
-/// Ile żądań obsłużył CPU `c`.
+/// How many requests CPU `c` handled.
 #[allow(dead_code)]
 pub fn handled_by(c: usize) -> u64 {
     HANDLED[c % MAX_CPUS].load(Ordering::Relaxed)
 }
 
-/// Z pętli czekania z IF = 0 (BKL, spinlocki, konsola): `poll` + licznik.
+/// From a wait loop with IF = 0 (BKL, spinlocks, console): `poll` + counter.
 #[inline]
 pub fn poll_from_wait() {
     if PENDING.load(Ordering::Relaxed) != 0 && poll() {
@@ -216,7 +216,7 @@ pub fn poll_from_wait() {
     }
 }
 
-/// Ile żądań obsłużono w pętlach czekania (zamiast w handlerze IPI).
+/// How many requests were handled in wait loops (instead of in the IPI handler).
 #[allow(dead_code)]
 pub fn polled() -> u64 {
     POLLED.load(Ordering::Relaxed)

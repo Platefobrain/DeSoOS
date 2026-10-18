@@ -1,18 +1,18 @@
-// M6: kontroler PS/2 (Intel 8042).
+// PS/2 controller (Intel 8042).
 //
-// Porty: 0x60 = dane (odczyt: bajt od urządzenia, zapis: bajt do
-// urządzenia), 0x64 = status (odczyt) / komenda kontrolera (zapis).
+// Ports: 0x60 = data (read: byte from the device, write: byte to the
+// device), 0x64 = status (read) / controller command (write).
 //
-// Konfiguracja po `init()`:
-//   * port 1 (klawiatura) włączony, IRQ1 włączone,
-//   * port 2 (mysz, M11b): włączony, jeśli mysz odpowie; tryb IntelliMouse
-//     (kółko) przez "magiczną" sekwencję częstotliwości 200/100/80,
-//   * translacja włączona: klawiatura mówi zestawem 2, kontroler
-//     tłumaczy na zestaw 1 (prostszy, jeden bajt na większość klawiszy).
+// Configuration after `init()`:
+//   * port 1 (keyboard) enabled, IRQ1 enabled,
+//   * port 2 (mouse): enabled if a mouse responds; IntelliMouse mode
+//     (wheel) via the "magic" sample-rate sequence 200/100/80,
+//   * translation enabled: the keyboard speaks scan code set 2, the controller
+//     translates to set 1 (simpler, one byte for most keys).
 //
-// Czekanie na kontroler: przy włączonych przerwaniach przez `hlt`
-// (budzi tick co 1 ms – nie ma ciasnej pętli na portach), przy
-// wyłączonych – ograniczona liczba prób.
+// Waiting for the controller: with interrupts enabled via `hlt`
+// (woken by the 1 ms tick – no tight loop on the ports), with
+// interrupts disabled – a bounded number of attempts.
 
 use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::port::{inb, outb};
@@ -22,18 +22,18 @@ const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
 const COMMAND: u16 = 0x64;
 
-const STATUS_OUTPUT_FULL: u8 = 1 << 0; // jest bajt do odczytu z 0x60
-const STATUS_INPUT_FULL: u8 = 1 << 1; // kontroler jeszcze nie przyjął zapisu
-pub const STATUS_AUX_DATA: u8 = 1 << 5; // bajt w 0x60 pochodzi z portu 2 (mysz)
+const STATUS_OUTPUT_FULL: u8 = 1 << 0; // a byte is available to read from 0x60
+const STATUS_INPUT_FULL: u8 = 1 << 1; // the controller has not accepted the write yet
+pub const STATUS_AUX_DATA: u8 = 1 << 5; // the byte in 0x60 comes from port 2 (mouse)
 
 const CMD_READ_CONFIG: u8 = 0x20;
 const CMD_WRITE_CONFIG: u8 = 0x60;
 const CMD_DISABLE_PORT2: u8 = 0xA7;
 const CMD_ENABLE_PORT2: u8 = 0xA8;
 const CMD_TEST_PORT2: u8 = 0xA9;
-const CMD_WRITE_PORT2: u8 = 0xD4; // następny bajt danych idzie do myszy
+const CMD_WRITE_PORT2: u8 = 0xD4; // the next data byte goes to the mouse
 #[cfg(selftest)]
-const CMD_WRITE_PORT2_OUTPUT: u8 = 0xD3; // "udawaj bajt od myszy"
+const CMD_WRITE_PORT2_OUTPUT: u8 = 0xD3; // "pretend a byte came from the mouse"
 #[allow(dead_code)]
 const CMD_SELF_TEST: u8 = 0xAA;
 #[allow(dead_code)]
@@ -41,7 +41,7 @@ const CMD_TEST_PORT1: u8 = 0xAB;
 const CMD_DISABLE_PORT1: u8 = 0xAD;
 const CMD_ENABLE_PORT1: u8 = 0xAE;
 #[cfg(selftest)]
-const CMD_WRITE_PORT1_OUTPUT: u8 = 0xD2; // "udawaj bajt od klawiatury"
+const CMD_WRITE_PORT1_OUTPUT: u8 = 0xD2; // "pretend a byte came from the keyboard"
 
 pub const CONFIG_PORT1_IRQ: u8 = 1 << 0;
 pub const CONFIG_PORT2_IRQ: u8 = 1 << 1;
@@ -49,7 +49,7 @@ pub const CONFIG_PORT1_CLOCK_OFF: u8 = 1 << 4;
 pub const CONFIG_PORT2_CLOCK_OFF: u8 = 1 << 5;
 pub const CONFIG_TRANSLATION: u8 = 1 << 6;
 
-// Komendy do klawiatury (przez port danych).
+// Keyboard commands (via the data port).
 #[allow(dead_code)]
 const KBD_RESET: u8 = 0xFF;
 const KBD_ENABLE_SCANNING: u8 = 0xF4;
@@ -58,16 +58,16 @@ pub const KBD_ACK: u8 = 0xFA;
 pub const KBD_RESEND: u8 = 0xFE;
 const KBD_SELF_TEST_OK: u8 = 0xAA;
 
-// Komendy myszy.
+// Mouse commands.
 const MOUSE_RESET: u8 = 0xFF;
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 const MOUSE_SET_SAMPLE_RATE: u8 = 0xF3;
 const MOUSE_GET_ID: u8 = 0xF2;
 const MOUSE_ENABLE_REPORTING: u8 = 0xF4;
 
-/// ID myszy po inicjalizacji: 0 = zwykła (3 bajty), 3 = IntelliMouse
-/// (4 bajty, kółko), 4 = Explorer (4 bajty, kółko + przyciski 4/5);
-/// 0xFF = brak myszy.
+/// Mouse ID after initialization: 0 = standard (3 bytes), 3 = IntelliMouse
+/// (4 bytes, wheel), 4 = Explorer (4 bytes, wheel + buttons 4/5);
+/// 0xFF = no mouse.
 static MOUSE_ID: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
 
 pub fn mouse_id() -> Option<u8> {
@@ -81,7 +81,7 @@ fn status() -> u8 {
     unsafe { inb(STATUS) }
 }
 
-/// Czeka, aż `ready()` zwróci true, najwyżej ok. `timeout_ms`.
+/// Waits until `ready()` returns true, at most about `timeout_ms`.
 fn wait_until(timeout_ms: u64, ready: impl Fn() -> bool) -> bool {
     if interrupts::are_enabled() {
         let deadline = crate::time::ticks() + timeout_ms + 1;
@@ -93,7 +93,7 @@ fn wait_until(timeout_ms: u64, ready: impl Fn() -> bool) -> bool {
         }
         ready()
     } else {
-        // Bez przerwań ticki stoją – ograniczamy liczbę prób (~1 µs każda).
+        // Without interrupts ticks are stopped – limit the number of attempts (~1 µs each).
         for _ in 0..timeout_ms * 1000 {
             if ready() {
                 return true;
@@ -120,7 +120,7 @@ pub fn write_command(cmd: u8) -> bool {
     true
 }
 
-/// Wysyła bajt do urządzenia na porcie 1 (klawiatury).
+/// Sends a byte to the device on port 1 (keyboard).
 pub fn write_data(byte: u8) -> bool {
     if !wait_input_empty() {
         return false;
@@ -137,8 +137,8 @@ fn read_data(timeout_ms: u64) -> Option<u8> {
     }
 }
 
-/// Odczyt bajtu z handlera IRQ: (bajt, czy z portu 2).  `None`, gdy
-/// bufor jest pusty (przerwanie bez danych).
+/// Reads a byte from the IRQ handler: (byte, whether from port 2).  `None` when
+/// the buffer is empty (interrupt without data).
 pub fn read_irq_byte() -> Option<(u8, bool)> {
     let s = status();
     if s & STATUS_OUTPUT_FULL == 0 {
@@ -148,7 +148,7 @@ pub fn read_irq_byte() -> Option<(u8, bool)> {
     Some((byte, s & STATUS_AUX_DATA != 0))
 }
 
-/// Bajt od myszy (port 2); bajty klawiatury w międzyczasie są pomijane.
+/// Byte from the mouse (port 2); keyboard bytes arriving meanwhile are skipped.
 fn read_aux(timeout_ms: u64) -> Option<u8> {
     let deadline_tries = timeout_ms.max(1);
     for _ in 0..deadline_tries {
@@ -164,7 +164,7 @@ fn read_aux(timeout_ms: u64) -> Option<u8> {
     None
 }
 
-/// Komenda do myszy (przez 0xD4) i czekanie na ACK.
+/// Mouse command (via 0xD4) and wait for ACK.
 fn mouse_command(byte: u8) -> bool {
     for _ in 0..3 {
         if !write_command(CMD_WRITE_PORT2) || !write_data(byte) {
@@ -190,8 +190,8 @@ fn mouse_get_id() -> Option<u8> {
     read_aux(50)
 }
 
-/// Port 2: test, reset myszy, tryb z kółkiem, włączenie raportowania.
-/// Zwraca ID myszy albo None (brak myszy / błąd – system działa dalej).
+/// Port 2: test, mouse reset, wheel mode, enable reporting.
+/// Returns the mouse ID or None (no mouse / error – the system keeps going).
 fn init_mouse() -> Option<u8> {
     write_command(CMD_TEST_PORT2);
     if read_data(100)? != 0x00 {
@@ -209,8 +209,8 @@ fn init_mouse() -> Option<u8> {
     let _ = read_aux(50); // ID 0x00
     mouse_command(MOUSE_SET_DEFAULTS);
 
-    // IntelliMouse: 200, 100, 80 -> ID 3 (kółko).
-    // Explorer: potem 200, 200, 80 -> ID 4 (kółko + przyciski 4/5).
+    // IntelliMouse: 200, 100, 80 -> ID 3 (wheel).
+    // Explorer: then 200, 200, 80 -> ID 4 (wheel + buttons 4/5).
     let mut id = 0;
     if mouse_set_rate(200) && mouse_set_rate(100) && mouse_set_rate(80) {
         id = mouse_get_id().unwrap_or(0);
@@ -218,7 +218,7 @@ fn init_mouse() -> Option<u8> {
             id = mouse_get_id().unwrap_or(3);
         }
     }
-    mouse_set_rate(100); // zwykła częstotliwość raportów
+    mouse_set_rate(100); // normal report rate
     if !mouse_command(MOUSE_ENABLE_REPORTING) {
         return None;
     }
@@ -245,15 +245,15 @@ fn write_config(config: u8) -> bool {
     write_command(CMD_WRITE_CONFIG) && write_data(config)
 }
 
-/// Aktualna konfiguracja kontrolera (do testów / diagnostyki).
-/// Z wyłączonymi przerwaniami: gdy IRQ1 jest włączone, odpowiedź kontrolera
-/// też wywołuje IRQ1 i handler klawiatury zabrałby ją z bufora.
+/// Current controller configuration (for tests / diagnostics).
+/// With interrupts disabled: when IRQ1 is enabled, the controller's reply
+/// also raises IRQ1 and the keyboard handler would take it from the buffer.
 #[allow(dead_code)]
 pub fn config() -> Option<u8> {
     interrupts::without_interrupts(read_config)
 }
 
-/// Wysyła komendę do klawiatury i czeka na ACK (ponawia przy RESEND).
+/// Sends a command to the keyboard and waits for ACK (retries on RESEND).
 fn keyboard_command(byte: u8) -> bool {
     for _ in 0..3 {
         if !write_data(byte) {
@@ -282,20 +282,20 @@ impl core::fmt::Display for Ps2Error {
     }
 }
 
-/// Inicjalizuje kontroler i klawiaturę.  IRQ1 musi być wtedy zamaskowane
-/// w PIC-u; przerwania CPU mogą być włączone (lepiej – czekamy przez hlt).
+/// Initializes the controller and keyboard.  IRQ1 must be masked
+/// in the PIC at that point; CPU interrupts may be enabled (better – we wait via hlt).
 pub fn init() -> Result<(), Ps2Error> {
-    // Brak kontrolera (część nowych komputerów bez "legacy"): port zwraca 0xFF.
+    // No controller (some newer machines without "legacy"): the port returns 0xFF.
     if status() == 0xFF {
         return Err(Ps2Error::NoController);
     }
 
-    // 1. Wyłącz oba porty i opróżnij bufor (firmware mógł coś zostawić).
+    // 1. Disable both ports and flush the buffer (firmware may have left something).
     write_command(CMD_DISABLE_PORT1);
     write_command(CMD_DISABLE_PORT2);
     flush();
 
-    // 2. Konfiguracja: bez IRQ na czas inicjalizacji, translacja włączona.
+    // 2. Configuration: no IRQ during initialization, translation enabled.
     let mut config = read_config().ok_or(Ps2Error::Timeout("read config"))?;
     config &= !(CONFIG_PORT1_IRQ | CONFIG_PORT2_IRQ | CONFIG_PORT1_CLOCK_OFF);
     config |= CONFIG_TRANSLATION | CONFIG_PORT2_CLOCK_OFF;
@@ -303,12 +303,12 @@ pub fn init() -> Result<(), Ps2Error> {
         return Err(Ps2Error::Timeout("write config"));
     }
 
-    // 3–5. M16b: BEZ testu kontrolera (0xAA), testu portu (0xAB) i resetu
-    // klawiatury (0xFF) – tak jak Linux na x86 (i8042.reset i atkbd.reset
-    // domyślnie wyłączone).  Na laptopach (np. Lenovo Legion z Ryzenem)
-    // 8042 jest emulowany przez EC i po takim resecie klawiatura przestaje
-    // wysyłać znaki, choć na wszystko odpowiada poprawnie.  Firmware i tak
-    // zostawia klawiaturę gotową; wystarczy włączyć port i skanowanie.
+    // 3–5. NO controller self-test (0xAA), port test (0xAB) or keyboard
+    // reset (0xFF) – just like Linux on x86 (i8042.reset and atkbd.reset
+    // are off by default).  On some laptops the
+    // 8042 is emulated by the EC and after such a reset the keyboard stops
+    // sending keys, even though it answers everything correctly.  Firmware
+    // leaves the keyboard ready anyway; enabling the port and scanning is enough.
     write_command(CMD_ENABLE_PORT1);
     flush();
     if !keyboard_command(KBD_ENABLE_SCANNING) {
@@ -316,7 +316,7 @@ pub fn init() -> Result<(), Ps2Error> {
     }
     flush();
 
-    // 5b. Mysz na porcie 2 (opcjonalna).
+    // 5b. Mouse on port 2 (optional).
     match init_mouse() {
         Some(id) => {
             MOUSE_ID.store(id, core::sync::atomic::Ordering::Relaxed);
@@ -330,8 +330,8 @@ pub fn init() -> Result<(), Ps2Error> {
         }
     }
 
-    // 6. Włącz IRQ1 (i IRQ12, jeśli jest mysz) w kontrolerze.  Odmaskowanie
-    //    w PIC-u robią sterowniki klawiatury i myszy.
+    // 6. Enable IRQ1 (and IRQ12 if there is a mouse) in the controller.  Unmasking
+    //    in the PIC is done by the keyboard and mouse drivers.
     flush();
     config |= CONFIG_PORT1_IRQ;
     if !write_config(config) {
@@ -341,8 +341,8 @@ pub fn init() -> Result<(), Ps2Error> {
     Ok(())
 }
 
-/// Reset komputera przez kontroler 8042 (impuls na linii RESET CPU).
-/// Zwraca tylko, jeśli nie zadziałało.
+/// Resets the computer via the 8042 controller (pulse on the CPU RESET line).
+/// Returns only if it did not work.
 pub fn reset_cpu() {
     write_command(0xFE);
     for _ in 0..1_000_000 {
@@ -350,15 +350,15 @@ pub fn reset_cpu() {
     }
 }
 
-/// Test: kontroler wstawia `byte` do bufora tak, jakby przyszedł od
-/// klawiatury (komenda 0xD2) – generuje IRQ1.  Bajt NIE przechodzi przez
-/// translację, więc podajemy od razu kody zestawu 1.
+/// Test: the controller inserts `byte` into the buffer as if it came from the
+/// keyboard (command 0xD2) – raises IRQ1.  The byte does NOT go through
+/// translation, so we pass set 1 codes directly.
 #[cfg(selftest)]
 pub fn inject_keyboard_byte(byte: u8) -> bool {
     write_command(CMD_WRITE_PORT1_OUTPUT) && write_data(byte)
 }
 
-/// Test: bajt tak, jakby przyszedł od myszy (komenda 0xD3) – generuje IRQ12.
+/// Test: a byte as if it came from the mouse (command 0xD3) – raises IRQ12.
 #[cfg(selftest)]
 pub fn inject_mouse_byte(byte: u8) -> bool {
     write_command(CMD_WRITE_PORT2_OUTPUT) && write_data(byte)

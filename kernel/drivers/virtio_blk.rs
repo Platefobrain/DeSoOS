@@ -1,25 +1,25 @@
-// M8: sterownik dysku virtio-blk (virtio 1.0 "modern", PCI).
+// virtio-blk disk driver (virtio 1.0 "modern", PCI).
 //
-// Jak rozmawia się z urządzeniem virtio:
-//   * Konfiguracja przez struktury w BAR-ach, wskazane przez capabilities
-//     PCI typu "vendor specific" (0x09): common cfg, notify, ISR, device cfg.
-//   * Dane przez kolejkę "virtqueue" (split ring) w pamięci RAM:
-//       - tablica deskryptorów (adres fizyczny + długość + flagi),
-//       - "available ring": kernel wpisuje numery łańcuchów do obsłużenia,
-//       - "used ring": urządzenie wpisuje, co skończyło.
-//     Urządzenie czyta i pisze tę pamięć samo (DMA).
-//   * Po dodaniu żądania kernel "puka" (notify), urządzenie po skończeniu
-//     zgłasza przerwanie: M17 – MSI-X (wektor z arch/msi.rs; działa i z PIC,
-//     i z I/O APIC), a gdy go nie ma – INTx przez PIC (wyzwalane poziomem –
-//     kasuje je odczyt ISR) albo odpytywanie.
+// How to talk to a virtio device:
+//   * Configuration through structures in BARs, pointed to by PCI capabilities
+//     of the "vendor specific" type (0x09): common cfg, notify, ISR, device cfg.
+//   * Data through a "virtqueue" (split ring) in RAM:
+//       - descriptor table (physical address + length + flags),
+//       - "available ring": the kernel writes the numbers of chains to process,
+//       - "used ring": the device writes what it has finished.
+//     The device reads and writes this memory itself (DMA).
+//   * After adding a request the kernel "knocks" (notify), and when done the device
+//     raises an interrupt: MSI-X (vector from arch/msi.rs; works with both the PIC
+//     and the I/O APIC), and if unavailable – INTx through the PIC (level-triggered –
+//     cleared by reading ISR) or polling.
 //
-// Żądanie dysku = łańcuch 3 deskryptorów:
-//   [nagłówek: typ + sektor] -> [dane] -> [1 bajt statusu]
+// A disk request = a chain of 3 descriptors:
+//   [header: type + sector] -> [data] -> [1 status byte]
 //
-// Uproszczenia: jedno żądanie naraz, max 64 KiB (128 sektorów) na żądanie –
-// większe odczyty są dzielone; dane idą przez bufor DMA (M11: 16 ciągłych
-// ramek z alloc_frames, wcześniej jedna ramka 4 KiB)
-// i są kopiowane.  Czekamy przez hlt (budzi przerwanie dysku albo tick timera).
+// Simplifications: one request at a time, max 64 KiB (128 sectors) per request –
+// larger reads are split; data goes through a DMA buffer (16 contiguous
+// frames from alloc_frames)
+// and is copied.  We wait via hlt (woken by the disk interrupt or a timer tick).
 
 use alloc::format;
 use alloc::string::String;
@@ -33,7 +33,7 @@ use crate::memory::{alloc_frame, alloc_frames, map_mmio, phys_to_virt};
 use crate::serial_println;
 
 pub const VENDOR_VIRTIO: u16 = 0x1AF4;
-/// 0x1001 = virtio-blk "transitional" (legacy + modern), 0x1042 = tylko modern.
+/// 0x1001 = virtio-blk "transitional" (legacy + modern), 0x1042 = modern only.
 pub const DEVICE_IDS: [u16; 2] = [0x1001, 0x1042];
 
 const CAP_VENDOR: u8 = 0x09;
@@ -42,7 +42,7 @@ const CFG_NOTIFY: u8 = 2;
 const CFG_ISR: u8 = 3;
 const CFG_DEVICE: u8 = 4;
 
-// common cfg (offsety)
+// common cfg (offsets)
 const C_DEVICE_FEATURE_SELECT: u64 = 0;
 const C_DEVICE_FEATURE: u64 = 4;
 const C_DRIVER_FEATURE_SELECT: u64 = 8;
@@ -71,26 +71,26 @@ const F_BLK_RO: u64 = 1 << 5;
 const F_BLK_FLUSH: u64 = 1 << 9;
 const F_VERSION_1: u64 = 1 << 32;
 
-const REQ_IN: u32 = 0; // odczyt
-const REQ_OUT: u32 = 1; // zapis
+const REQ_IN: u32 = 0; // read
+const REQ_OUT: u32 = 1; // write
 const REQ_FLUSH: u32 = 4;
 
 const DESC_NEXT: u16 = 1;
-const DESC_WRITE: u16 = 2; // urządzenie pisze do bufora
+const DESC_WRITE: u16 = 2; // the device writes to the buffer
 
 const QUEUE_SIZE_MAX: u16 = 64;
 const PAGE: usize = 4096;
 const DATA_FRAMES: usize = 16;
-const DATA_BUFFER: usize = DATA_FRAMES * PAGE; // 64 KiB, fizycznie ciągłe
+const DATA_BUFFER: usize = DATA_FRAMES * PAGE; // 64 KiB, physically contiguous
 const SECTORS_PER_REQUEST: usize = DATA_BUFFER / SECTOR_SIZE;
 const REQUEST_TIMEOUT_MS: u64 = 2000;
 
-// Układ ramki "req": nagłówek żądania na 0, bajt statusu na 64.
+// Layout of the "req" frame: request header at 0, status byte at 64.
 const STATUS_OFFSET: u64 = 64;
 
 static IRQS: AtomicU64 = AtomicU64::new(0);
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
-/// M12: zadanie czekające na zakończenie żądania śpi tutaj (budzi IRQ).
+/// A task waiting for a request to complete sleeps here (woken by the IRQ).
 static BLK_WAIT: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
 static ISR_ADDRESS: AtomicU64 = AtomicU64::new(0);
 
@@ -137,7 +137,7 @@ pub struct VirtioBlk {
     data_frame: u64,
 }
 
-/// Jak urządzenie zgłasza koniec żądania.
+/// How the device signals request completion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Irq {
     None,
@@ -150,11 +150,11 @@ fn on_msi(_vector: u8) {
     BLK_WAIT.wake_all();
 }
 
-/// Znalezione struktury konfiguracyjne (adresy wirtualne = fizyczne).
+/// Configuration structures found (virtual addresses = physical).
 struct Caps {
     common: u64,
-    /// Fizyczny adres struktury notify (adres "puknięcia" kolejki liczy się
-    /// od niego i mapuje osobno).
+    /// Physical address of the notify structure (the queue "knock" address is computed
+    /// from it and mapped separately).
     notify_phys: u64,
     notify_multiplier: u32,
     isr: u64,
@@ -182,7 +182,7 @@ fn read_caps(dev: &Device) -> Result<Caps, &'static str> {
             continue;
         }
         let Bar::Memory { base, size, .. } = dev.bars[bar] else {
-            continue; // struktury w BAR-ze IO pomijamy
+            continue; // structures in an IO BAR are skipped
         };
         if base == 0 || offset + length > size {
             continue;
@@ -199,7 +199,7 @@ fn read_caps(dev: &Device) -> Result<Caps, &'static str> {
             _ => continue,
         };
         if slot.is_none() {
-            // M10: map_mmio zwraca adres wirtualny (direct map).
+            // map_mmio returns a virtual address (direct map).
             let virt = map_mmio(addr, length.max(1)).ok_or("cannot map virtio registers")?;
             if cfg_type == CFG_NOTIFY {
                 notify_phys = addr;
@@ -226,7 +226,7 @@ fn zeroed_frame() -> Option<u64> {
 fn on_irq(_irq: u8) {
     let isr = ISR_ADDRESS.load(Ordering::Relaxed);
     if isr != 0 {
-        // Odczyt ISR kasuje przerwanie (linia poziomowa opada).
+        // Reading ISR clears the interrupt (the level-triggered line drops).
         if mmio_r8(isr) != 0 {
             IRQS.fetch_add(1, Ordering::Relaxed);
             BLK_WAIT.wake_all();
@@ -248,7 +248,7 @@ impl VirtioBlk {
         why
     }
 
-    /// Inicjalizacja wg specyfikacji virtio 1.0, rozdz. 3.1.
+    /// Initialization per the virtio 1.0 specification, section 3.1.
     fn new(dev: &Device, index: usize) -> Result<Self, &'static str> {
         dev.enable(true, false);
         let caps = read_caps(dev)?;
@@ -273,7 +273,7 @@ impl VirtioBlk {
             data_frame: 0,
         };
 
-        // 1. Reset i czekanie, aż urządzenie go potwierdzi.
+        // 1. Reset and wait until the device acknowledges it.
         me.set_status(0);
         let mut ok = false;
         for _ in 0..100_000 {
@@ -289,7 +289,7 @@ impl VirtioBlk {
         me.set_status(STATUS_ACKNOWLEDGE);
         me.set_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER);
 
-        // 2. Funkcje (features): wymagamy VERSION_1, bierzemy RO i FLUSH.
+        // 2. Features: we require VERSION_1, we take RO and FLUSH.
         mmio_w32(me.common + C_DEVICE_FEATURE_SELECT, 0);
         let lo = mmio_r32(me.common + C_DEVICE_FEATURE) as u64;
         mmio_w32(me.common + C_DEVICE_FEATURE_SELECT, 1);
@@ -310,7 +310,7 @@ impl VirtioBlk {
         me.read_only = wanted & F_BLK_RO != 0;
         me.has_flush = wanted & F_BLK_FLUSH != 0;
 
-        // 3. Pojemność (u64 w device cfg; czytamy spójnie wg config_generation).
+        // 3. Capacity (u64 in device cfg; read consistently using config_generation).
         loop {
             let generation = mmio_r8(me.common + C_CONFIG_GENERATION);
             let lo = mmio_r32(me.device_cfg) as u64;
@@ -321,7 +321,7 @@ impl VirtioBlk {
             }
         }
 
-        // 4. Kolejka 0.
+        // 4. Queue 0.
         mmio_w16(me.common + C_MSIX_CONFIG, NO_VECTOR);
         mmio_w16(me.common + C_QUEUE_SELECT, 0);
         let max = mmio_r16(me.common + C_QUEUE_SIZE);
@@ -347,11 +347,11 @@ impl VirtioBlk {
         let notify_off = mmio_r16(me.common + C_QUEUE_NOTIFY_OFF) as u64;
         let notify_phys = caps.notify_phys + notify_off * caps.notify_multiplier as u64;
         me.notify = map_mmio(notify_phys, 2).ok_or("cannot map notify register")?;
-        // 5. Przerwanie.  M17: najpierw MSI-X (wpis 0 tablicy MSI-X dla
-        //    kolejki 0) – nie zależy od kontrolera przerwań; zapisany wektor
-        //    odczytujemy z powrotem (urządzenie odpowiada NO_VECTOR, gdy nie
-        //    przyjęło).  Inaczej INTx przez PIC (tylko bez I/O APIC – numer
-        //    linii PCI dla I/O APIC jest w AML), inaczej odpytywanie.
+        // 5. Interrupt.  MSI-X first (entry 0 of the MSI-X table for
+        //    queue 0) – independent of the interrupt controller; the written vector
+        //    is read back (the device answers NO_VECTOR if it did not
+        //    accept it).  Otherwise INTx through the PIC (only without an I/O APIC – the
+        //    PCI line number for the I/O APIC is in AML), otherwise polling.
         if let Some(v) = msi::alloc(on_msi) {
             if dev.enable_msix(0, v).is_ok() {
                 mmio_w16(me.common + C_QUEUE_MSIX_VECTOR, 0);
@@ -373,7 +373,7 @@ impl VirtioBlk {
             }
         }
 
-        // 6. Gotowe.
+        // 6. Done.
         me.set_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
         Ok(me)
     }
@@ -392,12 +392,12 @@ impl VirtioBlk {
         unsafe { read_volatile((phys_to_virt(self.used) + 2) as *const u16) }
     }
 
-    /// Wysyła jedno żądanie i czeka na wynik.  `data_len` bajtów z/do data_frame.
+    /// Sends one request and waits for the result.  `data_len` bytes from/to data_frame.
     fn submit(&mut self, req_type: u32, sector: u64, data_len: usize) -> Result<(), BlockError> {
         REQUESTS.fetch_add(1, Ordering::Relaxed);
         let req = self.req_frame;
         let status_addr = req + STATUS_OFFSET;
-        // Urządzenie dostaje adresy fizyczne, CPU pisze przez direct map.
+        // The device gets physical addresses, the CPU writes through the direct map.
         let req_v = phys_to_virt(req);
         unsafe {
             write_volatile(req_v as *mut u32, req_type);
@@ -415,7 +415,7 @@ impl VirtioBlk {
         }
         self.write_desc(2, status_addr, 1, DESC_WRITE, 0);
 
-        // Wstaw łańcuch (zaczyna się od deskryptora 0) do available ring.
+        // Put the chain (starting at descriptor 0) into the available ring.
         let slot = self.avail_idx % self.queue_size;
         unsafe {
             write_volatile((phys_to_virt(self.avail) + 4 + slot as u64 * 2) as *mut u16, 0);
@@ -428,8 +428,8 @@ impl VirtioBlk {
         fence(Ordering::SeqCst);
         mmio_w16(self.notify, 0);
 
-        // Czekamy, aż urządzenie przesunie used.idx.  M12: z przerwaniem
-        // zadanie śpi w BLK_WAIT (CPU dostają inne zadania), budzi je IRQ.
+        // Wait until the device advances used.idx.  With an interrupt the
+        // task sleeps in BLK_WAIT (CPUs get other tasks), the IRQ wakes it.
         if self.irq != Irq::None && interrupts::are_enabled() {
             let last = self.last_used;
             let used = phys_to_virt(self.used) + 2;
@@ -532,20 +532,20 @@ impl BlockDevice for VirtioBlk {
 
     fn flush(&mut self) -> Result<(), BlockError> {
         if !self.has_flush {
-            return Ok(()); // urządzenie bez cache zapisu
+            return Ok(()); // device without a write cache
         }
         self.submit(REQ_FLUSH, 0, 0)
     }
 }
 
-/// Liczba przerwań od dysków virtio (do testów).
+/// Number of interrupts from virtio disks (for tests).
 #[allow(dead_code)]
 pub fn irq_count() -> u64 {
     IRQS.load(Ordering::Relaxed)
 }
 
-/// Szuka dysków virtio-blk i rejestruje je w warstwie block.
-/// Zwraca liczbę dodanych dysków.
+/// Finds virtio-blk disks and registers them in the block layer.
+/// Returns the number of disks added.
 pub fn init() -> usize {
     let mut added = 0;
     for dev in pci::devices() {
@@ -553,13 +553,13 @@ pub fn init() -> usize {
             continue;
         }
         if added > 0 {
-            // Na razie jedna linia IRQ / jeden adres ISR – drugi dysk pominięty.
+            // For now one IRQ line / one ISR address – the second disk is skipped.
             serial_println!("[VIRTIO] second virtio-blk at {} ignored (one disk supported for now)", dev.address);
             continue;
         }
         match VirtioBlk::new(dev, added) {
             Ok(d) => {
-                pci::set_kernel_owner(dev.address); // M19.c: usługa go nie przejmie
+                pci::set_kernel_owner(dev.address); // a service will not claim it
                 serial_println!("[VIRTIO] {}: {}", d.name, d.description());
                 block::register(alloc::boxed::Box::new(d));
                 added += 1;
@@ -574,7 +574,7 @@ pub fn init() -> usize {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -594,7 +594,7 @@ pub fn self_test() {
     serial_println!("[BLK TEST] Starting PCI + virtio-blk tests...");
     crate::selftest::begin();
 
-    // 1. PCI: mostek główny q35 na 00:00.0, wszystkie urządzenia z sensownym vendorem.
+    // 1. PCI: q35 host bridge at 00:00.0, all devices with a sensible vendor.
     let devs = pci::devices();
     let host = devs.iter().find(|d| d.address == pci::Address { bus: 0, device: 0, function: 0 });
     check!(host.is_some(), "no device at 00:00.0");
@@ -604,7 +604,7 @@ pub fn self_test() {
     check!(devs.len() >= 3, "only {} PCI devices", devs.len());
     serial_println!("[BLK TEST] 1/8 PCI: {} devices, host bridge {:04x}:{:04x} PASS", devs.len(), host.vendor, host.device);
 
-    // 2. Urządzenia bez sterownika (i z MSI-X) mają wyłączone INTx.
+    // 2. Devices without a driver (and with MSI-X) have INTx disabled.
     for d in devs {
         if d.header_type & 0x7F == 0 && d.interrupt_pin != 0 {
             let ours = d.vendor == VENDOR_VIRTIO && DEVICE_IDS.contains(&d.device);
@@ -614,14 +614,14 @@ pub fn self_test() {
     }
     serial_println!("[BLK TEST] 2/8 INTx disabled on devices without a driver PASS");
 
-    // 3. Dysk virtio zarejestrowany.
+    // 3. virtio disk registered.
     check!(block::count() >= 1, "no block device (run QEMU with the virtio disk - see run-qemu.sh)");
     let (sectors, name) = block::with_device(0, |d| (d.sector_count(), String::from(d.name()))).unwrap();
     check!(sectors >= 64, "capacity {} sectors", sectors);
     serial_println!("[BLK TEST] 3/8 disk {} registered, {} sectors PASS", name, sectors);
 
-    // 4. Odczyt: dwa odczyty tego samego = te same dane; 160 sektorów =
-    //    80 KiB = 2 żądania (64 + 16 KiB) przez ciągły bufor DMA.
+    // 4. Read: two reads of the same data = the same data; 160 sectors =
+    //    80 KiB = 2 requests (64 + 16 KiB) through the contiguous DMA buffer.
     let mut a = vec![0u8; 160 * SECTOR_SIZE];
     let mut b = vec![0xAAu8; 160 * SECTOR_SIZE];
     let r0 = REQUESTS.load(Ordering::Relaxed);
@@ -632,7 +632,7 @@ pub fn self_test() {
     check!(a == b, "two reads of the same sectors differ");
     serial_println!("[BLK TEST] 4/8 read 160 sectors (2 requests, 64 KiB DMA buffer) PASS");
 
-    // 5. Zapis + odczyt kontrolny na końcu dysku, potem przywrócenie danych.
+    // 5. Write + verification read at the end of the disk, then restore the data.
     let lba = sectors - 20;
     let mut original = vec![0u8; 20 * SECTOR_SIZE];
     check!(block::read(0, lba, &mut original).is_ok(), "read original");
@@ -649,7 +649,7 @@ pub fn self_test() {
     check!(block::read(0, lba, &mut check_restore).is_ok() && check_restore == original, "restore mismatch");
     serial_println!("[BLK TEST] 5/8 write + flush + read-back of 20 sectors @{} (restored) PASS", lba);
 
-    // 6. Błędy: poza dyskiem, zły rozmiar bufora, brak dysku.
+    // 6. Errors: beyond the disk, wrong buffer size, no disk.
     let mut one = [0u8; SECTOR_SIZE];
     check!(block::read(0, sectors, &mut one) == Err(BlockError::OutOfRange), "read past end");
     check!(block::read(0, sectors - 1, &mut [0u8; 2 * SECTOR_SIZE]) == Err(BlockError::OutOfRange), "read across end");
@@ -657,7 +657,7 @@ pub fn self_test() {
     check!(block::read(7, 0, &mut one) == Err(BlockError::NoDevice), "missing disk");
     serial_println!("[BLK TEST] 6/8 range / buffer / device errors PASS");
 
-    // 7. Przerwania: każde żądanie kończy się przerwaniem (M17: MSI-X).
+    // 7. Interrupts: every request ends with an interrupt (MSI-X).
     let kind = block::with_device(0, |d| d.description()).unwrap_or_default();
     let before = irq_count();
     check!(block::read(0, 1, &mut one).is_ok(), "read for IRQ test");
@@ -672,7 +672,7 @@ pub fn self_test() {
         serial_println!("[BLK TEST] 7/8 no interrupt available - polling mode PASS");
     }
 
-    // 8. Wydajność (orientacyjnie): 1 MiB odczytu.
+    // 8. Performance (rough): 1 MiB read.
     let mut big = vec![0u8; 1024 * 1024];
     let t0 = crate::time::ticks();
     check!(block::read(0, 0, &mut big[..(sectors.min(2048) as usize) * SECTOR_SIZE]).is_ok(), "1 MiB read");

@@ -1,4 +1,4 @@
-// M13a: samotesty trybu użytkownika (tylko build z --cfg selftest).
+// User-mode self-tests (only in builds with --cfg selftest).
 
 use alloc::vec::Vec;
 
@@ -30,7 +30,7 @@ fn run(name: &str, data: u64) -> Option<TaskId> {
     spawn_process(name, programs::code(name)?, data).ok()
 }
 
-/// Uruchamia i czeka na koniec; zwraca sposób zakończenia.
+/// Starts and waits for the end; returns how it terminated.
 fn run_wait(name: &str, data: u64) -> Option<ExitInfo> {
     let id = run(name, data)?;
     if !wait_for(2000, || sched::task_info(id).is_none()) {
@@ -39,7 +39,7 @@ fn run_wait(name: &str, data: u64) -> Option<ExitInfo> {
     exit_info(id)
 }
 
-/// Wszystkie ramki wróciły (idle może właśnie sprzątać – czekamy).
+/// All frames came back (idle may be reaping right now – we wait).
 fn frames_back(before: u64) -> bool {
     wait_for(200, || {
         sched::reap();
@@ -73,7 +73,7 @@ pub fn self_test() {
         smep_enabled()
     );
 
-    // 2. Przestrzeń adresowa: górna połowa wspólna, dolna tylko procesu.
+    // 2. Address space: upper half shared, lower half process-only.
     {
         let mut sp = match AddressSpace::new() {
             Some(s) => s,
@@ -101,7 +101,7 @@ pub fn self_test() {
     check!(frames_back(frames), "address space leaked frames");
     serial_println!("[USER TEST] 2/9 address space: shared kernel half, private lower half, USER/NX PASS");
 
-    // 3. Pierwszy ring 3: iretq -> program -> int3.
+    // 3. First ring 3 entry: iretq -> program -> int3.
     let r = run_wait("sum", 0);
     check!(r.is_some(), "sum did not finish");
     let r = r.unwrap();
@@ -112,7 +112,7 @@ pub fn self_test() {
     check!(frames_back(frames), "process leaked frames");
     serial_println!("[USER TEST] 3/9 ring 3 via iretq: sum = 5050, CS = {:#x}, int3 ends it PASS", r.rbx);
 
-    // 4. Wyjątki z ring 3 – wszystkie naraz (stosy IST używane wielokrotnie).
+    // 4. Exceptions from ring 3 – all at once (IST stacks reused many times).
     let cases: [(&str, fn(&ExitKind) -> bool); 6] = [
         ("pf", |k| matches!(k, ExitKind::PageFault { address: 0, error } if error & 5 == 4)),
         ("pfkernel", |k| matches!(k, ExitKind::PageFault { address: 0xffff_ffff_8000_0000, error } if error & 5 == 5)),
@@ -140,7 +140,7 @@ pub fn self_test() {
         let info = exit_info(*id);
         check!(info.map(|e| ok(&e.kind)).unwrap_or(false), "{}: {:?}", name, info.map(|e| e.kind));
     }
-    // M17b.c: #PF z ring 3 obsłużony na stosie kernela zadania, nie na IST.
+    // #PF from ring 3 handled on the task's kernel stack, not on IST.
     let (pf, on_task) = user_page_fault_stats();
     check!(pf > 0 && pf == on_task, "user #PF on the task stack: {} of {}", on_task, pf);
     if nx_flag() != 0 {
@@ -154,7 +154,7 @@ pub fn self_test() {
     check!(frames_back(frames), "faulting processes leaked frames");
     serial_println!("[USER TEST] 4/9 #PF (null, kernel, write code, NX), #GP, #UD x 3 rounds -> only the process ends PASS");
 
-    // 5. Izolacja: dwa procesy, ten sam adres danych, różne strony.
+    // 5. Isolation: two processes, the same data address, different pages.
     let a = run("counter", 1000);
     let b = run("counter", 2_000_000);
     check!(a.is_some() && b.is_some(), "spawn counters");
@@ -166,7 +166,7 @@ pub fn self_test() {
     check!(frames_back(frames), "counters leaked frames");
     serial_println!("[USER TEST] 5/9 isolation: same address, own data (3001000 / 5000000) PASS");
 
-    // 6. Wywłaszczanie ring 3 + kill przy przerwaniu.
+    // 6. Ring 3 preemption + kill on interrupt.
     let l = run("loop", 0);
     check!(l.is_some(), "spawn loop");
     let l = l.unwrap();
@@ -181,7 +181,7 @@ pub fn self_test() {
     check!(frames_back(frames), "loop leaked frames");
     serial_println!("[USER TEST] 6/9 endless ring 3 loop preempted ({} ms CPU), killed from IRQ PASS", cpu);
 
-    // 7. FPU/SSE w ring 3 działa (M13b; w M13a: #NM).
+    // 7. FPU/SSE in ring 3 works (no #NM).
     for (name, want) in [("sse", 42u64), ("x87", 3)] {
         let r = run_wait(name, 0);
         check!(
@@ -194,7 +194,7 @@ pub fn self_test() {
     check!(cr0() & 8 != 0, "kernel task without CR0.TS");
     serial_println!("[USER TEST] 7/9 SSE (21 + 21 = 42) and x87 (1 + 1 + 1 = 3) in ring 3 PASS");
 
-    // 8. SMEP: kernel nie wykona kodu ze strony użytkownika.
+    // 8. SMEP: the kernel will not execute code from a user page.
     if smep_enabled() {
         let mut sp = AddressSpace::new().unwrap();
         let f = sp.map_new(USER_CODE, USER).unwrap();
@@ -216,7 +216,7 @@ pub fn self_test() {
         serial_println!("[USER TEST] 8/9 SMEP skipped (CPU without SMEP) PASS");
     }
 
-    // 9. Po wszystkim: RSP0 i CR3 zadania kernela, brak wycieków.
+    // 9. Afterwards: the kernel task's RSP0 and CR3, no leaks.
     check!(gdt::rsp0() == crate::memory::kernel_layout().stack_top, "RSP0 not restored");
     let cr3: u64;
     unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3) };
@@ -234,7 +234,7 @@ pub fn self_test() {
 
 
 // ------------------------------------------------------------
-// M13b: stan FPU/SSE procesów
+// Process FPU/SSE state
 // ------------------------------------------------------------
 
 macro_rules! fcheck {
@@ -260,7 +260,7 @@ pub fn fpu_self_test() {
     crate::selftest::begin();
     let frames = crate::sched::stack::free_frames_flushed();
 
-    // 1. CR0/CR4 i obraz początkowy.
+    // 1. CR0/CR4 and the initial image.
     fcheck!(fpu::cr4() & (1 << 9) != 0 && fpu::cr4() & (1 << 10) != 0, "CR4.OSFXSR/OSXMMEXCPT off");
     fcheck!(cr0() & 4 == 0 && cr0() & 2 != 0, "CR0.EM set or CR0.MP clear ({:#x})", cr0());
     fcheck!(fpu::ts(), "kernel task runs without CR0.TS");
@@ -269,8 +269,8 @@ pub fn fpu_self_test() {
     fcheck!(u32::from_le_bytes([init.0[24], init.0[25], init.0[26], init.0[27]]) == 0x1F80, "initial MXCSR");
     serial_println!("[FPU TEST] 1/5 CR4.OSFXSR + OSXMMEXCPT, kernel task with CR0.TS, initial state PASS");
 
-    // 2. Trzy procesy wypełniają xmm0..15 + st0 różnymi wartościami i ciągle
-    //    je sprawdzają; obok zadanie kernela – dużo przełączeń.
+    // 2. Three processes fill xmm0..15 + st0 with different values and keep
+    //    checking them; alongside a kernel task – lots of switches.
     SPIN_STOP.store(false, core::sync::atomic::Ordering::SeqCst);
     let spin = sched::spawn("t-fpu-spin", kernel_spinner, 0);
     fcheck!(spin.is_ok(), "spawn spinner");
@@ -301,15 +301,15 @@ pub fn fpu_self_test() {
             r.map(|e| e.rax).unwrap_or(0)
         );
     }
-    // Pod KVM (natywna szybkość) procesy xmm kończą się w kilku kwantach –
-    // przełączeń jest mniej; sedno testu to zawartość rejestrów (wyżej).
+    // Under KVM (native speed) the xmm processes finish within a few quanta –
+    // there are fewer switches; the core of the test is the register contents (above).
     fcheck!(switches >= 6, "only {} context switches - test did not interleave", switches);
     serial_println!(
         "[FPU TEST] 2/5 3 processes x (xmm0-15 + st0), {} context switches, no register leaked PASS",
         switches
     );
 
-    // 3. Nowy proces po "brudnych" nie widzi ich rejestrów.
+    // 3. A new process after "dirty" ones does not see their registers.
     let r = run_wait("fpuclean", 0);
     fcheck!(
         r.map(|e| (e.kind, e.rax)) == Some((ExitKind::Breakpoint, 1)),
@@ -319,8 +319,8 @@ pub fn fpu_self_test() {
     );
     serial_println!("[FPU TEST] 3/5 new process starts clean (xmm = 0, FCW 0x37f, MXCSR 0x1f80) PASS");
 
-    // 4. Odmaskowany wyjątek SSE -> #XM kończy tylko proces.
-    // (Emulacja TCG w QEMU nie zgłasza #XM – wtedy program dochodzi do int3.)
+    // 4. Unmasked SSE exception -> #XM terminates only the process.
+    // (QEMU TCG emulation does not raise #XM – then the program reaches int3.)
     let r = run_wait("simdexc", 0);
     match r.map(|e| e.kind) {
         Some(ExitKind::SimdException) => {
@@ -335,7 +335,7 @@ pub fn fpu_self_test() {
         }
     }
 
-    // 5. Po wszystkim: kernel znów z CR0.TS, brak wycieków.
+    // 5. Afterwards: the kernel runs with CR0.TS again, no leaks.
     fcheck!(wait_for(200, || spin.map(|s| sched::task_info(s).is_none()).unwrap_or(true)), "spinner did not stop");
     fcheck!(fpu::ts(), "CR0.TS not set again for the kernel task");
     fcheck!(frames_back(frames), "frames leaked");

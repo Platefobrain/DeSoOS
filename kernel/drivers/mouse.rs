@@ -1,16 +1,16 @@
-// M11b: mysz PS/2 (port 2 kontrolera 8042, IRQ12).
+// PS/2 mouse (port 2 of the 8042 controller, IRQ12).
 //
-// Pakiet (zestaw standardowy, po inicjalizacji w ps2.rs):
-//   bajt 0: przyciski (bit 0 lewy, 1 prawy, 2 środkowy), bit 3 = zawsze 1
-//           (synchronizacja), bity 4/5 = znak dx/dy, 6/7 = przepełnienie
-//   bajt 1: dx, bajt 2: dy (9-bitowe z bitem znaku z bajtu 0)
-//   bajt 3: tylko IntelliMouse (ID 3/4): kółko dz, 4 bity ze znakiem
-//           (ujemne = kółko od siebie = w górę)
+// Packet (standard set, after initialization in ps2.rs):
+//   byte 0: buttons (bit 0 left, 1 right, 2 middle), bit 3 = always 1
+//           (synchronization), bits 4/5 = dx/dy sign, 6/7 = overflow
+//   byte 1: dx, byte 2: dy (9-bit with the sign bit from byte 0)
+//   byte 3: IntelliMouse only (ID 3/4): wheel dz, 4 signed bits
+//           (negative = wheel away from the user = up)
 //
-// Na razie mysz służy do przewijania konsoli kółkiem (scrollback).  Handler
-// IRQ tylko zbiera ruch kółka; przewija `console` (poza przerwaniem), bo
-// przerysowanie ekranu jest za długie na handler.  Ruch i przyciski są
-// liczone – przydadzą się przy GUI.
+// For now the mouse is used to scroll the console with the wheel (scrollback).  The IRQ
+// handler only accumulates wheel movement; `console` does the scrolling (outside the interrupt),
+// because redrawing the screen takes too long for a handler.  Movement and buttons are
+// counted – they will be useful for a GUI.
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 
@@ -21,7 +21,7 @@ use crate::serial_println;
 const MOUSE_IRQ: u8 = 12;
 
 static PACKET_LEN: AtomicU8 = AtomicU8::new(3);
-static WHEEL: AtomicI32 = AtomicI32::new(0); // suma dz od ostatniego odbioru
+static WHEEL: AtomicI32 = AtomicI32::new(0); // sum of dz since the last read
 static PACKETS: AtomicU64 = AtomicU64::new(0);
 static BUTTONS: AtomicU8 = AtomicU8::new(0);
 static RESYNCS: AtomicU64 = AtomicU64::new(0);
@@ -34,15 +34,15 @@ struct Decoder {
 static mut DECODER: Decoder = Decoder { bytes: [0; 4], len: 0 };
 
 fn decoder() -> &'static mut Decoder {
-    // Tylko z handlerów IRQ (IF=0).
+    // Only from IRQ handlers (IF=0).
     unsafe { &mut *core::ptr::addr_of_mut!(DECODER) }
 }
 
-/// Jeden bajt od myszy (z IRQ12, albo z IRQ1, jeśli kontroler tak go podał).
+/// One byte from the mouse (from IRQ12, or from IRQ1 if the controller delivered it that way).
 pub fn handle_byte(byte: u8) {
     let d = decoder();
     if d.len == 0 && byte & 0x08 == 0 {
-        // Bajt 0 musi mieć bit 3 – inaczej zgubiliśmy synchronizację.
+        // Byte 0 must have bit 3 set – otherwise we have lost synchronization.
         RESYNCS.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -55,7 +55,7 @@ pub fn handle_byte(byte: u8) {
     PACKETS.fetch_add(1, Ordering::Relaxed);
     BUTTONS.store(d.bytes[0] & 0x07, Ordering::Relaxed);
     if PACKET_LEN.load(Ordering::Relaxed) == 4 {
-        // 4 bity ze znakiem (ID 4 ma w górnych bitach przyciski 4/5).
+        // 4 signed bits (ID 4 has buttons 4/5 in the upper bits).
         let dz = ((d.bytes[3] << 4) as i8) >> 4;
         if dz != 0 {
             WHEEL.fetch_add(dz as i32, Ordering::Relaxed);
@@ -75,7 +75,7 @@ fn on_irq(_irq: u8) {
     }
 }
 
-/// Rejestruje IRQ12, jeśli ps2::init znalazł mysz.  Wołać po keyboard::init.
+/// Registers IRQ12 if ps2::init found a mouse.  Call after keyboard::init.
 pub fn init() -> bool {
     let Some(id) = ps2::mouse_id() else {
         serial_println!("[MOUSE] No PS/2 mouse");
@@ -95,8 +95,8 @@ pub fn init() -> bool {
     true
 }
 
-/// Ruch kółka od ostatniego wywołania (ujemny = w górę / od siebie).
-/// M20.e: kółko myszy USB (usbd przez input_inject) – jak pakiet PS/2.
+/// Wheel movement since the last call (negative = up / away from the user).
+/// The USB mouse wheel (usbd via input_inject) is handled like a PS/2 packet.
 pub fn add_wheel(dz: i32) {
     WHEEL.fetch_add(dz, Ordering::Relaxed);
     crate::console::wake_input();
@@ -110,7 +110,7 @@ pub fn has_wheel() -> bool {
     WHEEL.load(Ordering::Relaxed) != 0
 }
 
-/// (pakiety, przyciski, zgubione synchronizacje) – diagnostyka.
+/// (packets, buttons, lost synchronizations) – diagnostics.
 #[allow(dead_code)]
 pub fn stats() -> (u64, u8, u64) {
     (
@@ -121,7 +121,7 @@ pub fn stats() -> (u64, u8, u64) {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (selftest build only, --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -134,7 +134,7 @@ macro_rules! check {
     };
 }
 
-/// Wstrzykuje bajty przez kontroler (0xD3) i czeka, aż IRQ12 je odbierze.
+/// Injects bytes through the controller (0xD3) and waits until IRQ12 receives them.
 #[cfg(selftest)]
 fn inject(bytes: &[u8]) -> bool {
     for &b in bytes {
@@ -158,7 +158,7 @@ pub fn self_test() {
     serial_println!("[MOUSE TEST] Starting mouse tests...");
     crate::selftest::begin();
 
-    // 1. Mysz włączona, IRQ12 i kaskada odmaskowane.
+    // 1. Mouse enabled, IRQ12 and the cascade unmasked.
     let id = ps2::mouse_id().unwrap_or(0xFF);
     let cfg = ps2::config().unwrap_or(0);
     check!(cfg & ps2::CONFIG_PORT2_IRQ != 0, "port 2 IRQ disabled (config {:#x})", cfg);
@@ -167,7 +167,7 @@ pub fn self_test() {
     check!(id == 3 || id == 4, "mouse ID {} (no wheel mode)", id);
     serial_println!("[MOUSE TEST] 1/3 mouse ID {}, IRQ12 unmasked, config {:#04x} PASS", id, cfg);
 
-    // 2. Pakiet z kółkiem w górę (dz = -1) i w dół (dz = +2) przez IRQ12.
+    // 2. Packet with the wheel up (dz = -1) and down (dz = +2) via IRQ12.
     take_wheel();
     let p0 = stats().0;
     check!(inject(&[0x08, 0, 0, 0x0F]), "inject wheel up timed out");
@@ -177,8 +177,8 @@ pub fn self_test() {
     check!(stats().0 == p0 + 2 && stats().1 == 1, "packets/buttons {:?}", stats());
     serial_println!("[MOUSE TEST] 2/3 wheel packets via IRQ12 (up -1, down +2, left button) PASS");
 
-    // 3. Utrata synchronizacji: bajt bez bitu 3 jest pomijany, następny
-    //    pakiet dekoduje się poprawnie.
+    // 3. Loss of synchronization: a byte without bit 3 is skipped, the next
+    //    packet decodes correctly.
     let r0 = stats().2;
     check!(inject(&[0x00, 0x08, 0, 0, 0x0F]), "inject resync");
     check!(stats().2 == r0 + 1 && take_wheel() == -1, "resync failed {:?}", stats());

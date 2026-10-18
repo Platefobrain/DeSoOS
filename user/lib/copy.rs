@@ -1,4 +1,4 @@
-// M16: kopiowanie pliku (cp, mv) – po kawałku przez read/write.
+// File copying (cp, mv) – chunk by chunk via read/write.
 #![allow(dead_code)]
 
 use alloc::format;
@@ -6,7 +6,7 @@ use alloc::string::String;
 
 use crate::desoos::{O_CREATE, O_READ, O_TRUNC, O_WRITE, close, open, read, stat, strerror, write};
 
-/// Cel kopiowania: katalog -> katalog/<nazwa źródła>.
+/// Copy target: directory -> directory/<source name>.
 pub fn target(src: &str, dst: &str) -> String {
     match stat(dst) {
         Ok(s) if s.is_dir => {
@@ -17,7 +17,7 @@ pub fn target(src: &str, dst: &str) -> String {
     }
 }
 
-/// Kopiuje plik; zwraca liczbę bajtów.
+/// Copies a file; returns the number of bytes.
 pub fn copy_file(src: &str, dst: &str) -> Result<u64, String> {
     let dst = target(src, dst);
     let s = stat(src).map_err(|e| format!("{}: {}", src, strerror(e)))?;

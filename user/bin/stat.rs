@@ -1,4 +1,4 @@
-// M16: stat <ścieżka>... – typ i rozmiar.
+// stat <path>... – type and size.
 #![no_std]
 #![no_main]
 

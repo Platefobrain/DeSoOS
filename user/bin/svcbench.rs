@@ -1,18 +1,18 @@
-// M19.h: pomiar usług w user space na urządzeniu `edu` (QEMU).
+// Benchmark of user-space services on the `edu` device (QEMU).
 //
-// Z HW_ROOT (samotest jądra, SVC TEST 7/7):
-//   1. przerwanie -> pobudka sterownika: zapis "raise", wait_many (W_IRQ),
-//      status, ack – sterownik w procesie, bez IPC,
-//   2. silnia zakończona przerwaniem – sterownik w procesie,
-//   3. ten sam sterownik jako usługa (/bin/edud): PING i silnia przez kanał
-//      (klient -> usługa -> urządzenie -> odpowiedź),
-//   4. restart usługi: kill -> urządzenie wraca -> nowa instancja -> pierwsza
-//      odpowiedź (bez odstępu 100 ms, który dodaje menedżer w init).
-// Bez HW_ROOT (np. z shella, slot 3 = kanał do init): tylko punkt 3 – przez
-// usługę `edu` uruchomioną przez init (`svc_connect`).
+// With HW_ROOT (kernel self-test, SVC TEST 7/7):
+//   1. interrupt -> driver wakeup: write "raise", wait_many (W_IRQ),
+//      status, ack – driver inside the process, no IPC,
+//   2. factorial completed by an interrupt – driver inside the process,
+//   3. the same driver as a service (/bin/edud): PING and factorial over a channel
+//      (client -> service -> device -> reply),
+//   4. service restart: kill -> device returns -> new instance -> first
+//      reply (without the 100 ms delay added by the manager in init).
+// Without HW_ROOT (e.g. from the shell, slot 3 = channel to init): only item 3 – via
+// the `edu` service started by init (`svc_connect`).
 //
-// Każdy pomiar trwa co najmniej MIN_MS (zegar ms; średnia z wielu rund).
-// Wynik: zdanie dla człowieka i linia "svcbench-result k=v ..." dla jądra.
+// Each measurement lasts at least MIN_MS (ms clock; average of many rounds).
+// Result: a human-readable sentence and a "svcbench-result k=v ..." line for the kernel.
 #![no_std]
 #![no_main]
 
@@ -47,7 +47,7 @@ fn wr(base: u64, reg: u64, v: u32) {
     unsafe { core::ptr::write_volatile((base + reg) as *mut u32, v) }
 }
 
-/// Powtarza `round` przez co najmniej MIN_MS; ns na rundę albo None (błąd).
+/// Repeats `round` for at least MIN_MS; ns per round or None (error).
 fn timed(mut round: impl FnMut() -> bool) -> Option<u64> {
     let t0 = uptime_ms();
     let mut n = 0u64;
@@ -63,7 +63,7 @@ fn timed(mut round: impl FnMut() -> bool) -> Option<u64> {
     }
 }
 
-/// Czeka, aż urządzenie zgłosi `bit` (pobudka przerwaniem), potem ack.
+/// Waits until the device raises `bit` (interrupt wakeup), then acks.
 fn wait_bit(m: u64, irq: u64, bit: u32) -> bool {
     while rd(m, REG_IRQ_STATUS) & bit == 0 {
         match wait_many(&[(irq, W_IRQ)], 1000) {
@@ -102,7 +102,7 @@ fn connect(listen: u64) -> Option<u64> {
     Some(mine)
 }
 
-/// Usługa edud z urządzeniem z HW_ROOT: (pid, kanał połączeń).
+/// The edud service with the device from HW_ROOT: (pid, connection channel).
 fn start_edud() -> Option<(u64, u64)> {
     let dev = dev_claim(HW_ROOT, EDU);
     if dev < 0 {
@@ -119,7 +119,7 @@ fn start_edud() -> Option<(u64, u64)> {
     Some((pid as u64, listen))
 }
 
-/// PING i silnia przez usługę: (ns PING, ns silnia).
+/// PING and factorial via the service: (ns PING, ns factorial).
 fn via_service(c: u64) -> Option<(u64, u64)> {
     let ping = timed(|| call(c, OP_PING, 0) == Some(0x010000ed))?;
     let fact = timed(|| call(c, OP_FACT, 12) == Some(479_001_600))?;
@@ -133,7 +133,7 @@ fn us(ns: u64) -> (u64, u64) {
 fn main(_args: Args) -> i32 {
     let hw = handle_info(HW_ROOT).map(|(k, _)| k) == Ok(KIND_HW_ROOT);
     if !hw {
-        // Z shella: usługa edu uruchomiona przez init.
+        // From the shell: the edu service started by init.
         let Ok(c) = svc_connect("edu") else {
             eprintln!("svcbench: no service manager channel (slot 3)");
             return 1;
@@ -149,7 +149,7 @@ fn main(_args: Args) -> i32 {
         return 0;
     }
 
-    // 1-2. Sterownik w procesie: przerwanie i silnia.
+    // 1-2. Driver inside the process: interrupt and factorial.
     let dev = dev_claim(HW_ROOT, EDU);
     if dev < 0 {
         println!("svcbench: FAIL claim edu: {} (QEMU needs -device edu,addr=06)", strerror(dev));
@@ -184,7 +184,7 @@ fn main(_args: Args) -> i32 {
         return 1;
     };
 
-    // 3. Usługa edud: PING i silnia przez kanał.
+    // 3. The edud service: PING and factorial over a channel.
     let Some((mut pid, mut listen)) = start_edud() else {
         println!("svcbench: FAIL start edud");
         return 1;
@@ -196,7 +196,7 @@ fn main(_args: Args) -> i32 {
     };
     close(c);
 
-    // 4. Restart: kill -> nowa instancja -> pierwsza odpowiedź.
+    // 4. Restart: kill -> new instance -> first reply.
     let t0 = uptime_ms();
     for _ in 0..RESTARTS {
         kill(pid);

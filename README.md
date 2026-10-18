@@ -1,229 +1,326 @@
 # DeSoOS v0.35.2
 
-Wlasny system operacyjny
+DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
+Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
+user-space processes that talk to the kernel and to each other over IPC (handles, channels and
+shared memory).
 
-Lancuch startowy:
+Boot chain:
 
-UEFI/OVMF -> DSB -> DeSoOS kernel
-
-## Budowanie
-
-```bash
-./build.sh              # zwykly kernel (bez samotestow)
-./build.sh --selftest   # kernel z samotestami (28 zestawow, M1-M19 + etap P + USB)
-tests/test.sh           # build --selftest + testy w QEMU, wynik PASS/FAIL
+```
+UEFI firmware (OVMF in QEMU) -> DSB (DeSoOS boot loader) -> DeSoOS kernel
 ```
 
-Nie uruchamiaj `build.sh` przez sudo.
+More documentation:
 
-Kernel jest kompilowany z optymalizacja (`-O`) do `build/kernel.elf` (z symbolami, do gdb).
-DSB ma w sobie kopie bez symboli (`build/kernel.boot.elf`), laduje jej segmenty ELF pod
-`0xffffffff80000000` (kernel w gornej polowie), alokuje stos ze strona-straznikiem i skacze
-do kernela. Rozmiar kernela nie jest juz ograniczony do 512 KiB.
+- `ARCHITECTURE.md` - architecture: what lives in the kernel, what runs in user space, syscalls
+  and IPC.
+- `CHANGELOG.md` and `ROADMAP.md` - detailed development history and plans.
 
-Pamiec wirtualna (od v0.8): dolna polowa pusta (dla procesow), fizyczna pamiec pod
-`0xffff800000000000 + adres` (direct map), heap `0xffffc00000000000`, kernel `0xffffffff80000000`,
-stos `..0xffffffffc0041000`. Komenda `mem` pokazuje, gdzie fizycznie lezy kernel.
+## Features
 
-## QEMU
+- UEFI boot through its own loader (DSB); higher-half kernel, ELF loading, guard-paged stack.
+- Memory management: physical frame allocator, 4-level paging with a direct map, kernel heap,
+  per-process address spaces, NX and SMEP.
+- Preemptive scheduler with SMP support (up to 16 CPUs), Local APIC timer, IPIs, TLB shootdown,
+  and adaptive idle polling before `hlt` for faster wake-ups.
+- User processes in ring 3: static Rust ELF programs, syscalls, FPU/SSE state per process,
+  faults that kill only the offending process, background jobs, Ctrl+C.
+- IPC: handles, channels and shared memory; drivers and services run in user space and are
+  supervised by `init`.
+- ACPI (MADT etc.), PCI enumeration.
+- Storage: virtio-blk, NVMe (read-only on real hardware), GPT partitions, block layer with
+  read-only enforcement.
+- USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, read-only mass storage
+  and hubs (nested up to 5 levels).
+- File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`).
+- Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
+- User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
+  emergency shell as a fallback.
+- Built-in self-tests and stress tests, runnable automatically in QEMU or on real hardware.
+
+It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB and an NVMe SSD.
+
+## Requirements
+
+- Linux host (scripts use bash, `lsblk`, `findmnt`, etc.).
+- Rust toolchain with edition 2024 support (`rustc`, `cargo`, `rustup`). `build.sh` adds the
+  targets `x86_64-unknown-none` and `x86_64-unknown-uefi` automatically if they are missing.
+- binutils (`objcopy`, `readelf`).
+- For QEMU: `qemu-system-x86` and OVMF (`sudo apt install ovmf qemu-system-x86`).
+- `python3` for the test scripts (creates FAT32 test images).
+- Optional: `mtools` to access `disk.img` from the host; `/dev/kvm` for hardware acceleration.
+
+## Building
+
+```bash
+./build.sh                  # regular kernel (no self-tests)
+./build.sh --selftest       # kernel with self-tests (results on the serial console)
+./build.sh --autostress=60  # runs a 60 s stress test by itself 5 s after boot
+```
+
+Do not run `build.sh` with sudo.
+
+Build-time environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DESOOS_AUTOSTRESS=S` | `0` (off) | Same as `--autostress=S`: stress test for S seconds 5 s after boot. |
+| `DESOOS_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
+| `DESOOS_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
+| `DESOOS_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |
+
+Outputs:
+
+- `build/kernel.elf` - optimized kernel with symbols (for gdb).
+- `build/kernel.boot.elf` - stripped copy embedded in the boot loader.
+- `build/EFI/BOOT/BOOTX64.EFI` - the whole system as a single UEFI executable.
+
+DSB loads the kernel's ELF segments at `0xffffffff80000000`, sets up its own page tables,
+allocates a stack with a guard page, calls ExitBootServices and jumps to the kernel.
+
+Virtual memory layout: the lower half is reserved for processes; physical memory is mapped at
+`0xffff800000000000 + address` (direct map); kernel heap at `0xffffc00000000000`; kernel at
+`0xffffffff80000000`; kernel stack below `0xffffffffc0041000`. The `mem` command shows where the
+kernel is located physically.
+
+User programs live in `user/bin/*.rs` and are embedded in the kernel image as `/bin/<name>`.
+To add one, create `user/bin/<name>.rs` (see `user/bin/hello.rs`) and run `./build.sh`. The
+user library `user/lib/desoos.rs` provides `println!`, files, directories, `spawn`/`wait`/`kill`,
+`sleep_ms`, `readkey`, arguments, and `Vec`/`String` via `extern crate alloc;`.
+
+## Running in QEMU
 
 ```bash
 ./run-qemu.sh
 ```
 
-Po starcie kernel uruchamia `/bin/init`, a init - shell w user space (`desoos:/$`), na ekranie
-QEMU i w terminalu jednoczesnie. Mozna pisac w oknie QEMU (klawiatura PS/2) albo w terminalu,
-z ktorego odpalono `run-qemu.sh`. Wpisz `help`, zeby zobaczyc komendy.
+The kernel starts `/bin/init`, which starts the user-space shell (`desoos:/$`). Output appears
+both in the QEMU window and in the terminal; you can type in either (the QEMU window uses a PS/2
+keyboard). Type `help` for the command list. If `/bin/init` is missing or keeps crashing, the
+kernel emergency shell (`desoos>`) starts instead.
 
-`USB=1 ./run-qemu.sh` (v0.25.0) - jak laptop bez PS/2 (Legion): QEMU bez kontrolera 8042, klawiatura i mysz
-tylko na USB. Pisanie w oknie QEMU idzie wtedy przez sterownik USB w user space (`usbd` -> jadro).
+Note: in the terminal (`-serial stdio`) Ctrl+C quits QEMU; in the QEMU window it goes to the shell.
 
-`HUB=1 ./run-qemu.sh` (v0.27.0) - hub USB w porcie 3; z `USB=1` klawiatura i mysz sa za hubem (porty 3.1, 3.2),
-`usb.img` - w porcie 3.3.
+Options (environment variables):
 
-Drugi pendrive w QEMU (v0.26.0): plik `usb.img` w katalogu DeSoOS - `run-qemu.sh` podlacza go tylko do odczytu,
-jadro montuje FAT32 w `/usb0`. Obraz z wlasnymi plikami: `python3 tests/mkfat32.py usb.img plik1 plik2`.
+- `ACCEL=kvm` - hardware virtualization (Linux with `/dev/kvm`; faster and truly parallel).
+  Needs access to `/dev/kvm`: `sudo usermod -aG kvm $USER`, then log out and back in.
+  Default: `ACCEL=tcg` (multi-threaded emulation).
+- `SMP=N` - number of CPUs (default 4).
+- `USB=1` - no PS/2 controller (like many laptops): keyboard and mouse only via USB, handled by
+  the user-space `usbd` service.
+- `HUB=1` - adds a USB hub on port 3; with `USB=1` the keyboard and mouse are behind it
+  (ports 3.1, 3.2) and `usb.img` on port 3.3.
 
-Shell (M16, `user/bin/sh.rs`, ring 3):
+Disks attached by `run-qemu.sh`:
 
-- programy po nazwie: `ls /bin`, `primes 50000`, `args "jeden dwa" trzy`, albo sciezka: `cd /bin`, `./hello`
-- `> plik`, `>> plik`, `< plik`, `&` na koncu = w tle (`ps`, `kill <pid>`, `wait`)
-- wbudowane: `cd`, `pwd`, `echo`, `exit`, `help`, `history`, `clear`, `wait`, `sync`, `reboot`, `halt`, `stress`
-- informacje od jadra (tylko odczyt): `mem`, `cpus`, `irq`, `lspci`, `acpi`, `disk`, `mount`, `df`, `date`, `ver`, `uptime`
-- uslugi: `services` (stan uslug uruchomionych przez init; od v0.23.0 takze `usb0`, `usb1`... - kontrolery USB xHCI)
-- `lsusb` (v0.24.0) - urzadzenia USB: port, VID:PID, predkosc, rodzaj (klawiatura, mysz, pamiec masowa, hub...),
-  klasy interfejsow, producent i produkt; od v0.25.0 dzialaja klawiatura i mysz USB (`keyboard ready`), od
-  v0.26.0 pendrive TYLKO DO ODCZYTU (`disk sda ready`, FAT32 samo montuje sie w `/usb0`: `ls /usb0`, `cat`);
-  od v0.27.0 takze urzadzenia za hubem (port `3.2` = port kontrolera 3, port huba 2; hub w hubie do 5 poziomow)
-- `mkfs`, zapis na dysk (`disk write`) i `run` - tylko w awaryjnym shellu kernela
-- `exit` albo zabicie shella (`kill <pid sh>`) - init uruchamia nowy shell
-- Ctrl+C konczy program na pierwszym planie, nie shell
+- `disk.img` - virtio-blk data disk (64 MiB, created on first run), FAT32 at `/disk`.
+- `nvme.img` - disk on QEMU's emulated NVMe controller (created on first run). This is the only
+  NVMe device DeSoOS ever writes to.
+- `build/` - presented as a read-only USB stick, like a real boot from a USB stick.
+- `usb.img` (optional, in the repository root) - a second, read-only USB stick, mounted at
+  `/usb0`. Create one with your own files: `python3 tests/mkfat32.py usb.img file1 file2`.
 
-Awaryjnie (brak `/bin/init` albo init ciagle pada) startuje shell kernela (`desoos>`).
-
-QEMU dostaje (M16b) takze dysk NVMe `nvme.img` (tworzony przy pierwszym starcie). To jedyny NVMe,
-do ktorego DeSoOS zapisuje - emulowany kontroler QEMU. Katalog `build/` QEMU widzi jak pendrive USB
-tylko do odczytu (tak jak prawdziwy start z pendrive'a).
-
-## Prawdziwy komputer (M16b) - start z pendrive'a
-
-### Czy moje dane sa bezpieczne?
-
-Tak - DeSoOS na prawdziwym komputerze **niczego nie zapisuje na dyski**:
-
-1. **Sterownik NVMe** pozwala zapisywac tylko emulowanemu kontrolerowi QEMU (PCI `1b36:0010`). Kazdy
-   prawdziwy SSD jest "tylko do odczytu": zapis konczy sie bledem, zanim cokolwiek trafi do dysku.
-   Do SSD ida tylko polecenia odczytu i konfiguracji kolejek (zadnych Write, TRIM, Format, Sanitize,
-   aktualizacji firmware).
-2. **Warstwa dyskow** (`kernel/block.rs`) niezaleznie odrzuca kazdy zapis na dysk "tylko do odczytu" -
-   takze `mkfs`, `disk write`, zapis plikow w `/esp`.
-3. **Pendrive** (od v0.26.0 widoczny jako `/usb0`) jest TYLKO DO ODCZYTU - cztery niezalezne zamki: sterownik
-   USB (`usbd`) nie ma zadnej komendy zapisu SCSI (sprawdzane przy kompilacji), protokol jadro-usbd nie ma
-   operacji zapisu, dysk USB jest "tylko do odczytu" w warstwie dyskow, a FAT32 / `open` odmawiaja zapisu (EROFS).
-4. Sprawdzone w QEMU na kopii ukladu dysku Ubuntu (GPT: ESP + swap + ext4), z kontrolerem udajacym
-   prawdziwy SSD i sledzeniem polecen NVMe: po starcie DeSoOS **0 polecen zapisu**, mimo prob
-   `echo > /esp/...`, `rm`, `mkfs`, `disk write`.
-
-Jedyna zmiana poza pendrive'em to ustawienie Secure Boot w BIOS-ie (patrz nizej).
-
-### 1. Pendrive
-
-Wystarczy dowolny pendrive z FAT32 (np. pusty, nowy). DeSoOS to jeden plik: `EFI/BOOT/BOOTX64.EFI`.
+## Self-tests and stress tests
 
 ```bash
-./make-usb.sh --list                    # pokazuje dyski USB (i ktore sa systemowe - tych nie rusza)
-./make-usb.sh /media/$USER/NAZWA        # buduje i kopiuje DeSoOS na zamontowany pendrive
+tests/test.sh                # build --selftest + run tests in headless QEMU
+tests/test.sh --no-build     # run only (after your own ./build.sh --selftest)
+tests/test.sh --verbose      # show the whole log live
+TIMEOUT=300 tests/test.sh    # change the timeout (default 180 s)
+ACCEL=kvm tests/test.sh      # with KVM; SMP=N also works (default 4)
 ```
 
-Skrypt **niczego nie formatuje**, sprawdza, ze cel to FAT32 na dysku USB (nie systemowym), i nie
-nadpisze innego bootloadera (np. instalatora Ubuntu) bez `--overwrite`. Pendrive z exFAT/NTFS (czesto
-duze, nowe) trzeba raz sformatowac na FAT32 - to KASUJE pendrive: `./make-usb.sh --format /dev/sdX`
-(sprawdza USB i kaze przepisac nazwe urzadzenia) albo w programie "Dyski".
+Result and exit code: `PASS` (0), `FAIL` (1, with a list of failures), `TIMEOUT` (2, hang) or a
+QEMU/build error (3). Full log: `logs/test.log`. Tests use separate, temporary disk images, so
+`disk.img` is left untouched. Do not run `test.sh` at the same time as `run-qemu.sh` (both use
+`build/`).
 
-### 2. BIOS (Lenovo Legion 5: F2 przy logo, albo przycisk Novo z boku)
+How it works: QEMU receives the fw_cfg file `opt/desoos/autotest` and an `isa-debug-exit`
+device; after the tests (or on a panic / critical exception) the kernel powers QEMU off with the
+result code. A `--selftest` build started with plain `./run-qemu.sh` runs the tests and then
+starts the shell as usual. Test code is marked `#[cfg(selftest)]` and is not compiled into a
+regular build at all. When adding new test-only functions, mark them `#[cfg(selftest)]` as well.
 
-- **Secure Boot -> Disabled** (DSB nie jest podpisany). Ubuntu startuje tak samo z wylaczonym Secure Boot.
-  Po testach mozna go wlaczyc z powrotem.
-- **Uwaga, jesli na laptopie jest tez Windows z BitLockerem**: zmiana Secure Boot moze wymusic podanie
-  klucza odzyskiwania BitLockera - najpierw zapisz ten klucz (konto Microsoft / ustawienia BitLockera).
+Stress test in QEMU (the same autostress as on real hardware, before writing a USB stick):
 
-### 3. Start
+```bash
+tests/stress-qemu.sh              # build with autostress + QEMU, result on screen
+tests/stress-qemu.sh --no-build   # run only (after ./build.sh --autostress=S)
+SECS=120 SMP=8 tests/stress-qemu.sh
+```
 
-Wloz pendrive, wlacz komputer, **F12** przy logo Lenovo -> wybierz pendrive (`EFI USB Device`).
-Na ekranie: logi startu, potem `desoos:/$`. Warto sprawdzic:
+`SECS` = stress duration (default 60), `SMP` = CPUs (default: host cores, at most 16),
+`ACCEL` = `kvm` (default if `/dev/kvm` is available) or `tcg`. Exit codes: 0 PASS, 1 FAIL,
+2 timeout/hang, 3 error. Log: `logs/stress-qemu.log`. Afterwards `build/` contains an
+autostress kernel; `make-usb.sh` and `test.sh` rebuild their own anyway.
 
-- `disk` - dyski NVMe i partycje GPT (wszystko `read-only`)
-- `ls /esp` - partycja EFI z dysku (tylko do odczytu), np. `ls /esp/EFI`
-- `lspci`, `acpi`, `mem`, `ps`
-- `cpus` - rdzenie procesora (M17: Ryzen 7 4800H powinien pokazac 16 CPU online)
-- Shift+PgUp - przewijanie logow startu
+Logs of `make-usb.sh` builds go to `logs/build-usb.log`.
 
-Komputer nie ma portu szeregowego - wszystko widac tylko na ekranie (zrob zdjecie, jesli cos
-nie dziala). Wylaczenie: `k halt` i przytrzymaj przycisk zasilania, albo od razu przytrzymaj przycisk.
-Potem wyjmij pendrive - komputer startuje normalnie z dysku.
+## Real hardware
 
-Jesli wewnetrzna klawiatura nie dziala (laptopy bez kontrolera 8042), DeSoOS i tak wystartuje - widac
-logi, ale nie da sie pisac. Od v0.25.1 dziala klawiatura USB (wbudowana klawiatura Legiona - przez `usbd`).
+DeSoOS boots on a PC or laptop from a USB stick in UEFI mode.
 
-## Pliki
+### Is my data safe?
 
-- `/` to ramfs (w pamieci, znika po restarcie), `/disk` to dysk FAT32 (`disk.img`, zostaje).
-- Nowy `disk.img` jest pusty - sformatuj go raz w DeSoOS: `mkfs 0`, potem `mkfs 0 yes`
-  (od razu montuje sie w `/disk`). Dopoki dysk nie jest sformatowany, `/disk` nie istnieje.
-- Sprawdzenie: `df` pokazuje dwie linie (`/` i `/disk`) - wtedy pliki w `/disk` przetrwaja restart.
-- Komendy: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat` (programy w /bin
-  albo wbudowane) oraz `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date` (kernel).
-  Przekierowanie: `echo tekst > plik`, `help >> plik`. Nazwy ze spacjami w cudzyslowach:
-  `cat "moj plik.txt"`.
-- Dysk jest zgodny z Linuxem: na hoscie mozna go czytac i zapisywac np. przez mtools
-  (`mdir -i disk.img ::`, `mcopy -i disk.img plik.txt ::/`) - tylko gdy QEMU jest wylaczone.
-- Na nizszym poziomie: `lspci`, `disk`, `disk read 0 <sektor>`, `disk write 0 <sektor> <tekst>`.
-- Zadania (M12): `ps` - lista zadan (stan, czas CPU), `spawn spin` - zadanie w petli bez przerwy
-  (shell dalej odpowiada dzieki wywlaszczaniu), `spawn tick` - zadanie budzace sie co 1 s,
-  `kill <id>` - zakonczenie zadania.
-- Wiele rdzeni (M17): `cpus` - procesory, zadanie na kazdym, ticki timera, IPI. Kolumna `CPU` w `ps`
-  pokazuje rdzen (`~2` = nie dziala teraz, ostatnio CPU 2). Np. `primes 3000000 &` dwa razy, potem `ps`
-  - oba licza naraz na roznych rdzeniach. QEMU startuje z 4 rdzeniami (`-smp 4` w `run-qemu.sh`).
-- Szybciej i naprawdę równolegle (Linux z KVM): `ACCEL=kvm ./run-qemu.sh`, `ACCEL=kvm tests/test.sh`
-  (potrzebny dostęp do /dev/kvm: `sudo usermod -aG kvm $USER`, potem wyloguj się). Liczba rdzeni: `SMP=8`.
-- Stress test (M17a): `stress` (10 s) albo `stress 300` - wiele procesow, pliki, spinlocki na wszystkich
-  rdzeniach naraz; na koncu `stress PASS: ...`. Potem `cpus` pokazuje, ile razy rdzenie czekaly na
-  Big Kernel Lock, i statystyke TLB shootdown (M17a.b).
-- Stress test bez klawiatury (np. Legion z pendrive'a): `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/...`
-  (albo `./build.sh --autostress=60`) - 5 s po starcie kernel sam robi stress test 60 s i wypisuje na
-  ekranie `[AUTOSTRESS] PASS/FAIL`, `cpus` i `mem`. Zwykly `./make-usb.sh` - bez tego.
-  Od v0.28.0 w trakcie stressu czyta tez w kolko najwiekszy plik z pendrive'a (`/usb0`) - linia `usb:`
-  (MiB, KiB/s, sumy kontrolne przejsc, bledy). Od v0.29.0 takze przed stressem: odczyt tego pliku buforem
-  256 KiB i 4 KiB (KiB/s) i opoznienie klawiatury USB (przerwanie -> znak, us; nacisnij kilka klawiszy w trakcie),
-  linia `[RESULT-USB]`.
-  Od v0.34.0 bezczynny rdzeń kreci sie chwile przed `hlt` (okno dobierane samo, do 200 us) - szybsza pobudka.
-  Ustawienia przy budowaniu: `DESOOS_IDLE_POLL_US=N` (granica, 0 = bez krecenia), `DESOOS_IDLE_POLL_ADAPT=0` (stale N).
-- Procesy w ring 3 (M13a): `run` - lista programow testowych, `run sum` - pierwszy program
-  uzytkownika (wynik 5050), `run pf` / `gp` / `ud` / `nx` / `sse` - bledy, ktore koncza tylko
-  proces, `run loop` - petla bez konca (Ctrl+C konczy), `run loop &` - w tle (`ps`, `kill`).
-  `run <program> <n>` uruchamia n kopii naraz (1..16), np. `run xmm 16 &`. Komunikat procesu z tla
-  nie psuje linii, ktora piszesz - prompt z wpisanym tekstem rysuje sie pod nim od nowa.
-- Syscalle (M14): `run hello` (write), `run cat` (read z klawiatury; od M15 to programy ELF z /bin), `run files` (open/write/read
-  na /tmp/ring3.txt - potem `cat /tmp/ring3.txt`), `run ticker &` (sleep, wypisuje w tle),
-  `run regs` (100 tys. syscalli), `run badptr` (zly wskaznik -> -14). Ctrl+C konczy proces na
-  pierwszym planie. Lista syscalli: `kernel/user/syscalls.rs` i ARCHITEKTURA.md.
-- Od M16 programy uruchamia sie po nazwie (bez `run`); `run ...` nizej dziala dalej (komenda kernela).
-- Programy ELF (M15): `ls /bin` - programy napisane w Rust (`user/bin/*.rs`), wbudowane w kernel.
-  `run hello`, `run args jeden dwa` (wypisuje argv), `run primes 50000` (liczy liczby pierwsze),
-  `run save notatka.txt ala ma kota` + `run cat notatka.txt` (pliki, sciezki wzgledem `cd`),
-  `run primes 300000 &` - w tle. To zwykle pliki: `cp /bin/args /tmp/a` i `run /tmp/a x` albo
-  `cd /tmp` i `run ./a x`. Samo `run` pokazuje liste (/bin + programy testowe w asm).
-  Nowy program: plik `user/bin/<nazwa>.rs` (wzor: `user/bin/hello.rs`) i `./build.sh` - pojawi sie
-  jako `/bin/<nazwa>`. Biblioteka: `user/lib/desoos.rs` (`println!`, `open`, `read`, `write`,
-  `sleep_ms`, argumenty; od M16 `spawn`/`wait`/`kill`, katalogi, `readkey`, a z `extern crate alloc;`
-  takze `Vec`/`String`).
-- FPU/SSE w procesach (M13b): `run sse` (42), `run x87` (3), `run xmm 3` - 3 procesy naraz, kazdy
-  wypelnia xmm0-15 swoimi wartosciami i sprawdza je 2 mln razy (wynik 1 = nic sie nie pomieszalo),
-  `run fpuclean` - nowy proces zaczyna z czystymi rejestrami.
+Yes. On real hardware DeSoOS **does not write to any disk**:
 
-- strzalki, Home/End, Backspace/Delete - edycja linii
-- strzalki gora/dol - historia, Tab - dopelnianie komendy
-- Ctrl+C - porzuc linie, Ctrl+U - wyczysc linie, Ctrl+L - wyczysc ekran
-- przewijanie ekranu wstecz (1000 linii): Shift+strzalka gora/dol - o 1 linie,
-  Shift+PgUp/PgDn - o caly ekran, kolko myszy - o 3 linie; pisanie wraca na dol.
-  Na klawiaturze numerycznej tez: Shift + 8/2 (linia), Shift + 9/3 (ekran). Dziala w oknie QEMU (nie w terminalu - terminal ma wlasna historie).
-  Mysz: najpierw kliknij w okno QEMU (przechwyci mysz), zwolnienie myszy: Ctrl+Alt+G.
-- polskie znaki na klawiaturze PS/2: prawy Alt (AltGr) + a/c/e/l/n/o/s/x/z, AltGr+u = €
+1. **NVMe driver**: only QEMU's emulated controller (PCI `1b36:0010`) is writable. Every real
+   SSD is read-only: a write fails before anything reaches the device. Only read and queue
+   setup commands are ever sent (no Write, TRIM, Format, Sanitize or firmware update).
+2. **Block layer** (`kernel/block.rs`) independently rejects every write to a read-only disk,
+   including `mkfs`, `disk write` and writing files on `/esp`.
+3. **USB sticks are read-only**, with four independent locks: `usbd` contains no SCSI write
+   command (checked at compile time), the kernel-`usbd` protocol has no write operation, the
+   USB disk is read-only in the block layer, and FAT32 / `open` refuse writes (`EROFS`).
+4. Verified in QEMU on a copy of a typical Linux disk layout (GPT: ESP + swap + ext4) with a
+   controller posing as a real SSD and NVMe command tracing: **0 write commands** after boot,
+   despite attempts such as `echo > /esp/...`, `rm`, `mkfs` and `disk write`.
 
-Uwaga: w terminalu QEMU (`-serial stdio`) Ctrl+C zamyka QEMU. W oknie QEMU Ctrl+C trafia do shella.
+The only change outside the USB stick is the Secure Boot setting in the firmware (see below).
 
-## Samotesty (`--selftest`, `tests/test.sh`)
+### 1. Prepare the USB stick
 
-`tests/test.sh` buduje kernel z samotestami, uruchamia QEMU bez okna i konczy sie wynikiem:
-`PASS` (kod 0), `FAIL` (1, z lista bledow), `TIMEOUT` (2, zawieszenie) albo blad QEMU (3).
-Pelny log: `logs/test.log` (stress w QEMU: `logs/stress-qemu.log`, budowanie z make-usb: `logs/build-usb.log`). Testy dzialaja na osobnym, pustym dysku - `disk.img` zostaje nietkniety.
-Opcje: `--no-build` (bez budowania), `--verbose` (log na biezaco), `TIMEOUT=300 tests/test.sh`.
-QEMU w testach dziala z `-cpu max` (NX, SMEP jak na nowym procesorze).
-Nie uruchamiaj `test.sh` rownoczesnie z `run-qemu.sh` (oba uzywaja katalogu `build/`).
+Any FAT32 USB stick works (for example a new, empty one). The whole system is a single file:
+`EFI/BOOT/BOOTX64.EFI`.
 
-Jak to dziala: QEMU dostaje plik fw_cfg `opt/desoos/autotest` i urzadzenie `isa-debug-exit`;
-kernel po testach (albo przy panice / krytycznym wyjatku) sam wylacza QEMU z kodem wyniku.
-Zwykle `./run-qemu.sh` z buildem `--selftest` dziala jak dotad - po testach startuje shell.
+```bash
+./make-usb.sh --list                 # list USB disks (system disks are marked and never touched)
+./make-usb.sh /media/$USER/<LABEL>   # build and copy DeSoOS to the mounted stick
+```
 
-Build z `--selftest` kompiluje kernel z `--cfg selftest`: po kazdym etapie
-uruchamia sie jego test, a wyniki ida na serial (`... TESTS PASSED` albo
-`... FAIL: ...`). Zwykly build nie zawiera kodu testow wcale (kod testowy jest
-oznaczony `#[cfg(selftest)]`), wiec startuje od razu, bez ok. 2 s testow.
+The script **does not format anything**. It checks that the target is FAT32 on a USB disk (not
+a system disk) and refuses to overwrite another boot loader (e.g. an OS installer) unless you
+add `--overwrite`. Sticks formatted as exFAT/NTFS (common for large, new ones) must be
+reformatted to FAT32 once, which **erases** the stick: `./make-usb.sh --format /dev/sdX` (checks
+that it is USB and asks you to retype the device name), or use your desktop's disk utility.
 
-Przy dodawaniu nowego etapu: funkcje/testy uzywane tylko w testach oznaczaj
-`#[cfg(selftest)]`, a wywolanie `self_test()` w `kernel_main` tez pod
-`#[cfg(selftest)]`.
+To run a stress test without a keyboard: `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
+(see [Stress test on real hardware](#stress-test-on-real-hardware)). A plain `./make-usb.sh`
+builds a regular kernel.
 
-## Stan (etapy)
+### 2. Firmware settings
 
-Kolejnosc startu kernela (M16b: po konsoli ACPI + Local APIC, po virtio NVMe + partycje GPT): serial -> GDT/IDT (M4) -> frame allocator (M1) -> paging (M2) -> heap (M3) -> mapowanie on-demand (M4) -> PIC + PIT + `sti` (M5) -> klawiatura PS/2 (M6) -> konsola na ekranie + shell (M7; konsola startuje zaraz po M4, od tego momentu logi sa tez na ekranie) -> PCI + dysk virtio (M8) -> VFS: ramfs w / i FAT32 w /disk (M9).
-Scheduler (M12) startuje zaraz po timerze: kod startowy staje sie zadaniem 1 ("kernel", potem shell), obok dziala zadanie 0 ("idle").
-DSB (M10): ELF kernela -> wlasne tablice stron (direct map + kernel w gornej polowie + stos) -> ExitBootServices -> skok do kernela.
-Szczegoly i plan: `roadmapa`. Architektura (co w kernelu, co w user space): `ARCHITEKTURA.md`. Historia zmian: `CHANGELOG.md`.
+Open the firmware setup (usually F2 or Del at the vendor logo):
 
-## Licencja
+- **Secure Boot -> Disabled** (DSB is not signed). You can re-enable it after testing.
+- **If the machine also runs Windows with BitLocker**: changing Secure Boot may trigger a
+  BitLocker recovery key prompt. Save the recovery key first (Microsoft account or BitLocker
+  settings).
 
-DeSoOS: GNU General Public License v3 albo nowsza (`GPL-3.0-or-later`) - pelny tekst w `LICENSE`.
-Wyjatek: `kernel/drivers/font.rs` - zmodyfikowany podzbior czcionki Terminus Font (Copyright (c) 2020
-Dimitar Toshkov Zhekov), wylacznie na licencji SIL Open Font License 1.1 (`OFL-1.1`) - patrz `FONT-LICENSE.txt`.
-Rozpowszechniajac DeSoOS (takze BOOTX64.EFI) dolacz `LICENSE` i `FONT-LICENSE.txt`.
+### 3. Boot
+
+Insert the stick, power on, open your firmware boot menu (usually F12, F11, F9 or Esc at the
+vendor logo) and choose the USB stick (`EFI USB Device`). You will see boot logs, then
+`desoos:/$`. Useful checks:
+
+- `disk` - NVMe disks and GPT partitions (all `read-only`)
+- `ls /esp` - the disk's EFI partition (read-only), e.g. `ls /esp/EFI`
+- `ls /usb0` - the boot USB stick (read-only)
+- `cpus` - CPUs online (a 16-thread CPU should show 16)
+- `lspci`, `acpi`, `mem`, `ps`, `lsusb`, `services`
+- Shift+PgUp - scroll back through the boot log
+
+Most laptops have no serial port, so everything is visible only on screen (take a photo if
+something goes wrong). To shut down: `k halt` and then hold the power button, or just hold the
+power button. Remove the stick and the computer boots normally from its disk.
+
+Internal laptop keyboards are often USB devices rather than PS/2 (no 8042 controller); they
+work through `usbd`. If no keyboard works, DeSoOS still boots and shows its logs.
+
+### Stress test on real hardware
+
+Build with `DESOOS_AUTOSTRESS=S` (or `./build.sh --autostress=S`). 5 s after boot the kernel
+measures USB reads of the largest file on `/usb0` (256 KiB and 4 KiB buffers, KiB/s) and USB
+keyboard latency (interrupt to character, in us; press a few keys meanwhile), printing a
+`[RESULT-USB]` line. It then runs the stress test for S seconds, continuously reading that file
+from `/usb0` (a `usb:` line with MiB, KiB/s, per-pass checksums and errors), and finally prints
+`[AUTOSTRESS] PASS/FAIL`, `cpus` and `mem`. Use `DESOOS_STRESS_POOL=P` for full load.
+
+## Using the shell
+
+The user-space shell (`user/bin/sh.rs`, ring 3):
+
+- Run programs by name (`ls /bin`, `primes 50000`, `args "one two" three`) or by path
+  (`cd /bin`, `./hello`).
+- Redirection `> file`, `>> file`, `< file`; a trailing `&` runs in the background (`ps`,
+  `kill <pid>`, `wait`). Quote names containing spaces: `cat "my file.txt"`.
+- Built-ins: `cd`, `pwd`, `echo`, `exit`, `help`, `history`, `clear`, `wait`, `sync`, `reboot`,
+  `halt`, `stress`.
+- Kernel information (read-only): `mem`, `cpus`, `irq`, `lspci`, `acpi`, `disk`, `mount`, `df`,
+  `date`, `ver`, `uptime`.
+- `services` - state of services started by `init`, including USB controllers (`usb0`,
+  `usb1`, ...).
+- `lsusb` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
+  (keyboard, mouse, mass storage, hub, ...), interface classes, manufacturer and product.
+- Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`
+  start a new one.
+- `mkfs`, disk writes (`disk write`) and `run` are available only in the kernel emergency shell.
+
+Line editing and console:
+
+- Arrows, Home/End, Backspace/Delete edit the line; Up/Down browse history; Tab completes.
+- Ctrl+C abandons the line, Ctrl+U clears it, Ctrl+L clears the screen.
+- Scrollback (1000 lines, in the QEMU window / on screen): Shift+Up/Down by a line,
+  Shift+PgUp/PgDn by a screen, mouse wheel by 3 lines; also Shift + keypad 8/2 and 9/3. Typing
+  returns to the bottom. In QEMU click the window to capture the mouse; Ctrl+Alt+G releases it.
+- Polish characters on PS/2 keyboards: right Alt (AltGr) + a/c/e/l/n/o/s/x/z, AltGr+u = euro sign.
+
+### Files
+
+- `/` is a ramfs (in memory, lost on reboot); `/disk` is the FAT32 disk `disk.img` (persistent).
+- A new `disk.img` is empty: format it once in DeSoOS with `mkfs 0`, then `mkfs 0 yes` (it is
+  mounted at `/disk` immediately). Until then `/disk` does not exist. `df` then shows two lines
+  (`/` and `/disk`).
+- Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, plus kernel
+  commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`.
+- The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
+  `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
+- Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.
+
+### Processes, SMP and stress
+
+- `ps` lists tasks (state, CPU time, CPU; `~2` = not running now, last ran on CPU 2).
+- `cpus` shows processors, per-CPU tasks, timer ticks, IPIs, Big Kernel Lock contention and
+  TLB shootdown statistics.
+- Example: run `primes 3000000 &` twice, then `ps` - both compute in parallel on different CPUs.
+- `stress` (10 s) or `stress 300` - many processes, files and spinlocks on all CPUs at once;
+  ends with `stress PASS: ...`.
+
+### Kernel emergency shell test programs
+
+In the kernel shell (`desoos>`), `run` lists programs from `/bin` plus built-in assembly test
+programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
+
+- `run sum` (prints 5050); `run pf` / `gp` / `ud` / `nx` / `sse` - faults that end only the
+  process; `run loop` - endless loop (Ctrl+C or `&` + `kill`).
+- Syscalls: `run hello`, `run cat`, `run files` (then `cat /tmp/ring3.txt`), `run ticker &`,
+  `run regs` (100k syscalls), `run badptr` (bad pointer -> -14). Syscall list:
+  `kernel/user/syscalls.rs` and `ARCHITECTURE.md`.
+- FPU/SSE: `run sse` (42), `run x87` (3), `run xmm 3` (3 processes checking xmm0-15 2 million
+  times; 1 = no corruption), `run fpuclean` (new processes start with clean registers).
+- Kernel tasks: `spawn spin`, `spawn tick`, `kill <id>`.
+
+## Project layout
+
+- `boot/` - DSB, the UEFI boot loader (`dsb.rs`).
+- `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
+  syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
+- `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
+- `common/` - code shared by the boot loader and kernel (ELF parsing).
+- `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `qemu-hotplug.py`.
+- `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
+- `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.
+- `build/` - build output; `logs/` - test and build logs.
+
+## License
+
+DeSoOS is licensed under the GNU General Public License v3 or later (`GPL-3.0-or-later`); full
+text in `LICENSE`.
+
+Exception: `kernel/drivers/font.rs` is a modified subset of Terminus Font (Copyright (c) 2020
+Dimitar Toshkov Zhekov), licensed solely under the SIL Open Font License 1.1 (`OFL-1.1`); see
+`FONT-LICENSE.txt`.
+
+When distributing DeSoOS (including `BOOTX64.EFI`), include `LICENSE` and `FONT-LICENSE.txt`.

@@ -1,11 +1,11 @@
-// M13a: programy testowe dla ring 3 (asembler, kod niezależny od położenia).
+// Test programs for ring 3 (assembly, position-independent code).
 //
-// Programy M13 kończą się `int3` (kernel zapisuje rejestry, rax = wynik);
-// od M14 programy używają syscalli (write, read, open, exit... – numery
-// w user/syscalls.rs).  Kod leży w
-// .rodata kernela (nigdy nie jest tam wykonywany) i jest kopiowany do stron
-// procesu pod USER_CODE.  Strona danych procesu (USER_DATA) ma na starcie
-// w pierwszym qwordzie argument podany przy uruchomieniu.
+// The earliest programs ended with `int3` (the kernel saves registers, rax = result);
+// newer programs use syscalls (write, read, open, exit... – numbers
+// in user/syscalls.rs).  The code lives in
+// the kernel's .rodata (it is never executed there) and is copied into the
+// process pages at USER_CODE.  The process data page (USER_DATA) holds at startup
+// the argument given at launch in its first qword.
 
 use core::arch::global_asm;
 
@@ -14,7 +14,7 @@ global_asm!(r#"
 
     .global up_sum
     .global up_sum_end
-    // suma 1..100 przez stos (push/pop), rbx = CS (ring 3 -> 0x23)
+    // sum of 1..100 through the stack (push/pop), rbx = CS (ring 3 -> 0x23)
     up_sum:
         xor eax, eax
         mov ecx, 100
@@ -28,7 +28,7 @@ global_asm!(r#"
         int3
     up_sum_end:
 
-    // ---------------- M14: programy z syscallami ----------------
+    // ---------------- programs using syscalls ----------------
 
     .global up_hello
     .global up_hello_end
@@ -49,7 +49,7 @@ global_asm!(r#"
 
     .global up_cat
     .global up_cat_end
-    // pyta o linię (read z fd 0), wypisuje ją z powrotem
+    // asks for a line (read from fd 0) and prints it back
     up_cat:
         mov eax, 1
         mov edi, 1
@@ -80,7 +80,7 @@ global_asm!(r#"
         xor edi, edi
         xor eax, eax
         syscall
-    1:  mov rdi, rax                    // exit(błąd)
+    1:  mov rdi, rax                    // exit(error)
         xor eax, eax
         syscall
     up_cat_q:
@@ -93,7 +93,7 @@ global_asm!(r#"
 
     .global up_files
     .global up_files_end
-    // open/write/close/open/read/close na pliku w VFS, potem wypisuje treść
+    // open/write/close/open/read/close on a VFS file, then prints the contents
     up_files:
         mov eax, 3                      // open(path, len, WRITE|CREATE|TRUNC)
         lea rdi, [rip + up_files_path]
@@ -157,7 +157,7 @@ global_asm!(r#"
 
     .global up_badptr
     .global up_badptr_end
-    // write z adresem kernela -> -EFAULT (-14) jako kod wyjścia
+    // write with a kernel address -> -EFAULT (-14) as the exit code
     up_badptr:
         mov eax, 1
         mov edi, 1
@@ -171,7 +171,7 @@ global_asm!(r#"
 
     .global up_badsys
     .global up_badsys_end
-    // nieznany syscall -> -ENOSYS (-38) jako kod wyjścia
+    // unknown syscall -> -ENOSYS (-38) as the exit code
     up_badsys:
         mov eax, 999
         syscall
@@ -193,7 +193,7 @@ global_asm!(r#"
 
     .global up_sleeper
     .global up_sleeper_end
-    // exit(ile ms naprawdę trwał sleep(100))
+    // exit(how many ms sleep(100) really took)
     up_sleeper:
         mov eax, 8                      // uptime
         syscall
@@ -211,7 +211,7 @@ global_asm!(r#"
 
     .global up_regs
     .global up_regs_end
-    // 100 000 x getpid; rejestry poza rax/rcx/r11 nie mogą się zmienić
+    // 100 000 x getpid; registers other than rax/rcx/r11 must not change
     up_regs:
         mov rbx, 0x1111111111111111
         mov rbp, 0x2222222222222222
@@ -265,14 +265,14 @@ global_asm!(r#"
         xor edi, edi                    // exit(0)
         xor eax, eax
         syscall
-    2:  mov edi, 1                      // exit(1) – rejestr zmieniony
+    2:  mov edi, 1                      // exit(1) – a register changed
         xor eax, eax
         syscall
     up_regs_end:
 
     .global up_ticker
     .global up_ticker_end
-    // 5 x ("tick" + sleep 1 s) – działa w tle, nie zajmuje CPU
+    // 5 x ("tick" + sleep 1 s) – runs in the background without using the CPU
     up_ticker:
         mov r12, 5
     1:  mov eax, 1
@@ -296,7 +296,7 @@ global_asm!(r#"
 
     .global up_counter
     .global up_counter_end
-    // 3 000 000 x (czytaj [USER_DATA], +1, zapisz) – izolacja i wywłaszczanie
+    // 3 000 000 x (read [USER_DATA], +1, write) – isolation and preemption
     up_counter:
         mov rdx, 0x600000
         mov ecx, 3000000
@@ -339,7 +339,7 @@ global_asm!(r#"
 
     .global up_nx
     .global up_nx_end
-    // skok na własny stos (strona z NX)
+    // jump onto its own stack (an NX page)
     up_nx:
         mov rdx, rsp
         sub rdx, 64
@@ -360,9 +360,9 @@ global_asm!(r#"
 
     .global up_sse
     .global up_sse_end
-    // M13b: kod SSE/x87 jako bajty – kernel jest soft-float, więc nie
-    // polegamy na tym, że asembler przyjmie te instrukcje.  Źródło w
-    // komentarzach.
+    // SSE/x87 code as raw bytes – the kernel is soft-float, so we do not
+    // rely on the assembler accepting these instructions.  The source is
+    // in the comments.
     // mov eax, 21; movq xmm0, rax; paddq xmm0, xmm0; movq rax, xmm0; int3
     up_sse:
         .byte 0xb8, 0x15, 0x00, 0x00, 0x00, 0x66, 0x48, 0x0f, 0x6e, 0xc0, 0x66, 0x0f, 0xd4, 0xc0, 0x66, 0x48
@@ -380,8 +380,8 @@ global_asm!(r#"
     .global up_xmm
     .global up_xmm_end
     // xmm0..xmm15 = seed+0..seed+15 (seed = [USER_DATA]), st0 = seed;
-    // 2 000 000 razy sprawdza, czy rejestry się nie zmieniły (przełączanie
-    // procesów w trakcie).  rax = 1 OK, 0xbad = XMM zmieniony, 0xbad1 = x87.
+    // checks 2 000 000 times that the registers did not change (processes
+    // switch meanwhile).  rax = 1 OK, 0xbad = XMM changed, 0xbad1 = x87.
     up_xmm:
         .byte 0x48, 0xc7, 0xc2, 0x00, 0x00, 0x60, 0x00, 0x48, 0x8b, 0x02, 0x66, 0x48, 0x0f, 0x6e, 0xc0, 0x48
         .byte 0xff, 0xc0, 0x66, 0x48, 0x0f, 0x6e, 0xc8, 0x48, 0xff, 0xc0, 0x66, 0x48, 0x0f, 0x6e, 0xd0, 0x48
@@ -414,8 +414,8 @@ global_asm!(r#"
 
     .global up_fpuclean
     .global up_fpuclean_end
-    // Nowy proces: xmm0..15 = 0, FCW = 0x37f, MXCSR = 0x1f80 -> rax = 1
-    // (0xbad2 = XMM nie zerowy, 0xbad3 = FCW, 0xbad4 = MXCSR).
+    // New process: xmm0..15 = 0, FCW = 0x37f, MXCSR = 0x1f80 -> rax = 1
+    // (0xbad2 = XMM not zero, 0xbad3 = FCW, 0xbad4 = MXCSR).
     up_fpuclean:
         .byte 0x66, 0x48, 0x0f, 0x7e, 0xc0, 0x66, 0x0f, 0xeb, 0xc1, 0x66, 0x0f, 0xeb, 0xc2, 0x66, 0x0f, 0xeb
         .byte 0xc3, 0x66, 0x0f, 0xeb, 0xc4, 0x66, 0x0f, 0xeb, 0xc5, 0x66, 0x0f, 0xeb, 0xc6, 0x66, 0x0f, 0xeb
@@ -431,7 +431,7 @@ global_asm!(r#"
 
     .global up_simdexc
     .global up_simdexc_end
-    // odmaskowane dzielenie przez zero w MXCSR, divsd x/0 -> #XM (wektor 19)
+    // divide-by-zero unmasked in MXCSR, divsd x/0 -> #XM (vector 19)
     up_simdexc:
         .byte 0x48, 0x83, 0xec, 0x08, 0x0f, 0xae, 0x1c, 0x24, 0x81, 0x24, 0x24, 0xff, 0xfd, 0xff, 0xff, 0x0f
         .byte 0xae, 0x14, 0x24, 0x66, 0x0f, 0x57, 0xc9, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xf2, 0x48, 0x0f, 0x2a
@@ -444,11 +444,11 @@ global_asm!(r#"
         ret
     up_ret_end:
 
-    // ---------------- M17a.d: syscalle bez BKL ----------------
+    // ---------------- syscalls without the BKL ----------------
 
     .global up_lines
     .global up_lines_end
-    // 2000 x write(1, linia 51 B), exit(0) – linie mają dojść całe
+    // 2000 x write(1, 51-byte line), exit(0) – every line must arrive whole
     up_lines:
         mov r12d, 2000
     1:  mov eax, 1
@@ -472,7 +472,7 @@ global_asm!(r#"
 
     .global up_pidloop
     .global up_pidloop_end
-    // getpid bez końca (kill w trakcie syscalli bez BKL)
+    // getpid forever (killed in the middle of BKL-free syscalls)
     up_pidloop:
     1:  mov eax, 5
         syscall
@@ -488,10 +488,10 @@ macro_rules! programs {
             $( static $start: u8; static $end: u8; )*
         }
 
-        /// (nazwa, opis)
+        /// (name, description)
         pub const LIST: &[(&str, &str)] = &[ $( ($name, $about), )* ];
 
-        /// Kod programu.
+        /// Program code.
         pub fn code(name: &str) -> Option<&'static [u8]> {
             $(
                 if name == $name {

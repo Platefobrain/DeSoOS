@@ -1,8 +1,8 @@
-// M17b.d: test pamięci procesu – brk, mmap / munmap, leniwe strony, rosnący
-// stos, duże i małe alokacje przez alokator biblioteki.
-//   memtest          – wszystkie sprawdzenia; "memtest: N checks OK", kod 0
-//   memtest unmapped – dotyka strony po munmap (powinien zginąć od #PF)
-//   memtest stack    – rekurencja głębsza niż 8 MiB stosu (powinien zginąć)
+// Process memory test – brk, mmap / munmap, lazy pages, growing
+// stack, large and small allocations through the library allocator.
+//   memtest          – all checks; "memtest: N checks OK", code 0
+//   memtest unmapped – touches a page after munmap (should die from #PF)
+//   memtest stack    – recursion deeper than the 8 MiB stack (should die)
 #![no_std]
 #![no_main]
 
@@ -28,7 +28,7 @@ macro_rules! check {
     };
 }
 
-/// Rekurencja z ramką ~4 KiB na poziom; zwraca sumę (kompilator nie usunie).
+/// Recursion with a ~4 KiB frame per level; returns a sum (so the compiler cannot remove it).
 #[inline(never)]
 fn deep(level: u64) -> u64 {
     let mut pad = [0u8; 4000];
@@ -43,17 +43,17 @@ fn main(args: Args) -> i32 {
             let a = mmap(8192, PROT_READ | PROT_WRITE).unwrap_or(0);
             unsafe { core::ptr::write_volatile(a as *mut u8, 1) };
             munmap(a, 8192);
-            unsafe { core::ptr::write_volatile(a as *mut u8, 2) }; // #PF -> koniec
+            unsafe { core::ptr::write_volatile(a as *mut u8, 2) }; // #PF -> exit
             return 0;
         }
         Some("stack") => {
-            return deep(4096) as i32; // ~16 MiB stosu > 8 MiB
+            return deep(4096) as i32; // ~16 MiB of stack > 8 MiB
         }
         _ => {}
     }
     let mut n = 0;
 
-    // 1. brk: zapytanie, wzrost, zapis na końcu, zmniejszenie.
+    // 1. brk: query, grow, write at the end, shrink.
     let b0 = brk(0);
     check!(n, b0 > 0, "brk(0) = {:#x}", b0);
     let b1 = brk(b0 + 3 * 4096 + 100);
@@ -66,7 +66,7 @@ fn main(args: Args) -> i32 {
     check!(n, brk(b0) == b0, "brk shrink");
     check!(n, brk(1) == b0, "invalid brk must return the current end");
 
-    // 2. mmap: 64 MiB zarezerwowane, dotknięte tylko kilka stron.
+    // 2. mmap: 64 MiB reserved, only a few pages touched.
     let big = mmap(64 << 20, PROT_READ | PROT_WRITE);
     check!(n, big.is_ok(), "mmap 64 MiB: {:?}", big);
     let big = big.unwrap();
@@ -78,7 +78,7 @@ fn main(args: Args) -> i32 {
             check!(n, core::ptr::read_volatile((big + off) as *const u64) == off ^ 0xdead, "mmap page at +{:#x}", off);
         }
     }
-    // Częściowe munmap (środek), reszta działa.
+    // Partial munmap (the middle), the rest still works.
     check!(n, munmap(big + (16 << 20), 16 << 20) == 0, "partial munmap");
     unsafe {
         check!(n, core::ptr::read_volatile(big as *const u64) == 0xdead, "rest of the region after partial munmap");
@@ -86,11 +86,11 @@ fn main(args: Args) -> i32 {
     check!(n, munmap(big, 64 << 20) == 0, "munmap all");
     check!(n, mmap(0, PROT_READ).is_err() && munmap(big + 1, 4096) == -22, "bad mmap / munmap arguments");
     check!(n, mmap(16 << 30, PROT_READ | PROT_WRITE).is_err(), "16 GiB mmap must fail (limit)");
-    // Długości bliskie 2^64: błąd, nie przepełnienie przy zaokrąglaniu (jądro z overflow-checks).
+    // Lengths close to 2^64: an error, not an overflow when rounding (kernel with overflow-checks).
     check!(n, mmap(u64::MAX, PROT_READ).is_err() && mmap(u64::MAX - 4094, PROT_READ).is_err(), "mmap near 2^64 must fail");
     check!(n, munmap(0x4000_0000_0000 - 4096, u64::MAX) == -22 && munmap(big, u64::MAX - 4094) == -22, "munmap near 2^64 must fail");
 
-    // 3. Kernel kopiuje do niedotkniętych stron (read do świeżego bufora).
+    // 3. The kernel copies into untouched pages (read into a fresh buffer).
     let buf = mmap(8192, PROT_READ | PROT_WRITE).unwrap_or(0);
     let fd = open("/bin/hello", O_READ);
     let r = read(fd as u64, unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, 8192) });
@@ -98,7 +98,7 @@ fn main(args: Args) -> i32 {
     check!(n, r == 8192 && unsafe { *(buf as *const [u8; 4]) } == *b"\x7fELF", "read into untouched pages: {}", r);
     munmap(buf, 8192);
 
-    // 4. Alokator: 4 MiB Vec (mmap), dużo małych bloków (brk), zwalnianie.
+    // 4. Allocator: 4 MiB Vec (mmap), many small blocks (brk), freeing.
     let mut v: Vec<u8> = vec![0u8; 4 << 20];
     for (i, b) in v.iter_mut().enumerate().step_by(4096) {
         *b = (i / 4096) as u8;
@@ -117,11 +117,11 @@ fn main(args: Args) -> i32 {
     }
     check!(n, grow[299_999] == 299_999 && grow.len() == 300_000, "Vec growing to 2.4 MiB");
 
-    // 5. Stos rośnie: ~1 MiB rekurencji (start: 16 KiB).
+    // 5. The stack grows: ~1 MiB of recursion (start: 16 KiB).
     let _ = deep(256);
     n += 1;
 
-    // 6. Dzieci: dostęp po munmap i przepełnienie stosu kończą tylko dziecko.
+    // 6. Children: access after munmap and stack overflow terminate only the child.
     for (mode, want) in [("unmapped", 14u64), ("stack", 14)] {
         let pid = spawn("/bin/memtest", &["memtest", mode], 0, STDIO);
         let st = wait(pid as u64, 0);

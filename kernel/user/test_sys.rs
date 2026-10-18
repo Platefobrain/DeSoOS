@@ -1,4 +1,4 @@
-// M14: samotesty syscalli (tylko build z --cfg selftest).
+// Syscall self-tests (only builds with --cfg selftest).
 
 use alloc::vec::Vec;
 
@@ -31,7 +31,7 @@ fn start(name: &str, stdin: Option<&[u8]>) -> Option<TaskId> {
     spawn_with(name, programs::code(name)?, &opts).ok()
 }
 
-/// Uruchamia z przechwyceniem wyjścia; (sposób zakończenia, wyjście).
+/// Runs with output capture; (how it ended, output).
 fn run_capture(name: &str, stdin: Option<&[u8]>) -> Option<(ExitKind, Vec<u8>)> {
     let id = start(name, stdin)?;
     if !wait_for(5000, || sched::task_info(id).is_none()) {
@@ -53,7 +53,7 @@ pub fn self_test() {
     crate::selftest::begin();
     let frames = crate::selftest::settled_free_frames();
 
-    // 1. MSR-y SYSCALL/SYSRET i blok per CPU.
+    // 1. SYSCALL/SYSRET MSRs and the per-CPU block.
     let (sce, star, lstar, fmask, kgs, krsp) = syscall::state();
     check!(sce, "EFER.SCE off");
     check!(star == (0x08u64 << 32) | (syscall::SYSRET_BASE << 48), "STAR {:#x}", star);
@@ -75,7 +75,7 @@ pub fn self_test() {
     );
     serial_println!("[SYSCALL TEST] 2/10 write(1) + exit(0) PASS");
 
-    // 3. Pliki: open/write/close/open/read/close przez VFS.
+    // 3. Files: open/write/close/open/read/close through the VFS.
     let _ = crate::fs::remove("/tmp/ring3.txt");
     let r = run_capture("files", None);
     let want = b"written by a ring 3 process\n";
@@ -88,7 +88,7 @@ pub fn self_test() {
     let _ = crate::fs::remove("/tmp/ring3.txt");
     serial_println!("[SYSCALL TEST] 3/10 open/write/read/close on the VFS (/tmp/ring3.txt) PASS");
 
-    // 4. read z wejścia.
+    // 4. read from input.
     let r = run_capture("cat", Some(b"abc\n"));
     check!(
         r.as_ref().map(|(k, o)| (*k, o.as_slice())) == Some((ExitKind::Exit(0), &b"Type something: You typed: abc\n"[..])),
@@ -97,7 +97,7 @@ pub fn self_test() {
     );
     serial_println!("[SYSCALL TEST] 4/10 read(0) from stdin PASS");
 
-    // 5. Błędy: zły wskaźnik, nieznany syscall; getpid.
+    // 5. Errors: bad pointer, unknown syscall; getpid.
     let r = run_capture("badptr", None).map(|(k, _)| k);
     check!(r == Some(ExitKind::Exit(-14)), "badptr: {:?}", r);
     let r = run_capture("badsys", None).map(|(k, _)| k);
@@ -108,7 +108,7 @@ pub fn self_test() {
     check!(exit_info(pid).map(|e| e.kind) == Some(ExitKind::Exit(pid as i64)), "getpid: {:?}", exit_info(pid).map(|e| e.kind));
     serial_println!("[SYSCALL TEST] 5/10 kernel pointer -> EFAULT, unknown syscall -> ENOSYS, getpid PASS");
 
-    // 6. Rejestry po 100 000 syscalli, 3 procesy naraz (przełączanie w trakcie).
+    // 6. Registers after 100 000 syscalls, 3 processes at once (switching in between).
     let ids: Vec<TaskId> = (0..3).filter_map(|_| start("regs", None)).collect();
     check!(ids.len() == 3, "spawn regs");
     check!(wait_for(20_000, || ids.iter().all(|i| sched::task_info(*i).is_none())), "regs did not end");
@@ -118,7 +118,7 @@ pub fn self_test() {
     }
     serial_println!("[SYSCALL TEST] 6/10 3 x 100 000 syscalls, all registers preserved PASS");
 
-    // 7. sleep w syscallu (zadanie śpi, CPU dla innych): 4 naraz.
+    // 7. sleep in a syscall (the task sleeps, the CPU goes to others): 4 at once.
     let ids: Vec<TaskId> = (0..4).filter_map(|_| start("sleeper", None)).collect();
     check!(ids.len() == 4, "spawn sleepers");
     check!(wait_for(3000, || ids.iter().all(|i| sched::task_info(*i).is_none())), "sleepers did not end");
@@ -128,7 +128,7 @@ pub fn self_test() {
     }
     serial_println!("[SYSCALL TEST] 7/10 sleep(100) in 4 processes at once -> 100..120 ms each PASS");
 
-    // 8. kill procesu czekającego w syscallu (read z klawiatury).
+    // 8. Killing a process waiting in a syscall (read from the keyboard).
     let opts = SpawnOptions { capture: true, ..SpawnOptions::default() };
     let id = spawn_with("cat", programs::code("cat").unwrap(), &opts).ok();
     check!(id.is_some(), "spawn cat");
@@ -142,8 +142,8 @@ pub fn self_test() {
     check!(exit_info(id).map(|e| e.kind) == Some(ExitKind::Killed), "cat: {:?}", exit_info(id).map(|e| e.kind));
     serial_println!("[SYSCALL TEST] 8/10 kill while blocked in read() PASS");
 
-    // 9. SYSRET: syscall jako ostatnia instrukcja dolnej połowy -> RIP
-    //    powrotu 0x0000_8000_0000_0000 (niekanoniczny) -> proces kończony.
+    // 9. SYSRET: syscall as the last instruction of the lower half -> return
+    //    RIP 0x0000_8000_0000_0000 (non-canonical) -> the process is killed.
     let mut page = alloc::vec![0u8; 4096];
     page[0xff9..].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0x0f, 0x05]); // mov eax, 7; syscall
     let opts = SpawnOptions { code_at: 0x0000_7fff_ffff_f000, entry_offset: 0xff9, ..SpawnOptions::default() };
@@ -159,7 +159,7 @@ pub fn self_test() {
     );
     serial_println!("[SYSCALL TEST] 9/10 non-canonical SYSRET address -> process killed, not a kernel #GP PASS");
 
-    // 10. SMAP: kernel nie czyta strony użytkownika poza copy_from_user.
+    // 10. SMAP: the kernel does not read a user page outside copy_from_user.
     if smap_enabled() {
         let mut sp = AddressSpace::new().unwrap();
         sp.map_new(USER_DATA, USER | WRITABLE).unwrap();

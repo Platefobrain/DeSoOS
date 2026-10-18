@@ -1,23 +1,23 @@
-// M8: magistrala PCI – wyszukiwanie urządzeń i dostęp do konfiguracji.
+// PCI bus – device discovery and configuration access.
 //
-// Dostęp do przestrzeni konfiguracyjnej:
-//   * "mechanizm #1" – porty 0xCF8 (adres) i 0xCFC (dane): działa na każdym
-//     PC x86, ale daje tylko pierwsze 256 bajtów konfiguracji.  Nim
-//     przeglądamy magistralę.
-//   * M16b: PCIe ECAM – konfiguracja jako pamięć (4 KiB na funkcję), adres
-//     z tablicy ACPI MCFG.  Po przeglądzie każda znaleziona funkcja dostaje
-//     zmapowaną stronę ECAM; gdy odczyty ECAM zgadzają się z portami, cały
-//     dostęp do konfiguracji idzie przez ECAM (także rozszerzona część
+// Configuration space access:
+//   * "mechanism #1" – ports 0xCF8 (address) and 0xCFC (data): works on every
+//     x86 PC, but only gives the first 256 bytes of configuration.  We use it
+//     to scan the bus.
+//   * PCIe ECAM – configuration as memory (4 KiB per function), address
+//     from the ACPI MCFG table.  After the scan each function found gets
+//     its ECAM page mapped; if ECAM reads match the ports, all
+//     configuration access goes through ECAM (including the extended part
 //     0x100..0xFFF – `read32_ext`).
 //
-// M16b: MSI / MSI-X (`enable_msix`, `enable_msi`) – przerwania jako zapis do
-// LAPIC, bez linii INTx (której numeru na prawdziwym sprzęcie nie znamy bez
-// interpretera AML).
+// MSI / MSI-X (`enable_msix`, `enable_msi`) – interrupts as writes to the
+// LAPIC, without an INTx line (whose number on real hardware we cannot know without
+// an AML interpreter).
 //
-// `init()` przegląda wszystkie szyny/urządzenia/funkcje, zapisuje listę
-// i wyłącza przerwania INTx urządzeniom, których nie obsługujemy (np. karta
-// sieciowa dzieli linię IRQ z dyskiem virtio – jej przerwanie bez sterownika
-// zablokowałoby system).  Sterownik włącza INTx dla swojego urządzenia.
+// `init()` scans all buses/devices/functions, stores the list
+// and disables INTx interrupts for devices we do not support (e.g. a network
+// card sharing an IRQ line with the virtio disk – its interrupt without a driver
+// would lock up the system).  A driver enables INTx for its own device.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -49,7 +49,7 @@ pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 const STATUS_CAPABILITIES: u16 = 1 << 4;
 
 // ------------------------------------------------------------
-// Dostęp do konfiguracji
+// Configuration access
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,12 +94,12 @@ fn write_data32(v: u32) {
     }
 }
 
-// M16b: ECAM (segment 0).  Włączane w init po sprawdzeniu.
+// ECAM (segment 0).  Enabled in init after verification.
 static ECAM_ON: AtomicBool = AtomicBool::new(false);
 static ECAM_BASE: AtomicU64 = AtomicU64::new(0);
 static ECAM_BUSES: AtomicU64 = AtomicU64::new(0); // start | end << 8
 
-/// Adres fizyczny rejestru w ECAM (bez sprawdzania, czy ECAM działa).
+/// Physical address of a register in ECAM (without checking whether ECAM works).
 fn ecam_phys(a: Address, offset: u16) -> Option<u64> {
     let base = ECAM_BASE.load(Ordering::Relaxed);
     let buses = ECAM_BUSES.load(Ordering::Relaxed);
@@ -115,7 +115,7 @@ fn ecam_phys(a: Address, offset: u16) -> Option<u64> {
     )
 }
 
-/// Wirtualny adres rejestru w ECAM, jeśli strona funkcji jest zmapowana.
+/// Virtual address of a register in ECAM, if the function's page is mapped.
 fn ecam_virt(a: Address, offset: u16) -> Option<u64> {
     let phys = ecam_phys(a, offset)?;
     let page = phys & !0xFFF;
@@ -133,8 +133,8 @@ fn port_read32(a: Address, offset: u8) -> u32 {
     })
 }
 
-// Para zapis adresu + odczyt danych nie może zostać przerwana przez inny
-// dostęp do konfiguracji (np. z handlera IRQ) – stąd without_interrupts.
+// The address write + data read pair must not be interrupted by another
+// configuration access (e.g. from an IRQ handler) – hence without_interrupts.
 pub fn read32(a: Address, offset: u8) -> u32 {
     if ECAM_ON.load(Ordering::Relaxed) {
         if let Some(va) = ecam_virt(a, offset as u16) {
@@ -157,7 +157,7 @@ pub fn write32(a: Address, offset: u8, value: u32) {
     })
 }
 
-/// M16b: rozszerzona konfiguracja PCIe (0x100..0xFFF) – tylko przez ECAM.
+/// Extended PCIe configuration (0x100..0xFFF) – only through ECAM.
 #[allow(dead_code)]
 pub fn read32_ext(a: Address, offset: u16) -> Option<u32> {
     if !ECAM_ON.load(Ordering::Relaxed) {
@@ -167,24 +167,24 @@ pub fn read32_ext(a: Address, offset: u16) -> Option<u32> {
     Some(unsafe { core::ptr::read_volatile(va as *const u32) })
 }
 
-/// Czy konfiguracja idzie przez ECAM (lspci, testy).
+/// Whether configuration goes through ECAM (lspci, tests).
 pub fn ecam_enabled() -> bool {
     ECAM_ON.load(Ordering::Relaxed)
 }
 
-/// Adres ECAM (0 = brak).
+/// ECAM address (0 = none).
 pub fn ecam_base() -> u64 {
     if ecam_enabled() { ECAM_BASE.load(Ordering::Relaxed) } else { 0 }
 }
 
-/// Testy: odczyt tym samym rejestrem przez porty (porównanie z ECAM).
+/// Tests: reads the same register through the ports (comparison with ECAM).
 #[allow(dead_code)]
 pub fn read32_port(a: Address, offset: u8) -> u32 {
     port_read32(a, offset)
 }
 
-/// M16b: mapuje strony ECAM znalezionych funkcji i włącza ECAM, jeśli
-/// odczyty zgadzają się z portami.  Po przeglądzie magistrali.
+/// Maps the ECAM pages of the functions found and enables ECAM if
+/// the reads match the ports.  After the bus scan.
 fn setup_ecam(found: &[Device]) {
     let Some(e) = crate::acpi::mcfg().iter().find(|e| e.segment == 0).copied() else {
         serial_println!("[PCI] no MCFG (ACPI) - config space via ports 0xCF8/0xCFC (256 B per function)");
@@ -201,7 +201,7 @@ fn setup_ecam(found: &[Device]) {
             serial_println!("[PCI] cannot map ECAM page {:#x} - ECAM not used", phys);
             return;
         }
-        // Ten sam rejestr przez ECAM i przez porty: ID i klasa.
+        // The same register through ECAM and through the ports: ID and class.
         for off in [REG_VENDOR, REG_CLASS] {
             let via_ecam = unsafe { core::ptr::read_volatile(ecam_virt(d.address, off as u16).unwrap() as *const u32) };
             let via_port = port_read32(d.address, off);
@@ -238,7 +238,7 @@ pub fn write16(a: Address, offset: u8, value: u16) {
 }
 
 // ------------------------------------------------------------
-// Urządzenia
+// Devices
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -272,7 +272,7 @@ impl Device {
         write16(self.address, REG_COMMAND, value);
     }
 
-    /// Włącza dekodowanie pamięci/IO, bus mastering (DMA) i przerwania INTx.
+    /// Enables memory/IO decoding, bus mastering (DMA) and INTx interrupts.
     pub fn enable(&self, bus_master: bool, intx: bool) {
         let mut cmd = self.command() | CMD_MEMORY | CMD_IO;
         if bus_master {
@@ -286,7 +286,7 @@ impl Device {
         self.set_command(cmd);
     }
 
-    /// Lista capabilities: (offset, id).
+    /// Capability list: (offset, id).
     pub fn capabilities(&self) -> Vec<(u8, u8)> {
         let mut caps = Vec::new();
         if read16(self.address, REG_STATUS) & STATUS_CAPABILITIES == 0 {
@@ -311,8 +311,8 @@ impl Device {
         self.capabilities().into_iter().find(|&(_, i)| i == id).map(|(off, _)| off)
     }
 
-    /// M16b: MSI-X – wpis `entry` tablicy MSI-X na wektor `vector` (do
-    /// bieżącego CPU).  Pozostałe wpisy zostają zamaskowane.  INTx wyłączone.
+    /// MSI-X – entry `entry` of the MSI-X table to vector `vector` (to the
+    /// current CPU).  The other entries stay masked.  INTx disabled.
     pub fn enable_msix(&self, entry: u16, vector: u8) -> Result<(), &'static str> {
         let cap = self.find_capability(CAP_MSIX).ok_or("no MSI-X capability")?;
         let ctrl = read16(self.address, cap + 2);
@@ -327,7 +327,7 @@ impl Device {
             return Err("MSI-X table BAR is not a memory BAR");
         };
         let tbl = crate::memory::map_mmio(base + offset, table_size as u64 * 16).ok_or("cannot map the MSI-X table")?;
-        // Włącz z maską całej funkcji, ustaw wpis, zdejmij maski.
+        // Enable with the whole function masked, set the entry, remove the masks.
         write16(self.address, cap + 2, ctrl | (1 << 15) | (1 << 14));
         let e = tbl + entry as u64 * 16;
         let addr = crate::arch::x86_64::lapic::msi_address();
@@ -335,14 +335,14 @@ impl Device {
             core::ptr::write_volatile(e as *mut u32, addr as u32);
             core::ptr::write_volatile((e + 4) as *mut u32, (addr >> 32) as u32);
             core::ptr::write_volatile((e + 8) as *mut u32, vector as u32); // fixed, edge
-            core::ptr::write_volatile((e + 12) as *mut u32, 0); // odmaskowany
+            core::ptr::write_volatile((e + 12) as *mut u32, 0); // unmasked
         }
         self.set_command(self.command() | CMD_INTX_DISABLE);
         write16(self.address, cap + 2, (ctrl | (1 << 15)) & !(1 << 14));
         Ok(())
     }
 
-    /// M16b: MSI (jeden komunikat) na wektor `vector`.  INTx wyłączone.
+    /// MSI (single message) to vector `vector`.  INTx disabled.
     pub fn enable_msi(&self, vector: u8) -> Result<(), &'static str> {
         let cap = self.find_capability(CAP_MSI).ok_or("no MSI capability")?;
         let ctrl = read16(self.address, cap + 2);
@@ -357,12 +357,12 @@ impl Device {
         };
         write16(self.address, data_off, vector as u16);
         self.set_command(self.command() | CMD_INTX_DISABLE);
-        // Multiple Message Enable = 1 komunikat, MSI Enable.
+        // Multiple Message Enable = 1 message, MSI Enable.
         write16(self.address, cap + 2, (ctrl & !(7 << 4)) | 1);
         Ok(())
     }
 
-    /// M19.d: wyłącza MSI i MSI-X (urządzenie przestaje wysyłać przerwania).
+    /// Disables MSI and MSI-X (the device stops sending interrupts).
     pub fn disable_msi(&self) {
         if let Some(cap) = self.find_capability(CAP_MSI) {
             let ctrl = read16(self.address, cap + 2);
@@ -374,9 +374,9 @@ impl Device {
         }
     }
 
-    /// M19.d: bus mastering (DMA i przerwania MSI – to też zapisy urządzenia
-    /// do pamięci).  Wyłączenie kończy się odczytem rejestru: zapisy do
-    /// konfiguracji PCI mogą być buforowane, odczyt gwarantuje, że dotarły.
+    /// Bus mastering (DMA and MSI interrupts – those are device writes
+    /// to memory too).  Disabling ends with a register read: writes to
+    /// PCI configuration may be buffered, a read guarantees they have landed.
     pub fn set_bus_master(&self, on: bool) {
         let cmd = self.command();
         self.set_command(if on { cmd | CMD_BUS_MASTER | CMD_MEMORY } else { cmd & !CMD_BUS_MASTER });
@@ -408,8 +408,8 @@ fn class_name(class: u8, subclass: u8) -> &'static str {
     }
 }
 
-/// Rozmiar i typ BAR-a (zapis samych jedynek, odczyt maski, przywrócenie).
-/// Na czas pomiaru dekodowanie urządzenia jest wyłączone.
+/// BAR size and type (write all ones, read the mask, restore).
+/// Device decoding is disabled for the duration of the measurement.
 fn probe_bars(a: Address, count: usize) -> [Bar; 6] {
     let mut bars = [Bar::None; 6];
     let cmd = read16(a, REG_COMMAND);
@@ -464,7 +464,7 @@ fn read_device(a: Address) -> Option<Device> {
     }
     let class_reg = read32(a, REG_CLASS);
     let header_type = read8(a, REG_HEADER_TYPE);
-    // Nagłówek typu 0 ma 6 BAR-ów, mostek PCI-PCI (typ 1) – 2.
+    // A type 0 header has 6 BARs, a PCI-PCI bridge (type 1) – 2.
     let bar_count = match header_type & 0x7F {
         0 => 6,
         1 => 2,
@@ -487,7 +487,7 @@ fn read_device(a: Address) -> Option<Device> {
 
 static mut DEVICES: Vec<Device> = Vec::new();
 
-/// Lista znalezionych urządzeń (po `init`).
+/// List of devices found (after `init`).
 pub fn devices() -> &'static [Device] {
     unsafe { &*core::ptr::addr_of!(DEVICES) }
 }
@@ -497,7 +497,7 @@ pub fn find(vendor: u16, device_ids: &[u16]) -> Option<&'static Device> {
     devices().iter().find(|d| d.vendor == vendor && device_ids.contains(&d.device))
 }
 
-/// Przegląda magistralę.  Wymaga heapa.
+/// Scans the bus.  Requires the heap.
 pub fn init() {
     let mut found = Vec::new();
     for bus in 0..=255u8 {
@@ -516,10 +516,10 @@ pub fn init() {
         }
     }
 
-    // M16b: ECAM z ACPI MCFG (porównanie z portami przed włączeniem).
+    // ECAM from ACPI MCFG (compared with the ports before enabling).
     setup_ecam(&found);
 
-    // Bez sterownika = bez przerwań INTx (mostki zostawiamy w spokoju).
+    // No driver = no INTx interrupts (bridges are left alone).
     for d in &found {
         if d.header_type & 0x7F == 0 && d.interrupt_pin != 0 {
             d.set_command(d.command() | CMD_INTX_DISABLE);
@@ -547,33 +547,33 @@ pub fn init() {
 }
 
 // ------------------------------------------------------------
-// M19.c: właściciel urządzenia – sterownik w jądrze albo usługa w user space
-// (dev_claim).  Jedno urządzenie – jeden właściciel naraz.
+// Device owner – a kernel driver or a user-space service
+// (dev_claim).  One device – one owner at a time.
 // ------------------------------------------------------------
 
 pub const OWNER_FREE: u8 = 0;
 pub const OWNER_KERNEL: u8 = 1;
 pub const OWNER_USER: u8 = 2;
-/// Urządzenia dalej na liście nie mogą być przejęte przez usługę.
+/// Devices further down the list cannot be claimed by a service.
 const MAX_OWNED: usize = 256;
 static OWNERS: [AtomicU8; MAX_OWNED] = [const { AtomicU8::new(OWNER_FREE) }; MAX_OWNED];
 
-/// Powód odmowy `claim_user`.
+/// Reason for a `claim_user` refusal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClaimError {
     NoDevice,
-    /// Sterownik w jądrze albo klasa, której usługa nie dostanie nigdy.
+    /// A kernel driver, or a class a service never gets.
     Forbidden,
-    /// Inna usługa już ma to urządzenie.
+    /// Another service already has this device.
     Busy,
 }
 
-/// Indeks urządzenia na liście `devices()`.
+/// Device index in the `devices()` list.
 pub fn index_of(a: Address) -> Option<usize> {
     devices().iter().position(|d| d.address == a)
 }
 
-/// Sterownik w jądrze obsługuje urządzenie (virtio-blk, NVMe).
+/// A kernel driver handles the device (virtio-blk, NVMe).
 pub fn set_kernel_owner(a: Address) {
     if let Some(i) = index_of(a).filter(|&i| i < MAX_OWNED) {
         OWNERS[i].store(OWNER_KERNEL, Ordering::SeqCst);
@@ -584,15 +584,15 @@ pub fn owner(index: usize) -> u8 {
     if index < MAX_OWNED { OWNERS[index].load(Ordering::SeqCst) } else { OWNER_KERNEL }
 }
 
-/// Klasy, których usługa nie dostanie nigdy: pamięć masowa (0x01 – także bez
-/// sterownika: ochrona dysków na prawdziwym sprzęcie), grafika (0x03 –
-/// framebuffer konsoli), mostki (0x06), urządzenia systemowe (0x08 – PIC,
-/// IOAPIC, timery, IOMMU).
+/// Classes a service never gets: mass storage (0x01 – even without a
+/// driver: protects disks on real hardware), display (0x03 –
+/// console framebuffer), bridges (0x06), system devices (0x08 – PIC,
+/// IOAPIC, timers, IOMMU).
 pub fn class_forbidden(d: &Device) -> bool {
     matches!(d.class, 0x01 | 0x03 | 0x06 | 0x08)
 }
 
-/// Przejęcie urządzenia przez usługę – indeks albo powód odmowy.
+/// A service claims a device – the index or the reason for refusal.
 pub fn claim_user(a: Address) -> Result<usize, ClaimError> {
     let i = index_of(a).ok_or(ClaimError::NoDevice)?;
     let d = &devices()[i];
@@ -606,7 +606,7 @@ pub fn claim_user(a: Address) -> Result<usize, ClaimError> {
     }
 }
 
-/// Usługa oddaje urządzenie (ostatni uchwyt / mapowanie zniknęło).
+/// A service returns a device (the last handle / mapping is gone).
 pub fn release_user(index: usize) {
     if index < MAX_OWNED {
         let _ = OWNERS[index].compare_exchange(OWNER_USER, OWNER_FREE, Ordering::SeqCst, Ordering::SeqCst);
@@ -614,9 +614,9 @@ pub fn release_user(index: usize) {
 }
 
 impl Device {
-    /// M19.c: obszary MSI-X (tablica, PBA) w BAR-ze `bar` – (offset, długość).
-    /// Usługa nie może ich zmapować: zapis tam kieruje przerwanie na dowolny
-    /// wektor (np. IPI jądra).
+    /// MSI-X regions (table, PBA) in BAR `bar` – (offset, length).
+    /// A service must not map them: a write there routes an interrupt to any
+    /// vector (e.g. a kernel IPI).
     pub fn msix_regions(&self, bar: usize) -> Vec<(u64, u64)> {
         let mut out = Vec::new();
         let Some(cap) = self.find_capability(CAP_MSIX) else { return out };
@@ -633,7 +633,7 @@ impl Device {
     }
 }
 
-/// Do czytelnych opisów (shell `lspci`).
+/// For readable descriptions (shell `lspci`).
 pub fn describe_bar(bar: &Bar) -> Option<alloc::string::String> {
     match *bar {
         Bar::None => None,
@@ -648,8 +648,8 @@ pub fn describe_bar(bar: &Bar) -> Option<alloc::string::String> {
     }
 }
 
-// ELCR – rejestry trybu wyzwalania PIC (0x4D0: IRQ0-7, 0x4D1: IRQ8-15).
-// Przerwania PCI (INTx) są wyzwalane poziomem.
+// ELCR – PIC trigger-mode registers (0x4D0: IRQ0-7, 0x4D1: IRQ8-15).
+// PCI interrupts (INTx) are level-triggered.
 pub fn set_level_triggered(irq: u8) {
     let port = if irq < 8 { 0x4D0 } else { 0x4D1 };
     unsafe {

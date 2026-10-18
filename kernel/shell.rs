@@ -1,17 +1,17 @@
-// M7: prosty shell kernela.
+// Simple kernel shell.
 //
-// M16: zwykłym shellem jest /bin/sh (user space, uruchamia go init).  Ten
-// shell zostaje jako:
-//   * awaryjny – gdy nie ma /bin/init albo init ciągle pada (user::run_init),
-//   * źródło tekstu dla user space: M19.i syscall sysinfo (tylko odczyt: mem,
-//     lspci, cpus...) i sysctl (reboot, halt, sync, stress – z uchwytem SYSCTL);
-//     mkfs, zapis na dysk i run (programy testowe) – tylko tutaj.
-// Wejście z klawiatury PS/2 i z terminala (serial), wyjście na serial
-// i ekran (console.rs).
+// The regular shell is /bin/sh (user space, started by init).  This
+// shell remains as:
+//   * a fallback – when there is no /bin/init or init keeps crashing (user::run_init),
+//   * a text source for user space: the sysinfo syscall (read-only: mem,
+//     lspci, cpus...) and sysctl (reboot, halt, sync, stress – with the SYSCTL handle);
+//     mkfs, disk writes and run (test programs) – only here.
+// Input from the PS/2 keyboard and from the terminal (serial), output to serial
+// and the screen (console.rs).
 //
-// Edycja linii: strzałki ←/→, Home/End, Backspace/Delete, historia ↑/↓,
-// Tab = dopełnianie nazwy komendy, Ctrl+C = porzuć linię, Ctrl+U = wyczyść
-// linię, Ctrl+L = wyczyść ekran.
+// Line editing: arrows ←/→, Home/End, Backspace/Delete, history ↑/↓,
+// Tab = command name completion, Ctrl+C = abandon line, Ctrl+U = clear
+// line, Ctrl+L = clear screen.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,36 +19,36 @@ use core::fmt::Write;
 
 use crate::console::{self, Key};
 
-/// Wersja z Cargo.toml (build.sh przekazuje ją w zmiennej DESOOS_VERSION).
+/// Version from Cargo.toml (build.sh passes it in the DESOOS_VERSION variable).
 pub const VERSION: &str = match option_env!("DESOOS_VERSION") {
     Some(v) => v,
     None => "dev",
 };
 
-/// Linia razem z promptem mieści się w 80 kolumnach terminala.
+/// The line together with the prompt fits in 80 terminal columns.
 const TERMINAL_WIDTH: usize = 80;
 const MIN_LINE: usize = 24;
 const HISTORY_MAX: usize = 32;
 
 // ------------------------------------------------------------
-// Edytor linii
+// Line editor
 // ------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Edit {
-    /// Nic do narysowania.
+    /// Nothing to draw.
     Nothing,
-    /// Dopisano znak na końcu – wystarczy go wypisać.
+    /// A character was appended at the end – just print it.
     Echo(char),
-    /// Linia się zmieniła – narysuj ją od nowa.
+    /// The line changed – redraw it from scratch.
     Redraw,
-    /// Enter – gotowa linia.
+    /// Enter – line is ready.
     Submit(String),
     /// Ctrl+C.
     Cancel,
     /// Ctrl+L.
     ClearScreen,
-    /// Tab z wieloma pasującymi komendami – pokaż listę.
+    /// Tab with several matching commands – show the list.
     Candidates(Vec<&'static str>),
 }
 
@@ -56,7 +56,7 @@ pub struct LineEditor {
     buf: Vec<char>,
     cursor: usize,
     history: Vec<String>,
-    /// Pozycja w historii podczas przeglądania ↑/↓ (None = edytujemy nową linię).
+    /// Position in history while browsing ↑/↓ (None = editing a new line).
     browsing: Option<usize>,
     draft: Vec<char>,
     prompt: String,
@@ -78,13 +78,13 @@ impl LineEditor {
         ed
     }
 
-    /// Prompt z bieżącym katalogiem: "desoos:/disk> ".
+    /// Prompt with the current directory: "desoos:/disk> ".
     pub fn set_prompt(&mut self, cwd: &str) {
         self.prompt = alloc::format!("\x1b[1;32mdesoos\x1b[0m:\x1b[1;34m{}\x1b[0m> ", cwd);
         self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
     }
 
-    /// Maksymalna długość linii (prompt + linia < szerokość terminala).
+    /// Maximum line length (prompt + line < terminal width).
     pub fn max_len(&self) -> usize {
         TERMINAL_WIDTH.saturating_sub(self.prompt_width + 1).max(MIN_LINE)
     }
@@ -212,7 +212,7 @@ impl LineEditor {
         self.draft.clear();
     }
 
-    /// Dopełnianie nazwy komendy (tylko pierwsze słowo, kursor na końcu).
+    /// Command name completion (first word only, cursor at the end).
     fn complete(&mut self) -> Edit {
         if self.cursor != self.buf.len() || self.buf.contains(&' ') {
             return Edit::Nothing;
@@ -232,7 +232,7 @@ impl LineEditor {
         }
     }
 
-    /// Rysuje prompt + linię i ustawia kursor.
+    /// Draws prompt + line and positions the cursor.
     pub fn render(&self, out: &mut dyn Write) {
         let line = self.line();
         let _ = write!(out, "\r{}{}\x1b[K", self.prompt, line);
@@ -244,7 +244,7 @@ impl LineEditor {
 }
 
 // ------------------------------------------------------------
-// Komendy
+// Commands
 // ------------------------------------------------------------
 
 struct Command {
@@ -254,10 +254,10 @@ struct Command {
     run: fn(args: &str, out: &mut dyn Write, ctx: &mut Context),
 }
 
-/// Dane z shella dostępne dla komend.
+/// Shell data available to commands.
 pub struct Context<'a> {
     pub history: &'a [String],
-    /// Bieżący katalog (ścieżka absolutna).
+    /// Current directory (absolute path).
     pub cwd: &'a mut String,
 }
 
@@ -341,7 +341,7 @@ fn cmd_mem(_: &str, out: &mut dyn Write, _: &mut Context) {
     mem_report(out);
 }
 
-/// `mem` (także automatyczny stress test po starcie).
+/// `mem` (also the automatic stress test after boot).
 pub fn mem_report(out: &mut dyn Write) {
     let free = crate::memory::free_frame_count();
     let _ = writeln!(out, "physical: {} free frames = {} MiB", free, free * 4 / 1024);
@@ -385,7 +385,7 @@ fn cmd_irq(_: &str, out: &mut dyn Write, _: &mut Context) {
             );
         }
     }
-    // M16b: klawiatura – ile bajtów przyszło przerwaniem, ile odpytywaniem.
+    // Keyboard – how many bytes came via interrupt, how many via polling.
     let (by_irq, by_poll) = crate::drivers::keyboard::delivery_stats();
     let _ = writeln!(out, "PS/2 keyboard bytes: {} via IRQ1, {} via polling", by_irq, by_poll);
     for v in crate::arch::x86_64::msi::MSI_BASE..crate::arch::x86_64::msi::MSI_BASE + crate::arch::x86_64::msi::MSI_VECTORS {
@@ -410,7 +410,7 @@ fn cmd_sleep(args: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 // ------------------------------------------------------------
-// M12: zadania
+// Tasks
 // ------------------------------------------------------------
 
 fn cmd_ps(_: &str, out: &mut dyn Write, _: &mut Context) {
@@ -419,7 +419,7 @@ fn cmd_ps(_: &str, out: &mut dyn Write, _: &mut Context) {
     let up = crate::time::ticks().max(1);
     let _ = writeln!(out, "  ID  NAME          MODE    STATE    CPU   CPU ms   CPU%  SWITCHES");
     for t in &list {
-        // M17: CPU, na którym działa ("~n" – nie działa, ostatnio CPU n).
+        // CPU it runs on ("~n" – not running, last ran on CPU n).
         let cpu = match t.cpu {
             Some(c) => alloc::format!("{}", c),
             None => alloc::format!("~{}", t.last_cpu),
@@ -447,12 +447,12 @@ fn cmd_ps(_: &str, out: &mut dyn Write, _: &mut Context) {
     );
 }
 
-/// M17: procesory – stan, zadanie bieżące, ticki timera, IPI.
+/// Processors – state, current task, timer ticks, IPIs.
 fn cmd_cpus(_: &str, out: &mut dyn Write, _: &mut Context) {
     cpus_report(out);
 }
 
-/// `cpus` (także automatyczny stress test po starcie).
+/// `cpus` (also the automatic stress test after boot).
 pub fn cpus_report(out: &mut dyn Write) {
     use crate::arch::x86_64::{cpu::MAX_CPUS, lapic, smp};
     let _ = writeln!(
@@ -475,7 +475,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         let timer = if c == 0 { alloc::format!("PIT {}", crate::time::ticks()) } else { alloc::format!("{}", timer) };
         let _ = writeln!(out, "{:>4}  {:>4}  {:<20}  {:>6}  {:>4}", c, smp::apic_id(c), task, timer, ipi);
     }
-    // M17a: miara blokad – ile czekania na BKL (cel M17a: zbić to do zera).
+    // Lock metrics – how much waiting on the BKL (the goal is to bring this to zero).
     let (acq, cont, cyc) = crate::sched::bkl::stats();
     let _ = writeln!(
         out,
@@ -485,7 +485,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         if acq > 0 { cont * 100 / acq } else { 0 },
         cyc / 1000
     );
-    // M17a.g2: czas w zadaniu idle (od startu; APy startują ~na początku).
+    // Time spent in the idle task (since boot; APs start roughly at the beginning).
     {
         let online: alloc::vec::Vec<usize> = (0..MAX_CPUS).filter(|&c| smp::online(c)).collect();
         let idle: u64 = online.iter().map(|&c| crate::sched::idle_us(c)).sum();
@@ -498,8 +498,8 @@ pub fn cpus_report(out: &mut dyn Write) {
             if total > 0 { idle * 100 / total } else { 0 }
         );
     }
-    // M17a.g: kto bierze BKL – miejsca posortowane wg czasu (czekanie +
-    // trzymanie); to, co zdejmujemy najpierw.
+    // Who takes the BKL – call sites sorted by time (waiting +
+    // holding); these are the ones to remove first.
     let sites = crate::sched::bkl::site_stats();
     let lost = crate::sched::bkl::site_overflow();
     let _ = writeln!(
@@ -525,8 +525,8 @@ pub fn cpus_report(out: &mut dyn Write) {
             e.held_us / 1000
         );
     }
-    // M17a.g5: blokady usypiające (KMutex) – czekanie to sen, nie kręcenie
-    // się, więc nie widać go w BKL / blokadzie schedulera, tylko w "idle".
+    // Sleeping locks (KMutex) – waiting is sleeping, not spinning,
+    // so it does not show in the BKL / scheduler lock, only in "idle".
     for e in crate::sched::sync::kmutex_stats() {
         let _ = writeln!(
             out,
@@ -552,7 +552,7 @@ pub fn cpus_report(out: &mut dyn Write) {
             e.wait_us / 1000
         );
     }
-    // M17a.g16: kręcące się blokady czytelnicy–pisarz (drzewo ramfs).
+    // Spinning reader–writer locks (ramfs tree).
     for e in crate::sched::spin::rwspin_stats() {
         let _ = writeln!(
             out,
@@ -568,7 +568,7 @@ pub fn cpus_report(out: &mut dyn Write) {
     }
     let (sacq, scont, sdl) = crate::sched::spin::stats();
     let _ = writeln!(out, "spinlocks: {} taken, {} had to wait, {} deadlock report(s)", sacq, scont, sdl);
-    // M17a.b: TLB shootdown.
+    // TLB shootdown.
     let (req, ipis, full, wait_us, handled) = crate::arch::x86_64::tlb::stats();
     let _ = writeln!(
         out,
@@ -580,7 +580,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         crate::arch::x86_64::tlb::polled(),
         wait_us
     );
-    // M17a.f1: blokada schedulera (decyzja o kolejkach per CPU – f3).
+    // Scheduler lock (per-CPU run queue decision).
     let (sa, sc, sw) = crate::sched::sched_lock_stats();
     let _ = writeln!(
         out,
@@ -590,7 +590,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         if sa > 0 { sc * 100 / sa } else { 0 },
         sw / 1000
     );
-    // M17a.g12: kto bierze blokadę schedulera (plik:linia).
+    // Who takes the scheduler lock (file:line).
     let (ssites, slost) = crate::sched::sched_lock_sites();
     let _ = writeln!(
         out,
@@ -610,8 +610,8 @@ pub fn cpus_report(out: &mut dyn Write) {
             e.held_us / 1000
         );
     }
-    // P4.c: przełączenia zadań poza blokadą schedulera; czekania na zadanie,
-    // które jeszcze schodziło z innego CPU (flaga on_cpu).
+    // Task switches outside the scheduler lock; waits for a task
+    // that was still leaving another CPU (the on_cpu flag).
     let (wmax, wsite, wlong, wirq) = crate::sched::sched_wait_extremes();
     let _ = writeln!(
         out,
@@ -631,7 +631,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         grow,
         shrink
     );
-    // v0.35.2: limity – procesy, zapas pamięci jądra, bufory IPC, ramfs.
+    // Limits – processes, kernel memory reserve, IPC buffers, ramfs.
     let (res, denied) = crate::memory::user_reserve_stats();
     let (kb, kb_denied) = crate::user::kbuf::stats();
     let _ = writeln!(
@@ -653,7 +653,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         "scheduler: {} task switches outside the lock, {} waited for a task still leaving another CPU ({} us in total)",
         sw_n, ow_n, ow_us
     );
-    // M17b.d: pamięć procesów – leniwe strony.
+    // Process memory – lazy pages.
     let (traps, pf_pages, copy_pages, calls) = crate::user::vm::stats();
     let _ = writeln!(
         out,
@@ -665,7 +665,7 @@ pub fn cpus_report(out: &mut dyn Write) {
         copy_pages,
         calls
     );
-    // M17a.d: syscalle bez BKL.
+    // Syscalls without the BKL.
     let (fast, slow) = crate::user::syscalls::syscall_stats();
     let fast_all: u64 = fast.iter().sum();
     let _ = writeln!(
@@ -695,7 +695,7 @@ pub fn cpus_report(out: &mut dyn Write) {
     }
 }
 
-/// M17a: stress test SMP (user/stress.rs).
+/// SMP stress test (user/stress.rs).
 fn cmd_stress(args: &str, out: &mut dyn Write, _: &mut Context) {
     let secs = match args.trim() {
         "" => 10,
@@ -720,7 +720,7 @@ fn cmd_stress(args: &str, out: &mut dyn Write, _: &mut Context) {
     }
 }
 
-/// Demo: pętla bez oddawania CPU – działa tylko dzięki wywłaszczaniu.
+/// Demo: a loop that never yields the CPU – works only thanks to preemption.
 fn demo_spin(_: usize) {
     let mut n: u64 = 0;
     while !crate::sched::should_exit() {
@@ -730,7 +730,7 @@ fn demo_spin(_: usize) {
     }
 }
 
-/// Demo: budzi się co sekundę (śpi – nie zajmuje CPU).
+/// Demo: wakes up every second (sleeps – does not occupy the CPU).
 fn demo_tick(_: usize) {
     while !crate::sched::should_exit() {
         crate::time::sleep_ms(1000);
@@ -765,7 +765,7 @@ fn cmd_kill(args: &str, out: &mut dyn Write, _: &mut Context) {
         let _ = writeln!(out, "kill: no such task or it cannot be stopped ({})", id);
         return;
     }
-    // Zadanie kończy się samo przy najbliższej okazji – chwilę czekamy.
+    // The task finishes on its own at the next opportunity – wait a moment.
     for _ in 0..100 {
         if crate::sched::task_info(id).is_none() {
             let _ = writeln!(out, "task {} ended", id);
@@ -776,14 +776,14 @@ fn cmd_kill(args: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = writeln!(out, "task {} was asked to end (it has not finished yet)", id);
 }
 
-/// M13a: program testowy w ring 3.  `run <prog> [n] [&]`: n kopii naraz
-/// (1..16); na pierwszym planie shell czeka na koniec wszystkich (Ctrl+C =
-/// kill), z `&` działają w tle.
+/// Test program in ring 3.  `run <prog> [n] [&]`: n copies at once
+/// (1..16); in the foreground the shell waits for all of them to finish (Ctrl+C =
+/// kill), with `&` they run in the background.
 fn cmd_run(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     use crate::user;
     let first = args.split_whitespace().next().unwrap_or("").trim_end_matches('&');
-    // M15: program ELF – ścieżka (z '/') albo /bin/<nazwa>; potem programy
-    // wbudowane (asm z M13/M14).
+    // ELF program – a path (with '/') or /bin/<name>; then the built-in
+    // programs (asm).
     if !first.is_empty() {
         if let Some(path) = find_program(first, ctx.cwd) {
             run_elf(&path, args, out, ctx);
@@ -838,15 +838,15 @@ fn cmd_run(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         let _ = writeln!(out, "  {}", if bin.is_empty() { String::from("(none)") } else { bin.join("  ") });
         let _ = writeln!(out, "built-in test programs (run <name> [n] [&], n = 1..16 copies):");
         for (n, about) in user::programs::LIST {
-            // Nazwy zajęte przez /bin (hello, cat) – wygrywa program ELF.
+            // Names taken by /bin (hello, cat) – the ELF program wins.
             if *n != "ret" && !bin.iter().any(|b| b == n) {
                 let _ = writeln!(out, "  {:<10} {}", n, about);
             }
         }
         return;
     };
-    // Wartość startowa w stronie danych procesu (np. "xmm" wypełnia nią
-    // rejestry) – różna dla każdego uruchomienia i każdej kopii.
+    // Initial value in the process data page (e.g. "xmm" fills the
+    // registers with it) – different for every run and every copy.
     let base = crate::time::ticks() << 20;
     let mut ids = Vec::new();
     for i in 0..count {
@@ -875,8 +875,8 @@ fn cmd_run(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     }
 }
 
-/// M15: ścieżka programu ELF dla `run <name>`: z '/' – względem cwd,
-/// inaczej /bin/<name>.  None, gdy nie ma takiego pliku.
+/// Path of the ELF program for `run <name>`: with '/' – relative to cwd,
+/// otherwise /bin/<name>.  None if there is no such file.
 fn find_program(name: &str, cwd: &str) -> Option<String> {
     let path = if name.contains('/') {
         crate::fs::normalize(cwd, name)
@@ -889,14 +889,14 @@ fn find_program(name: &str, cwd: &str) -> Option<String> {
     }
 }
 
-/// Nazwy plików w /bin.
+/// File names in /bin.
 fn bin_programs() -> Vec<String> {
     crate::fs::read_dir("/bin")
         .map(|v| v.into_iter().filter(|e| e.kind == crate::fs::FileType::File).map(|e| e.name).collect())
         .unwrap_or_default()
 }
 
-/// `run <path|name> [args...] [&]` dla programu ELF.
+/// `run <path|name> [args...] [&]` for an ELF program.
 fn run_elf(path: &str, args: &str, out: &mut dyn Write, ctx: &mut Context) {
     use crate::user;
     let mut words: Vec<&str> = args.split_whitespace().collect();
@@ -910,7 +910,7 @@ fn run_elf(path: &str, args: &str, out: &mut dyn Write, ctx: &mut Context) {
             }
         }
     }
-    // argv[0] = nazwa tak, jak ją wpisano.
+    // argv[0] = the name as it was typed.
     let name = path.rsplit('/').next().unwrap_or(path);
     let opts = user::SpawnOptions { foreground: !background, ..user::SpawnOptions::default() };
     let id = match user::exec(path, &words, ctx.cwd, &opts) {
@@ -938,9 +938,9 @@ fn report_background(ids: &[u64], name: &str, out: &mut dyn Write) {
     );
 }
 
-/// Pierwszy plan: czekamy na koniec wszystkich.  Shell nie czyta wtedy
-/// klawiatury (może to robić proces – read z fd 0); Ctrl+C kończy procesy
-/// już w przerwaniu klawiatury / seriala (console::interrupt_foreground).
+/// Foreground: wait for all of them to finish.  The shell does not read the
+/// keyboard then (the process may – read from fd 0); Ctrl+C kills the processes
+/// already in the keyboard / serial interrupt (console::interrupt_foreground).
 fn wait_foreground(ids: &[u64]) {
     crate::console::set_foreground(ids);
     while ids.iter().any(|id| crate::sched::task_info(*id).is_some()) {
@@ -968,7 +968,7 @@ fn cmd_keys(_: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 fn cmd_colors(_: &str, out: &mut dyn Write, _: &mut Context) {
-    // Na jasnych tłach (7 i 8..15) czarny tekst, inaczej numer byłby niewidoczny.
+    // On light backgrounds (7 and 8..15) black text, otherwise the number would be invisible.
     for i in 0..8 {
         let fg = if i == 7 { 30 } else { 97 };
         let _ = write!(out, "\x1b[{};{}m {:>2} \x1b[0m", fg, 40 + i, i);
@@ -1005,7 +1005,7 @@ fn cmd_lspci(args: &str, out: &mut dyn Write, _: &mut Context) {
         if d.interrupt_pin != 0 && d.interrupt_line != 0xFF {
             let _ = write!(out, " IRQ {}", d.interrupt_line);
         }
-        // M19.c: kto obsługuje urządzenie.
+        // Who handles the device.
         match pci::owner(i) {
             pci::OWNER_KERNEL => {
                 let _ = write!(out, " [kernel driver]");
@@ -1125,7 +1125,7 @@ fn cmd_disk(args: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 // ------------------------------------------------------------
-// Pliki (M9)
+// Files
 // ------------------------------------------------------------
 
 fn human_size(n: u64) -> String {
@@ -1138,8 +1138,8 @@ fn human_size(n: u64) -> String {
     }
 }
 
-/// Dzieli argumenty na słowa; "..." i '...' pozwalają na spacje w nazwach,
-/// a \ przed znakiem bierze go dosłownie.
+/// Splits arguments into words; "..." and '...' allow spaces in names,
+/// and \ before a character takes it literally.
 pub fn split_args(args: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -1178,7 +1178,7 @@ pub fn split_args(args: &str) -> Vec<String> {
     out
 }
 
-/// Pozycja '>' poza cudzysłowami.
+/// Position of '>' outside quotes.
 fn find_redirect(line: &str) -> Option<usize> {
     let mut quote: Option<char> = None;
     for (i, c) in line.char_indices() {
@@ -1344,7 +1344,7 @@ fn cmd_rm(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     }
 }
 
-/// Cel kopiowania: jeśli `dst` jest katalogiem, plik ląduje w nim pod tą samą nazwą.
+/// Copy target: if `dst` is a directory, the file lands in it under the same name.
 fn copy_target(src: &str, dst: &str) -> String {
     match crate::fs::stat(dst) {
         Ok(m) if m.kind == crate::fs::FileType::Directory => {
@@ -1467,7 +1467,7 @@ fn cmd_mkfs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         let _ = writeln!(out, "To continue type: mkfs {} yes", disk);
         return;
     }
-    // Dysk 0 jest montowany w /disk – najpierw odmontować.
+    // Disk 0 is mounted at /disk – unmount it first.
     if disk == 0 {
         if ctx.cwd.starts_with("/disk") {
             *ctx.cwd = String::from("/");
@@ -1514,7 +1514,7 @@ fn cmd_reboot(_: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = crate::fs::sync_all();
     let _ = writeln!(out, "Rebooting...");
     crate::drivers::ps2::reset_cpu();
-    // Kontroler nie zresetował – triple fault (pusta IDT + wyjątek).
+    // The controller did not reset – triple fault (empty IDT + exception).
     unsafe {
         let null_idt: [u8; 10] = [0; 10];
         core::arch::asm!("lidt [{}]", "int3", in(reg) &null_idt, options(noreturn));
@@ -1529,7 +1529,7 @@ fn cmd_halt(_: &str, out: &mut dyn Write, _: &mut Context) {
     }
 }
 
-/// Odległość edycyjna (Damerau-Levenshtein, z zamianą sąsiednich liter).
+/// Edit distance (Damerau-Levenshtein, with transposition of adjacent letters).
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -1552,8 +1552,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-/// Najbliższa znana komenda dla literówki (np. "mfks" -> "mkfs").
-/// Najbliższa nazwa (literówka: najwyżej 2 zmiany i mniej niż długość).
+/// Closest known command for a typo (e.g. "mfks" -> "mkfs").
+/// Closest name (typo: at most 2 edits and fewer than the length).
 fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     candidates
         .map(|c| (edit_distance(name, c), c))
@@ -1566,13 +1566,13 @@ fn suggest(name: &str) -> Option<&'static str> {
     closest(name, COMMANDS.iter().map(|c| c.name))
 }
 
-/// Wykonuje linię.  `false` = nieznana komenda.
+/// Executes a line.  `false` = unknown command.
 pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
     let line = line.trim();
     if line.is_empty() {
         return true;
     }
-    // Przekierowanie wyjścia: "komenda > plik" (zastąp) albo "komenda >> plik" (dopisz).
+    // Output redirection: "command > file" (replace) or "command >> file" (append).
     if let Some(pos) = find_redirect(line) {
         let append = line[pos..].starts_with(">>");
         let target_words = split_args(&line[pos + if append { 2 } else { 1 }..]);
@@ -1618,9 +1618,9 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
     }
 }
 
-/// M19.i: komendy tylko do odczytu dla user space (syscall sysinfo) –
-/// zastępują most kcmd.  Argumenty: tylko `lspci -v`; `disk` tylko lista
-/// (odczyt / zapis sektorów, mkfs, run – wyłącznie w awaryjnym shellu jądra).
+/// Read-only commands for user space (sysinfo syscall) –
+/// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
+/// (sector read / write, mkfs, run – only in the kernel fallback shell).
 pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
@@ -1641,9 +1641,9 @@ pub fn sysinfo(line: &str) -> Option<String> {
     Some(run_to_string(line))
 }
 
-/// M19.i: akcje systemowe (syscall sysctl – tylko z uchwytem SYSCTL, który
-/// jądro daje init, a init shellowi).  1 reboot, 2 halt, 3 sync, 4 stress
-/// `arg` sekund (0 = domyślnie 10, najwyżej 600).
+/// System actions (sysctl syscall – only with the SYSCTL handle, which
+/// the kernel gives to init, and init to the shell).  1 reboot, 2 halt, 3 sync, 4 stress
+/// `arg` seconds (0 = default 10, at most 600).
 pub const SYSCTL_REBOOT: u64 = 1;
 pub const SYSCTL_HALT: u64 = 2;
 pub const SYSCTL_SYNC: u64 = 3;
@@ -1670,7 +1670,7 @@ fn run_to_string(line: &str) -> String {
 }
 
 // ------------------------------------------------------------
-// Pętla shella
+// Shell loop
 // ------------------------------------------------------------
 
 pub fn run() -> ! {
@@ -1684,8 +1684,8 @@ pub fn run() -> ! {
         editor.set_prompt(&cwd);
         editor.render(&mut out);
         loop {
-            // Linia do odrysowania, gdyby w trakcie czekania przyszedł
-            // komunikat z innego zadania (np. koniec procesu w tle).
+            // Line to redraw in case a message from another task arrives
+            // while waiting (e.g. a background process finished).
             let mut snapshot = String::new();
             editor.render(&mut snapshot);
             console::set_input_line(Some(snapshot));
@@ -1725,7 +1725,7 @@ pub fn run() -> ! {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -1747,10 +1747,10 @@ pub fn self_test() {
     serial_println!("[CON TEST] Starting console + shell tests...");
     crate::selftest::begin();
 
-    // 1-5: konsola framebuffera (jeśli jest).
+    // 1-5: framebuffer console (if present).
     let fb_ok = console::fb_size().is_some();
     if fb_ok {
-        // 1. Geometria i write-combining.
+        // 1. Geometry and write-combining.
         let r = console::with_framebuffer(|fb| (fb.cols, fb.rows, fb.size_pixels()));
         let (cols, rows, (w, h)) = r.unwrap();
         check!(cols == w / font::WIDTH && rows == h / font::HEIGHT, "grid {}x{} for {}x{}", cols, rows, w, h);
@@ -1768,7 +1768,7 @@ pub fn self_test() {
         }
         serial_println!("[CON TEST] 1/10 framebuffer {}x{} chars, write-combining PASS", cols, rows);
 
-        // 2. Rysowanie glifu: piksele komórki (0,0) = glif 'A'.
+        // 2. Glyph drawing: pixels of cell (0,0) = glyph 'A'.
         let bad = console::with_framebuffer(|fb| {
             fb.write_bytes(b"\x1b[2J\x1b[HA");
             let fg = fb.native_color(fbcon::DEFAULT_FG);
@@ -1788,7 +1788,7 @@ pub fn self_test() {
         check!(bad.is_none(), "pixel {:?} of glyph 'A' wrong", bad);
         serial_println!("[CON TEST] 2/10 glyph 'A' pixels in framebuffer PASS");
 
-        // 3. ANSI: kolor, kursor w lewo, czyszczenie do końca linii, pozycja.
+        // 3. ANSI: color, cursor left, clear to end of line, position.
         let r = console::with_framebuffer(|fb| {
             fb.write_bytes(b"\x1b[2J\x1b[Hab\x1b[31mc\x1b[0m");
             let c = fb.cell(2, 0);
@@ -1804,10 +1804,10 @@ pub fn self_test() {
         check!(r.2 == 4 && r.3 == 2, "ESC[3;5H -> ({}, {})", r.2, r.3);
         serial_println!("[CON TEST] 3/10 ANSI colors, cursor, clear-to-EOL PASS");
 
-        // 4. Zawijanie i przewijanie.
+        // 4. Wrapping and scrolling.
         let r = console::with_framebuffer(|fb| {
             fb.write_bytes(b"\x1b[2J\x1b[H");
-            // rows linii + '\n' -> jedno przewinięcie, na górze zostaje "L1".
+            // rows lines + '\n' -> one scroll, "L1" stays at the top.
             for i in 0..fb.rows {
                 let s = alloc::format!("L{}\n", i);
                 fb.write_bytes(s.as_bytes());
@@ -1824,7 +1824,7 @@ pub fn self_test() {
         check!(r.1 == 1 && r.2 == 3 && r.3 == 'x', "wrap -> y={} x={}", r.1, r.2);
         serial_println!("[CON TEST] 4/10 line wrap + scroll PASS");
 
-        // 5. UTF-8 i polskie glify.
+        // 5. UTF-8 and Polish glyphs.
         let r = console::with_framebuffer(|fb| {
             fb.write_bytes("\x1b[2J\x1b[Hżółć€".as_bytes());
             [fb.cell(0, 0).ch, fb.cell(1, 0).ch, fb.cell(4, 0).ch]
@@ -1838,8 +1838,8 @@ pub fn self_test() {
         serial_println!("[CON TEST] 1-5/10 skipped (no framebuffer)");
     }
 
-    // 6. Serial RX na przerwaniach (pętla zwrotna UART).
-    // M16b: bez portu szeregowego (laptop) odbioru po prostu nie ma.
+    // 6. Interrupt-driven serial RX (UART loopback).
+    // Without a serial port (laptop) there is simply no reception.
     if !serial::present() {
         serial_println!("[CON TEST] 6/10 no COM1 port - serial RX skipped PASS");
     } else {
@@ -1864,7 +1864,7 @@ pub fn self_test() {
         serial_println!("[CON TEST] 6/10 COM1 RX via IRQ4 (UART loopback) PASS");
     }
 
-    // 7. Dekoder terminala.
+    // 7. Terminal decoder.
     let mut d = SerialDecoder::new();
     let mut keys = Vec::new();
     for &b in "a\r\n\x7f\x1b[D\x1b[3~\x03ż\x1b[1~".as_bytes() {
@@ -1878,7 +1878,7 @@ pub fn self_test() {
     );
     serial_println!("[CON TEST] 7/10 terminal decoder (UTF-8, ESC sequences, CR LF) PASS");
 
-    // 8. Edytor linii.
+    // 8. Line editor.
     let mut ed = LineEditor::new();
     for k in [Key::Char('h'), Key::Char('e'), Key::Char('l'), Key::Char('o'), Key::Left, Key::Char('l')] {
         ed.handle(k);
@@ -1905,7 +1905,7 @@ pub fn self_test() {
     check!(matches!(ed.handle(Key::Tab), Edit::Candidates(ref v) if v.contains(&"help") && v.contains(&"history")), "tab candidates");
     serial_println!("[CON TEST] 8/10 line editor (insert, Home/Del, history, Tab) PASS");
 
-    // 9. Komendy (wyjście do bufora).
+    // 9. Commands (output into a buffer).
     let mut cwd = String::from("/");
     let mut ctx = Context { history: &[], cwd: &mut cwd };
     let ctx = &mut ctx;
@@ -1932,7 +1932,7 @@ pub fn self_test() {
     check!(execute("help", &mut s, ctx) && s.contains("reboot"), "help");
     serial_println!("[CON TEST] 9/10 commands (echo, uptime, mem, irq, help, unknown) PASS");
 
-    // 10. Scrollback (M11): linie, które wyjechały górą, da się obejrzeć.
+    // 10. Scrollback: lines that scrolled off the top can be viewed.
     if fb_ok {
         let r = console::with_framebuffer(|fb| {
             fb.write_bytes(b"\x1b[2J\x1b[H");

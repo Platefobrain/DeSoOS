@@ -1,4 +1,4 @@
-// M16: ls [ścieżka...] – zawartość katalogu (katalogi z '/' na końcu).
+// ls [path...] – directory contents (directories with a trailing '/').
 #![no_std]
 #![no_main]
 
@@ -62,7 +62,7 @@ fn list(path: &str, header: bool) -> i32 {
             Some((kind == "d", size, p.next()?))
         })
         .collect();
-    // Katalogi pierwsze, potem alfabetycznie.
+    // Directories first, then alphabetically.
     entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(b.2)));
     for (dir, size, name) in &entries {
         if *dir {

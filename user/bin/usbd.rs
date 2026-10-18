@@ -1,72 +1,72 @@
-// M20: usbd – sterownik kontrolera USB xHCI jako usługa w user space.
-// Projekt: ARCHITEKTURA.md, „USB (M20 – projekt 20.a)”.  Jedna instancja na
-// kontroler; init znajduje kontrolery po klasie (dev_find 0C0330) i uruchamia
+// usbd – xHCI USB controller driver as a user-space service.
+// Design: ARCHITECTURE.md, section "USB".  One instance per
+// controller; init finds controllers by class (dev_find 0C0330) and starts
 // usb0, usb1, …
 //
-// Uchwyty na starcie (daje je init): 1 = konsola, 3 = urządzenie (DEVICE),
-// 4 = kanał połączeń, 5 = INPUT (klawiatura do jądra), 6 = BLK (dyski do jądra).
+// Handles at startup (given by init): 1 = console, 3 = device (DEVICE),
+// 4 = connection channel, 5 = INPUT (keyboard to the kernel), 6 = BLK (disks to the kernel).
 //
-// Krok b (v0.23.0) – start kontrolera:
-//   rejestry (dev_map BAR0), przejęcie od BIOS-u (USB Legacy Support: OS Owned,
-//   wyłączenie SMI), zatrzymanie i reset (HCRST), DCBAA, bufory scratchpad,
-//   pierścień komend, pierścień zdarzeń (interrupter 0), MSI (irq_bind), Run,
-//   komendy No-Op.
-// Krok c (v0.24.0) – urządzenia na portach kontrolera (maszyna stanów portu):
-//   Wolny -> Debounce (100 ms) -> reset portu (USB 2; USB 3 trenuje łącze sam)
-//   -> Enable Slot -> Address Device -> deskryptor urządzenia (8 B: rozmiar
-//   pakietu EP0, Evaluate Context; potem całe 18 B) -> konfiguracja (9 B, potem
-//   wTotalLength ≤ 4 KiB) -> napisy (producent, produkt) -> Działa.
-//   Błąd: Disable Slot, ponowna próba za 500 ms, po 3 – port ignorowany do
-//   odłączenia.  Odłączenie w dowolnym stanie: Disable Slot, strony wracają.
-//   Każda komenda i transfer z timeoutem 1 s; STALL -> Reset Endpoint + Set TR
-//   Dequeue.  Deskryptory parsuje user/lib/usb_desc.rs (obce dane – limity).
-//   Urządzenia NIE są konfigurowane (Set Configuration / endpointy – krok e i f);
-//   do urządzeń idą wyłącznie prośby o odczyt deskryptorów.
-// Krok e (v0.25.0) – klawiatura i mysz HID (boot protocol):
-//   urządzenie z interfejsem 03/01/01 (klawiatura) albo 03/01/02 (mysz) z
-//   endpointem przerwań IN: Configure Endpoint, Set Configuration, Set
-//   Protocol (boot), Set Idle (0); 8 TRB czeka na raporty.  Raport klawiatury
-//   (8 B: modyfikatory + 6 klawiszy) -> różnica z poprzednim -> zdarzenia HID
-//   usage -> syscall input_inject (uchwyt INPUT w slocie 5 od init) -> jądro
-//   (KeyCode, autorepeat, konsola).  Stan diod z jądra -> Set Report do
-//   klawiatury.  Mysz: kółko przewija konsolę.  Odłączenie -> puszczenie
-//   klawiszy tego urządzenia; koniec usbd -> puszcza je jądro.
-// Krok f (v0.26.0) – pamięć masowa (pendrive) TYLKO DO ODCZYTU:
-//   interfejs 08/06/50 (SCSI, Bulk-Only) z endpointami bulk IN i OUT:
-//   Configure Endpoint, Set Configuration, INQUIRY (tylko dysk – typ 0), TEST
-//   UNIT READY (do 10 prób z REQUEST SENSE), READ CAPACITY(10).  Bufor DMA
-//   256 KiB (4 sloty po 64 KiB) i kanał -> syscall blk_attach (uchwyt BLK w
-//   slocie 6 od init) -> jądro widzi dysk „sdX” i samo montuje FAT32 w /usbN.
-//   Żądania jądra (READ: lba, bloki, slot) -> READ(10) prosto do slotu bufora
-//   (DMA) -> odpowiedź (id, status, bloki).  Błąd transferu: STALL -> Clear
-//   Halt; timeout / zły CSW -> Bulk-Only Reset (reset recovery).  Odłączenie ->
-//   kanał zamknięty (jądro: dysk znika, odmontowany).
-//   ZAPISU NIE MA: jedyne komendy SCSI to te z SCSI_ALLOWED (sprawdzane przed
-//   wysłaniem każdej komendy; asercja przy kompilacji – żadnej komendy zapisu).
-// Krok d (v0.27.0) – huby USB 2 i USB 3 (także huby za hubami, do 5 poziomów):
-//   urządzenie klasy 09: Configure Endpoint (przerwania IN – mapa zmian portów),
-//   Set Configuration, Set Hub Depth (USB 3), deskryptor huba (liczba portów,
-//   TT think time, czas włączenia zasilania), drugi Configure Endpoint z polami
-//   huba w kontekście slotu, zasilanie portów.  Porty huba – ta sama maszyna
-//   stanów co porty kontrolera (debounce, reset portu huba, 3 próby, ignorowany
-//   do odłączenia); stan portu: GET_STATUS, zmiany kasowane CLEAR_FEATURE.
-//   Urządzenie za hubem: route string (port huba na każdym poziomie), port
-//   kontrolera najwyższego huba, prędkość z portu huba, TT (slot i port
-//   najbliższego huba high speed) dla klawiatur / myszy low / full speed za hubem
-//   USB 2.  Odłączenie huba = odłączenie wszystkiego, co za nim.  lsusb: „port 3.2”
-//   (port kontrolera . port huba).
-// Klienci (kanał "usbN" przez init): "status" – opis + linia "usbd-status k=v";
-// "list" – urządzenia (lsusb); "noop N" – N komend No-Op, "noop N <ns>";
-// "idle MS" – raporty HID co MS ms także bez zmian (test potoku przerwań w QEMU).
+// Controller startup:
+//   registers (dev_map BAR0), handoff from the BIOS (USB Legacy Support: OS Owned,
+//   SMI disabled), halt and reset (HCRST), DCBAA, scratchpad buffers,
+//   command ring, event ring (interrupter 0), MSI (irq_bind), Run,
+//   No-Op commands.
+// Devices on the controller's ports (port state machine):
+//   Free -> Debounce (100 ms) -> port reset (USB 2; USB 3 trains the link itself)
+//   -> Enable Slot -> Address Device -> device descriptor (8 B: EP0 max
+//   packet size, Evaluate Context; then the full 18 B) -> configuration (9 B, then
+//   wTotalLength ≤ 4 KiB) -> strings (manufacturer, product) -> Running.
+//   Error: Disable Slot, retry after 500 ms, after 3 – port ignored until
+//   disconnect.  Disconnect in any state: Disable Slot, pages are returned.
+//   Every command and transfer has a 1 s timeout; STALL -> Reset Endpoint + Set TR
+//   Dequeue.  Descriptors are parsed by user/lib/usb_desc.rs (untrusted data – limits).
+//   Generic devices are NOT configured (Set Configuration / endpoints only for the
+//   HID and mass-storage classes below); other devices get only descriptor reads.
+// HID keyboard and mouse (boot protocol):
+//   a device with interface 03/01/01 (keyboard) or 03/01/02 (mouse) with
+//   an interrupt IN endpoint: Configure Endpoint, Set Configuration, Set
+//   Protocol (boot), Set Idle (0); 8 TRBs wait for reports.  Keyboard report
+//   (8 B: modifiers + 6 keys) -> diff against the previous one -> HID usage
+//   events -> input_inject syscall (INPUT handle in slot 5 from init) -> kernel
+//   (KeyCode, autorepeat, console).  LED state from the kernel -> Set Report to
+//   the keyboard.  Mouse: the wheel scrolls the console.  Disconnect -> release
+//   that device's keys; usbd exit -> the kernel releases them.
+// Mass storage (USB stick) READ-ONLY:
+//   interface 08/06/50 (SCSI, Bulk-Only) with bulk IN and OUT endpoints:
+//   Configure Endpoint, Set Configuration, INQUIRY (disks only – type 0), TEST
+//   UNIT READY (up to 10 attempts with REQUEST SENSE), READ CAPACITY(10).  DMA buffer
+//   256 KiB (4 slots of 64 KiB) and a channel -> blk_attach syscall (BLK handle in
+//   slot 6 from init) -> the kernel sees disk "sdX" and mounts FAT32 at /usbN itself.
+//   Kernel requests (READ: lba, blocks, slot) -> READ(10) straight into the buffer slot
+//   (DMA) -> reply (id, status, blocks).  Transfer error: STALL -> Clear
+//   Halt; timeout / bad CSW -> Bulk-Only Reset (reset recovery).  Disconnect ->
+//   channel closed (kernel: disk disappears, unmounted).
+//   THERE IS NO WRITE: the only SCSI commands are those in SCSI_ALLOWED (checked before
+//   sending each command; compile-time assertion – no write command).
+// USB 2 and USB 3 hubs (including hubs behind hubs, up to 5 levels):
+//   class 09 device: Configure Endpoint (interrupt IN – port change bitmap),
+//   Set Configuration, Set Hub Depth (USB 3), hub descriptor (number of ports,
+//   TT think time, power-on time), a second Configure Endpoint with the hub
+//   fields in the slot context, port power.  Hub ports – the same state
+//   machine as controller ports (debounce, hub port reset, 3 attempts, ignored
+//   until disconnect); port state: GET_STATUS, changes cleared with CLEAR_FEATURE.
+//   Device behind a hub: route string (hub port at each level), controller
+//   port of the top-level hub, speed from the hub port, TT (slot and port
+//   of the nearest high-speed hub) for low / full speed keyboards / mice behind a
+//   USB 2 hub.  Disconnecting a hub = disconnecting everything behind it.  lsusb: "port 3.2"
+//   (controller port . hub port).
+// Clients (channel "usbN" via init): "status" – description + a "usbd-status k=v" line;
+// "list" – devices (lsusb); "noop N" – N No-Op commands, "noop N <ns>";
+// "idle MS" – HID reports every MS ms even without changes (interrupt pipeline test in QEMU).
 //
-// DMA bez IOMMU (ARCHITEKTURA.md): usbd sam wpisuje adresy fizyczne do struktur
-// kontrolera – jądro ich nie sprawdzi.  Izolacja procesu chroni przed crashem i
-// zawieszeniem, nie przed błędnym DMA; dlatego usbd jest kodem systemu (initrd).
+// DMA without an IOMMU (ARCHITECTURE.md): usbd itself writes physical addresses into the
+// controller's structures – the kernel does not check them.  Process isolation protects
+// against crashes and hangs, not against bad DMA; that is why usbd is system code (initrd).
 //
-// Koniec: kanał połączeń zamknięty i żaden klient nie został -> kontroler
-// zatrzymany, kod 0.  Błąd kontrolera (HSE / HCE) -> kod 3 (init restartuje,
-// nowa instancja robi pełny reset).  Kill w dowolnym momencie – sprząta jądro
-// (bus mastering off -> wektor -> ramki DMA -> przejęcie).
+// Exit: connection channel closed and no clients left -> controller
+// halted, code 0.  Controller error (HSE / HCE) -> code 3 (init restarts it,
+// the new instance does a full reset).  Kill at any time – the kernel cleans up
+// (bus mastering off -> vector -> DMA frames -> claim).
 #![no_std]
 #![no_main]
 
@@ -86,40 +86,40 @@ const LISTEN: u64 = 4;
 const MAX_CLIENTS: usize = WAIT_MAX - 2 - STOR_MAX;
 const EIO: i64 = -5;
 
-/// Limit czasu na każdą operację na kontrolerze (reset, komenda, transfer).
+/// Time limit for each controller operation (reset, command, transfer).
 const TIMEOUT_MS: u64 = 1000;
-/// M20.a: najwyżej 32 urządzenia na kontroler.
+/// At most 32 devices per controller.
 const SLOTS_MAX: u32 = 32;
 const DEVS_MAX: usize = 32;
 const PORTS_MAX: usize = 64;
-/// TRB na pierścień (jedna strona 4 KiB: 256 × 16 B).
+/// TRBs per ring (one 4 KiB page: 256 × 16 B).
 const RING: usize = 256;
 const DEBOUNCE_MS: u64 = 100;
 const PORT_RESET_MS: u64 = 500;
 const RETRY_MS: u64 = 500;
 const TRIES: u32 = 3;
 const NAME_MAX: usize = 40;
-/// M20.e: TRB czekających na raporty HID i bufor na raport (w stronie danych).
+/// TRBs waiting for HID reports and the report buffer (in the data page).
 const HID_TRBS: usize = 8;
 const HID_BUF: u64 = 256;
-/// M20.d: huby – najwięcej portów na hub, głębokość (route string ma 5 poziomów),
-/// najdłuższe czekanie na reset portu huba.
+/// Hubs – max ports per hub, depth (the route string has 5 levels),
+/// longest wait for a hub port reset.
 const HUB_PORTS_MAX: usize = 15;
 const HUB_DEPTH_MAX: u32 = 5;
 const HUB_RESET_MS: u64 = 500;
-// Żądania i funkcje portu huba (USB 2.0 rozdz. 11, USB 3.2 rozdz. 10).
+// Hub port requests and features (USB 2.0 ch. 11, USB 3.2 ch. 10).
 const HUB_PORT_RESET: u16 = 4;
 const HUB_PORT_POWER: u16 = 8;
-/// M20.f: pamięć masowa – najwięcej urządzeń, sloty bufora (po 64 KiB),
-/// limit czasu transferu bulk (jądro czeka 5 s – odpowiadamy wcześniej).
+/// Mass storage – max devices, buffer slots (64 KiB each),
+/// bulk transfer timeout (the kernel waits 5 s – we answer earlier).
 const STOR_MAX: usize = 4;
 const STOR_SLOTS: usize = 4;
 const STOR_SLOT: u64 = 64 * 1024;
 const BULK_TIMEOUT_MS: u64 = 4000;
 const ENODEV_REPLY: i32 = -19;
 const EIO_REPLY: i32 = -5;
-/// Jedyne komendy SCSI, jakie usbd wysyła: TEST UNIT READY, REQUEST SENSE,
-/// INQUIRY, READ CAPACITY(10), READ(10).  Brak zapisu – patrz asercja niżej.
+/// The only SCSI commands usbd sends: TEST UNIT READY, REQUEST SENSE,
+/// INQUIRY, READ CAPACITY(10), READ(10).  No writes – see the assertion below.
 const SCSI_ALLOWED: [u8; 5] = [0x00, 0x03, 0x12, 0x25, 0x28];
 const _: () = {
     // WRITE(6/10/12/16), WRITE AND VERIFY, WRITE SAME, FORMAT UNIT, MODE SELECT
@@ -136,14 +136,14 @@ const _: () = {
     }
 };
 
-// Rejestry możliwości (od początku BAR0).
+// Capability registers (from the start of BAR0).
 const CAPLENGTH: u64 = 0x00;
 const HCSPARAMS1: u64 = 0x04;
 const HCSPARAMS2: u64 = 0x08;
 const HCCPARAMS1: u64 = 0x10;
 const DBOFF: u64 = 0x14;
 const RTSOFF: u64 = 0x18;
-// Rejestry operacyjne (od CAPLENGTH).
+// Operational registers (from CAPLENGTH).
 const USBCMD: u64 = 0x00;
 const USBSTS: u64 = 0x04;
 const PAGESIZE: u64 = 0x08;
@@ -159,7 +159,7 @@ const STS_HSE: u32 = 1 << 2;
 const STS_EINT: u32 = 1 << 3;
 const STS_CNR: u32 = 1 << 11;
 const STS_HCE: u32 = 1 << 12;
-// Interrupter 0 (rejestry runtime + 0x20).
+// Interrupter 0 (runtime registers + 0x20).
 const IR0: u64 = 0x20;
 const IMAN: u64 = 0x00;
 const IMOD: u64 = 0x04;
@@ -169,8 +169,8 @@ const ERDP: u64 = 0x18;
 const IMAN_IP: u32 = 1 << 0;
 const IMAN_IE: u32 = 1 << 1;
 const ERDP_EHB: u64 = 1 << 3;
-// PORTSC: bity zachowywane przy zapisie (tylko do odczytu + RWS) i bity zmian
-// (RW1C) – zapis 1 do PED wyłączyłby port, więc nigdy go nie przepisujemy.
+// PORTSC: bits preserved on write (read-only + RWS) and change bits
+// (RW1C) – writing 1 to PED would disable the port, so we never write it back.
 const PORT_CCS: u32 = 1 << 0;
 const PORT_PED: u32 = 1 << 1;
 const PORT_PR: u32 = 1 << 4;
@@ -178,7 +178,7 @@ const PORT_PP: u32 = 1 << 9;
 const PORT_CSC: u32 = 1 << 17;
 const PORT_KEEP: u32 = 0x4E00_FFE9 & !PORT_PED;
 const PORT_CHANGES: u32 = 0x00FE_0000;
-// Typy TRB.
+// TRB types.
 const TRB_SETUP: u32 = 2;
 const TRB_DATA: u32 = 3;
 const TRB_STATUS: u32 = 4;
@@ -213,14 +213,14 @@ fn wr32(a: u64, v: u32) {
     unsafe { core::ptr::write_volatile(a as *mut u32, v) }
 }
 
-/// Rejestry 64-bitowe jako dwa zapisy 32-bitowe (najpierw młodsza połowa) –
-/// działa też na kontrolerach bez 64-bitowego dostępu do MMIO.
+/// 64-bit registers as two 32-bit writes (low half first) –
+/// also works on controllers without 64-bit MMIO access.
 fn wr64(a: u64, v: u64) {
     wr32(a, v as u32);
     wr32(a + 4, (v >> 32) as u32);
 }
 
-/// Czeka (≤ TIMEOUT_MS), aż `cond` będzie prawdą.
+/// Waits (≤ TIMEOUT_MS) until `cond` is true.
 fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     let t0 = uptime_ms();
     loop {
@@ -234,8 +234,8 @@ fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
-/// Strony DMA: bufory z dma_alloc dzielone po stronie; strony urządzeń wracają
-/// na listę wolnych (wyzerowane) po odłączeniu.
+/// DMA pages: buffers from dma_alloc split into pages; device pages go back
+/// to the free list (zeroed) after disconnect.
 struct Pool {
     bits: u64,
     va: u64,
@@ -255,13 +255,13 @@ impl Pool {
         }
         let pa = dma_phys(h as u64)?;
         let va = shm_map(h as u64, PROT_READ | PROT_WRITE)?;
-        close(h as u64); // bufor żyje z przejęciem urządzenia
+        close(h as u64); // the buffer lives as long as the device claim
         (self.va, self.pa, self.pages, self.used) = (va, pa, pages, 0);
         self.total += pages;
         Ok(())
     }
 
-    /// Jedna wyzerowana strona (adres w procesie, adres fizyczny).
+    /// One zeroed page (address in the process, physical address).
     fn page(&mut self) -> Result<(u64, u64), i64> {
         if self.nfree > 0 {
             self.nfree -= 1;
@@ -296,7 +296,7 @@ impl Ring {
         (self.va + i as u64 * 16) as *mut u32
     }
 
-    /// Pierścień komend / transferów: ostatni TRB to Link na początek (Toggle Cycle).
+    /// Command / transfer ring: the last TRB is a Link back to the start (Toggle Cycle).
     fn new_linked(va: u64, pa: u64) -> Ring {
         let r = Ring { va, pa, idx: 0, cycle: 1 };
         let l = r.trb(RING - 1);
@@ -309,13 +309,13 @@ impl Ring {
         r
     }
 
-    /// Adres fizyczny następnego wolnego TRB | bit cyklu (Set TR Dequeue).
+    /// Physical address of the next free TRB | cycle bit (Set TR Dequeue).
     fn enqueue_ptr(&self) -> u64 {
         (self.pa + self.idx as u64 * 16) | self.cycle as u64
     }
 
-    /// Wpisuje TRB (`ctl` = typ << 10 | flagi; bit cyklu na końcu); zwraca
-    /// jego adres fizyczny.
+    /// Writes a TRB (`ctl` = type << 10 | flags; cycle bit last); returns
+    /// its physical address.
     fn push(&mut self, dw: [u32; 3], ctl: u32) -> u64 {
         let t = self.trb(self.idx);
         let pa = self.pa + self.idx as u64 * 16;
@@ -336,7 +336,7 @@ impl Ring {
         pa
     }
 
-    /// Pierścień zdarzeń: następne zdarzenie (bit cyklu zgodny) albo None.
+    /// Event ring: the next event (matching cycle bit) or None.
     fn pop(&mut self) -> Option<[u32; 4]> {
         let t = self.trb(self.idx);
         let d3 = unsafe { t.add(3).read_volatile() };
@@ -353,24 +353,24 @@ impl Ring {
     }
 }
 
-/// M20.e: klawiatura / mysz w boot protocol.
+/// Keyboard / mouse in boot protocol.
 struct Hid {
     mouse: bool,
     iface: u8,
-    /// Indeks kontekstu endpointu (DCI = numer * 2 + 1 dla IN).
+    /// Endpoint context index (DCI = number * 2 + 1 for IN).
     dci: u32,
     mps: u16,
     ring: Ring,
     ring_page: (u64, u64),
     data_page: (u64, u64),
-    /// Poprzedni raport klawiatury (różnica = zdarzenia).
+    /// Previous keyboard report (the difference = events).
     prev: [u8; 8],
     leds: u8,
     reports: u64,
     errors: u64,
 }
 
-/// M20.f: pendrive (Bulk-Only + SCSI) – tylko odczyt.
+/// USB stick (Bulk-Only + SCSI) – read-only.
 struct Storage {
     iface: u8,
     dci_in: u32,
@@ -383,82 +383,82 @@ struct Storage {
     ring_out: Ring,
     ring_in_page: (u64, u64),
     ring_out_page: (u64, u64),
-    /// CBW (0), CSW (512), dane komend (1024: INQUIRY, sense, pojemność).
+    /// CBW (0), CSW (512), command data (1024: INQUIRY, sense, capacity).
     cmd_page: (u64, u64),
-    /// Bufor wspólny z jądrem (indeks w Hc.stor_bufs).
+    /// Buffer shared with the kernel (index into Hc.stor_bufs).
     buf: usize,
     blocks: u64,
     bs: u32,
     tag: u32,
-    /// Producent + produkt z INQUIRY.
+    /// Vendor + product from INQUIRY.
     name: [u8; 40],
     nlen: usize,
-    /// Kanał do jądra (nasz koniec) i numer dysku (0 = sda) po blk_attach.
+    /// Channel to the kernel (our end) and disk number (0 = sda) after blk_attach.
     chan: u64,
     disk: Option<u64>,
     attach_error: i64,
     reads: u64,
     errors: u64,
-    /// M20.g: transfer przerwany (zmiana portu huba) – przed następną komendą
-    /// reset recovery (jeśli urządzenie jeszcze jest).
+    /// Transfer interrupted (hub port change) – before the next command
+    /// do a reset recovery (if the device is still there).
     needs_recovery: bool,
 }
 
-/// M20.h: tyle prób INQUIRY przy starcie pendrive'a (przerwy 200, 400, 600 ms).
+/// Number of INQUIRY attempts when a USB stick starts (delays 200, 400, 600 ms).
 const INQUIRY_TRIES: u32 = 4;
 
 #[derive(Clone, Copy, Debug)]
 enum StorError {
     Xfer(XferError),
-    /// CSW: komenda nie wyszła (status 1).
+    /// CSW: the command failed (status 1).
     Failed,
-    /// Zły / brak CSW albo status 2 (phase error) – po reset recovery.
+    /// Bad / missing CSW or status 2 (phase error) – after reset recovery.
     Phase,
-    /// Komenda spoza SCSI_ALLOWED – nie wysłana.
+    /// Command outside SCSI_ALLOWED – not sent.
     Refused,
 }
 
-/// M20.d: gdzie jest urządzenie – port kontrolera i droga przez huby.
+/// Where the device is – controller port and path through hubs.
 #[derive(Clone, Copy, Default)]
 struct Loc {
-    /// Route string (xHCI): numer portu huba na kolejnych poziomach (4 bity każdy).
+    /// Route string (xHCI): hub port number at successive levels (4 bits each).
     route: u32,
-    /// 0 – bezpośrednio w porcie kontrolera; 1 – za jednym hubem itd.
+    /// 0 – directly on a controller port; 1 – behind one hub, etc.
     depth: u32,
-    /// Porty hubów po kolei (lsusb: „3.2.1”).
+    /// Hub ports in order (lsusb: "3.2.1").
     path: [u8; 5],
-    /// M20.g: hub-rodzic (indeks w `devs`) i jego port – zmiana na tym porcie
-    /// przerywa transfer bulk (pendrive wyjęty z huba).
+    /// Parent hub (index into `devs`) and its port – a change on that port
+    /// interrupts the bulk transfer (stick pulled out of the hub).
     parent: Option<usize>,
     hub_port: u32,
-    /// Translator transakcji (urządzenie low / full speed za hubem high speed):
-    /// (slot huba, port huba); (0, 0) – bez TT.
+    /// Transaction translator (low / full speed device behind a high-speed hub):
+    /// (hub slot, hub port); (0, 0) – no TT.
     tt: (u32, u32),
 }
 
-/// M20.d: hub USB 2 / USB 3.
+/// USB 2 / USB 3 hub.
 struct Hub {
     usb3: bool,
     nports: u32,
-    /// TT think time (USB 2, pole 2-bitowe) i czas włączenia zasilania portu (ms).
+    /// TT think time (USB 2, 2-bit field) and port power-on time (ms).
     think: u32,
     power_ms: u64,
-    /// Endpoint przerwań IN: mapa zmian (bit 0 hub, bit n – port n).
+    /// Interrupt IN endpoint: change bitmap (bit 0 hub, bit n – port n).
     dci: u32,
     mps: u16,
     ring: Ring,
     ring_page: (u64, u64),
     data_page: (u64, u64),
     ports: [Port; HUB_PORTS_MAX],
-    /// Porty do sprawdzenia (bit n – port n).
+    /// Ports to check (bit n – port n).
     pending: u32,
     last_error: [&'static str; HUB_PORTS_MAX],
     errors: u64,
 }
 
-/// Urządzenie z przydzielonym slotem.
+/// Device with an assigned slot.
 struct Dev {
-    /// Port kontrolera (dla urządzeń za hubem – port najwyższego huba).
+    /// Controller port (for devices behind a hub – port of the top-level hub).
     port: u32,
     slot: u32,
     speed: u32,
@@ -475,29 +475,29 @@ struct Dev {
     product: [u8; NAME_MAX],
     plen: usize,
     hid: Option<Hid>,
-    /// Konfiguracja HID nie wyszła – powód (lsusb).
+    /// HID configuration failed – reason (lsusb).
     hid_error: &'static str,
-    /// M20.f: pamięć masowa (albo powód, dla którego nie działa).
+    /// Mass storage (or the reason it does not work).
     stor: Option<Storage>,
     stor_error: &'static str,
-    /// M20.d: położenie, hub (jeśli urządzenie nim jest) albo powód błędu.
+    /// Location, hub (if the device is one) or error reason.
     loc: Loc,
     hub: Option<Hub>,
     hub_error: &'static str,
-    /// M20.h: ms od resetu portu do gotowości (sterowniki klas skonfigurowane).
+    /// ms from port reset to ready (class drivers configured).
     enum_ms: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Port {
     Free,
-    /// Podłączone – czekamy do chwili (ms), aż styki się ustalą.
+    /// Connected – waiting until the time (ms) when the contacts settle.
     Debounce(u64),
-    /// Działa: indeks w `devs`.
+    /// Running: index into `devs`.
     Working(usize),
-    /// Błąd: liczba prób, następna próba (ms).
+    /// Error: attempt count, next attempt (ms).
     Failed(u32, u64),
-    /// 3 nieudane próby – do odłączenia.
+    /// 3 failed attempts – until disconnect.
     Ignored,
 }
 
@@ -508,7 +508,7 @@ enum XferError {
     Code,
     Command,
     Gone,
-    /// M20.g: hub zgłosił zmianę na porcie urządzenia w trakcie transferu.
+    /// The hub reported a change on the device's port during a transfer.
     Interrupted,
 }
 
@@ -538,22 +538,22 @@ struct Hc {
     max_ports: u32,
     scratch: u32,
     ac64: bool,
-    /// Rozmiar kontekstu: 32 albo 64 B (HCCPARAMS1.CSZ).
+    /// Context size: 32 or 64 B (HCCPARAMS1.CSZ).
     ctx: u64,
-    /// Porty USB 2 / USB 3 z „Supported Protocol”: (pierwszy, liczba).
+    /// USB 2 / USB 3 ports from "Supported Protocol": (first, count).
     usb2: (u32, u32),
     usb3: (u32, u32),
     bios: &'static str,
     irq: u64,
     pool: Pool,
     dcbaa: u64,
-    /// Strona na dane transferów sterujących (deskryptory).
+    /// Page for control transfer data (descriptors).
     buf: (u64, u64),
     cmd: Ring,
     ev: Ring,
-    /// Zakończona komenda: (adres TRB, kod, slot).
+    /// Completed command: (TRB address, code, slot).
     done: Option<(u64, u32, u32)>,
-    /// Zdarzenia transferu: (adres TRB, kod, reszta, slot, endpoint).
+    /// Transfer events: (TRB address, code, residue, slot, endpoint).
     xfers: [(u64, u32, u32, u32, u32); 16],
     nxfers: usize,
     ports: [Port; PORTS_MAX],
@@ -568,34 +568,34 @@ struct Hc {
     port_events: u64,
     errors: u64,
     enumerated: u64,
-    /// M20.h: czasy enumeracji (ms) – liczba, suma, najdłuższy.
+    /// Enumeration times (ms) – count, sum, longest.
     enum_count: u64,
     enum_sum: u64,
     enum_max: u64,
     failures: u64,
-    /// M20.e: uchwyt INPUT (slot 5) jest – zdarzenia idą do jądra.
+    /// INPUT handle (slot 5) present – events go to the kernel.
     input: bool,
     hid_reports: u64,
     hid_events: u64,
     hid_errors: u64,
-    /// Diody do wysłania klawiaturom (Set Report poza obsługą zdarzeń).
+    /// LEDs to send to keyboards (Set Report outside event handling).
     leds_wanted: Option<u8>,
-    /// M20.f: uchwyt BLK (slot 6) jest – dyski idą do jądra.
+    /// BLK handle (slot 6) present – disks go to the kernel.
     blk: bool,
-    /// Bufory DMA dla pendrive'ów: (adres w procesie, fizyczny, uchwyt SHM,
-    /// zajęty).  Żyją z przejęciem kontrolera – po odłączeniu wracają do puli.
+    /// DMA buffers for USB sticks: (address in the process, physical, SHM handle,
+    /// busy).  They live as long as the controller claim – after disconnect they go back to the pool.
     stor_bufs: [(u64, u64, u64, bool); STOR_MAX],
     stor_reads: u64,
     stor_bytes: u64,
     stor_errors: u64,
     stor_requests_bad: u64,
-    /// M20.h: ponowione INQUIRY przy starcie pendrive'ów.
+    /// Retried INQUIRYs when USB sticks start.
     stor_retries: u64,
-    /// v0.27.1: kod zakończenia ostatniej nieudanej komendy (diagnostyka) i
-    /// prędkość ostatnio enumerowanego portu huba.
+    /// Completion code of the last failed command (diagnostics) and
+    /// speed of the most recently enumerated hub port.
     last_cc: u32,
     last_speed: u32,
-    /// M20.d: raporty zmian portów od hubów, błędy hubów.
+    /// Port change reports from hubs, hub errors.
     hub_events: u64,
     hub_errors: u64,
 }
@@ -630,7 +630,7 @@ impl Hc {
         self.op_rd(USBSTS) & (STS_HSE | STS_HCE) != 0
     }
 
-    /// Zdarzenia z pierścienia: zakończenia komend, transferów, zmiany portów.
+    /// Events from the ring: command completions, transfers, port changes.
     fn poll_events(&mut self) {
         let mut any = false;
         while let Some(ev) = self.ev.pop() {
@@ -641,11 +641,11 @@ impl Hc {
             match ty {
                 TRB_CMD_DONE => self.done = Some((ptr, ev[2] >> 24, ev[3] >> 24)),
                 TRB_TRANSFER if self.is_hid_ep(ev[3] >> 24, (ev[3] >> 16) & 0x1F) => {
-                    // M20.e: raport HID – obsłużony od razu (nie czeka na transfer sterujący).
+                    // HID report – handled immediately (does not wait for the control transfer).
                     self.hid_event(ptr, ev[2] >> 24, ev[2] & 0xFF_FFFF, ev[3] >> 24, (ev[3] >> 16) & 0x1F);
                 }
                 TRB_TRANSFER if self.is_hub_ep(ev[3] >> 24, (ev[3] >> 16) & 0x1F) => {
-                    // M20.d: hub zgłasza zmianę portów – sprawdzimy je w pętli głównej.
+                    // A hub reports a port change – we check it in the main loop.
                     self.hub_event(ptr, ev[2] >> 24, ev[2] & 0xFF_FFFF, ev[3] >> 24, (ev[3] >> 16) & 0x1F);
                 }
                 TRB_TRANSFER => {
@@ -660,8 +660,8 @@ impl Hc {
                     self.port_events += 1;
                     let port = ev[0] >> 24;
                     if port >= 1 && port <= self.ports() {
-                        // Zapamiętaj podłączenie / odłączenie, skasuj bity zmian (RW1C),
-                        // nie ruszając PED.
+                        // Remember connect / disconnect, clear the change bits (RW1C),
+                        // without touching PED.
                         let a = self.portsc(port);
                         let v = rd32(a);
                         if v & PORT_CSC != 0 {
@@ -691,8 +691,8 @@ impl Hc {
         ep != 1 && self.devs.iter().any(|x| matches!(x, Some(d) if d.slot == slot && matches!(&d.hid, Some(h) if h.dci == ep)))
     }
 
-    /// Czeka na przerwanie najwyżej `ms` (co najwyżej 10 ms – potem i tak
-    /// sprawdzamy pierścień); true = przyszło przerwanie.
+    /// Waits for an interrupt for at most `ms` (at most 10 ms – after that we check
+    /// the ring anyway); true = an interrupt arrived.
     fn wait_irq(&mut self, ms: u64) -> bool {
         match wait_many(&[(self.irq, W_IRQ)], ms.min(10).max(1)) {
             Ok(1) => {
@@ -703,12 +703,12 @@ impl Hc {
         }
     }
 
-    /// Komenda -> czeka na jej zdarzenie zakończenia (przerwanie; co 10 ms
-    /// sprawdza też pierścień – gdyby przerwania nie dochodziły, licznik
-    /// `polled` to pokaże).  Wynik: (kod zakończenia, slot).
+    /// Command -> waits for its completion event (interrupt; every 10 ms
+    /// it also checks the ring – if interrupts were not arriving, the `polled`
+    /// counter will show it).  Result: (completion code, slot).
     fn command(&mut self, dw: [u32; 3], ctl: u32) -> Result<(u32, u32), i64> {
         let pa = self.cmd.push(dw, ctl);
-        wr32(self.db, 0); // dzwonek 0 = kontroler (pierścień komend)
+        wr32(self.db, 0); // doorbell 0 = controller (command ring)
         let t0 = uptime_ms();
         let mut by_poll = false;
         loop {
@@ -746,7 +746,7 @@ impl Hc {
         }
     }
 
-    /// n komend No-Op; ns na komendę.
+    /// n No-Op commands; ns per command.
     fn noop_bench(&mut self, n: u64) -> Result<u64, i64> {
         let t0 = uptime_ms();
         for _ in 0..n {
@@ -769,8 +769,8 @@ impl Hc {
         }
     }
 
-    /// Po STALL / błędzie: endpoint 0 z powrotem w stanie Running (Reset
-    /// Endpoint) i kolejka za nieudanym transferem (Set TR Dequeue).
+    /// After a STALL / error: endpoint 0 back in the Running state (Reset
+    /// Endpoint) and the queue past the failed transfer (Set TR Dequeue).
     fn reset_ep0(&mut self, d: usize) {
         let Some(dev) = self.devs[d].as_ref() else { return };
         let (slot, deq) = (dev.slot, dev.ring.enqueue_ptr());
@@ -778,12 +778,12 @@ impl Hc {
         let _ = self.slot_command(TRB_SET_DEQUEUE, slot, 1 << 16, [deq as u32, (deq >> 32) as u32, 0]);
     }
 
-    /// Transfer sterujący na EP0; dane (IN) w `self.buf`.  Wynik: bajty danych.
+    /// Control transfer on EP0; data (IN) in `self.buf`.  Result: data bytes.
     fn control(&mut self, d: usize, req_type: u8, req: u8, value: u16, index: u16, len: u16) -> Result<usize, XferError> {
         self.control_data(d, req_type, req, value, index, len, &[])
     }
 
-    /// Transfer sterujący; `out` – dane do urządzenia (prośby OUT, np. Set Report).
+    /// Control transfer; `out` – data to the device (OUT requests, e.g. Set Report).
     fn control_data(&mut self, d: usize, req_type: u8, req: u8, value: u16, index: u16, len: u16, out: &[u8]) -> Result<usize, XferError> {
         let len = len.min(4096);
         if req_type & 0x80 == 0 && !out.is_empty() {
@@ -802,7 +802,7 @@ impl Hc {
         }
         let status_in = !(len > 0 && input);
         let status = dev.ring.push([0; 3], TRB_STATUS << 10 | TRB_IOC | (status_in as u32) << 16);
-        wr32(self.db + 4 * slot as u64, 1); // dzwonek urządzenia, cel 1 = EP0
+        wr32(self.db + 4 * slot as u64, 1); // device doorbell, target 1 = EP0
         let t0 = uptime_ms();
         let mut residual = 0u32;
         loop {
@@ -813,7 +813,7 @@ impl Hc {
                 self.xfers.copy_within(1.., 0);
                 self.nxfers -= 1;
                 if s != slot || ep != 1 {
-                    continue; // nie nasze (inne urządzenie)
+                    continue; // not ours (another device)
                 }
                 match code {
                     CC_SHORT => residual = rest,
@@ -840,7 +840,7 @@ impl Hc {
         }
     }
 
-    /// GET_DESCRIPTOR (standardowe, do urządzenia).
+    /// GET_DESCRIPTOR (standard, to the device).
     fn get_descriptor(&mut self, d: usize, ty: u8, index: u8, lang: u16, len: u16) -> Result<usize, XferError> {
         self.control(d, 0x80, 6, (ty as u16) << 8 | index as u16, lang, len)
     }
@@ -849,7 +849,7 @@ impl Hc {
         unsafe { core::slice::from_raw_parts(self.buf.0 as *const u8, n.min(4096)) }
     }
 
-    /// Napis (producent / produkt) jako ASCII.
+    /// String descriptor (manufacturer / product) as ASCII.
     fn string(&mut self, d: usize, index: u8, lang: u16, out: &mut [u8; NAME_MAX]) -> usize {
         if index == 0 {
             return 0;
@@ -864,7 +864,7 @@ impl Hc {
         }
     }
 
-    /// Reset portu USB 2 (urządzenie high speed ujawnia się dopiero tu).
+    /// USB 2 port reset (a high-speed device reveals itself only here).
     fn port_reset(&mut self, port: u32) -> Result<(), &'static str> {
         let a = self.portsc(port);
         let v = rd32(a);
@@ -883,7 +883,7 @@ impl Hc {
                 return Err("port reset timed out");
             }
         }
-        sleep_ms(10); // czas na powrót urządzenia po resecie (USB 2: 10 ms)
+        sleep_ms(10); // time for the device to recover after reset (USB 2: 10 ms)
         let v = rd32(a);
         wr32(a, (v & PORT_KEEP) | (v & PORT_CHANGES));
         if v & PORT_PED == 0 {
@@ -896,8 +896,8 @@ impl Hc {
         wr32(base + index * self.ctx + dword * 4, v);
     }
 
-    /// Kontekst slotu w kontekście wejściowym: liczba wpisów, prędkość, route
-    /// string, port kontrolera, TT; dla huba – bit Hub, liczba portów, think time.
+    /// Slot context in the input context: number of entries, speed, route
+    /// string, controller port, TT; for a hub – the Hub bit, number of ports, think time.
     fn slot_ctx(&self, input: u64, d: usize, entries: u32) {
         let dev = self.devs[d].as_ref().unwrap();
         let l = &dev.loc;
@@ -917,8 +917,8 @@ impl Hc {
         self.ctx_w(input, 1, 2, dw2);
     }
 
-    /// Port kontrolera -> urządzenie w stanie „Działa”; Err = powód (port do
-    /// ponownej próby).
+    /// Controller port -> device in the "Running" state; Err = reason (port to
+    /// be retried).
     fn enumerate(&mut self, port: u32) -> Result<usize, &'static str> {
         let t0 = uptime_ms();
         let v = rd32(self.portsc(port));
@@ -932,11 +932,11 @@ impl Hc {
         self.enumerate_at(port, speed, Loc::default(), t0)
     }
 
-    /// Wspólne dla portu kontrolera i portu huba: slot, adres, deskryptory,
-    /// sterowniki klas (HID, pamięć masowa, hub).
-    /// `t0` – początek enumeracji (przed resetem portu) – M20.h: czas do „gotowe”.
+    /// Common to controller ports and hub ports: slot, address, descriptors,
+    /// class drivers (HID, mass storage, hub).
+    /// `t0` – start of enumeration (before the port reset) – for the time-to-ready statistic.
     fn enumerate_at(&mut self, port: u32, speed: u32, loc: Loc, t0: u64) -> Result<usize, &'static str> {
-        let usb3 = speed >= 4; // SuperSpeed: bMaxPacketSize0 jako wykładnik
+        let usb3 = speed >= 4; // SuperSpeed: bMaxPacketSize0 as an exponent
         let mps0: u16 = match speed {
             1 | 2 => 8,
             3 => 64,
@@ -988,23 +988,23 @@ impl Hc {
         match self.describe_device(d, slot, mps0, usb3) {
             Ok(()) => {
                 self.enumerated += 1;
-                // M20.e: klawiatura / mysz – błąd konfiguracji nie odłącza urządzenia.
+                // Keyboard / mouse – a configuration error does not disconnect the device.
                 if let Err(e) = self.setup_hid(d) {
                     self.devs[d].as_mut().unwrap().hid_error = e;
                 }
-                // M20.f: pendrive – błąd nie odłącza urządzenia (widać go w lsusb).
+                // USB stick – an error does not disconnect the device (it is visible in lsusb).
                 if let Err(e) = self.setup_storage(d) {
                     if let Some(dev) = self.devs[d].as_mut() {
                         dev.stor_error = e;
                     }
                 }
-                // M20.d: hub – błąd: hub widoczny w lsusb, porty za nim nieobsługiwane.
+                // Hub – on error: the hub is visible in lsusb, ports behind it are not handled.
                 if let Err(e) = self.setup_hub(d) {
                     if let Some(dev) = self.devs[d].as_mut() {
                         dev.hub_error = e;
                     }
                 }
-                // M20.h: czas enumeracji (reset portu -> sterownik klasy gotowy).
+                // Enumeration time (port reset -> class driver ready).
                 let ms = uptime_ms().saturating_sub(t0);
                 if let Some(dev) = self.devs[d].as_mut() {
                     dev.enum_ms = ms as u32;
@@ -1021,25 +1021,25 @@ impl Hc {
         }
     }
 
-    /// Address Device, deskryptory, napisy.
+    /// Address Device, descriptors, strings.
     fn describe_device(&mut self, d: usize, slot: u32, mps0: u16, usb3: bool) -> Result<(), &'static str> {
         let (input, output, ring_pa) = {
             let dev = self.devs[d].as_ref().unwrap();
             (dev.input, dev.output, dev.ring.pa)
         };
-        // Kontekst wejściowy: dodaj slot i EP0.
+        // Input context: add the slot and EP0.
         self.ctx_w(input.0, 0, 1, 0b11);
-        self.slot_ctx(input.0, d, 1); // 1 wpis kontekstu, prędkość, trasa, TT
-        self.ctx_w(input.0, 2, 1, 3 << 1 | 4 << 3 | (mps0 as u32) << 16); // CErr 3, typ: sterujący
+        self.slot_ctx(input.0, d, 1); // 1 context entry, speed, route, TT
+        self.ctx_w(input.0, 2, 1, 3 << 1 | 4 << 3 | (mps0 as u32) << 16); // CErr 3, type: control
         self.ctx_w(input.0, 2, 2, ring_pa as u32 | 1);
         self.ctx_w(input.0, 2, 3, (ring_pa >> 32) as u32);
-        self.ctx_w(input.0, 2, 4, 8); // średnia długość TRB
+        self.ctx_w(input.0, 2, 4, 8); // average TRB length
         unsafe { ((self.dcbaa + slot as u64 * 8) as *mut u64).write_volatile(output.1) };
         self.slot_command(TRB_ADDRESS_DEVICE, slot, 0, [input.1 as u32, (input.1 >> 32) as u32, 0])
             .map_err(|_| address_error(self.last_cc))?;
         let addr = rd32(output.0 + 3 * 4) & 0xFF;
 
-        // Pierwsze 8 B: prawdziwy rozmiar pakietu EP0 (full speed: 8..64).
+        // First 8 B: the real EP0 max packet size (full speed: 8..64).
         let n = self.get_descriptor(d, DESC_DEVICE, 0, 0, 8).map_err(|e| e.text())?;
         let real = max_packet0(self.buf(n), usb3).map_err(|e| e.name())?;
         if real != mps0 {
@@ -1052,7 +1052,7 @@ impl Hc {
         let n = self.get_descriptor(d, DESC_DEVICE, 0, 0, 18).map_err(|e| e.text())?;
         let desc = parse_device(self.buf(n), usb3).map_err(|e| e.name())?;
 
-        // Konfiguracja 1: nagłówek (wTotalLength), potem całość.
+        // Configuration 1: header (wTotalLength), then the whole thing.
         let n = self.get_descriptor(d, DESC_CONFIG, 0, 0, 9).map_err(|e| e.text())?;
         let total = config_total(self.buf(n)).map_err(|e| e.name())?;
         let n = self.get_descriptor(d, DESC_CONFIG, 0, 0, total).map_err(|e| e.text())?;
@@ -1060,7 +1060,7 @@ impl Hc {
         tmp[..n].copy_from_slice(self.buf(n));
         let cfg = parse_config(&tmp[..n]).map_err(|e| e.name())?;
 
-        // Napisy – nieobowiązkowe (błąd = brak nazwy).
+        // Strings – optional (error = no name).
         let lang = match self.get_descriptor(d, DESC_STRING, 0, 0, 255) {
             Ok(n) => first_langid(self.buf(n)).unwrap_or(0x0409),
             Err(_) => 0x0409,
@@ -1081,10 +1081,10 @@ impl Hc {
 
 
     // --------------------------------------------------------------
-    // M20.e: klawiatura i mysz HID (boot protocol)
+    // HID keyboard and mouse (boot protocol)
     // --------------------------------------------------------------
 
-    /// Interfejs boot HID z endpointem przerwań IN: (indeks interfejsu, mysz?, endpoint).
+    /// Boot HID interface with an interrupt IN endpoint: (interface index, mouse?, endpoint).
     fn hid_interface(cfg: &Config) -> Option<(u8, bool, Endpoint)> {
         for f in &cfg.ifaces[..cfg.n_ifaces] {
             if f.class == 3 && f.subclass == 1 && matches!(f.protocol, 1 | 2) {
@@ -1096,8 +1096,8 @@ impl Hc {
         None
     }
 
-    /// Klawiatura / mysz: Configure Endpoint, Set Configuration, Set Protocol
-    /// (boot), Set Idle, TRB czekające na raporty.
+    /// Keyboard / mouse: Configure Endpoint, Set Configuration, Set Protocol
+    /// (boot), Set Idle, TRBs waiting for reports.
     fn setup_hid(&mut self, d: usize) -> Result<(), &'static str> {
         let (slot, speed, input, cfg_value, found) = {
             let dev = self.devs[d].as_ref().unwrap();
@@ -1109,7 +1109,7 @@ impl Hc {
         let interval = if speed >= 3 {
             (ep.interval.clamp(1, 16) - 1) as u32
         } else {
-            let v = (ep.interval.max(1) as u32) * 8; // ms -> mikroramki 125 us
+            let v = (ep.interval.max(1) as u32) * 8; // ms -> 125 us microframes
             (31 - v.leading_zeros()).clamp(3, 10)
         };
         let (Ok(ring_page), Ok(data_page)) = (self.pool.page(), self.pool.page()) else {
@@ -1128,13 +1128,13 @@ impl Hc {
             reports: 0,
             errors: 0,
         };
-        // Kontekst wejściowy: slot (liczba kontekstów = dci) + endpoint dci.
+        // Input context: slot (context count = dci) + endpoint dci.
         unsafe { core::ptr::write_bytes(input.0 as *mut u8, 0, 4096) };
         self.ctx_w(input.0, 0, 1, 1 | 1 << dci);
         self.slot_ctx(input.0, d, dci);
         let e = dci as u64 + 1;
         self.ctx_w(input.0, e, 0, interval << 16);
-        self.ctx_w(input.0, e, 1, 3 << 1 | 7 << 3 | (mps as u32) << 16); // CErr 3, typ: przerwania IN
+        self.ctx_w(input.0, e, 1, 3 << 1 | 7 << 3 | (mps as u32) << 16); // CErr 3, type: interrupt IN
         self.ctx_w(input.0, e, 2, hid.ring.pa as u32 | 1);
         self.ctx_w(input.0, e, 3, (hid.ring.pa >> 32) as u32);
         self.ctx_w(input.0, e, 4, mps as u32 | (mps as u32) << 16);
@@ -1147,7 +1147,7 @@ impl Hc {
             self.pool.release(data_page);
             return Err(e);
         }
-        // Boot protocol i raport tylko przy zmianie – nieobowiązkowe (część urządzeń odmawia).
+        // Boot protocol and report-on-change only – optional (some devices refuse).
         let _ = self.control(d, 0x21, 0x0B, 0, iface as u16, 0);
         let _ = self.control(d, 0x21, 0x0A, 0, iface as u16, 0);
         for _ in 0..HID_TRBS {
@@ -1158,13 +1158,13 @@ impl Hc {
         Ok(())
     }
 
-    /// Jeden TRB czekający na raport (bufor = indeks TRB % 16 w stronie danych).
+    /// One TRB waiting for a report (buffer = TRB index % 16 in the data page).
     fn hid_queue(h: &mut Hid) {
         let pa = h.data_page.1 + (h.ring.idx as u64 % 16) * HID_BUF;
         h.ring.push([pa as u32, (pa >> 32) as u32, h.mps as u32], TRB_NORMAL << 10 | TRB_IOC | TRB_ISP);
     }
 
-    /// Zdarzenie transferu na endpoincie HID (z poll_events).
+    /// Transfer event on a HID endpoint (from poll_events).
     fn hid_event(&mut self, ptr: u64, code: u32, rest: u32, slot: u32, ep: u32) {
         let Some(d) = self.devs.iter().position(|x| matches!(x, Some(dev) if dev.slot == slot && matches!(&dev.hid, Some(h) if h.dci == ep)))
         else {
@@ -1177,7 +1177,7 @@ impl Hc {
             return;
         }
         if !matches!(code, CC_SUCCESS | CC_SHORT) {
-            // Endpoint zatrzymany (STALL, błąd transmisji) – reset w pętli głównej.
+            // Endpoint halted (STALL, transmission error) – reset in the main loop.
             h.errors += 1;
             self.hid_errors += 1;
             return;
@@ -1198,15 +1198,15 @@ impl Hc {
         }
     }
 
-    /// Raport klawiatury (boot: modyfikatory, zarezerwowany, 6 klawiszy) ->
-    /// różnica z poprzednim -> zdarzenia do jądra.
+    /// Keyboard report (boot: modifiers, reserved, 6 keys) ->
+    /// diff against the previous one -> events to the kernel.
     fn kbd_report(&mut self, d: usize, r: &[u8]) {
         if r.len() < 3 {
             return;
         }
         let mut new = [0u8; 8];
         new[..r.len().min(8)].copy_from_slice(&r[..r.len().min(8)]);
-        // ErrorRollOver / POSTFail / ErrorUndefined – za dużo klawiszy naraz: bez zmian.
+        // ErrorRollOver / POSTFail / ErrorUndefined – too many keys at once: no change.
         if new[2..].iter().any(|&k| matches!(k, 1..=3)) {
             return;
         }
@@ -1246,19 +1246,19 @@ impl Hc {
         }
     }
 
-    /// Raport myszy (boot: przyciski, dx, dy[, kółko]) – kółko przewija konsolę.
+    /// Mouse report (boot: buttons, dx, dy[, wheel]) – the wheel scrolls the console.
     fn mouse_report(&mut self, r: &[u8]) {
         if r.len() < 4 || r[3] == 0 {
             return;
         }
         self.hid_events += 1;
         if self.input {
-            // USB: dodatnie = od siebie (w górę); jądro (jak PS/2): dodatnie = w dół.
+            // USB: positive = away from the user (up); kernel (like PS/2): positive = down.
             let _ = input_inject(INPUT, &[mouse_event(r[0], (r[3] as i8).saturating_neg())]);
         }
     }
 
-    /// Pętla główna: diody klawiatur, endpointy HID po błędzie.
+    /// Main loop: keyboard LEDs, HID endpoints after an error.
     fn hid_maintenance(&mut self) {
         if let Some(l) = self.leds_wanted.take() {
             for d in 0..DEVS_MAX {
@@ -1280,7 +1280,7 @@ impl Hc {
             if errors == 0 {
                 continue;
             }
-            // Reset endpointu, kolejka za nieudanymi TRB, nowe TRB.
+            // Reset the endpoint, queue past the failed TRBs, new TRBs.
             let deq = self.devs[d].as_ref().unwrap().hid.as_ref().unwrap().ring.enqueue_ptr();
             let _ = self.slot_command(TRB_RESET_EP, slot, dci << 16, [0; 3]);
             let _ = self.slot_command(TRB_SET_DEQUEUE, slot, dci << 16, [deq as u32, (deq >> 32) as u32, 0]);
@@ -1293,7 +1293,7 @@ impl Hc {
         }
     }
 
-    /// "idle MS": raporty co MS ms także bez zmian (Set Idle) – test potoku.
+    /// "idle MS": reports every MS ms even without changes (Set Idle) – pipeline test.
     fn hid_idle(&mut self, ms: u16) -> usize {
         let mut n = 0;
         for d in 0..DEVS_MAX {
@@ -1306,10 +1306,10 @@ impl Hc {
     }
 
     // --------------------------------------------------------------
-    // M20.f: pamięć masowa (Bulk-Only + SCSI) – TYLKO ODCZYT
+    // Mass storage (Bulk-Only + SCSI) – READ-ONLY
     // --------------------------------------------------------------
 
-    /// Interfejs 08/06/50 (SCSI transparent, Bulk-Only) z bulk IN i OUT.
+    /// Interface 08/06/50 (SCSI transparent, Bulk-Only) with bulk IN and OUT.
     fn storage_interface(cfg: &Config) -> Option<(u8, Endpoint, Endpoint)> {
         for f in &cfg.ifaces[..cfg.n_ifaces] {
             if f.class == 8 && f.subclass == 6 && f.protocol == 0x50 {
@@ -1323,7 +1323,7 @@ impl Hc {
         None
     }
 
-    /// Czeka `ms`, obsługując zdarzenia (klawiatura działa dalej).
+    /// Waits `ms` while handling events (the keyboard keeps working).
     fn pause(&mut self, ms: u64) {
         let t0 = uptime_ms();
         loop {
@@ -1336,7 +1336,7 @@ impl Hc {
         }
     }
 
-    /// Bufor DMA na dane pendrive'a (wspólny z jądrem): wolny z puli albo nowy.
+    /// DMA buffer for USB stick data (shared with the kernel): a free one from the pool or a new one.
     fn stor_buf(&mut self) -> Result<usize, &'static str> {
         if let Some(i) = self.stor_bufs.iter().position(|b| b.2 != 0 && !b.3) {
             self.stor_bufs[i].3 = true;
@@ -1356,9 +1356,9 @@ impl Hc {
         Ok(i)
     }
 
-    /// Transfer bulk: `len` bajtów (1..128 KiB) z / do `pa`; TRB dzielone na
-    /// granicach 64 KiB (wymóg xHCI), połączone w łańcuch.  Wynik: przesłane
-    /// bajty (krótki pakiet IN – mniej).
+    /// Bulk transfer: `len` bytes (1..128 KiB) from / to `pa`; TRBs split at
+    /// 64 KiB boundaries (xHCI requirement), chained together.  Result: bytes
+    /// transferred (short IN packet – fewer).
     fn bulk(&mut self, d: usize, input: bool, pa: u64, len: usize) -> Result<usize, XferError> {
         let db = self.db;
         let Some(dev) = self.devs[d].as_mut() else { return Err(XferError::Gone) };
@@ -1401,7 +1401,7 @@ impl Hc {
                 if s != slot || ep != dci {
                     continue;
                 }
-                // Zdarzenie spoza tego transferu (np. po Stop Endpoint) – pomijane.
+                // Event not belonging to this transfer (e.g. after Stop Endpoint) – skipped.
                 let Some(i) = trbs[..n].iter().position(|t| t.0 == ptr) else { continue };
                 if code == CC_SUCCESS && i + 1 != n {
                     continue;
@@ -1422,8 +1422,8 @@ impl Hc {
             if rd32(self.portsc(port)) & PORT_CCS == 0 {
                 return Err(XferError::Gone);
             }
-            // M20.g: za hubem – zmiana na porcie huba (np. pendrive wyjęty) przerywa
-            // czekanie od razu (bez tego: 4 s timeoutu + reset recovery > 5 s jądra).
+            // Behind a hub – a change on the hub port (e.g. stick pulled out) interrupts
+            // the wait immediately (otherwise: 4 s timeout + reset recovery > the kernel's 5 s).
             if self.port_change_pending(d) {
                 return Err(XferError::Interrupted);
             }
@@ -1435,7 +1435,7 @@ impl Hc {
         }
     }
 
-    /// Hub-rodzic zgłosił zmianę na porcie urządzenia `d` (jeszcze nieobsłużoną).
+    /// The parent hub reported a change on device `d`'s port (not yet handled).
     fn port_change_pending(&self, d: usize) -> bool {
         let Some(dev) = self.devs[d].as_ref() else { return true };
         match dev.loc.parent.and_then(|p| self.devs[p].as_ref()).and_then(|x| x.hub.as_ref()) {
@@ -1444,9 +1444,9 @@ impl Hc {
         }
     }
 
-    /// Endpoint bulk po błędzie: zatrzymany (Stop – gdy działał z porzuconym
-    /// TRB) albo zresetowany (Reset – gdy STALL), kolejka za porzuconymi TRB
-    /// (Set TR Dequeue), Clear Feature(ENDPOINT_HALT) w urządzeniu.
+    /// Bulk endpoint after an error: stopped (Stop – when it was running with an abandoned
+    /// TRB) or reset (Reset – on STALL), queue past the abandoned TRBs
+    /// (Set TR Dequeue), Clear Feature(ENDPOINT_HALT) on the device.
     fn bulk_recover(&mut self, d: usize, input: bool) {
         let Some((slot, dci, addr, deq)) = self.devs[d].as_ref().and_then(|x| {
             x.stor.as_ref().map(|s| {
@@ -1461,7 +1461,7 @@ impl Hc {
         let _ = self.control(d, 0x02, 1, 0, addr as u16, 0);
     }
 
-    /// Bulk-Only Mass Storage Reset + oba endpointy od nowa (reset recovery).
+    /// Bulk-Only Mass Storage Reset + both endpoints from scratch (reset recovery).
     fn reset_recovery(&mut self, d: usize) {
         let Some(iface) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| s.iface) else { return };
         let _ = self.control(d, 0x21, 0xFF, 0, iface as u16, 0);
@@ -1469,14 +1469,14 @@ impl Hc {
         self.bulk_recover(d, false);
     }
 
-    /// Komenda SCSI przez Bulk-Only: CBW, dane IN (`len` bajtów do `data_pa`),
-    /// CSW.  Wysyła WYŁĄCZNIE komendy z SCSI_ALLOWED (brak zapisu).
+    /// SCSI command over Bulk-Only: CBW, IN data (`len` bytes to `data_pa`),
+    /// CSW.  Sends ONLY commands from SCSI_ALLOWED (no writes).
     fn bot(&mut self, d: usize, cdb: &[u8], len: usize, data_pa: u64) -> Result<usize, StorError> {
         if cdb.is_empty() || cdb.len() > 16 || !SCSI_ALLOWED.contains(&cdb[0]) {
             return Err(StorError::Refused);
         }
-        // M20.g: poprzedni transfer przerwany zmianą portu – urządzenie nadal jest
-        // (hub nie odłączył go w pętli głównej), więc najpierw reset recovery.
+        // The previous transfer was interrupted by a port change – the device is still there
+        // (the hub did not disconnect it in the main loop), so do a reset recovery first.
         if self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map_or(false, |s| s.needs_recovery) {
             if self.port_change_pending(d) {
                 return Err(StorError::Xfer(XferError::Interrupted));
@@ -1513,7 +1513,7 @@ impl Hc {
         if len > 0 {
             match self.bulk(d, true, data_pa, len) {
                 Ok(n) => got = n,
-                // Urządzenie odmówiło danych – CSW i tak przychodzi (po Clear Halt).
+                // The device refused the data – the CSW arrives anyway (after Clear Halt).
                 Err(XferError::Stall) => self.bulk_recover(d, true),
                 Err(XferError::Gone) => return Err(StorError::Xfer(XferError::Gone)),
                 Err(XferError::Interrupted) => return Err(self.interrupted(d)),
@@ -1555,8 +1555,8 @@ impl Hc {
         }
     }
 
-    /// Transfer przerwany zmianą portu huba: bez reset recovery teraz (urządzenie
-    /// mogło zniknąć – każda komenda czekałaby na timeout), tylko znacznik.
+    /// Transfer interrupted by a hub port change: no reset recovery now (the device
+    /// may be gone – every command would wait for a timeout), just a flag.
     fn interrupted(&mut self, d: usize) -> StorError {
         if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
             st.needs_recovery = true;
@@ -1564,7 +1564,7 @@ impl Hc {
         StorError::Xfer(XferError::Interrupted)
     }
 
-    /// Komenda z danymi do strony komend (offset 1024); dane w `out`.
+    /// Command with data into the command page (offset 1024); data in `out`.
     fn scsi_in(&mut self, d: usize, cdb: &[u8], len: usize, out: &mut [u8; 64]) -> Result<usize, StorError> {
         let Some((va, pa)) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| (s.cmd_page.0 + 1024, s.cmd_page.1 + 1024)) else {
             return Err(StorError::Xfer(XferError::Gone));
@@ -1574,9 +1574,9 @@ impl Hc {
         Ok(n)
     }
 
-    /// Pendrive: endpointy bulk, INQUIRY, TEST UNIT READY, READ CAPACITY.
-    /// Dysk trafia do jądra później (attach_pending – z pętli głównej, gdy
-    /// usbd już odpowiada na żądania).
+    /// USB stick: bulk endpoints, INQUIRY, TEST UNIT READY, READ CAPACITY.
+    /// The disk is handed to the kernel later (attach_pending – from the main loop, once
+    /// usbd is already answering requests).
     fn setup_storage(&mut self, d: usize) -> Result<(), &'static str> {
         let found = self.devs[d].as_ref().and_then(|dev| Self::storage_interface(&dev.cfg));
         if found.is_none() {
@@ -1632,18 +1632,18 @@ impl Hc {
             errors: 0,
             needs_recovery: false,
         };
-        // Kontekst wejściowy: slot (liczba kontekstów – największy DCI, także
-        // endpointu HID, jeśli urządzenie ma oba) + oba endpointy bulk.
+        // Input context: slot (context count – the largest DCI, including the
+        // HID endpoint if the device has both) + both bulk endpoints.
         unsafe { core::ptr::write_bytes(input.0 as *mut u8, 0, 4096) };
         let entries = dci_in.max(dci_out).max(hid_dci.unwrap_or(0));
         self.ctx_w(input.0, 0, 1, 1 | 1 << dci_in | 1 << dci_out);
         self.slot_ctx(input.0, d, entries);
         for (dci, ty, ring_pa, mps) in [(dci_in, 6u32, st.ring_in.pa, st.mps_in), (dci_out, 2u32, st.ring_out.pa, st.mps_out)] {
             let e = dci as u64 + 1;
-            self.ctx_w(input.0, e, 1, 3 << 1 | ty << 3 | (mps as u32) << 16); // CErr 3, typ: bulk IN / OUT
+            self.ctx_w(input.0, e, 1, 3 << 1 | ty << 3 | (mps as u32) << 16); // CErr 3, type: bulk IN / OUT
             self.ctx_w(input.0, e, 2, ring_pa as u32 | 1);
             self.ctx_w(input.0, e, 3, (ring_pa >> 32) as u32);
-            self.ctx_w(input.0, e, 4, 3072); // średnia długość TRB (bulk)
+            self.ctx_w(input.0, e, 4, 3072); // average TRB length (bulk)
         }
         self.devs[d].as_mut().unwrap().stor = Some(st);
         self.slot_command(TRB_CONFIGURE_EP, slot, 0, [input.1 as u32, (input.1 >> 32) as u32, 0])
@@ -1651,10 +1651,10 @@ impl Hc {
         if hid_dci.is_none() {
             self.control(d, 0x00, 9, cfg_value as u16, 0, 0).map_err(|_| "Set Configuration failed")?;
         }
-        // INQUIRY: tylko dysk (typ 0) – nie CD-ROM, nie inne urządzenia SCSI.
+        // INQUIRY: disks only (type 0) – not CD-ROMs or other SCSI devices.
         let mut data = [0u8; 64];
-        // M20.h: kilka prób – pendrive SuperSpeed za hubem USB 3 (Legion, port 5.1)
-        // raz nie odpowiedział na pierwsze INQUIRY tuż po Configure Endpoint.
+        // Several attempts – on real hardware a SuperSpeed stick behind a USB 3 hub
+        // once did not answer the first INQUIRY right after Configure Endpoint.
         let mut n = 0;
         let mut last = None;
         for attempt in 0..INQUIRY_TRIES {
@@ -1712,8 +1712,8 @@ impl Hc {
                 }
             }
         }
-        // TEST UNIT READY: pendrive po podłączeniu zgłasza zwykle UNIT ATTENTION
-        // (REQUEST SENSE ją kasuje); czytnik bez karty – nigdy gotowy.
+        // TEST UNIT READY: after being plugged in a stick usually reports UNIT ATTENTION
+        // (REQUEST SENSE clears it); a card reader without a card – never ready.
         let mut ready = false;
         for _ in 0..10 {
             match self.bot(d, &[0, 0, 0, 0, 0, 0], 0, 0) {
@@ -1761,8 +1761,8 @@ impl Hc {
         Ok(())
     }
 
-    /// Strony i bufor pendrive'a wracają do puli, kanał do jądra zamknięty
-    /// (jądro: dysk znika).
+    /// The stick's pages and buffer return to the pool, the channel to the kernel is closed
+    /// (kernel: the disk disappears).
     fn drop_storage(&mut self, d: usize) {
         let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.take()) else { return };
         self.release_storage(st);
@@ -1778,7 +1778,7 @@ impl Hc {
         self.stor_bufs[st.buf].3 = false;
     }
 
-    /// Pendrive'y gotowe, a jeszcze nie w jądrze: kanał + blk_attach.
+    /// Sticks that are ready but not yet in the kernel: channel + blk_attach.
     fn attach_pending(&mut self) {
         if !self.blk {
             return;
@@ -1810,7 +1810,7 @@ impl Hc {
         }
     }
 
-    /// Żądania jądra z kanału pendrive'a (READ -> READ(10) do slotu bufora).
+    /// Kernel requests from a stick's channel (READ -> READ(10) into a buffer slot).
     fn serve_storage(&mut self, d: usize) {
         let mut msg = [0u8; 64];
         let mut info = RecvInfo::default();
@@ -1818,7 +1818,7 @@ impl Hc {
             let Some(chan) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| s.chan).filter(|&c| c != 0) else { return };
             let r = chan_recv(chan, &mut msg, CHAN_NONBLOCK, &mut info);
             if r == EPIPE || r == EMSGSIZE {
-                // Jądro odłączyło dysk (3 timeouty) – bez ponownej rejestracji.
+                // The kernel detached the disk (3 timeouts) – no re-registration.
                 if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
                     close(st.chan);
                     st.chan = 0;
@@ -1839,7 +1839,7 @@ impl Hc {
         }
     }
 
-    /// Jedno żądanie: (id, status, bloki).
+    /// One request: (id, status, blocks).
     fn storage_request(&mut self, d: usize, m: &[u8]) -> (u32, i32, u32) {
         let le32 = |i: usize| u32::from_le_bytes([m[i], m[i + 1], m[i + 2], m[i + 3]]);
         if m.len() < 24 {
@@ -1883,10 +1883,10 @@ impl Hc {
     }
 
     // --------------------------------------------------------------
-    // M20.d: huby USB 2 i USB 3
+    // USB 2 and USB 3 hubs
     // --------------------------------------------------------------
 
-    /// Interfejs huba (klasa 09) z endpointem przerwań IN (mapa zmian portów).
+    /// Hub interface (class 09) with an interrupt IN endpoint (port change bitmap).
     fn hub_interface(cfg: &Config) -> Option<Endpoint> {
         cfg.ifaces[..cfg.n_ifaces]
             .iter()
@@ -1895,8 +1895,8 @@ impl Hc {
     }
 
     /// Hub: Configure Endpoint + Set Configuration, Set Hub Depth (USB 3),
-    /// deskryptor huba, drugi Configure Endpoint (pola huba w kontekście slotu),
-    /// zasilanie portów, TRB na mapę zmian.  Porty sprawdza potem service_hubs.
+    /// hub descriptor, second Configure Endpoint (hub fields in the slot context),
+    /// port power, TRB for the change bitmap.  Ports are then checked by service_hubs.
     fn setup_hub(&mut self, d: usize) -> Result<(), &'static str> {
         let (found, depth, speed, slot, input, cfg_value, configured) = {
             let dev = self.devs[d].as_ref().unwrap();
@@ -1960,14 +1960,14 @@ impl Hc {
         usb3: bool,
         depth: u32,
     ) -> Result<(), &'static str> {
-        // 1. Endpoint mapy zmian (kontekst slotu jeszcze bez pól huba – nie znamy
-        // liczby portów) + Set Configuration.
+        // 1. Change bitmap endpoint (slot context without hub fields yet – we do not know
+        // the number of ports) + Set Configuration.
         unsafe { core::ptr::write_bytes(input.0 as *mut u8, 0, 4096) };
         self.ctx_w(input.0, 0, 1, 1 | 1 << dci);
         self.slot_ctx_plain(input.0, d, dci);
         let e = dci as u64 + 1;
         self.ctx_w(input.0, e, 0, interval << 16);
-        self.ctx_w(input.0, e, 1, 3 << 1 | 7 << 3 | (mps as u32) << 16); // CErr 3, typ: przerwania IN
+        self.ctx_w(input.0, e, 1, 3 << 1 | 7 << 3 | (mps as u32) << 16); // CErr 3, type: interrupt IN
         self.ctx_w(input.0, e, 2, ring_pa as u32 | 1);
         self.ctx_w(input.0, e, 3, (ring_pa >> 32) as u32);
         self.ctx_w(input.0, e, 4, mps as u32 | (mps as u32) << 16);
@@ -1976,11 +1976,11 @@ impl Hc {
         if !configured {
             self.control(d, 0x00, 9, cfg_value as u16, 0, 0).map_err(|_| "Set Configuration failed")?;
         }
-        // 2. USB 3: głębokość huba (route string dla urządzeń za nim).
+        // 2. USB 3: hub depth (route string for devices behind it).
         if usb3 {
             self.control(d, 0x20, 12, depth as u16, 0, 0).map_err(|_| "Set Hub Depth failed")?;
         }
-        // 3. Deskryptor huba: liczba portów, cechy (TT think time), zasilanie.
+        // 3. Hub descriptor: number of ports, characteristics (TT think time), power.
         let ty: u8 = if usb3 { 0x2A } else { 0x29 };
         let n = self.control(d, 0xA0, 6, (ty as u16) << 8, 0, 12).map_err(|_| "hub descriptor failed")?;
         let mut b = [0u8; 12];
@@ -2000,18 +2000,18 @@ impl Hc {
             h.think = if usb3 { 0 } else { (chars >> 5) & 3 };
             h.power_ms = power_ms;
         }
-        // 4. Kontekst slotu z polami huba (bit Hub, liczba portów, TT think time).
+        // 4. Slot context with hub fields (Hub bit, number of ports, TT think time).
         unsafe { core::ptr::write_bytes(input.0 as *mut u8, 0, 4096) };
         self.ctx_w(input.0, 0, 1, 1);
         self.slot_ctx(input.0, d, dci);
         self.slot_command(TRB_CONFIGURE_EP, slot, 0, [input.1 as u32, (input.1 >> 32) as u32, 0])
             .map_err(|_| "Configure Endpoint (hub slot fields) failed")?;
-        // 5. Zasilanie portów i czas na jego ustalenie.
+        // 5. Port power and time for it to stabilize.
         for p in 1..=nports {
             let _ = self.control(d, 0x23, 3, HUB_PORT_POWER, p as u16, 0);
         }
         self.pause(power_ms + 10);
-        // 6. TRB czekające na mapę zmian; na start sprawdzamy wszystkie porty.
+        // 6. TRBs waiting for the change bitmap; at start we check all ports.
         let h = self.devs[d].as_mut().unwrap().hub.as_mut().unwrap();
         for _ in 0..2 {
             Self::hub_queue(h);
@@ -2021,7 +2021,7 @@ impl Hc {
         Ok(())
     }
 
-    /// Kontekst slotu bez pól huba (pierwszy Configure Endpoint huba).
+    /// Slot context without hub fields (the hub's first Configure Endpoint).
     fn slot_ctx_plain(&self, input: u64, d: usize, entries: u32) {
         let dev = self.devs[d].as_ref().unwrap();
         let l = &dev.loc;
@@ -2035,7 +2035,7 @@ impl Hc {
         h.ring.push([pa as u32, (pa >> 32) as u32, h.mps as u32], TRB_NORMAL << 10 | TRB_IOC | TRB_ISP);
     }
 
-    /// Mapa zmian od huba (z poll_events): porty do sprawdzenia w pętli głównej.
+    /// Change bitmap from a hub (from poll_events): ports to check in the main loop.
     fn hub_event(&mut self, ptr: u64, code: u32, rest: u32, slot: u32, ep: u32) {
         let Some(d) = self.devs.iter().position(|x| matches!(x, Some(dev) if dev.slot == slot && matches!(&dev.hub, Some(h) if h.dci == ep)))
         else {
@@ -2064,7 +2064,7 @@ impl Hc {
         self.hub_events += 1;
     }
 
-    /// GET_STATUS portu huba: (stan, zmiany).
+    /// GET_STATUS of a hub port: (status, changes).
     fn hub_port_status(&mut self, d: usize, p: u32) -> Result<(u16, u16), XferError> {
         let n = self.control(d, 0xA3, 0, 0, p as u16, 4)?;
         if n < 4 {
@@ -2074,7 +2074,7 @@ impl Hc {
         Ok((u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])))
     }
 
-    /// Kasuje bity zmian portu (CLEAR_FEATURE C_PORT_*).
+    /// Clears port change bits (CLEAR_FEATURE C_PORT_*).
     fn hub_clear_changes(&mut self, d: usize, p: u32, ch: u16, usb3: bool) {
         for bit in 0..8u16 {
             if ch & (1 << bit) == 0 {
@@ -2094,7 +2094,7 @@ impl Hc {
         }
     }
 
-    /// Reset portu huba; wynik: stan portu po resecie (włączony).
+    /// Hub port reset; result: port status after reset (enabled).
     fn hub_port_reset(&mut self, d: usize, p: u32, usb3: bool) -> Result<u16, &'static str> {
         self.control(d, 0x23, 3, HUB_PORT_RESET, p as u16, 0).map_err(|_| "hub port reset request failed")?;
         let t0 = uptime_ms();
@@ -2112,7 +2112,7 @@ impl Hc {
                 return Err("hub port reset timed out");
             }
         }
-        self.pause(10); // powrót urządzenia po resecie
+        self.pause(10); // device recovery after reset
         let (st, _) = self.hub_port_status(d, p).map_err(|_| "hub port status failed")?;
         if st & 2 == 0 {
             return Err("hub port not enabled after reset");
@@ -2120,7 +2120,7 @@ impl Hc {
         Ok(st)
     }
 
-    /// Port huba -> urządzenie: reset, prędkość, położenie (route, TT), enumeracja.
+    /// Hub port -> device: reset, speed, location (route, TT), enumeration.
     fn enumerate_hub_port(&mut self, d: usize, p: u32) -> Result<usize, &'static str> {
         let t0 = uptime_ms();
         let (usb3, ploc, pspeed, pslot, root) = {
@@ -2132,7 +2132,7 @@ impl Hc {
             return Err("too deep (5 levels of hubs)");
         }
         let st = self.hub_port_reset(d, p, usb3)?;
-        // Prędkość: hub USB 3 – SuperSpeed; USB 2 – bity low (9) / high speed (10).
+        // Speed: USB 3 hub – SuperSpeed; USB 2 – low (9) / high speed (10) bits.
         let speed = if usb3 {
             4
         } else if st & (1 << 9) != 0 {
@@ -2152,7 +2152,7 @@ impl Hc {
             hub_port: p,
         };
         loc.path[ploc.depth as usize] = p as u8;
-        // Low / full speed: TT najbliższego huba high speed.
+        // Low / full speed: TT of the nearest high-speed hub.
         if speed <= 2 {
             loc.tt = if pspeed == 3 { (pslot, p) } else { ploc.tt };
         }
@@ -2188,7 +2188,7 @@ impl Hc {
         }
     }
 
-    /// "usb2 port 1.3" – port `p` huba `d`.
+    /// "usb2 port 1.3" – port `p` of hub `d`.
     fn port_name(&self, out: &mut Text, d: usize, p: u32) {
         use core::fmt::Write;
         if let Some(dev) = self.devs[d].as_ref() {
@@ -2196,8 +2196,8 @@ impl Hc {
         }
     }
 
-    /// Porty hubów: zmiany zgłoszone mapą, terminy debounce / ponownych prób.
-    /// Zwraca czas (ms) do najbliższego terminu.
+    /// Hub ports: changes reported by the bitmap, debounce / retry deadlines.
+    /// Returns the time (ms) until the nearest deadline.
     fn service_hubs(&mut self) -> u64 {
         let mut next = 1000u64;
         for d in 0..DEVS_MAX {
@@ -2205,7 +2205,7 @@ impl Hc {
                 continue;
             };
             if errors > 0 {
-                // Endpoint mapy zmian po błędzie: reset, kolejka, nowe TRB, wszystkie porty do sprawdzenia.
+                // Change bitmap endpoint after an error: reset, queue, new TRBs, all ports to be checked.
                 let deq = self.devs[d].as_ref().unwrap().hub.as_ref().unwrap().ring.enqueue_ptr();
                 let _ = self.slot_command(TRB_RESET_EP, slot, dci << 16, [0; 3]);
                 let _ = self.slot_command(TRB_SET_DEQUEUE, slot, dci << 16, [deq as u32, (deq >> 32) as u32, 0]);
@@ -2217,7 +2217,7 @@ impl Hc {
                 h.pending |= ((1u32 << (nports + 1)) - 1) & !1;
                 wr32(self.db + 4 * slot as u64, dci);
             }
-            // Bit 0: zmiana samego huba (zasilanie / przeciążenie) – skasuj.
+            // Bit 0: change of the hub itself (power / overcurrent) – clear it.
             if self.devs[d].as_ref().and_then(|x| x.hub.as_ref()).map_or(false, |h| h.pending & 1 != 0) {
                 self.devs[d].as_mut().unwrap().hub.as_mut().unwrap().pending &= !1;
                 if let Ok(n) = self.control(d, 0xA0, 0, 0, 0, 4) {
@@ -2235,7 +2235,7 @@ impl Hc {
                 let i = p as usize - 1;
                 let now = uptime_ms();
                 let Some((state, pend)) = self.devs[d].as_ref().and_then(|x| x.hub.as_ref()).map(|h| (h.ports[i], h.pending & (1 << p) != 0)) else {
-                    break; // hub zniknął w trakcie
+                    break; // the hub disappeared meanwhile
                 };
                 let due = pend || matches!(state, Port::Debounce(t) | Port::Failed(_, t) if now >= t);
                 if !due {
@@ -2280,7 +2280,7 @@ impl Hc {
         next
     }
 
-    /// Porty hubów czekają na coś (start usbd: enumeracja do 5 s).
+    /// Hub ports are waiting for something (usbd startup: enumeration up to 5 s).
     fn hubs_busy(&self) -> bool {
         self.devs.iter().flatten().filter_map(|x| x.hub.as_ref()).any(|h| {
             h.pending != 0 || h.ports[..h.nports as usize].iter().any(|p| matches!(p, Port::Debounce(_) | Port::Failed(..)))
@@ -2291,7 +2291,7 @@ impl Hc {
         self.devs.iter().filter(|x| matches!(x, Some(d) if d.hub.is_some())).count()
     }
 
-    /// Porty huba `d` w lsusb (rekurencyjnie – huby za hubami).
+    /// Ports of hub `d` in lsusb (recursively – hubs behind hubs).
     fn list_hub(&self, out: &mut Text, d: usize) {
         use core::fmt::Write;
         let Some(dev) = self.devs[d].as_ref() else { return };
@@ -2328,9 +2328,9 @@ impl Hc {
         self.devs.iter().filter(|x| matches!(x, Some(d) if d.hid.is_some())).count()
     }
 
-    /// Odłączenie / błąd: Disable Slot, strony wracają do puli.
+    /// Disconnect / error: Disable Slot, pages return to the pool.
     fn detach(&mut self, d: usize) {
-        // M20.d: hub – najpierw wszystko, co za nim (rekurencyjnie).
+        // Hub – first everything behind it (recursively).
         let children: [Option<usize>; HUB_PORTS_MAX] = match self.devs[d].as_ref().and_then(|x| x.hub.as_ref()) {
             Some(h) => core::array::from_fn(|i| if let Port::Working(c) = h.ports[i] { Some(c) } else { None }),
             None => [None; HUB_PORTS_MAX],
@@ -2349,7 +2349,7 @@ impl Hc {
             self.release_storage(st);
         }
         if let Some(h) = &dev.hid {
-            // Klawisze tego urządzenia puszczone (jądro puszcza je samo dopiero po końcu usbd).
+            // This device's keys released (the kernel releases them itself only after usbd exits).
             if !h.mouse && self.input {
                 let mut ev = [[0u8; 8]; 16];
                 let mut n = 0;
@@ -2379,7 +2379,7 @@ impl Hc {
         }
     }
 
-    /// Maszyna stanów portów; zwraca czas (ms) do następnego terminu.
+    /// Port state machine; returns the time (ms) until the next deadline.
     fn service_ports(&mut self) -> u64 {
         let now = uptime_ms();
         let mut next = 1000u64;
@@ -2449,7 +2449,7 @@ impl Hc {
         let _ = wait_until(|| self.op_rd(USBSTS) & STS_HCH != 0);
     }
 
-    /// Linia urządzenia (lsusb i konsola).
+    /// Device line (lsusb and console).
     fn device_line(&self, out: &mut Text, d: usize) {
         use core::fmt::Write;
         let Some(dev) = self.devs[d].as_ref() else { return };
@@ -2514,7 +2514,7 @@ impl Hc {
         let _ = writeln!(out);
     }
 
-    /// Opis dla `status` (i dla konsoli przy starcie).
+    /// Description for `status` (and for the console at startup).
     fn describe(&self, out: &mut Text, machine: bool) {
         use core::fmt::Write;
         let _ = writeln!(
@@ -2576,7 +2576,7 @@ impl Hc {
         );
     }
 
-    /// Urządzenia i porty z błędem.
+    /// Devices and ports with errors.
     fn list(&self, out: &mut Text) {
         use core::fmt::Write;
         for port in 1..=self.ports() {
@@ -2600,8 +2600,8 @@ impl Hc {
     }
 }
 
-/// v0.27.1: Address Device nie wyszło – z kodem zakończenia xHCI (diagnostyka
-/// z prawdziwego sprzętu: Legion, port huba 1.1).
+/// Address Device failed – with the xHCI completion code (diagnostics
+/// from real hardware, behind a hub port).
 fn address_error(cc: u32) -> &'static str {
     match cc {
         0 => "Address Device failed: command timeout",
@@ -2628,7 +2628,7 @@ fn speed_name(speed: u32) -> &'static str {
     }
 }
 
-/// Czym jest urządzenie (dla ludzi): klasa urządzenia albo pierwszego interfejsu.
+/// What the device is (for humans): device class or that of the first interface.
 fn kind_name(d: &DeviceDesc, c: &Config) -> &'static str {
     let (class, sub, proto) = if d.class != 0 && d.class != 0xEF {
         (d.class, d.subclass, d.protocol)
@@ -2656,7 +2656,7 @@ fn kind_name(d: &DeviceDesc, c: &Config) -> &'static str {
     }
 }
 
-/// Bez spacji (i zer) na początku i końcu – pola INQUIRY są dopełniane spacjami.
+/// Without spaces (and NULs) at the start and end – INQUIRY fields are space-padded.
 fn trim_ascii(b: &[u8]) -> &[u8] {
     let mut s = 0;
     let mut e = b.len();
@@ -2669,7 +2669,7 @@ fn trim_ascii(b: &[u8]) -> &[u8] {
     &b[s..e]
 }
 
-/// M20.d: „3” (port kontrolera) albo „3.2.1” (porty hubów po drodze).
+/// "3" (controller port) or "3.2.1" (hub ports along the way).
 struct PortPath(u32, Loc);
 
 impl core::fmt::Display for PortPath {
@@ -2693,7 +2693,7 @@ impl core::fmt::Display for Range {
     }
 }
 
-/// Tekst w buforze (bez alokacji; komunikat kanału ≤ 4 KiB).
+/// Text in a buffer (no allocation; channel message ≤ 4 KiB).
 struct Text {
     buf: [u8; MSG_MAX],
     len: usize,
@@ -2719,7 +2719,7 @@ impl core::fmt::Write for Text {
     }
 }
 
-/// Przejęcie od BIOS-u (USB Legacy Support) i lista portów USB 2 / USB 3.
+/// Handoff from the BIOS (USB Legacy Support) and the list of USB 2 / USB 3 ports.
 fn extended_caps(hc: &mut Hc, bar: u64, hcc1: u32) {
     let mut off = ((hcc1 >> 16) & 0xFFFF) as u64 * 4;
     let mut guard = 0;
@@ -2735,7 +2735,7 @@ fn extended_caps(hc: &mut Hc, bar: u64, hcc1: u32) {
                     if wait_until(|| rd32(a) & (1 << 16) == 0) {
                         hc.bios = "handed over";
                     } else {
-                        // Jak Linux: BIOS nie oddał w 1 s – zabieramy siłą.
+                        // Like Linux: if the BIOS did not hand over within 1 s – take it by force.
                         wr32(a, rd32(a) & !(1 << 16) | 1 << 24);
                         hc.bios = "TIMEOUT - taken over";
                     }
@@ -2743,12 +2743,12 @@ fn extended_caps(hc: &mut Hc, bar: u64, hcc1: u32) {
                     unsafe { core::ptr::write_volatile((a + 3) as *mut u8, 1) };
                     hc.bios = "not owned";
                 }
-                // Wyłącz SMI od USB, skasuj zgłoszone (jak Linux: XHCI_LEGACY_DISABLE_SMI).
+                // Disable USB SMIs, clear pending ones (like Linux: XHCI_LEGACY_DISABLE_SMI).
                 let ctl = rd32(a + 4);
                 wr32(a + 4, (ctl & ((0x7 << 1) | (0xFF << 5) | (0x7 << 17))) | (0x7 << 29));
             }
             2 => {
-                // Supported Protocol: wersja (bity 31..24) i zakres portów.
+                // Supported Protocol: version (bits 31..24) and port range.
                 let d2 = rd32(a + 8);
                 let range = (d2 & 0xFF, (d2 >> 8) & 0xFF);
                 match v >> 24 {
@@ -2767,7 +2767,7 @@ fn extended_caps(hc: &mut Hc, bar: u64, hcc1: u32) {
     }
 }
 
-/// Start kontrolera; Err = komunikat dla konsoli.
+/// Controller startup; Err = message for the console.
 fn start(name: &'static str) -> Result<Hc, &'static str> {
     let info = dev_info(DEV).map_err(|_| "no device in slot 3")?;
     if (info.class, info.subclass, info.prog_if) != (0x0C, 0x03, 0x30) {
@@ -2861,10 +2861,10 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         last_speed: 0,
     };
 
-    // BIOS -> system.
+    // BIOS -> OS.
     extended_caps(&mut hc, bar, hcc1);
 
-    // Zatrzymanie i reset.
+    // Halt and reset.
     if hc.op_rd(USBSTS) & STS_HCH == 0 {
         hc.op_wr(USBCMD, hc.op_rd(USBCMD) & !CMD_RUN);
         if !wait_until(|| hc.op_rd(USBSTS) & STS_HCH != 0) {
@@ -2872,7 +2872,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         }
     }
     hc.op_wr(USBCMD, CMD_HCRST);
-    sleep_ms(1); // niektóre kontrolery nie odpowiadają tuż po HCRST
+    sleep_ms(1); // some controllers do not respond right after HCRST
     if !wait_until(|| hc.op_rd(USBCMD) & CMD_HCRST == 0 && hc.op_rd(USBSTS) & STS_CNR == 0) {
         return Err("controller reset timed out");
     }
@@ -2880,7 +2880,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         return Err("controller does not support 4 KiB pages");
     }
 
-    // Struktury w pamięci DMA.
+    // Structures in DMA memory.
     hc.op_wr(CONFIG, hc.slots);
     if scratch > 0 {
         if scratch > 1023 {
@@ -2890,7 +2890,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         let mut left = scratch as u64;
         let mut i = 0u64;
         while left > 0 {
-            let n = left.min(512); // bufor DMA ≤ 2 MiB
+            let n = left.min(512); // DMA buffer ≤ 2 MiB
             hc.pool.chunk(n).map_err(|_| "dma_alloc (scratchpad) failed")?;
             for k in 0..n {
                 let pa = hc.pool.pa + k * 4096;
@@ -2904,8 +2904,8 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
     }
     wr64(hc.op + DCBAAP, dcbaa_pa);
     wr64(hc.op + CRCR, cmd_pa | 1);
-    // Tablica segmentów pierścienia zdarzeń (jeden segment) – w stronie DCBAA,
-    // za 33 wpisami (wyrównanie 64 B).
+    // Event ring segment table (one segment) – in the DCBAA page,
+    // after 33 entries (64 B alignment).
     let erst_off = 0x400u64;
     unsafe {
         ((dcbaa_va + erst_off) as *mut u64).write_volatile(ev_pa);
@@ -2930,7 +2930,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         return Err("host controller error after start");
     }
 
-    // Zasilanie portów (gdy kontroler nim steruje – HCCPARAMS1.PPC).
+    // Port power (when the controller controls it – HCCPARAMS1.PPC).
     if hcc1 & (1 << 3) != 0 {
         for p in 1..=hc.ports() {
             let a = hc.portsc(p);
@@ -2941,7 +2941,7 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         }
     }
 
-    // Pierwsze komendy.
+    // First commands.
     for _ in 0..3 {
         if hc.noop().is_err() {
             return Err("No-Op command not completed (command ring / event ring / interrupts)");
@@ -3001,14 +3001,14 @@ fn main(args: Args) -> i32 {
     let mut t = Text::new();
     hc.describe(&mut t, false);
     write(1, t.as_bytes());
-    // Urządzenia podłączone od startu: debounce liczony od teraz.
+    // Devices connected since boot: debounce counted from now.
     let t0 = uptime_ms();
     for p in 1..=hc.ports() {
         if rd32(hc.portsc(p)) & PORT_CCS != 0 {
             hc.ports[p as usize - 1] = Port::Debounce(t0 + DEBOUNCE_MS);
         }
     }
-    // Enumeracja na starcie (do 5 s – potem reszta w pętli głównej).
+    // Enumeration at startup (up to 5 s – the rest happens in the main loop).
     while uptime_ms() - t0 < 5000 {
         hc.poll_events();
         let wait = hc.service_ports().min(hc.service_hubs());
@@ -3039,7 +3039,7 @@ fn main(args: Args) -> i32 {
             hc.stop();
             return 0;
         }
-        // M20.f: pendrive'y do jądra (dopiero tu – usbd już odpowiada na żądania).
+        // USB sticks to the kernel (only here – usbd is already answering requests).
         hc.attach_pending();
         let mut list = [(0u64, 0u64); WAIT_MAX];
         let mut k = 0;
@@ -3050,7 +3050,7 @@ fn main(args: Args) -> i32 {
         let irq_at = k;
         list[k] = (hc.irq, W_IRQ);
         k += 1;
-        // Kanały dysków (żądania odczytu od jądra).
+        // Disk channels (read requests from the kernel).
         let stor_at = k;
         let mut stor_dev = [0usize; STOR_MAX];
         let mut nstor = 0;
@@ -3083,7 +3083,7 @@ fn main(args: Args) -> i32 {
                 hc.serve_storage(stor_dev[j]);
             }
         }
-        // Podłączenia / odłączenia (zdarzenia portów) i terminy maszyny stanów.
+        // Connects / disconnects (port events) and state machine deadlines.
         timeout = hc.service_ports().min(hc.service_hubs());
         hc.hid_maintenance();
         if listening && ready & 1 != 0 {

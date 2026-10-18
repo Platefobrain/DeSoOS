@@ -1,27 +1,27 @@
-// M10: układ wirtualnej przestrzeni adresowej kernela.
+// Layout of the kernel's virtual address space.
 //
-//   0x0000_0000_0000_0000 .. 0x0000_7fff_ffff_ffff   dolna połowa – PUSTA
-//                                                    (procesy użytkownika, M13)
-//   0xffff_8000_0000_0000  PML4[256..384)  direct map: fizyczny adres X
-//                                          widoczny pod DIRECT_MAP_BASE + X
-//   0xffff_c000_0000_0000  PML4[384]       heap kernela (M3)
-//   0xffff_d000_0000_0000  PML4[416]       obszar on-demand (M4)
-//   0xffff_e000_0000_0000  PML4[448]       stosy zadań (M12): sloty po 1 MiB,
-//                                          zamapowane tylko górne 64 KiB
-//   0xffff_ff00_0000_0000  PML4[510]       mapowanie rekurencyjne (M2)
-//   0xffff_ffff_8000_0000  PML4[511]       obraz kernela (ELF, -2 GiB)
-//   0xffff_ffff_c000_0000                  strona-strażnik (niezamapowana)
-//   0xffff_ffff_c000_1000 .. stack_top     stos kernela
+//   0x0000_0000_0000_0000 .. 0x0000_7fff_ffff_ffff   lower half – EMPTY
+//                                                    (user processes)
+//   0xffff_8000_0000_0000  PML4[256..384)  direct map: physical address X
+//                                          visible at DIRECT_MAP_BASE + X
+//   0xffff_c000_0000_0000  PML4[384]       kernel heap
+//   0xffff_d000_0000_0000  PML4[416]       on-demand area
+//   0xffff_e000_0000_0000  PML4[448]       task stacks: 1 MiB slots,
+//                                          only the top 64 KiB mapped
+//   0xffff_ff00_0000_0000  PML4[510]       recursive mapping
+//   0xffff_ffff_8000_0000  PML4[511]       kernel image (ELF, -2 GiB)
+//   0xffff_ffff_c000_0000                  guard page (unmapped)
+//   0xffff_ffff_c000_1000 .. stack_top     kernel stack
 //
-// Adresy kernela i stosu podaje DSB w BootInfo (`init`), reszta jest stała.
+// Kernel and stack addresses are provided by DSB in BootInfo (`init`), the rest is fixed.
 
 use crate::bootinfo::BootInfo;
 
 pub const DIRECT_MAP_BASE: u64 = 0xffff_8000_0000_0000;
-/// Direct map zajmuje PML4[256..384) = 64 TiB fizycznej pamięci.
+/// The direct map covers PML4[256..384) = 64 TiB of physical memory.
 pub const DIRECT_MAP_MAX: u64 = 128 * 512 * 1024 * 1024 * 1024;
 pub const KERNEL_BASE: u64 = 0xffff_ffff_8000_0000;
-/// Pierwszy indeks PML4 górnej połowy (kernel).
+/// First PML4 index of the upper half (kernel).
 pub const KERNEL_PML4_FIRST: usize = 256;
 pub const KERNEL_PML4_INDEX: usize = 511;
 
@@ -39,7 +39,7 @@ impl KernelLayout {
     pub const fn stack_bottom(&self) -> u64 {
         self.stack_top - self.stack_size
     }
-    /// Strona-strażnik tuż pod stosem.
+    /// Guard page right below the stack.
     pub const fn guard_page(&self) -> u64 {
         self.stack_bottom() - 4096
     }
@@ -54,14 +54,14 @@ static mut LAYOUT: KernelLayout = KernelLayout {
     stack_size: 0,
 };
 
-/// Fizyczny -> wirtualny (direct map).  Działa od pierwszej instrukcji
-/// kernela: DSB buduje direct map, potem `paging::init` buduje własny.
+/// Physical -> virtual (direct map).  Works from the kernel's very first
+/// instruction: DSB builds a direct map, then `paging::init` builds its own.
 #[inline]
 pub const fn phys_to_virt(physical: u64) -> u64 {
     DIRECT_MAP_BASE + physical
 }
 
-/// Wirtualny z direct mapy -> fizyczny (None dla innych adresów).
+/// Virtual from the direct map -> physical (None for other addresses).
 #[inline]
 #[allow(dead_code)]
 pub fn direct_to_phys(virtual_address: u64) -> Option<u64> {
@@ -72,7 +72,7 @@ pub fn direct_to_phys(virtual_address: u64) -> Option<u64> {
     }
 }
 
-/// Zapamiętuje adresy kernela i stosu z BootInfo (wołane na samym początku).
+/// Records the kernel and stack addresses from BootInfo (called at the very beginning).
 pub fn init(boot: &BootInfo) {
     unsafe {
         *core::ptr::addr_of_mut!(LAYOUT) = KernelLayout {
@@ -90,14 +90,14 @@ pub fn kernel_layout() -> KernelLayout {
     unsafe { *core::ptr::addr_of!(LAYOUT) }
 }
 
-/// Czy adres leży na stronie-strażniku stosu kernela (przepełnienie stosu).
+/// Whether an address lies on the kernel stack's guard page (stack overflow).
 pub fn is_stack_guard(address: u64) -> bool {
     let l = kernel_layout();
     (l.stack_size != 0 && address >= l.guard_page() && address < l.stack_bottom())
         || crate::sched::stack::is_guard(address)
 }
 
-/// Wirtualny adres w obrazie kernela -> fizyczny.
+/// Virtual address in the kernel image -> physical.
 #[allow(dead_code)]
 pub fn kernel_virt_to_phys(virtual_address: u64) -> Option<u64> {
     let l = kernel_layout();

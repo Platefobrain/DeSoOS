@@ -1,23 +1,23 @@
-// M7: konsola tekstowa na framebufferze z UEFI (GOP).
+// Text console on the UEFI (GOP) framebuffer.
 //
-// Siatka komórek 8x16 (czcionka z font.rs), 16 kolorów, kursor.
-// Rozumie ten sam podzbiór ANSI co terminal po drugiej stronie seriala,
-// więc konsola wysyła jeden strumień bajtów w oba miejsca:
+// A grid of 8x16 cells (font from font.rs), 16 colors, a cursor.
+// Understands the same ANSI subset as the terminal on the other end of the serial line,
+// so the console sends a single byte stream to both places:
 //
-//   \n  nowa linia (jak CR+LF)      \r  początek linii
-//   \x08 kursor w lewo              \t  do następnej wielokrotności 8
-//   ESC[K   czyść do końca linii    ESC[2J  czyść ekran
-//   ESC[H / ESC[r;cH  pozycja       ESC[nC / ESC[nD  kursor w prawo / lewo
-//   ESC[...m  kolory: 0, 1 (jasny), 30–37, 90–97, 39, 40–47, 49
+//   \n  new line (like CR+LF)       \r  start of line
+//   \x08 cursor left                \t  to the next multiple of 8
+//   ESC[K   clear to end of line    ESC[2J  clear screen
+//   ESC[H / ESC[r;cH  position      ESC[nC / ESC[nD  cursor right / left
+//   ESC[...m  colors: 0, 1 (bright), 30–37, 90–97, 39, 40–47, 49
 //
-// Framebuffer tylko zapisujemy (nie czytamy – na pamięci WC odczyt jest
-// bardzo wolny).  Stan ekranu trzymamy w siatce komórek; przy przewijaniu
-// rysujemy tylko komórki, które się zmieniły.
+// The framebuffer is write-only for us (we never read it – reads from WC memory are
+// very slow).  Screen state is kept in the cell grid; when scrolling
+// we only draw the cells that changed.
 //
-// M11: scrollback – linie, które wyjechały górą, trafiają do historii
-// (max SCROLLBACK_LINES).  `scroll_view(n)` pokazuje ekran przesunięty o n
-// linii wstecz (Shift+PgUp/PgDn w console.rs), w prawym górnym rogu widać
-// wskaźnik pozycji.  Każde nowe wyjście wraca na dół (jak w terminalu).
+// Scrollback – lines that scroll off the top go into the history
+// (max SCROLLBACK_LINES).  `scroll_view(n)` shows the screen shifted n
+// lines back (Shift+PgUp/PgDn in console.rs), with a position indicator in the
+// top-right corner.  Any new output jumps back to the bottom (like in a terminal).
 
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -37,7 +37,7 @@ pub const DEFAULT_FG: u8 = 7;
 pub const DEFAULT_BG: u8 = 0;
 pub const SCROLLBACK_LINES: usize = 1000;
 
-// Paleta 16 kolorów (0xRRGGBB), jak w typowym terminalu.
+// 16-color palette (0xRRGGBB), as in a typical terminal.
 const PALETTE: [u32; 16] = [
     0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
     0x555555, 0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
@@ -53,8 +53,8 @@ pub struct FbConsole {
     base: *mut u32,
     width: usize,
     height: usize,
-    stride: usize, // piksele na linię
-    bgr: bool,     // true: bajty B,G,R,x (u32 = 0x00RRGGBB)
+    stride: usize, // pixels per line
+    bgr: bool,     // true: bytes B,G,R,x (u32 = 0x00RRGGBB)
     pub cols: usize,
     pub rows: usize,
     cells: Vec<Cell>,
@@ -68,17 +68,17 @@ pub struct FbConsole {
     utf8: [u8; 4],
     utf8_len: usize,
     utf8_need: usize,
-    /// Linie, które wyjechały górą (najstarsza z przodu).
+    /// Lines that scrolled off the top (oldest first).
     history: VecDeque<Vec<Cell>>,
-    /// O ile linii widok jest przesunięty wstecz (0 = na żywo).
+    /// How many lines the view is shifted back (0 = live).
     view: usize,
 }
 
-// Wskaźnik do framebuffera; konsola jest używana tylko pod `without_interrupts`.
+// Pointer to the framebuffer; the console is only used under `without_interrupts`.
 unsafe impl Send for FbConsole {}
 
 impl FbConsole {
-    /// `pixel_format`: 0 = RGB (bajty R,G,B,x), 1 = BGR (bajty B,G,R,x).
+    /// `pixel_format`: 0 = RGB (bytes R,G,B,x), 1 = BGR (bytes B,G,R,x).
     pub fn new(addr: u64, width: usize, height: usize, stride: usize, pixel_format: u32) -> Option<Self> {
         if addr == 0 || width < font::WIDTH || height < font::HEIGHT || stride < width || pixel_format > 1 {
             return None;
@@ -126,12 +126,12 @@ impl FbConsole {
         if self.bgr {
             rgb
         } else {
-            // RGB: bajty R,G,B -> u32 little-endian = 0x00BBGGRR
+            // RGB: bytes R,G,B -> little-endian u32 = 0x00BBGGRR
             ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
         }
     }
 
-    /// Kolor piksela w formacie framebuffera (do testów).
+    /// Pixel color in the framebuffer format (for tests).
     #[allow(dead_code)]
     pub fn native_color(&self, index: u8) -> u32 {
         self.color(index)
@@ -166,9 +166,9 @@ impl FbConsole {
         }
     }
 
-    /// M16b: napis rysowany wprost w pikselach (bez zmiany zawartości
-    /// konsoli) – pasek stanu w prawym górnym rogu.  Znika przy przewinięciu
-    /// i jest rysowany ponownie przez zadanie paska.
+    /// Text drawn directly in pixels (without changing the console
+    /// contents) – the status bar in the top-right corner.  It disappears on scrolling
+    /// and is redrawn by the status-bar task.
     pub fn draw_overlay(&mut self, text: &str, fg: u8, bg: u8) {
         let n = text.chars().count().min(self.cols);
         let start = self.cols - n;
@@ -219,8 +219,8 @@ impl FbConsole {
 
     fn scroll(&mut self) {
         let cols = self.cols;
-        // Górna linia do historii (przy pełnej historii używamy ponownie
-        // bufora najstarszej linii – bez nowej alokacji).
+        // Top line into the history (when the history is full we reuse the
+        // buffer of the oldest line – no new allocation).
         let mut line = if self.history.len() >= SCROLLBACK_LINES {
             self.history.pop_front().unwrap_or_default()
         } else {
@@ -285,7 +285,7 @@ impl FbConsole {
         };
         match cmd {
             b'K' => {
-                // 0 (domyślnie): od kursora do końca linii
+                // 0 (default): from the cursor to end of line
                 let (x, y) = (self.x, self.y);
                 for col in x..self.cols {
                     self.set_cell(col, y, BLANK);
@@ -374,7 +374,7 @@ impl FbConsole {
                 if c == '[' {
                     self.parse = Parse::Csi { params: [0; 4], count: 0 };
                 }
-                // inne sekwencje ESC ignorujemy
+                // other ESC sequences are ignored
             }
             Parse::Csi { mut params, mut count } => match c {
                 '0'..='9' => {
@@ -395,32 +395,32 @@ impl FbConsole {
                     let n = count.min(params.len());
                     self.csi(c as u8, &params[..n]);
                 }
-                _ => {} // nieznany znak – porzucamy sekwencję
+                _ => {} // unknown character – drop the sequence
             },
         }
     }
 
     // --------------------------------------------------------
-    // M11: scrollback
+    // Scrollback
     // --------------------------------------------------------
 
-    /// Liczba linii w historii.
+    /// Number of lines in the history.
     #[allow(dead_code)]
     pub fn history_len(&self) -> usize {
         self.history.len()
     }
 
-    /// O ile linii widok jest przesunięty wstecz (0 = na żywo).
+    /// How many lines the view is shifted back (0 = live).
     #[allow(dead_code)]
     pub fn view_offset(&self) -> usize {
         self.view
     }
 
-    /// Komórka, którą faktycznie widać na ekranie (z uwzględnieniem
-    /// przewinięcia wstecz).
+    /// The cell actually visible on screen (taking the backward
+    /// scroll into account).
     pub fn visible_cell(&self, col: usize, row: usize) -> Cell {
-        // Wiersz `row` ekranu = linia nr (history.len() - view + row)
-        // w ciągu [historia..., bieżący ekran...].
+        // Screen row `row` = line number (history.len() - view + row)
+        // in the sequence [history..., current screen...].
         let line = self.history.len() - self.view + row;
         if line < self.history.len() {
             self.history[line].get(col).copied().unwrap_or(BLANK)
@@ -441,7 +441,7 @@ impl FbConsole {
             self.show_cursor();
             return;
         }
-        // Wskaźnik w prawym górnym rogu, np. " -25/1000 ".
+        // Indicator in the top-right corner, e.g. " -25/1000 ".
         let label = alloc::format!(" -{}/{} ", self.view, self.history.len());
         let n = label.chars().count().min(self.cols);
         for (i, ch) in label.chars().take(n).enumerate() {
@@ -450,8 +450,8 @@ impl FbConsole {
         }
     }
 
-    /// Przewija widok: `lines` > 0 wstecz (w górę), < 0 w przód.  Zwraca
-    /// nowe przesunięcie.
+    /// Scrolls the view: `lines` > 0 back (up), < 0 forward.  Returns
+    /// the new offset.
     pub fn scroll_view(&mut self, lines: isize) -> usize {
         let target = if lines >= 0 {
             self.view.saturating_add(lines as usize)
@@ -466,8 +466,8 @@ impl FbConsole {
         self.view
     }
 
-    /// Wypisuje bajty (UTF-8 + ANSI) i odświeża kursor.  Gdy widok jest
-    /// przewinięty wstecz, najpierw wraca na dół.
+    /// Writes bytes (UTF-8 + ANSI) and refreshes the cursor.  If the view is
+    /// scrolled back, it first jumps back to the bottom.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         if self.view != 0 {
             self.view = 0;

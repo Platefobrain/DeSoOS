@@ -1,24 +1,24 @@
-// M3: kernel heap.
+// Kernel heap.
 //
-// * Obszar wirtualny: HEAP_START .. HEAP_START + HEAP_MAX_SIZE
-//   (PML4[384], z dala od direct mapy w PML4[256..384) i slotu rekurencyjnego).
-// * Strony są brane z alokatora ramek (M1) i mapowane przez map_page (M2).
-// * Heap rośnie na żądanie (alloc bez miejsca -> mapujemy kolejne strony).
-// * M11: i się kurczy – gdy na końcu heapa zbierze się ponad SHRINK_AT
-//   wolnego miejsca, strony powyżej (koniec ostatniego zajętego bloku +
-//   SHRINK_KEEP) są odmapowywane, a ramki wracają do alokatora ramek.
-//   Nigdy poniżej INITIAL_SIZE.  Zapas SHRINK_KEEP chroni przed ciągłym
-//   mapowaniem/odmapowywaniem przy alokacjach na granicy.
-// * Algorytm: lista wolnych bloków posortowana po adresie, first-fit,
-//   scalanie sąsiadów przy zwalnianiu.  Węzły listy siedzą w samych
-//   wolnych blokach, więc alokacje nie mają nagłówków.
+// * Virtual area: HEAP_START .. HEAP_START + HEAP_MAX_SIZE
+//   (PML4[384], away from the direct map in PML4[256..384) and the recursive slot).
+// * Pages come from the frame allocator and are mapped with map_page.
+// * The heap grows on demand (alloc without room -> we map more pages).
+// * It also shrinks – when more than SHRINK_AT of free space accumulates
+//   at the end of the heap, pages above (end of the last used block +
+//   SHRINK_KEEP) are unmapped and the frames go back to the frame allocator.
+//   Never below INITIAL_SIZE.  The SHRINK_KEEP margin prevents constant
+//   mapping/unmapping for allocations right at the boundary.
+// * Algorithm: free-block list sorted by address, first-fit,
+//   neighbours coalesced on free.  List nodes live inside the free
+//   blocks themselves, so allocations have no headers.
 //
-// Współbieżność: M5 – alloc/dealloc z wyłączonymi przerwaniami (handler IRQ
-// może alokować).  M17a.c – własny IrqSpinLock (poziom HEAP): heap działa
-// także bez Big Kernel Lock, na wielu CPU naraz.  Wewnątrz: alokator ramek
-// (własna blokada), map_page w obszarze heapa (PML4[384] – tablice tego
-// obszaru zmienia tylko heap, pod swoją blokadą) i TLB shootdown przy
-// zmniejszaniu (czekający na blokadę heapa potwierdzają shootdown w pętli).
+// Concurrency: alloc/dealloc run with interrupts disabled (an IRQ handler
+// may allocate), under a dedicated IrqSpinLock (level HEAP): the heap works
+// without the Big Kernel Lock, on many CPUs at once.  Inside: the frame allocator
+// (its own lock), map_page in the heap area (PML4[384] – the tables of this
+// area are changed only by the heap, under its lock) and TLB shootdown when
+// shrinking (CPUs waiting for the heap lock acknowledge shootdowns in their spin loop).
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -38,8 +38,8 @@ const GROW_MIN: usize = 128 * 1024;
 const SHRINK_AT: usize = 512 * 1024;
 const SHRINK_KEEP: usize = 128 * 1024;
 
-// Każdy blok (wolny i zajęty) ma rozmiar podzielny przez 16 i adres podzielny
-// przez 16; w wolnym bloku mieści się Node.
+// Every block (free or used) has a size divisible by 16 and an address divisible
+// by 16; a free block can hold a Node.
 const MIN_BLOCK: usize = 16;
 
 #[repr(C)]
@@ -52,18 +52,18 @@ struct Heap {
     ready: bool,
     head: *mut Node,
     mapped_end: usize, // exclusive
-    used: usize,       // bajty w zajętych blokach (po zaokrągleniu)
+    used: usize,       // bytes in used blocks (after rounding)
 }
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-/// Rozmiar bloku dla Layout – JEDNA reguła niezależnie od list CPU (M17b.h2):
-/// małe bloki (<= MAX_CLASS, wyrównanie <= 16) zawsze zaokrąglone do klasy
-/// (potęga 2), więc blok wzięty z heapa przed `enable_cpu_caches` i oddany
-/// na listę CPU po (albo odwrotnie) ma ten sam rozmiar.  Wcześniej 80 B
-/// wzięte jako 80 i oddane jako klasa 128 nadpisałoby sąsiada.
+/// Block size for a Layout – ONE rule regardless of the CPU lists:
+/// small blocks (<= MAX_CLASS, alignment <= 16) are always rounded up to a class
+/// (power of 2), so a block taken from the heap before `enable_cpu_caches` and returned
+/// to a CPU list afterwards (or the other way round) has the same size.  Otherwise 80 B
+/// taken as 80 and returned as class 128 would overwrite its neighbour.
 fn block_size(layout: Layout) -> usize {
     match class_of(layout) {
         Some((_, size)) => size,
@@ -85,7 +85,7 @@ impl Heap {
         }
     }
 
-    /// Zwraca węzeł, w którym po scaleniu leży zwolniony blok.
+    /// Returns the node in which the freed block lies after coalescing.
     unsafe fn insert_free(&mut self, addr: usize, size: usize) -> *mut Node {
         unsafe {
             let mut prev: *mut Node = ptr::null_mut();
@@ -95,8 +95,8 @@ impl Heap {
                 cur = (*cur).next;
             }
 
-            // Wykrywanie double-free / uszkodzenia: blok nie może nachodzić
-            // na sąsiadów.
+            // Double-free / corruption detection: the block must not overlap
+            // its neighbours.
             if !prev.is_null() && prev as usize + (*prev).size > addr {
                 panic!("heap: overlapping free (double free?) at {:#x}", addr);
             }
@@ -113,13 +113,13 @@ impl Heap {
                 (*prev).next = node;
             }
 
-            // scal z następnym
+            // merge with the next one
             if !cur.is_null() && addr + (*node).size == cur as usize {
                 (*node).size += (*cur).size;
                 (*node).next = (*cur).next;
             }
 
-            // scal z poprzednim
+            // merge with the previous one
             if !prev.is_null() && prev as usize + (*prev).size == addr {
                 (*prev).size += (*node).size;
                 (*prev).next = (*node).next;
@@ -147,8 +147,8 @@ impl Heap {
 
                 if fits {
                     let alloc_end = alloc_start + size;
-                    // Oba kawałki są wielokrotnością 16, więc jeśli istnieją,
-                    // mieszczą w sobie Node.
+                    // Both pieces are multiples of 16, so if they exist
+                    // they can hold a Node.
                     let front = alloc_start - region_start;
                     let back = region_end - alloc_end;
 
@@ -183,8 +183,8 @@ impl Heap {
         }
     }
 
-    /// Mapuje `bytes` (zaokrąglone do stron) na końcu heapa i dodaje je do
-    /// listy wolnych bloków.  Wszystko albo nic.
+    /// Maps `bytes` (rounded up to pages) at the end of the heap and adds them to
+    /// the free-block list.  All or nothing.
     unsafe fn grow(&mut self, bytes: usize) -> bool {
         let want = align_up(bytes.max(GROW_MIN), PAGE_SIZE);
         let min = align_up(bytes, PAGE_SIZE);
@@ -216,7 +216,7 @@ impl Heap {
             };
 
             if !ok {
-                // Rollback już zmapowanych stron.
+                // Roll back the pages mapped so far.
                 for j in 0..i {
                     let va = (start + j * PAGE_SIZE) as u64;
                     if let Some(frame) = unmap_page(va) {
@@ -234,13 +234,13 @@ impl Heap {
         true
     }
 
-    /// Odmapowuje wolny koniec heapa, gdy jest większy niż SHRINK_AT.
-    /// `last` – wolny węzeł kończący się na końcu heapa (M17b.h: wcześniej
-    /// szukany przejściem całej listy przy KAŻDYM zwolnieniu).
+    /// Unmaps the free tail of the heap when it is larger than SHRINK_AT.
+    /// `last` – the free node ending at the end of the heap (passed in so the
+    /// whole list does not have to be walked on EVERY free).
     unsafe fn shrink(&mut self, last: *mut Node) {
-        // M17a.b: przy wielu CPU znowu oddaje strony – unmap_range_free robi
-        // TLB shootdown, zanim ramki wrócą do alokatora (od M17 do M17a.a
-        // heap przy SMP tylko rósł).
+        // With multiple CPUs pages are returned too – unmap_range_free does a
+        // TLB shootdown before the frames go back to the allocator (previously
+        // the heap only grew under SMP).
         unsafe {
             let start = last as usize;
             let end = start + (*last).size;
@@ -252,8 +252,8 @@ impl Heap {
             if new_end >= self.mapped_end {
                 return;
             }
-            // Najpierw skróć blok (węzeł leży na początku bloku, poniżej
-            // new_end), potem oddaj strony.
+            // First shorten the block (the node sits at the start of the block, below
+            // new_end), then release the pages.
             (*last).size = new_end - start;
             let pages = (self.mapped_end - new_end) / PAGE_SIZE;
             let n = super::unmap_range_free(new_end as u64, self.mapped_end as u64);
@@ -304,8 +304,8 @@ impl Heap {
     }
 }
 
-// Węzły listy wolnych bloków to surowe wskaźniki do pamięci heapa – całość
-// chroniona blokadą HEAP_LOCK.
+// Free-list nodes are raw pointers into heap memory – the whole thing is
+// protected by HEAP_LOCK.
 unsafe impl Send for Heap {}
 
 pub struct KernelHeap;
@@ -313,26 +313,26 @@ pub struct KernelHeap;
 static HEAP_LOCK: IrqSpinLock<Heap> = IrqSpinLock::new("heap", level::HEAP, Heap::empty());
 
 // ------------------------------------------------------------
-// M17b.h: listy wolnych bloków per CPU
+// Per-CPU free-block lists
 // ------------------------------------------------------------
 //
-// Legion v0.17.32/33 (16 CPU, stress): ~70 mln czekań na blokadę `heap`,
-// średnio 11 µs – 83% czasu wszystkich CPU na kręceniu.  Lista wolnych
-// bloków jest przeglądana pod blokadą przy każdym alloc i (wtedy dwa razy)
-// przy każdym dealloc, a jądro alokuje w każdym syscallu (ścieżki, bufory).
+// On a 16-CPU machine under stress: ~70 million waits on the `heap` lock,
+// 11 µs on average – 83% of all CPU time spent spinning.  The free-block
+// list is walked under the lock on every alloc and (twice then)
+// on every dealloc, and the kernel allocates in every syscall (paths, buffers).
 //
-// Małe bloki (do 2 KiB – od P2 do 32 KiB, wyrównanie <= 16) mają klasy 16, 32, ..., 2048 (32768).
-// Każdy CPU trzyma dla każdej klasy listę wolnych bloków (węzeł w samym
-// bloku); alloc / dealloc to zdjęcie / dołożenie na listę tego CPU przy
-// wyłączonych przerwaniach (przerwanie też alokuje) – bez blokady.  Pusta lista
-// = jedna wizyta pod blokadą heapa po paczkę bloków; za długa = połowa wraca
-// do heapa naraz.  Blok może wrócić na listę innego CPU niż ten, z którego
-// pochodzi – klasa wynika z Layout, więc rozmiar się zgadza.
-// Bloki na listach liczą się w heapie jako zajęte (`used`).
+// Small blocks (up to 32 KiB, alignment <= 16) have classes 16, 32, ..., 2048, ..., 32768.
+// Each CPU keeps a free-block list per class (the node lives in the
+// block itself); alloc / dealloc is a pop / push on this CPU's list with
+// interrupts disabled (interrupts allocate too) – no lock.  An empty list
+// = one visit under the heap lock for a batch of blocks; a too-long one = half goes back
+// to the heap at once.  A block may go back to a different CPU's list than the one it
+// came from – the class follows from the Layout, so the size matches.
+// Blocks on the lists count as used in the heap (`used`).
 
-// P2 (v0.21.0): klasy także 4, 8, 16, 32 KiB.  Pomiar (stress, v0.20.2):
-// 89% alokacji wolną ścieżką (globalna lista pod blokadą `heap`) to bloki
-// 2–8 KiB, dalsze 7% – 16–32 KiB (zadania, bufory, ELF przy spawn).
+// Classes include 4, 8, 16, 32 KiB too.  Measurement (stress):
+// 89% of slow-path allocations (global list under the `heap` lock) were blocks of
+// 2–8 KiB, another 7% – 16–32 KiB (tasks, buffers, ELF on spawn).
 const CLASSES: usize = 12; // 16, 32, ..., 2048, 4096, ..., 32768
 const MAX_CLASS: usize = 32768;
 
@@ -342,15 +342,15 @@ struct CpuCache {
 }
 
 struct CpuCacheCell(core::cell::UnsafeCell<CpuCache>);
-// Dostęp tylko z własnego CPU przy IF = 0.
+// Accessed only from the owning CPU with IF = 0.
 unsafe impl Sync for CpuCacheCell {}
 
 static CACHES: crate::arch::x86_64::percpu::PerCpu<CpuCacheCell> = crate::per_cpu!(CpuCacheCell(
     core::cell::UnsafeCell::new(CpuCache { head: [0; CLASSES], count: [0; CLASSES] })
 ));
 
-/// Bajty w blokach na listach (per CPU, suma może być chwilowo ujemna na
-/// jednym CPU – blok zwolniony na innym niż ten, który go wziął z heapa).
+/// Bytes in blocks on the lists (per CPU; the value may be temporarily negative on
+/// one CPU – a block freed on a different CPU than the one that took it from the heap).
 static CACHED_BYTES: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicI64> =
     crate::per_cpu!(core::sync::atomic::AtomicI64::new(0));
 
@@ -363,14 +363,14 @@ fn cached_add(cpu: usize, d: i64) {
     CACHED_BYTES[cpu].fetch_add(d, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Włączone po samoteście heapa (on sprawdza dokładne liczniki i scalanie).
+/// Enabled after the heap self-test (it checks exact counters and coalescing).
 static CACHE_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn enable_cpu_caches() {
     CACHE_ON.store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Klasa bloku: (indeks, rozmiar) albo None (duży / mocniej wyrównany).
+/// Block class: (index, size) or None (large / stricter alignment).
 #[inline]
 fn class_of(layout: Layout) -> Option<(usize, usize)> {
     if layout.align() > MIN_BLOCK || layout.size() > MAX_CLASS {
@@ -380,14 +380,14 @@ fn class_of(layout: Layout) -> Option<(usize, usize)> {
     Some((size.trailing_zeros() as usize - 4, size))
 }
 
-/// Ile bloków klasy trzyma lista jednego CPU (małe: ~16 KiB na klasę, 8..64).
+/// How many blocks of a class one CPU's list holds (small: ~16 KiB per class, 8..64).
 #[inline]
 fn class_limit(size: usize) -> u32 {
     if size <= 2048 {
         ((16 * 1024 / size) as u32).clamp(8, 64)
     } else {
-        // P2: duże klasy – mniej bloków na CPU (4 KiB: 8, 8 KiB: 8, 16 KiB: 4,
-        // 32 KiB: 2; razem ≤ 224 KiB na CPU).
+        // Large classes – fewer blocks per CPU (4 KiB: 8, 8 KiB: 8, 16 KiB: 4,
+        // 32 KiB: 2; ≤ 224 KiB per CPU in total).
         ((64 * 1024 / size) as u32).clamp(2, 8)
     }
 }
@@ -419,7 +419,7 @@ unsafe fn cached_alloc(c: usize, size: usize) -> *mut u8 {
         irq_restore(irq);
         return head as *mut u8;
     }
-    // Pusto: paczka bloków spod blokady heapa (połowa limitu), jeden dla nas.
+    // Empty: a batch of blocks from under the heap lock (half the limit), one for us.
     let batch = (class_limit(size) / 2).max(1) as usize;
     let layout = unsafe { Layout::from_size_align_unchecked(size, MIN_BLOCK) };
     let mut first: *mut u8 = ptr::null_mut();
@@ -454,7 +454,7 @@ unsafe fn cached_dealloc(p: *mut u8, c: usize, size: usize) {
     cached_add(me, size as i64);
     let limit = class_limit(size);
     if cache.count[c] > limit {
-        // Połowa wraca do heapa jedną wizytą pod blokadą.
+        // Half goes back to the heap in one visit under the lock.
         let layout = unsafe { Layout::from_size_align_unchecked(size, MIN_BLOCK) };
         let mut h = HEAP_LOCK.lock();
         while cache.count[c] > limit / 2 {
@@ -519,7 +519,7 @@ pub fn init() {
 
 #[allow(dead_code)]
 pub fn used_bytes() -> usize {
-    // M17b.h: bez bloków czekających na listach CPU (te są wolne dla jądra).
+    // Excluding blocks waiting on the CPU lists (those are free for the kernel).
     HEAP_LOCK.lock().used.saturating_sub(cached_bytes())
 }
 
@@ -541,7 +541,7 @@ pub fn free_region_count() -> usize {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only in builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -556,9 +556,9 @@ macro_rules! check {
 
 #[cfg(selftest)]
 pub fn self_test() {
-    // Wywołania wprost przez GlobalAlloc, a nie alloc::alloc::alloc: przy
-    // optymalizacji (-O) kompilator ma prawo usunąć parę alloc+dealloc
-    // nieużywanej pamięci, a wtedy testy układu heapa sprawdzałyby nic.
+    // Calls go directly through GlobalAlloc, not alloc::alloc::alloc: with
+    // optimization (-O) the compiler may remove an alloc+dealloc pair
+    // of unused memory, and then the heap layout tests would check nothing.
     unsafe fn raw_alloc(layout: Layout) -> *mut u8 {
         unsafe { core::hint::black_box(GlobalAlloc::alloc(&ALLOCATOR, layout)) }
     }
@@ -588,7 +588,7 @@ pub fn self_test() {
     check!(used_bytes() == 0, "Box leaked");
     serial_println!("[MM TEST] 1/10 Box PASS");
 
-    // 2. Vec rosnący ponad początkowy rozmiar heapa.
+    // 2. Vec growing beyond the initial heap size.
     let mapped_before = mapped_bytes();
     let peak;
     {
@@ -612,7 +612,7 @@ pub fn self_test() {
         mapped_bytes() / 1024
     );
 
-    // 3. Wyrównania.
+    // 3. Alignments.
     for align in [16usize, 64, 256, 4096] {
         let layout = match Layout::from_size_align(100, align) {
             Ok(l) => l,
@@ -633,7 +633,7 @@ pub fn self_test() {
     check!(free_region_count() == 1, "heap fragmented after aligned allocs");
     serial_println!("[MM TEST] 3/10 alignment PASS");
 
-    // 4. Scalanie: zwalniamy a, c, b -> jedna wolna strefa.
+    // 4. Coalescing: free a, c, b -> one free region.
     {
         let layout = Layout::from_size_align(512, 16).unwrap();
         let a = unsafe { raw_alloc(layout) };
@@ -654,7 +654,7 @@ pub fn self_test() {
     }
     serial_println!("[MM TEST] 4/10 coalescing PASS");
 
-    // 5. Ponowne użycie adresu.
+    // 5. Address reuse.
     {
         let layout = Layout::from_size_align(64, 16).unwrap();
         let p = unsafe { raw_alloc(layout) };
@@ -678,7 +678,7 @@ pub fn self_test() {
     check!(used_bytes() == 0, "String/Vec<String> leaked");
     serial_println!("[MM TEST] 6/10 String + Vec<String> PASS");
 
-    // 7. Stress: losowe alloc/free z weryfikacją zawartości.
+    // 7. Stress: random alloc/free with content verification.
     {
         const SLOTS: usize = 256;
         let mut slots: [(*mut u8, usize, usize, u8); SLOTS] =
@@ -730,7 +730,7 @@ pub fn self_test() {
     check!(free_region_count() == 1, "heap fragmented after stress");
     serial_println!("[MM TEST] 7/10 stress PASS");
 
-    // 8. Alokacja ponad limit heapa -> null, a heap zostaje spójny.
+    // 8. Allocation beyond the heap limit -> null, and the heap stays consistent.
     {
         let layout = Layout::from_size_align(HEAP_MAX_SIZE * 2, 16).unwrap();
         let p = unsafe { raw_alloc(layout) };
@@ -740,7 +740,7 @@ pub fn self_test() {
     check!(free_region_count() == 1, "heap damaged by failed alloc");
     serial_println!("[MM TEST] 8/10 out-of-limit alloc PASS");
 
-    // 9. Kurczenie: duży blok mapuje strony, po zwolnieniu ramki wracają.
+    // 9. Shrinking: a large block maps pages, after freeing the frames come back.
     {
         let frames_before = super::free_frame_count();
         let mapped_start = mapped_bytes();
@@ -764,7 +764,7 @@ pub fn self_test() {
         );
         check!(free_region_count() == 1, "heap damaged by shrinking");
 
-        // Mały blok na końcu nie powoduje odmapowania (próg SHRINK_AT).
+        // A small block at the end does not trigger unmapping (SHRINK_AT threshold).
         let small = Layout::from_size_align(200 * 1024, 16).unwrap();
         let q = unsafe { raw_alloc(small) };
         check!(!q.is_null(), "200 KiB alloc");
@@ -778,10 +778,10 @@ pub fn self_test() {
         );
     }
 
-    // 10. M17b.h2: granica włączenia list CPU.  Bloki o rozmiarach spoza
-    // potęg 2 wzięte z heapa PRZED włączeniem, oddane PO (na listę CPU) –
-    // sąsiednie bloki-strażnicy nie mogą się zmienić, a ponownie wzięte bloki
-    // tej klasy zapisane w CAŁOŚCI (rozmiar klasy) też nie ruszają strażników.
+    // 10. CPU-list enable boundary.  Blocks with non-power-of-2 sizes
+    // taken from the heap BEFORE enabling, returned AFTER (to a CPU list) –
+    // neighbouring guard blocks must not change, and re-taken blocks
+    // of this class written in FULL (class size) must not touch the guards either.
     {
         const SIZES: [usize; 6] = [24, 80, 200, 520, 1100, 2000];
         let mut odd: [(*mut u8, Layout); 6] = [(ptr::null_mut(), Layout::new::<u8>()); 6];
@@ -802,7 +802,7 @@ pub fn self_test() {
         for &(p, l) in odd.iter() {
             unsafe { raw_dealloc(p, l) };
         }
-        // Ponownie: ta sama klasa, zapis całego bloku klasy (najgorszy przypadek).
+        // Again: same class, writing the whole class block (worst case).
         let mut again: [(*mut u8, Layout); 6] = [(ptr::null_mut(), Layout::new::<u8>()); 6];
         for (i, &sz) in SIZES.iter().enumerate() {
             let l = Layout::from_size_align(sz, 8).unwrap();

@@ -1,15 +1,15 @@
-// M17b.f: profil wejść do kernela – czas (TSC) na rodzaj syscalla i
-// wyjątku / przerwania, liczony per CPU (bez false sharingu).
+// Profile of kernel entries – time (TSC) per kind of syscall and
+// exception / interrupt, counted per CPU (no false sharing).
 //
-// Legion: v0.17.31 robi ~9% mniej skryptów niż v0.17.28, a statystyki
-// blokad są takie same.  Profil mówi, gdzie idzie czas CPU, zamiast zgadywać.
+// Motivation: one build ran ~9% fewer scripts than an earlier one while lock
+// statistics were identical.  The profile shows where CPU time goes instead of guessing.
 //
 //   let t = prof::start();
 //   ...
 //   prof::stop(prof::PF_USER, t);
 //
-// Mierzony jest czas CPU zadania (sched::task_cpu_cycles): sen w syscallu
-// i czas innych zadań się nie liczą; przerwania w trakcie – tak.
+// What is measured is the task's CPU time (sched::task_cpu_cycles): sleeping in a syscall
+// and other tasks' time do not count; interrupts taken meanwhile do.
 
 use alloc::format;
 use alloc::string::String;
@@ -18,8 +18,8 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use crate::arch::x86_64::percpu::PerCpu;
 
-/// Kategorie 0..SYSCALLS to numery syscalli.
-pub const SYSCALLS: usize = 51; // M20: numery syscalli 0..51 (48 dev_find, 49–50 zarezerwowane w projekcie)
+/// Categories 0..SYSCALLS are syscall numbers.
+pub const SYSCALLS: usize = 51; // syscall numbers 0..51 (48 dev_find, 49–50 reserved in the design)
 pub const PF_USER: usize = 51;
 pub const IRQ_PIT: usize = 52;
 pub const IRQ_TIMER: usize = 53;
@@ -29,7 +29,7 @@ pub const EXIT: usize = 56;
 pub const LOAD_ELF: usize = 57;
 pub const CTX_SWITCH: usize = 58;
 pub const DRV_EXEC: usize = 59;
-/// Pomiary z końcem przed początkiem (nie powinno się zdarzać – kontrola).
+/// Measurements whose end precedes their start (should not happen – a sanity check).
 const TSC_SKEW: usize = 60;
 pub const SP_READ: usize = 61;
 pub const SP_ELF: usize = 62;
@@ -45,7 +45,7 @@ const NAMES: [&str; N] = [
     "resched IPI", "reap", "exit proc", " spawn:load", "ctx switch", "drv exec", "TSC skew", " sp:readfile", " sp:elf+pt", " sp:task",
 ];
 
-/// Porównanie napisów w czasie kompilacji.
+/// Compile-time string comparison.
 const fn same(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -61,9 +61,9 @@ const fn same(a: &str, b: &str) -> bool {
     true
 }
 
-// v0.18.0: po dodaniu numerów syscalli zabrakło jednej nazwy i etykiety w
-// tabeli przesunęły się o jedną ("ctx switch" pokazywał spawn:load).  Kompilacja
-// przerywa się, gdy nazwy nie zgadzają się z kategoriami.
+// Once, after adding syscall numbers, one name was missing and the labels in the
+// table shifted by one ("ctx switch" showed spawn:load).  Compilation now
+// fails when the names do not match the categories.
 const _: () = assert!(
     same(NAMES[28], "munmap")
         && same(NAMES[29], "handle_dup")
@@ -81,25 +81,25 @@ const _: () = assert!(
         && same(NAMES[SP_READ], " sp:readfile")
         && same(NAMES[SP_ELF], " sp:elf+pt")
         && same(NAMES[SP_TASK], " sp:task"),
-    "prof.rs: NAMES nie zgadzają się z numerami kategorii"
+    "prof.rs: NAMES do not match the category numbers"
 );
 
 
-/// [liczba wywołań, cykle] dla każdej kategorii; jeden blok na CPU.
+/// [call count, cycles] for each category; one block per CPU.
 struct Slot([AtomicU64; 2 * N]);
 
 static DATA: PerCpu<Slot> = crate::per_cpu!(Slot([const { AtomicU64::new(0) }; 2 * N]));
 
-/// Początek pomiaru: czas CPU bieżącego zadania (sched::task_cpu_cycles).
-/// Legion v0.17.32: surowy TSC z różnych rdzeni dawał bzdury po migracji
-/// (stat średnio 64 ms) – TSC rdzeni nie są zgrane.  Czas CPU zadania
-/// liczy scheduler zawsze na jednym CPU; sen i inne zadania się nie liczą.
+/// Start of a measurement: CPU time of the current task (sched::task_cpu_cycles).
+/// On real hardware a raw TSC from different cores gave nonsense after migration
+/// (stat averaging 64 ms) – core TSCs are not synchronized.  A task's CPU time
+/// is always computed by the scheduler on a single CPU; sleep and other tasks do not count.
 #[inline(always)]
 pub fn start() -> u64 {
     crate::sched::task_cpu_cycles()
 }
 
-/// Koniec pomiaru – do bloku CPU, na którym kończymy.
+/// End of a measurement – into the block of the CPU we finish on.
 #[inline(always)]
 pub fn stop(cat: usize, t0: u64) {
     let t1 = crate::sched::task_cpu_cycles();
@@ -112,7 +112,7 @@ pub fn stop(cat: usize, t0: u64) {
     }
 }
 
-/// Pomiar zrobiony samodzielnie (cykle na tym samym CPU).
+/// A measurement taken separately (cycles on the same CPU).
 #[inline(always)]
 pub fn add(cat: usize, cycles: u64) {
     let d = &DATA[crate::arch::x86_64::cpu::id()].0;
@@ -140,8 +140,8 @@ fn totals() -> [(u64, u64); N] {
     t
 }
 
-/// Raport: `top` najdroższych kategorii.  `cpu_ms` = czas wszystkich CPU
-/// (ms x liczba CPU), `scripts` = skrypty w tym czasie (koszt na skrypt).
+/// Report: the `top` most expensive categories.  `cpu_ms` = time of all CPUs
+/// (ms x number of CPUs), `scripts` = scripts in that time (cost per script).
 pub fn lines(top: usize, cpu_ms: u64, scripts: u64) -> Vec<String> {
     let per_ms = crate::arch::x86_64::lapic::tsc_per_ms().max(1);
     let t = totals();
@@ -167,7 +167,7 @@ pub fn lines(top: usize, cpu_ms: u64, scripts: u64) -> Vec<String> {
         ));
     }
     out.push(format!("    check: {} measurement(s) with negative time (should be 0)", t[TSC_SKEW].0));
-    // M17b.f: kręcenie na spinlockach, per nazwa.
+    // Spinning on spinlocks, per name.
     out.push(format!("  spin wait: name waits avg_us CPU%"));
     for (name, n, cyc) in crate::sched::spin::spin_wait_stats().into_iter().take(8) {
         let us_total = cyc.saturating_mul(1000) / per_ms;

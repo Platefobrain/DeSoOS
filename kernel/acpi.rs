@@ -1,16 +1,16 @@
-// M16b: ACPI – tylko czytanie tablic (bez interpretera AML).
+// ACPI – table parsing only (no AML interpreter).
 //
-// DSB podaje adres RSDP z tablicy konfiguracyjnej UEFI.  RSDP wskazuje
-// XSDT (ACPI 2.0+, adresy 64-bit) albo RSDT (1.0, 32-bit); w nich są
-// adresy pozostałych tablic.  Na razie potrzebna jest jedna:
+// DSB passes the RSDP address from the UEFI configuration table.  The RSDP points to
+// the XSDT (ACPI 2.0+, 64-bit addresses) or the RSDT (1.0, 32-bit); they hold the
+// addresses of the remaining tables.  We need:
 //
-//   MCFG – gdzie leży PCIe ECAM (przestrzeń konfiguracyjna PCI jako pamięć:
-//          4 KiB na funkcję zamiast 256 B przez porty 0xCF8/0xCFC).
+//   MCFG – where the PCIe ECAM lives (PCI configuration space as memory:
+//          4 KiB per function instead of 256 B through ports 0xCF8/0xCFC).
 //
-// M17: MADT – lista rdzeni (Local APIC), I/O APIC i przekierowania
-// przerwań ISA (np. zegar IRQ0 -> GSI 2).  Komenda `acpi` w shellu
-// pokazuje wszystkie znalezione tablice.  Każda tablica ma sumę kontrolną –
-// uszkodzone są pomijane.  Pamięć tablic mapujemy tylko do odczytu.
+// MADT – the list of cores (Local APIC), I/O APICs and ISA interrupt
+// overrides (e.g. timer IRQ0 -> GSI 2).  The `acpi` shell command
+// shows all tables found.  Each table has a checksum –
+// corrupted ones are skipped.  Table memory is mapped read-only.
 
 use alloc::vec::Vec;
 
@@ -35,7 +35,7 @@ impl Table {
     }
 }
 
-/// Wpis MCFG: ECAM dla segmentu PCI i zakresu szyn.
+/// MCFG entry: ECAM for a PCI segment and a range of buses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct McfgEntry {
     pub base: u64,
@@ -44,13 +44,13 @@ pub struct McfgEntry {
     pub bus_end: u8,
 }
 
-/// M17: MADT – sprzęt przerwań.
+/// MADT – interrupt hardware.
 #[derive(Clone, Debug, Default)]
 pub struct Madt {
     pub lapic_address: u64,
-    /// Czy jest też stary PIC 8259 (flaga PCAT_COMPAT).
+    /// Whether a legacy 8259 PIC is present too (PCAT_COMPAT flag).
     pub has_8259: bool,
-    /// ID Local APIC rdzeni, które można uruchomić (włączone albo "online capable").
+    /// Local APIC IDs of cores that can be started (enabled or "online capable").
     pub cpus: Vec<u32>,
     pub ioapics: Vec<IoApicEntry>,
     pub overrides: Vec<IrqOverride>,
@@ -63,7 +63,7 @@ pub struct IoApicEntry {
     pub gsi_base: u32,
 }
 
-/// Przerwanie ISA `source` podłączone do GSI `gsi` (flagi MPS: polaryzacja, wyzwalanie).
+/// ISA interrupt `source` connected to GSI `gsi` (MPS flags: polarity, trigger mode).
 #[derive(Clone, Copy, Debug)]
 pub struct IrqOverride {
     pub source: u8,
@@ -77,7 +77,7 @@ struct Acpi {
     tables: Vec<Table>,
     mcfg: Vec<McfgEntry>,
     madt: Option<Madt>,
-    /// M17a: adres HPET (tablica HPET; zegar odcinków czasu – clock.rs).
+    /// HPET address (HPET table; interval timer – clock.rs).
     hpet: Option<u64>,
 }
 
@@ -124,11 +124,11 @@ fn parse_madt(t: &[u8]) -> Madt {
 static mut ACPI: Option<Acpi> = None;
 
 fn acpi() -> Option<&'static Acpi> {
-    // Zapisywane raz w init (przed startem zadań), potem tylko czytane.
+    // Written once in init (before tasks start), read-only afterwards.
     unsafe { (*core::ptr::addr_of!(ACPI)).as_ref() }
 }
 
-/// Bajty z pamięci fizycznej (mapowanej tylko do odczytu).
+/// Bytes from physical memory (mapped read-only).
 fn bytes(phys: u64, len: usize) -> Option<&'static [u8]> {
     let v = map_firmware(phys, len as u64)?;
     Some(unsafe { core::slice::from_raw_parts(v as *const u8, len) })
@@ -146,7 +146,7 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-/// Tablica SDT pod adresem fizycznym (nagłówek 36 B + suma kontrolna).
+/// SDT table at a physical address (36 B header + checksum).
 fn read_table(phys: u64) -> Option<(Table, &'static [u8])> {
     if phys == 0 {
         return None;
@@ -174,7 +174,7 @@ fn read_table(phys: u64) -> Option<(Table, &'static [u8])> {
 
 fn parse_mcfg(t: &[u8]) -> Vec<McfgEntry> {
     let mut out = Vec::new();
-    let mut o = 44; // nagłówek 36 + 8 zarezerwowanych
+    let mut o = 44; // 36-byte header + 8 reserved
     while o + 16 <= t.len() {
         let e = McfgEntry {
             base: u64_at(t, o),
@@ -190,8 +190,8 @@ fn parse_mcfg(t: &[u8]) -> Vec<McfgEntry> {
     out
 }
 
-/// Czyta RSDP i listę tablic.  Wołać po starcie pamięci (map_firmware),
-/// przed PCI.
+/// Reads the RSDP and the table list.  Call after memory setup (map_firmware),
+/// before PCI.
 pub fn init(rsdp_phys: u64) {
     if rsdp_phys == 0 {
         serial_println!("[ACPI] no RSDP from the firmware - ACPI not available");
@@ -209,7 +209,7 @@ pub fn init(rsdp_phys: u64) {
     let mut oem_id = [0u8; 6];
     oem_id.copy_from_slice(&rsdp[9..15]);
 
-    // ACPI 2.0+: XSDT (adresy 64-bit), inaczej RSDT (32-bit).
+    // ACPI 2.0+: XSDT (64-bit addresses), otherwise RSDT (32-bit).
     let xsdt = if revision >= 2 && checksum_ok(&rsdp[0..36]) { u64_at(rsdp, 24) } else { 0 };
     let (root, entry_size) = match read_table(xsdt) {
         Some(t) if &t.0.signature == b"XSDT" => (t, 8),
@@ -239,8 +239,8 @@ pub fn init(rsdp_phys: u64) {
             if &t.signature == b"APIC" {
                 madt = Some(parse_madt(b));
             }
-            // HPET: adres w strukturze GAS od bajtu 40 (40 = przestrzeń
-            // adresowa, 0 = pamięć; adres 64-bit od bajtu 44).
+            // HPET: address in a GAS structure from byte 40 (40 = address
+            // space, 0 = memory; 64-bit address from byte 44).
             if &t.signature == b"HPET" && b.len() >= 52 && b[40] == 0 {
                 let a = u64_at(b, 44);
                 if a != 0 {
@@ -288,28 +288,28 @@ pub fn available() -> bool {
     acpi().is_some()
 }
 
-/// Znalezione tablice (pierwsza to XSDT/RSDT).
+/// Tables found (the first one is the XSDT/RSDT).
 #[allow(dead_code)]
 pub fn tables() -> &'static [Table] {
     acpi().map(|a| a.tables.as_slice()).unwrap_or(&[])
 }
 
-/// Obszary ECAM z MCFG.
+/// ECAM regions from MCFG.
 pub fn mcfg() -> &'static [McfgEntry] {
     acpi().map(|a| a.mcfg.as_slice()).unwrap_or(&[])
 }
 
-/// M17: MADT (None – brak ACPI albo tablicy APIC).
+/// MADT (None – no ACPI or no APIC table).
 pub fn madt() -> Option<&'static Madt> {
     acpi()?.madt.as_ref()
 }
 
-/// M17a: adres fizyczny HPET (None – brak tablicy).
+/// Physical HPET address (None – no table).
 pub fn hpet_base() -> Option<u64> {
     acpi()?.hpet
 }
 
-/// Opis dla komendy `acpi`.
+/// Description for the `acpi` command.
 pub fn describe() -> alloc::string::String {
     use core::fmt::Write;
     let mut s = alloc::string::String::new();

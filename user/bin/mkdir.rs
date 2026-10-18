@@ -1,4 +1,4 @@
-// M16: mkdir <katalog>... – tworzy katalogi.
+// mkdir <directory>... – creates directories.
 #![no_std]
 #![no_main]
 

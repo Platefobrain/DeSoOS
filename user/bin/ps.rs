@@ -1,5 +1,5 @@
-// M16: ps – lista zadań (procesy i zadania kernela), z rodzicem (PPID).
-// M17: kolumna CPU – na którym rdzeniu zadanie działa.
+// ps – task list (processes and kernel tasks), with the parent (PPID).
+// CPU column – which core the task runs on.
 #![no_std]
 #![no_main]
 
@@ -37,7 +37,7 @@ fn main(_: desoos::Args) -> i32 {
             continue;
         }
         let ppid = if f[5] == "user" { f[1] } else { "-" };
-        // M17: numer CPU ("~3" = nie działa teraz, ostatnio na CPU 3).
+        // CPU number ("~3" = not running now, last ran on CPU 3).
         let cpu = f.get(7).copied().unwrap_or("-");
         println!(
             "{:>5} {:>5}  {:<12}  {:<6}  {:<8} {:>3} {:>8}  {:>8}{}",

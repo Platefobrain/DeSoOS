@@ -1,4 +1,4 @@
-// M17a krok d: syscalle bez Big Kernel Lock – samotesty (tylko build z
+// Syscalls without the Big Kernel Lock – self-tests (only in builds with
 // --cfg selftest).
 
 use alloc::string::String;
@@ -35,8 +35,8 @@ fn start(name: &str) -> Option<TaskId> {
     spawn_with(name, programs::code(name)?, &opts).ok()
 }
 
-// M17a.f1: ping-pong przez WaitQueue (zgubiona pobudka = zawieszenie) i
-// burza przełączeń (yield) na wielu CPU.
+// Ping-pong via WaitQueue (a lost wakeup = hang) and a
+// storm of switches (yield) on many CPUs.
 static TURN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static PONGS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static PP_WQ: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
@@ -49,7 +49,7 @@ fn pong(_: usize) {
     for _ in 0..ROUNDS {
         PP_WQ.wait_until(|| TURN.load(SeqCst) == 1, Some(30_000));
         if TURN.load(SeqCst) != 1 {
-            return; // zawieszenie – test to zgłosi
+            return; // hang – the test will report it
         }
         TURN.store(0, SeqCst);
         PONGS.fetch_add(1, SeqCst);
@@ -59,14 +59,14 @@ fn pong(_: usize) {
 
 fn yielder(_: usize) {
     use core::sync::atomic::Ordering::Relaxed;
-    // Bez BKL (yield bierze go tylko na chwilę) – zadanie kernela trzymające
-    // BKL w ciasnej pętli zagłodziłoby resztę (przy 8 CPU test stał).
+    // No BKL (yield takes it only briefly) – a kernel task holding the
+    // BKL in a tight loop would starve the rest (with 8 CPUs the test stalled).
     crate::sched::bkl::unlocked(|| {
         while !YIELD_STOP.load(Relaxed) {
             crate::sched::yield_now();
             YIELDS.fetch_add(1, Relaxed);
-            // Chwila pracy między przełączeniami – bez tego 4 zadania walczą
-            // tylko o BKL (w QEMU z 8 CPU na 2 rdzeniach: minuty).
+            // A bit of work between switches – without it 4 tasks only fight
+            // for the BKL (in QEMU with 8 CPUs on 2 cores: minutes).
             for _ in 0..2_000 {
                 core::hint::spin_loop();
             }
@@ -74,9 +74,9 @@ fn yielder(_: usize) {
     });
 }
 
-// M17a.f2: burza pobudek bez BKL – kilka zadań czeka na kolejne "pokolenia"
-// licznika, zadanie budzące (też bez BKL) podbija go i budzi wszystkich.
-// Zgubiona pobudka przy ostatnim pokoleniu = zadanie wisi do timeoutu.
+// Wakeup storm without the BKL – several tasks wait for successive "generations"
+// of a counter, the waking task (also without the BKL) bumps it and wakes everyone.
+// A lost wakeup on the last generation = a task hangs until timeout.
 static GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static STORM_WQ: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
 static STORM_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -130,10 +130,10 @@ pub fn self_test() {
     let n = smp::online_count();
     let k = n.clamp(2, 4);
 
-    // 1. getpid bez BKL: k procesów x 100 000 getpid (program "regs" przy
-    //    okazji sprawdza, że rejestry przeżywają syscall).  BKL bierze się
-    //    tylko przy starcie / końcu procesów i w przerwaniach – nie na
-    //    każdy syscall.
+    // 1. getpid without the BKL: k processes x 100 000 getpid (the "regs" program
+    //    also checks that registers survive the syscall).  The BKL is taken
+    //    only at process start / exit and in interrupts – not on
+    //    every syscall.
     let (fast0, _) = syscalls::syscall_stats();
     let (bkl0, _, _) = bkl::stats();
     let t0 = ticks();
@@ -163,8 +163,8 @@ pub fn self_test() {
         taken
     );
 
-    // 2. write bez BKL: k procesów po 2000 linii naraz do przechwyconego
-    //    stdout – każda linia cała (write jest niepodzielny), nic nie ginie.
+    // 2. write without the BKL: k processes, 2000 lines each, at once into the captured
+    //    stdout – every line intact (write is atomic), nothing is lost.
     let (fast0, _) = syscalls::syscall_stats();
     let mut ids = Vec::new();
     for _ in 0..k {
@@ -185,8 +185,8 @@ pub fn self_test() {
     check!(writes >= k as u64 * 2000, "only {} writes without BKL", writes);
     serial_println!("[NOBKL TEST] 2/10 {} x 2000 lines written at once without BKL, every line intact PASS", k);
 
-    // 3. kill procesu, który robi tylko syscalle bez BKL (Ctrl+C musi
-    //    działać także wtedy).
+    // 3. kill of a process that only makes syscalls without the BKL (Ctrl+C must
+    //    work then too).
     let id = start("pidloop");
     check!(id.is_some(), "spawn pidloop");
     let id = id.unwrap();
@@ -198,9 +198,9 @@ pub fn self_test() {
     check!(e == Some(ExitKind::Killed), "pidloop ended with {:?}", e);
     serial_println!("[NOBKL TEST] 3/10 kill of a process doing only BKL-free syscalls PASS");
 
-    // 4. Pliki bez BKL (M17a.e): k shelli naraz dopisuje po 40 linii do
-    //    własnych plików (echo >> – open/write/close w shellu, bez nowych
-    //    procesów), VFS i ramfs pod FS_LOCK, nie pod BKL.
+    // 4. Files without the BKL: k shells at once append 40 lines each to
+    //    their own files (echo >> – open/write/close in the shell, no new
+    //    processes), VFS and ramfs under FS_LOCK, not under the BKL.
     let (f0, _) = syscalls::syscall_stats();
     let mut shells = Vec::new();
     for i in 0..k {
@@ -238,9 +238,9 @@ pub fn self_test() {
         files
     );
 
-    // 5. Procesy bez BKL (M17a.e2): k shelli naraz uruchamia po 15 programów
-    //    (spawn + wait – tablica zombie pod własną blokadą, lista zadań tylko
-    //    na chwilę pod BKL); każdy program wypisuje swój pid.
+    // 5. Processes without the BKL: k shells at once run 15 programs each
+    //    (spawn + wait – zombie table under its own lock, task list only
+    //    briefly under the BKL); every program prints its pid.
     let (f0, _) = syscalls::syscall_stats();
     let mut shells = Vec::new();
     for i in 0..k {
@@ -272,10 +272,10 @@ pub fn self_test() {
         procs
     );
 
-    // 6. Blokada schedulera (M17a.f1): ping-pong dwóch zadań przez WaitQueue
-    //    (2000 pobudek w obie strony – zgubiona = zawieszenie), w tym czasie
-    //    k zadań robi yield w kółko (przełączenia na wielu CPU).  Potem
-    //    blokada wolna, głębokość 0.
+    // 6. Scheduler lock: ping-pong of two tasks via WaitQueue
+    //    (2000 wakeups in each direction – a lost one = hang), meanwhile
+    //    k tasks yield in a loop (switches on many CPUs).  Afterwards the
+    //    lock is free, depth 0.
     {
         use core::sync::atomic::Ordering::SeqCst;
         let (a0, _, _) = crate::sched::sched_lock_stats();
@@ -320,9 +320,9 @@ pub fn self_test() {
         );
     }
 
-    // 7. Burza pobudek bez BKL (M17a.f2): k zadań czeka na WaitQueue, zadanie
-    //    bez BKL budzi je 3000 razy; w tym czasie k procesów "sleeper" robi
-    //    sleep(100) – syscall bez BKL.  Nikt nie wisi, nikt nie wraca z BKL.
+    // 7. Wakeup storm without the BKL: k tasks wait on a WaitQueue, a task
+    //    without the BKL wakes them 3000 times; meanwhile k "sleeper" processes do
+    //    sleep(100) – a syscall without the BKL.  Nobody hangs, nobody returns holding the BKL.
     {
         use core::sync::atomic::Ordering::SeqCst;
         GEN.store(0, SeqCst);
@@ -372,9 +372,9 @@ pub fn self_test() {
         );
     }
 
-    // 8. kill w trakcie uśpienia (M17a.f2): k procesów "ticker" śpi po 1 s
-    //    (sleep bez BKL); kill budzi je od razu – kończą się po chwili, nie
-    //    po końcu snu.
+    // 8. kill during sleep: k "ticker" processes sleep 1 s at a time
+    //    (sleep without the BKL); kill wakes them immediately – they exit shortly, not
+    //    after the sleep ends.
     {
         let mut tickers = Vec::new();
         for _ in 0..k {
@@ -382,7 +382,7 @@ pub fn self_test() {
             check!(id.is_some(), "spawn ticker");
             tickers.push(id.unwrap());
         }
-        // Wszystkie śpią (po pierwszym "tick" – sleep 1 s).
+        // All are sleeping (after the first "tick" – sleep 1 s).
         let asleep = wait_for(10_000, || {
             tickers.iter().all(|&i| sched::task_info(i).is_some_and(|t| t.state == crate::sched::State::Blocked && t.switches > 0))
         });
@@ -401,15 +401,15 @@ pub fn self_test() {
         serial_println!("[NOBKL TEST] 8/10 kill of {} processes sleeping without BKL: gone after {} ms PASS", k, wall);
     }
 
-    // 9. Statystyka BKL per miejsce (M17a.g): każde wzięcie przypisane
-    //    miejscu, syscall pod BKL i pobudka po przełączeniu widoczne, czas
-    //    trzymania mierzony.
+    // 9. Per-site BKL statistics: every acquisition attributed to a
+    //    site, syscall under the BKL and wakeup after a switch visible, hold
+    //    time measured.
     {
         let sum = |name: &str| {
             bkl::site_stats().iter().filter(|e| e.line == 0 && e.file == name).map(|e| (e.taken, e.held_us)).next().unwrap_or((0, 0))
         };
         let (sys0, _) = sum(bkl::tag::SYSCALL);
-        let id = start("badsys"); // nieznany syscall -> ścieżka pod BKL
+        let id = start("badsys"); // unknown syscall -> path under the BKL
         check!(id.is_some(), "spawn badsys");
         let id = id.unwrap();
         check!(wait_for(10_000, || sched::task_info(id).is_none()), "badsys did not end");
@@ -419,7 +419,7 @@ pub fn self_test() {
         let sites = bkl::site_stats();
         let tracked: u64 = sites.iter().map(|e| e.taken).sum::<u64>() + bkl::site_overflow();
         let (acq, _, _) = bkl::stats();
-        // Wzięcia trwające właśnie na innych CPU mogą jeszcze nie być w tablicy.
+        // Acquisitions in progress on other CPUs may not be in the table yet.
         check!(tracked + 64 >= acq0 && tracked <= acq, "sites count {} takes, BKL {}..{}", tracked, acq0, acq);
         let held: u64 = sites.iter().map(|e| e.held_us).sum();
         check!(held > 0 || crate::arch::x86_64::lapic::tsc_per_ms() == 0, "no hold time measured");
@@ -441,10 +441,10 @@ pub fn self_test() {
         );
     }
 
-    // 10. P1: rodzina procesów bez globalnej tablicy zombie – prawdziwy init
-    // (`init test /bin/famtest`, zarejestrowany jako init: sieroty idą do
-    // niego): 200 dzieci naraz, wait(pid), WNOHANG, 8 x 25 sierot, 4 rodziców
-    // po 50 dzieci równolegle.  Potem: żadnych zombie, żadnego famtest.
+    // 10. Process family without a global zombie table – a real init
+    // (`init test /bin/famtest`, registered as init: orphans are reparented to
+    // it): 200 children at once, wait(pid), WNOHANG, 8 x 25 orphans, 4 parents
+    // with 50 children each in parallel.  Afterwards: no zombies, no famtest.
     let opts = SpawnOptions { stdin: Some(Vec::new()), capture: true, ..SpawnOptions::default() };
     let id = exec("/bin/init", &["init", "test", "/bin/famtest"], "/", &opts);
     check!(id.is_ok(), "cannot start init test /bin/famtest");

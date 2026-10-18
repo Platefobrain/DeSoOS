@@ -1,4 +1,4 @@
-// M5: dostęp do portów I/O (in/out).  Wspólne dla PIC, PIT i CMOS/RTC.
+// I/O port access (in/out).  Shared by the PIC, PIT and CMOS/RTC.
 
 use core::arch::asm;
 
@@ -54,8 +54,8 @@ pub unsafe fn outl(port: u16, value: u32) {
     }
 }
 
-/// Krótkie opóźnienie (~1 µs) między kolejnymi zapisami do starych
-/// kontrolerów (8259) – zapis do nieużywanego portu 0x80 (POST code).
+/// Short delay (~1 µs) between successive writes to old
+/// controllers (8259) – a write to the unused port 0x80 (POST code).
 #[inline]
 pub fn io_wait() {
     unsafe {

@@ -1,14 +1,14 @@
-// M12: synchronizacja zadań – kolejki oczekiwania i mutex.
+// Task synchronization – wait queues and a mutex.
 //
-// WaitQueue: zadanie usypia, dopóki warunek nie jest spełniony; budzi je
-// `wake_all()` (np. z handlera przerwania) albo upływ czasu.  Warunek jest
-// sprawdzany przy wyłączonych przerwaniach, więc pobudka nie może
-// "przepaść" między sprawdzeniem a uśpieniem.  Bez schedulera (wczesny
-// start) czekanie to stare `sti; hlt`.
+// WaitQueue: a task sleeps until a condition holds; it is woken by
+// `wake_all()` (e.g. from an interrupt handler) or by a timeout.  The condition is
+// checked with interrupts disabled, so a wakeup cannot
+// "get lost" between the check and going to sleep.  Without the scheduler (early
+// boot) waiting is the old `sti; hlt`.
 //
-// Mutex: blokada usypiająca (czekające zadanie nie zajmuje CPU),
-// reentrant – to samo zadanie może ją wziąć wiele razy (VFS woła sam
-// siebie, np. write_file -> stat).  Nie wolno jej brać w przerwaniu.
+// Mutex: a sleeping lock (a waiting task does not use the CPU),
+// reentrant – the same task can take it multiple times (the VFS calls
+// itself, e.g. write_file -> stat).  Must not be taken in an interrupt.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -17,8 +17,8 @@ use super::{can_block, current_id, wake_channel, wake_one_channel};
 use crate::arch::x86_64::interrupts;
 
 pub struct WaitQueue {
-    // Adres kolejki to identyfikator kanału – pole nie może mieć rozmiaru
-    // zero (statyczne ZST mogłyby dzielić adres).
+    // The queue address is the channel identifier – the field must not be
+    // zero-sized (static ZSTs could share an address).
     _id: AtomicU8,
 }
 
@@ -31,22 +31,22 @@ impl WaitQueue {
         self as *const WaitQueue as usize
     }
 
-    /// Budzi wszystkie zadania czekające w tej kolejce (także z przerwania).
+    /// Wakes all tasks waiting in this queue (also from an interrupt).
     pub fn wake_all(&self) {
         wake_channel(self.channel());
     }
 
-    /// M17a.g10: budzi jedno – najdłużej czekające; `true` – obudzono.
+    /// Wakes one – the longest-waiting; `true` – someone was woken.
     pub fn wake_one(&self) -> bool {
         wake_one_channel(self.channel())
     }
 
-    /// Czeka, aż `cond()` będzie prawdą albo minie `timeout_ms`.
-    /// Zwraca wynik warunku.  Wymaga włączonych przerwań.
+    /// Waits until `cond()` is true or `timeout_ms` elapses.
+    /// Returns the condition result.  Requires interrupts enabled.
     pub fn wait_until(&self, mut cond: impl FnMut() -> bool, timeout_ms: Option<u64>) -> bool {
-        // M17a.f2: sprawdzenie warunku i uśpienie pod blokadą schedulera
-        // (sched::wait_event); pobudka (wake_channel) też ją bierze, więc nie
-        // przepada – bez BKL (do f1 gwarantował to BKL).
+        // The condition check and going to sleep happen under the scheduler lock
+        // (sched::wait_event); the wakeup (wake_channel) takes it too, so it cannot
+        // get lost – no BKL needed (the BKL used to guarantee this).
         let was_enabled = interrupts::are_enabled();
         assert!(was_enabled, "wait_until with interrupts disabled");
         let deadline = match timeout_ms {
@@ -59,7 +59,7 @@ impl WaitQueue {
         self.wait_until_hlt(cond, deadline)
     }
 
-    /// Bez schedulera (wczesny start) albo w zadaniu idle: `sti; hlt`.
+    /// Without the scheduler (early boot) or in the idle task: `sti; hlt`.
     fn wait_until_hlt(&self, mut cond: impl FnMut() -> bool, deadline: u64) -> bool {
         let result = loop {
             interrupts::disable();
@@ -69,7 +69,7 @@ impl WaitQueue {
             if crate::time::ticks() >= deadline {
                 break false;
             }
-            // sti+hlt atomowo: IRQ nie przepadnie między sprawdzeniem a hlt.
+            // sti+hlt is atomic: an IRQ cannot be lost between the check and hlt.
             interrupts::enable_and_hlt();
         };
         interrupts::enable();
@@ -77,48 +77,48 @@ impl WaitQueue {
     }
 }
 
-/// Blokada reentrant bez danych (strzeże stanu modułu, np. VFS).
+/// Reentrant lock without data (guards module state, e.g. the VFS).
 pub struct KMutex {
-    owner: AtomicU64, // 0 = wolna
+    owner: AtomicU64, // 0 = free
     depth: AtomicU32,
     queue: WaitQueue,
     contended: AtomicU64,
-    // M17a.g5: statystyka (blokady z nazwą – `cpus`: "sleeping locks").
+    // Statistics (named locks – `cpus`: "sleeping locks").
     name: &'static str,
     registered: AtomicBool,
     acquires: AtomicU64,
-    /// Wzięcia, przy których trzeba było czekać (raz na `lock`).
+    /// Acquisitions that had to wait (counted once per `lock`).
     waited: AtomicU64,
-    /// M17a.g8: wzięcia po krótkim kręceniu się, bez usypiania.
+    /// Acquisitions after a short spin, without sleeping.
     spun: AtomicU64,
-    /// M17a.g10: ile zadań czeka (zwolnienie budzi jedno, jeśli > 0).
+    /// How many tasks are waiting (unlock wakes one if > 0).
     sleepers: AtomicU32,
     wait_us: AtomicU64,
-    /// M17a.g6: czas trzymania próbkowany – co HOLD_SAMPLE-te wzięcie znacznik
-    /// HPET (0 = to wzięcie nie jest próbką), suma µs próbek × HOLD_SAMPLE.
-    /// (v0.17.14 mierzyła TSC – trzymający śpi i zmienia CPU, a TSC rdzeni
-    /// Legiona się różnią: 33 815 s trzymania w 60 s testu.)
+    /// Hold time is sampled – every HOLD_SAMPLE-th acquisition stores an
+    /// HPET timestamp (0 = this acquisition is not a sample), sum of sampled µs × HOLD_SAMPLE.
+    /// (TSC is not used: the holder may sleep and change CPU, and TSCs of different
+    /// cores can differ on real hardware, giving absurd hold times.)
     taken_stamp: AtomicU64,
-    /// M17a.g13: CPU, na którym wzięto (TSC porównywalny tylko na nim).
+    /// CPU on which the lock was taken (TSC is comparable only on that CPU).
     taken_cpu: AtomicU32,
     hold_us: AtomicU64,
 }
 
-/// Co które wzięcie mierzy czas trzymania (odczyt HPET kosztuje ~1 µs).
+/// How often an acquisition measures hold time (an HPET read costs ~1 µs).
 const HOLD_SAMPLE: u64 = 16;
 
-/// M17a.g8: ile obrotów (`pause`) kręcić się przed uśpieniem – rzędu
-/// kilkudziesięciu µs.  Tylko przy kilku CPU (na jednym trzymający i tak
-/// nie ruszy, dopóki nie oddamy CPU).
-/// M17a.g9: wyłączone (0) – na Legionie (v0.17.17) przy dużym tłoku kręcenie
-/// spalało CPU (6% idle) i obniżyło przepustowość o 9%; zostawione jako
-/// pokrętło do pomiarów.
-/// M17a.g15: włączone krótko (200 × `pause` – kilka µs): po g13/g14 sekcje
-/// trwają mikrosekundy (wcześniej wydłużały je odczyty HPET / RTC pod
-/// blokadą), a uśpienie i pobudka kosztują dwa przejścia przez scheduler.
+/// How many spins (`pause`) to do before sleeping – on the order of
+/// tens of µs.  Only with several CPUs (with one, the holder will not
+/// run anyway until we give up the CPU).
+/// Long spinning was measured on real hardware to burn CPU under heavy contention
+/// (6% idle) and lower throughput by 9%; it is kept as a tuning knob
+/// for measurements.
+/// Enabled briefly (200 × `pause` – a few µs): critical sections
+/// last microseconds (HPET / RTC reads under the lock no longer stretch
+/// them), while sleeping and waking cost two passes through the scheduler.
 const SPIN_ITERS: u32 = 200;
 
-/// Kręci się, aż `ready()` albo limit obrotów; `true` = gotowe.
+/// Spins until `ready()` or the spin limit; `true` = ready.
 fn spin_until(mut ready: impl FnMut() -> bool) -> bool {
     if SPIN_ITERS == 0 || !crate::arch::x86_64::smp::active() {
         return false;
@@ -132,12 +132,12 @@ fn spin_until(mut ready: impl FnMut() -> bool) -> bool {
     ready()
 }
 
-// M17a.g5: rejestr nazwanych KMutex (statyczne – adres stały).  Wpis przy
-// pierwszym `lock`.
+// Registry of named KMutexes (static – fixed address).  An entry is added on
+// the first `lock`.
 const MAX_NAMED: usize = 16;
 static NAMED: [core::sync::atomic::AtomicUsize; MAX_NAMED] = [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_NAMED];
 
-/// Statystyka jednej blokady usypiającej.
+/// Statistics of one sleeping lock.
 pub struct KMutexStats {
     pub name: &'static str,
     pub acquires: u64,
@@ -147,8 +147,8 @@ pub struct KMutexStats {
     pub held_us: u64,
 }
 
-/// Wszystkie nazwane blokady, które były już brane (sortowane: czekanie +
-/// trzymanie malejąco).
+/// All named locks that have been taken so far (sorted by waiting +
+/// holding time, descending).
 pub fn kmutex_stats() -> alloc::vec::Vec<KMutexStats> {
     let mut v: alloc::vec::Vec<KMutexStats> = NAMED
         .iter()
@@ -181,8 +181,8 @@ impl KMutex {
         Self::new_named("")
     }
 
-    /// M17a.g5: blokada z nazwą – liczona w `cpus` ("sleeping locks").
-    /// Tylko dla blokad statycznych (rejestr trzyma adres).
+    /// Named lock – counted in `cpus` ("sleeping locks").
+    /// Only for static locks (the registry stores the address).
     pub const fn new_named(name: &'static str) -> Self {
         KMutex {
             owner: AtomicU64::new(0),
@@ -218,14 +218,14 @@ impl KMutex {
     }
 
     fn try_take(&self, me: u64) -> bool {
-        // M17a.e: compare_exchange – dwa CPU bez BKL nie wezmą jej naraz
-        // (wcześniej wystarczało without_interrupts: jeden CPU w kernelu).
+        // compare_exchange – two CPUs without the BKL cannot take it at once
+        // (disabling interrupts alone is not enough with several CPUs in the kernel).
         match self.owner.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => {
                 self.depth.store(1, Ordering::Relaxed);
                 if !self.name.is_empty() {
                     let sample = self.acquires.load(Ordering::Relaxed) % HOLD_SAMPLE == 0;
-                    // M17a.g13: TSC + CPU (rdtscp), nie HPET – odczyt pod blokadą.
+                    // TSC + CPU (rdtscp), not HPET – this read happens under the lock.
                     if sample {
                         let (t, c) = crate::arch::x86_64::clock::tsc_cpu();
                         self.taken_cpu.store(c, Ordering::Relaxed);
@@ -249,23 +249,23 @@ impl KMutex {
         self.register();
         if !self.try_take(me) {
             self.contended.fetch_add(1, Ordering::Relaxed);
-            // M17a.g8: najpierw chwilę kręcimy się – sekcje pod tymi blokadami
-            // trwają mikrosekundy, a uśpienie i pobudka idą przez scheduler
-            // (Legion v0.17.16: ~1 ms na jedno czekanie).
+            // Spin briefly first – sections under these locks
+            // last microseconds, while sleeping and waking go through the scheduler
+            // (on the order of 1 ms per wait on real hardware).
             if spin_until(|| self.owner.load(Ordering::Relaxed) == 0) && self.try_take(me) {
                 self.spun.fetch_add(1, Ordering::Relaxed);
                 self.acquires.fetch_add(1, Ordering::Relaxed);
                 return KMutexGuard { mutex: self };
             }
-            // M17a.g5: czekanie liczone raz na `lock` (czas – zegar HPET).
+            // Waiting is counted once per `lock` (time from the HPET clock).
             let t0 = crate::arch::x86_64::clock::stamp();
-            // M17a.g10: zgłoszenie czekania PRZED sprawdzeniem warunku pod
-            // blokadą schedulera – zwalniający, który zobaczy sleepers > 0,
-            // budzi jednego; jeśli to zadanie jeszcze nie śpi, warunek
-            // (owner == 0) sprawdzony pod tą samą blokadą nie da mu zasnąć.
+            // Register as waiting BEFORE checking the condition under the
+            // scheduler lock – an unlocker that sees sleepers > 0
+            // wakes one; if this task is not asleep yet, the condition
+            // (owner == 0), checked under the same lock, keeps it from sleeping.
             self.sleepers.fetch_add(1, Ordering::SeqCst);
-            // M17a.g13: koniec czekania odczytany PRZED wzięciem (HPET pod
-            // blokadą wydłużał jej trzymanie).
+            // End of waiting is read BEFORE acquiring (an HPET read under the
+            // lock would lengthen the hold time).
             let mut t1 = t0;
             while !self.try_take(me) {
                 self.contended.fetch_add(1, Ordering::Relaxed);
@@ -280,7 +280,7 @@ impl KMutex {
         KMutexGuard { mutex: self }
     }
 
-    /// Ile razy ktoś musiał czekać (diagnostyka / testy).
+    /// How many times someone had to wait (diagnostics / tests).
     #[allow(dead_code)]
     pub fn contended(&self) -> u64 {
         self.contended.load(Ordering::Relaxed)
@@ -298,7 +298,7 @@ impl Drop for KMutexGuard<'_> {
         let release = if m.depth.fetch_sub(1, Ordering::Relaxed) == 1 {
             let t0 = m.taken_stamp.load(Ordering::Relaxed);
             if t0 != 0 {
-                // Zmiana CPU w trakcie (wywłaszczenie) – próbka pominięta.
+                // CPU changed meanwhile (preemption) – sample skipped.
                 if let Some(us) = crate::arch::x86_64::clock::tsc_us_on(t0, m.taken_cpu.load(Ordering::Relaxed)) {
                     m.hold_us.fetch_add(us * HOLD_SAMPLE, Ordering::Relaxed);
                 }
@@ -308,16 +308,16 @@ impl Drop for KMutexGuard<'_> {
         } else {
             false
         };
-        // M17a.g10: budzimy jednego czekającego (nie wszystkich).  Wzięty
-        // przez kogoś innego w międzyczasie – ten, kto weźmie, przy zwolnieniu
-        // obudzi następnego (sleepers nadal > 0).
+        // Wake one waiter (not all of them).  If someone else takes it
+        // in the meantime, whoever takes it will wake the next one when
+        // unlocking (sleepers is still > 0).
         if release && m.sleepers.load(Ordering::SeqCst) > 0 {
             m.queue.wake_one();
         }
     }
 }
 
-/// Mutex z danymi (jak spin::Mutex, ale usypiający).
+/// Mutex with data (like spin::Mutex, but sleeping).
 #[allow(dead_code)]
 pub struct Mutex<T> {
     lock: KMutex,
@@ -338,14 +338,14 @@ impl<T> Mutex<T> {
         Mutex { lock: KMutex::new(), data: UnsafeCell::new(value) }
     }
 
-    /// M17a.g5: z nazwą w statystyce (tylko dla statycznych).
+    /// Named in the statistics (static ones only).
     pub const fn new_named(name: &'static str, value: T) -> Self {
         Mutex { lock: KMutex::new_named(name), data: UnsafeCell::new(value) }
     }
 
-    /// Uwaga: reentrant – drugi `lock()` w tym samym zadaniu dałby dwie
-    /// referencje `&mut` do tych samych danych, więc dla `Mutex<T>` jest to
-    /// zabronione (panic).
+    /// Note: reentrant – a second `lock()` in the same task would give two
+    /// `&mut` references to the same data, so for `Mutex<T>` it is
+    /// forbidden (panic).
     pub fn lock(&self) -> MutexGuard<'_, T> {
         let guard = self.lock.lock();
         assert!(self.lock.depth.load(Ordering::Relaxed) == 1, "Mutex<T> locked twice by the same task");
@@ -367,29 +367,29 @@ impl<T> core::ops::DerefMut for MutexGuard<'_, T> {
 }
 
 // ------------------------------------------------------------
-// M17a.g6: KRwLock – usypiająca blokada czytelnicy–pisarz (VFS)
+// KRwLock – sleeping readers–writer lock (VFS)
 // ------------------------------------------------------------
 //
-// Wielu czytelników naraz albo jeden pisarz.  Jak KMutex: reentrant –
-// pisarz może wziąć ją ponownie (do odczytu i do zapisu), czytelnik może
-// ponownie czytać (zagnieżdżony odczyt nie czeka na pisarza w kolejce –
-// inaczej zakleszczyłby się z nim).  Czytelnik NIE może przejść na zapis
-// (panic – inaczej czekałby na samego siebie).  Pisarz czekający w kolejce
-// zatrzymuje nowych czytelników (nie zagłodzą go).
+// Many readers at once or one writer.  Like KMutex it is reentrant –
+// the writer may take it again (for reading and for writing), a reader may
+// read again (a nested read does not wait for a queued writer –
+// otherwise it would deadlock with it).  A reader can NOT upgrade to writing
+// (panic – otherwise it would wait for itself).  A writer waiting in the queue
+// holds back new readers (they will not starve it).
 //
-// Stan pod IrqSpinLock (krótkie sekcje, bez alokacji): przerwanie w sekcji
-// pod zwykłym SpinLock bierze BKL – zakleszczenie z CPU, który trzyma BKL
-// i czeka na tę samą blokadę (zasada z ARCHITEKTURA.md).
+// State under IrqSpinLock (short sections, no allocation): an interrupt inside a section
+// under a plain SpinLock takes the BKL – deadlock with a CPU that holds the BKL
+// and waits for the same lock (rule from ARCHITECTURE.md).
 //
-// M17a.g10: osobne kolejki czytelników i pisarzy (każda ze swoim licznikiem
-// zmian – warunek czekania to jeden atomik).  Zwolnienie budzi tylko tych,
-// którzy mogą wejść:
-//   * pisarz kończy: czekający czytelnicy – całą grupą (i mogą wejść mimo
-//     czekających pisarzy: `readers_pass`), a gdy ich nie ma – JEDEN pisarz;
-//   * ostatni czytelnik wychodzi: JEDEN pisarz.
-// Czytelnicy i pisarze się przeplatają (żadna strona nie zagłodzi drugiej).
-// Wcześniej każde zwolnienie budziło wszystkich (Legion v0.17.19: drzewo
-// ramfs – 1108 s czekania).
+// Separate reader and writer queues (each with its own change
+// counter – the wait condition is a single atomic).  Unlock wakes only those
+// who can enter:
+//   * a writer finishes: the waiting readers – as a whole group (and they may enter despite
+//     waiting writers: `readers_pass`), and if there are none – ONE writer;
+//   * the last reader leaves: ONE writer.
+// Readers and writers interleave (neither side starves the other).
+// Waking everyone on every unlock caused huge wait times on a ramfs
+// tree stress test.
 
 const MAX_READERS: usize = 64;
 
@@ -398,8 +398,8 @@ struct RwState {
     wdepth: u32,
     writers_waiting: u32,
     readers_waiting: u32,
-    /// Ilu czekających czytelników wpuszcza zwolnienie pisarza (mimo
-    /// czekających pisarzy).
+    /// How many waiting readers a writer's unlock lets in (despite
+    /// waiting writers).
     readers_pass: u32,
     readers: [(u64, u32); MAX_READERS],
     nreaders: usize,
@@ -418,13 +418,13 @@ pub struct KRwLock {
     read_waited: AtomicU64,
     write_waited: AtomicU64,
     wait_us: AtomicU64,
-    /// M17a.g8: czekania zakończone kręceniem się (bez uśpienia).
+    /// Waits that ended while spinning (without sleeping).
     spun: AtomicU64,
 }
 
 static NAMED_RW: [core::sync::atomic::AtomicUsize; 8] = [const { core::sync::atomic::AtomicUsize::new(0) }; 8];
 
-/// Jak `KMutexStats`, z podziałem na odczyty / zapisy.
+/// Like `KMutexStats`, split into reads / writes.
 pub struct KRwLockStats {
     pub name: &'static str,
     pub reads: u64,
@@ -462,7 +462,7 @@ pub enum KRwGuard<'a> {
     Write(&'a KRwLock),
 }
 
-/// Kogo obudzić po zwolnieniu (poza blokadą stanu).
+/// Whom to wake after unlocking (outside the state lock).
 enum RwWake {
     Nobody,
     Readers,
@@ -470,8 +470,8 @@ enum RwWake {
 }
 
 impl KRwLock {
-    /// Nazwana blokada trafia do statystyk przy pierwszym użyciu – po nim
-    /// nie wolno jej przenosić (statyczna albo już na heapie).
+    /// A named lock enters the statistics on first use – after that
+    /// it must not be moved (static or already on the heap).
     pub const fn new_named(name: &'static str) -> Self {
         KRwLock {
             name,
@@ -514,7 +514,7 @@ impl KRwLock {
         }
     }
 
-    /// Czeka na zmianę licznika `counter` (widzianego pod blokadą stanu).
+    /// Waits for the counter `counter` (read under the state lock) to change.
     fn wait_gen(&self, q: &WaitQueue, counter: &AtomicU64, seen: u64) {
         if spin_until(|| counter.load(Ordering::Acquire) != seen) {
             self.spun.fetch_add(1, Ordering::Relaxed);
@@ -537,7 +537,7 @@ impl KRwLock {
         }
     }
 
-    /// Czy bieżące zadanie trzyma tę blokadę do odczytu.
+    /// Whether the current task holds this lock for reading.
     pub fn read_held(&self) -> bool {
         let me = current_id();
         let st = self.state.lock();
@@ -548,7 +548,7 @@ impl KRwLock {
         self.register();
         let me = current_id();
         let mut t0 = 0;
-        let mut t1 = 0; // M17a.g13: koniec czekania odczytany przed wzięciem
+        let mut t1 = 0; // End of waiting is read before acquiring
         let mut queued = false;
         loop {
             let seen;
@@ -567,8 +567,8 @@ impl KRwLock {
                     self.reads.fetch_add(1, Ordering::Relaxed);
                     return KRwGuard::Read(self);
                 }
-                // Wolno wejść: brak pisarza i (nikt nie czeka na zapis albo
-                // to grupa wpuszczona po zwolnieniu pisarza).
+                // May enter: no writer and (nobody waits to write or
+                // this is the group let in after a writer's unlock).
                 let pass = queued && st.readers_pass > 0;
                 if st.writer == 0 && (st.writers_waiting == 0 || pass) && n < MAX_READERS {
                     st.readers[n] = (me, 1);
@@ -605,7 +605,7 @@ impl KRwLock {
         self.register();
         let me = current_id();
         let mut t0 = 0;
-        let mut t1 = 0; // M17a.g13: koniec czekania odczytany przed wzięciem
+        let mut t1 = 0; // End of waiting is read before acquiring
         let mut queued = false;
         loop {
             let seen;
@@ -662,7 +662,7 @@ impl Drop for KRwGuard<'_> {
                 if st.wdepth == 0 {
                     st.writer = 0;
                     if st.readers_waiting > 0 {
-                        // Grupa czytelników wchodzi mimo czekających pisarzy.
+                        // A group of readers enters despite waiting writers.
                         st.readers_pass = st.readers_waiting;
                         wake = RwWake::Readers;
                     } else if st.writers_waiting > 0 {
@@ -684,7 +684,7 @@ impl Drop for KRwGuard<'_> {
                     if st.nreaders == 0 && st.writers_waiting > 0 {
                         wake = RwWake::Writer;
                     } else if n == MAX_READERS && st.readers_waiting > 0 {
-                        wake = RwWake::Readers; // zwolniło się miejsce
+                        wake = RwWake::Readers; // a slot became free
                     }
                 }
                 (l, wake)
@@ -694,8 +694,8 @@ impl Drop for KRwGuard<'_> {
     }
 }
 
-// M17a.g7: KRwLock bywa częścią obiektu na heapie (ramfs zamontowany i
-// odmontowany) – przy zwolnieniu znika z rejestru statystyk.
+// A KRwLock can be part of a heap object (a mounted and
+// unmounted ramfs) – on drop it is removed from the statistics registry.
 impl Drop for KRwLock {
     fn drop(&mut self) {
         let me = self as *const KRwLock as usize;

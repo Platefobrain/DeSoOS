@@ -1,20 +1,20 @@
-// DSB – DeSoOS Boot (loader UEFI).
+// DSB – DeSoOS Boot (UEFI loader).
 //
-// M10: kernel to ELF (segmenty PT_LOAD) zlinkowany pod 0xffff_ffff_8000_0000.
+// The kernel is an ELF (PT_LOAD segments) linked at 0xffff_ffff_8000_0000.
 // DSB:
-//   1. sprawdza ELF i kopiuje segmenty do ciągłego bloku fizycznego
-//      (dowolny adres – ten, który da firmware),
-//   2. alokuje stos kernela (strona tuż pod nim zostaje niezamapowana –
-//      strażnik przepełnienia),
-//   3. buduje własne tablice stron:
-//        PML4[0]   identity (tylko na czas skoku – kod DSB działa pod
-//                  adresami fizycznymi; kernel usuwa to mapowanie),
-//        PML4[256] direct map: fizyczny X pod 0xffff_8000_0000_0000 + X,
-//        PML4[511] obraz kernela (4 KiB, kod tylko do odczytu) + stos,
-//   4. ExitBootServices, ładuje CR3, ustawia RSP i skacze do e_entry
-//      z RDI = BootInfo (adres w direct mapie).
+//   1. checks the ELF and copies the segments into a contiguous physical block
+//      (any address – whatever the firmware hands out),
+//   2. allocates the kernel stack (the page right below it stays unmapped –
+//      overflow guard),
+//   3. builds its own page tables:
+//        PML4[0]   identity (only for the jump – DSB code runs at
+//                  physical addresses; the kernel removes this mapping),
+//        PML4[256] direct map: physical X at 0xffff_8000_0000_0000 + X,
+//        PML4[511] kernel image (4 KiB, code read-only) + stack,
+//   4. ExitBootServices, loads CR3, sets RSP and jumps to e_entry
+//      with RDI = BootInfo (an address in the direct map).
 //
-// Nie ma już stałego adresu 0x200000, limitu 512 KiB ani stosu pod 0x300000.
+// There is no fixed address 0x200000, no 512 KiB limit and no stack at 0x300000.
 
 #![no_std]
 #![no_main]
@@ -26,7 +26,7 @@ use uefi::prelude::*;
 use uefi::println;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 
-/// Musi być identyczna z kernel/bootinfo.rs.
+/// Must be identical to kernel/bootinfo.rs.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BootInfo {
@@ -54,32 +54,32 @@ const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT11");
 const PAGE: u64 = 4096;
 const HUGE_PAGE: u64 = 2 * 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
-/// Direct map kernela: PML4[256..384) = 64 TiB (kernel/memory/layout.rs).
+/// Kernel direct map: PML4[256..384) = 64 TiB (kernel/memory/layout.rs).
 const DIRECT_MAP_LIMIT: u64 = 128 * 512 * GIB;
 
-// Układ adresów (musi się zgadzać z kernel/memory/layout.rs).
+// Address layout (must match kernel/memory/layout.rs).
 const DIRECT_MAP_BASE: u64 = 0xffff_8000_0000_0000;
 const KERNEL_BASE: u64 = 0xffff_ffff_8000_0000;
-/// Pierwszy adres za obszarem obrazu kernela; tu leży strona-strażnik.
+/// First address past the kernel image area; the guard page lives here.
 const STACK_GUARD: u64 = 0xffff_ffff_c000_0000;
 const STACK_SIZE: u64 = 256 * 1024;
 const STACK_BOTTOM: u64 = STACK_GUARD + PAGE;
 const STACK_TOP: u64 = STACK_BOTTOM + STACK_SIZE;
 
-// Bity wpisów tablic stron.
+// Page table entry bits.
 const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;
 const HUGE: u64 = 1 << 7;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 
-// Typy pamięci UEFI, które trafiają do direct mapy (RAM, ACPI, firmware).
-// Pomijamy Reserved (0), MMIO (11, 12) i PalCode (13) – potrafią leżeć
-// bardzo wysoko (np. dziura HyperTransport przy 1 TiB) i nie są RAM-em.
+// UEFI memory types that go into the direct map (RAM, ACPI, firmware).
+// We skip Reserved (0), MMIO (11, 12) and PalCode (13) – they can sit
+// very high (e.g. the HyperTransport hole at 1 TiB) and are not RAM.
 const DIRECT_MAP_TYPES: [u32; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14];
 
 static KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kernel.elf"));
 
-// M15: parser ELF wspólny z kernelem (ładowanie programów użytkownika).
+// ELF parser shared with the kernel (loading user programs).
 #[path = "../common/elf.rs"]
 mod elf;
 
@@ -90,12 +90,12 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
-/// Obraz kernela: segmenty z common/elf.rs + sprawdzenie, że wszystko leży
-/// w obszarze kernela (-2 GiB .. strona-strażnik stosu).
+/// Kernel image: segments from common/elf.rs + a check that everything lies
+/// in the kernel area (-2 GiB .. stack guard page).
 struct KernelImage {
     elf: elf::Elf,
-    start: u64, // pierwsza strona (wirtualnie)
-    end: u64,   // koniec, wyrównany do strony
+    start: u64, // first page (virtual)
+    end: u64,   // end, page-aligned
 }
 
 fn parse_elf(bytes: &[u8]) -> Result<KernelImage, &'static str> {
@@ -113,8 +113,8 @@ fn parse_elf(bytes: &[u8]) -> Result<KernelImage, &'static str> {
     Ok(KernelImage { elf, start, end })
 }
 
-/// Ciągły blok stron (wyzerowany).  Adres fizyczny = wskaźnik (UEFI ma
-/// identity map).
+/// Contiguous block of pages (zeroed).  Physical address = pointer (UEFI has
+/// an identity map).
 fn alloc_zeroed(pages: usize, ty: MemoryType) -> Result<u64, &'static str> {
     let p = boot::allocate_pages(AllocateType::AnyPages, ty, pages)
         .map_err(|_| "out of memory")?;
@@ -130,7 +130,7 @@ fn table(physical: u64) -> &'static mut [u64; 512] {
     unsafe { &mut *(physical as *mut [u64; 512]) }
 }
 
-/// Tabela następnego poziomu pod `entries[index]` (tworzy, gdy brak).
+/// Next-level table under `entries[index]` (created if missing).
 fn next_table(parent: u64, index: usize) -> Result<u64, &'static str> {
     let entries = table(parent);
     if entries[index] & PRESENT == 0 {
@@ -154,8 +154,8 @@ fn map_4k(pml4: u64, va: u64, pa: u64, flags: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Strona 2 MiB: fizyczny `pa` pod wirtualnym `va` (tablice tworzone w razie
-/// potrzeby; strona już zmapowana tak samo = OK).
+/// 2 MiB page: physical `pa` at virtual `va` (tables created as
+/// needed; a page already mapped the same way = OK).
 fn map_2m(pml4: u64, va: u64, pa: u64) -> Result<(), &'static str> {
     let pdpt = next_table(pml4, ((va >> 39) & 0x1ff) as usize)?;
     let pd = next_table(pdpt, ((va >> 30) & 0x1ff) as usize)?;
@@ -168,11 +168,11 @@ fn map_2m(pml4: u64, va: u64, pa: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// M16b: obszary fizyczne do zmapowania (identity + direct map), z mapy UEFI:
-/// RAM, ACPI, firmware – plus framebuffer.  Bez dziur między nimi: na
-/// laptopach z Ryzenem framebuffer zintegrowanej grafiki leży często powyżej
-/// 512 GiB, choć RAM-u jest 16 GiB – dawny limit "cały zakres 0..koniec"
-/// przerywał start.  Zwraca zakresy [start, end) wyrównane do 2 MiB.
+/// Physical areas to map (identity + direct map), from the UEFI map:
+/// RAM, ACPI, firmware – plus the framebuffer.  No holes between them: on
+/// some laptops the integrated GPU framebuffer often sits above
+/// 512 GiB, even with only 16 GiB of RAM – an old "whole range 0..end" limit
+/// aborted the boot.  Returns [start, end) ranges aligned to 2 MiB.
 fn direct_map_ranges(fb: u64, fb_size: u64) -> Result<Ranges, &'static str> {
     let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "cannot read the memory map")?;
     let mut raw = Ranges::new();
@@ -202,7 +202,7 @@ fn direct_map_ranges(fb: u64, fb_size: u64) -> Result<Ranges, &'static str> {
     Ok(merged)
 }
 
-/// Lista zakresów bez alokacji (DSB nie ma globalnego alokatora).
+/// Range list without allocation (DSB has no global allocator).
 struct Ranges {
     items: [(u64, u64); 512],
     len: usize,
@@ -234,13 +234,13 @@ struct Loaded {
     stack_phys: u64,
 }
 
-/// Kopiuje kernel, alokuje stos i buduje tablice stron.
+/// Copies the kernel, allocates the stack and builds the page tables.
 fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
     let image = parse_elf(KERNEL)?;
     let span = image.end - image.start;
     let span_pages = (span / PAGE) as usize;
 
-    // 1. Obraz kernela: jeden ciągły blok, segment pod (vaddr - start).
+    // 1. Kernel image: one contiguous block, segment at (vaddr - start).
     let kernel_phys = alloc_zeroed(span_pages, MemoryType::LOADER_CODE)?;
     for seg in image.elf.segments() {
         let dst = kernel_phys + (seg.vaddr - image.start);
@@ -251,17 +251,17 @@ fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
                 seg.filesz as usize,
             );
         }
-        // Reszta (memsz - filesz, czyli .bss) jest już wyzerowana.
+        // The rest (memsz - filesz, i.e. .bss) is already zeroed.
     }
 
-    // 2. Stos.
+    // 2. Stack.
     let stack_phys = alloc_zeroed((STACK_SIZE / PAGE) as usize, MemoryType::LOADER_DATA)?;
 
-    // 3. Tablice stron.
+    // 3. Page tables.
     let pml4 = alloc_table()?;
 
-    // Identity + direct map, strony 2 MiB – tylko obszary z mapy UEFI
-    // (RAM, ACPI, firmware) i framebuffer; dziury zostają puste.
+    // Identity + direct map, 2 MiB pages – only areas from the UEFI map
+    // (RAM, ACPI, firmware) and the framebuffer; holes stay empty.
     for &(start, end) in ranges {
         if end > DIRECT_MAP_LIMIT {
             println!("DSB: region {:#x}..{:#x}", start, end);
@@ -269,8 +269,8 @@ fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
         }
         let mut pa = start;
         while pa < end {
-            // Identity map tylko w dolnych 512 GiB (PML4[0]) – potrzebna tylko
-            // na kilka instrukcji skoku do kernela (kod DSB leży nisko).
+            // Identity map only in the lower 512 GiB (PML4[0]) – needed only
+            // for the few instructions of the jump to the kernel (DSB code sits low).
             if pa < 512 * GIB {
                 map_2m(pml4, pa, pa)?;
             }
@@ -279,8 +279,8 @@ fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
         }
     }
 
-    // Kernel: strony 4 KiB; zapis tylko tam, gdzie segment ma PF_W
-    // (strona dzielona przez dwa segmenty dostaje sumę uprawnień).
+    // Kernel: 4 KiB pages; writable only where the segment has PF_W
+    // (a page shared by two segments gets the union of permissions).
     for k in 0..span_pages as u64 {
         let va = image.start + k * PAGE;
         let writable = image
@@ -292,7 +292,7 @@ fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
         map_4k(pml4, va, kernel_phys + k * PAGE, flags)?;
     }
 
-    // Stos: STACK_BOTTOM..STACK_TOP; STACK_GUARD (strona niżej) zostaje pusta.
+    // Stack: STACK_BOTTOM..STACK_TOP; STACK_GUARD (the page below) stays empty.
     for k in 0..STACK_SIZE / PAGE {
         map_4k(pml4, STACK_BOTTOM + k * PAGE, stack_phys + k * PAGE, WRITABLE)?;
     }
@@ -348,8 +348,8 @@ fn dsb() -> Status {
     drop(framebuffer);
     drop(gop);
 
-    // M16b: RSDP z tablicy konfiguracyjnej UEFI (ACPI 2.0, inaczej 1.0) –
-    // kernel znajdzie przez nie MCFG (PCIe ECAM).  Tylko odczyt adresu.
+    // RSDP from the UEFI configuration table (ACPI 2.0, otherwise 1.0) –
+    // the kernel finds MCFG (PCIe ECAM) through it.  Only the address is read.
     let acpi_rsdp = uefi::system::with_config_table(|tables| {
         use uefi::table::cfg::ConfigTableEntry;
         let find = |guid| tables.iter().find(|t| t.guid == guid).map(|t| t.address as u64);
@@ -394,11 +394,11 @@ fn dsb() -> Status {
     };
     unsafe { core::ptr::write(bootinfo_phys as *mut BootInfo, info) };
 
-    // Bufor mapy pamięci ma żyć zawsze – kernel czyta go przez direct map.
+    // The memory map buffer must live forever – the kernel reads it through the direct map.
     core::mem::forget(memory_map);
 
-    // Skok: od `mov cr3` działają nasze tablice; ta sekwencja leży w
-    // identity mapie (PML4[0]), więc wykona się do końca.
+    // Jump: from `mov cr3` on our tables are active; this sequence lies in
+    // the identity map (PML4[0]), so it runs to completion.
     unsafe {
         asm!(
             "cli",

@@ -1,12 +1,12 @@
-// M16b: tablica partycji GPT – tylko odczyt.
+// GPT partition table – read-only.
 //
-// Dysk z GPT: sektor 0 = "ochronny" MBR (typ 0xEE), blok 1 = nagłówek
-// "EFI PART" (adres tablicy wpisów, ich liczba i rozmiar, sumy CRC32),
-// dalej wpisy po 128 B: GUID typu, początek i koniec (w blokach urządzenia
-// – 512 albo 4096 B), nazwa w UTF-16.  Obie sumy CRC32 są sprawdzane;
-// uszkodzony nagłówek = brak partycji (nic nie zgadujemy).
+// A GPT disk: sector 0 = "protective" MBR (type 0xEE), block 1 = the
+// "EFI PART" header (entry table address, entry count and size, CRC32 sums),
+// then 128 B entries: type GUID, start and end (in device blocks
+// – 512 or 4096 B), name in UTF-16.  Both CRC32 sums are checked;
+// a corrupted header = no partitions (we do not guess).
 //
-// Używa tego block::scan_partitions – partycje stają się osobnymi dyskami.
+// Used by block::scan_partitions – partitions become separate disks.
 
 use alloc::string::String;
 use alloc::vec;
@@ -15,9 +15,9 @@ use alloc::vec::Vec;
 use crate::block::{self, BlockError, SECTOR_SIZE};
 
 pub struct GptPartition {
-    /// Numer wpisu w tablicy (od 1, jak w Linuksie).
+    /// Entry number in the table (from 1, as in Linux).
     pub index: usize,
-    /// Początek i długość w sektorach po 512 B.
+    /// Start and length in 512 B sectors.
     pub first_sector: u64,
     pub sectors: u64,
     #[allow(dead_code)]
@@ -26,7 +26,7 @@ pub struct GptPartition {
     pub kind: &'static str,
 }
 
-/// GUID w zapisie tekstowym -> bajty jak na dysku (pierwsze 3 pola little-endian).
+/// GUID in text form -> bytes as on disk (first 3 fields little-endian).
 const fn guid(s: &[u8; 36]) -> [u8; 16] {
     const fn hex(c: u8) -> u8 {
         match c {
@@ -39,7 +39,7 @@ const fn guid(s: &[u8; 36]) -> [u8; 16] {
     const fn byte(s: &[u8; 36], i: usize) -> u8 {
         hex(s[i]) << 4 | hex(s[i + 1])
     }
-    // Pozycje par cyfr w "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+    // Positions of digit pairs in "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
     let p = [6, 4, 2, 0, 11, 9, 16, 14, 19, 21, 24, 26, 28, 30, 32, 34];
     let mut out = [0u8; 16];
     let mut i = 0;
@@ -52,7 +52,7 @@ const fn guid(s: &[u8; 36]) -> [u8; 16] {
 
 pub const ESP: [u8; 16] = guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
 
-/// Znane typy partycji: (GUID, nazwa).
+/// Known partition types: (GUID, name).
 pub const KINDS: &[([u8; 16], &str)] = &[
     (ESP, "EFI System"),
     (guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4"), "Linux filesystem"),
@@ -72,7 +72,7 @@ pub fn kind_name(type_guid: &[u8; 16]) -> &'static str {
 }
 
 // ------------------------------------------------------------
-// CRC32 (IEEE, jak w GPT / zip)
+// CRC32 (IEEE, as in GPT / zip)
 // ------------------------------------------------------------
 
 pub fn crc32(data: &[u8]) -> u32 {
@@ -94,18 +94,18 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-/// Partycje GPT dysku; Ok(None) = dysk bez GPT (albo z uszkodzonym).
+/// GPT partitions of a disk; Ok(None) = disk without GPT (or with a corrupted one).
 pub fn read(disk: usize) -> Result<Option<Vec<GptPartition>>, BlockError> {
     let (bs, total) = block::with_device(disk, |d| (d.logical_block_size(), d.sector_count()))?;
     if bs < SECTOR_SIZE || bs % SECTOR_SIZE != 0 {
         return Ok(None);
     }
-    let spb = (bs / SECTOR_SIZE) as u64; // sektorów 512 B na blok urządzenia
+    let spb = (bs / SECTOR_SIZE) as u64; // 512 B sectors per device block
     if total < 3 * spb {
         return Ok(None);
     }
 
-    // Ochronny MBR: wpis typu 0xEE.
+    // Protective MBR: an entry of type 0xEE.
     let mut mbr = [0u8; SECTOR_SIZE];
     block::read(disk, 0, &mut mbr)?;
     let protective = mbr[510] == 0x55 && mbr[511] == 0xAA && (0..4).any(|i| mbr[446 + i * 16 + 4] == 0xEE);
@@ -153,7 +153,7 @@ pub fn read(disk: usize) -> Result<Option<Vec<GptPartition>>, BlockError> {
         let mut type_guid = [0u8; 16];
         type_guid.copy_from_slice(&e[0..16]);
         if type_guid == [0u8; 16] {
-            continue; // pusty wpis
+            continue; // empty entry
         }
         let (lo, hi) = (u64_at(e, 32), u64_at(e, 40));
         if hi < lo {
@@ -161,7 +161,7 @@ pub fn read(disk: usize) -> Result<Option<Vec<GptPartition>>, BlockError> {
         }
         let (Some(start), Some(len)) = (lo.checked_mul(spb), (hi - lo + 1).checked_mul(spb)) else { continue };
         if start.checked_add(len).map_or(true, |end| end > total) {
-            continue; // poza dyskiem – pomijamy
+            continue; // beyond the disk – skip
         }
         let units: Vec<u16> = e[56..128].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
         out.push(GptPartition {
@@ -176,14 +176,14 @@ pub fn read(disk: usize) -> Result<Option<Vec<GptPartition>>, BlockError> {
     Ok(Some(out))
 }
 
-/// Testy: zapisuje GPT z jedną partycją `type_guid` od bloku 2048 do końca
-/// (minus kopia zapasowa), na dysku o blokach 512 B.
+/// Tests: writes a GPT with one `type_guid` partition from block 2048 to the end
+/// (minus the backup copy), on a disk with 512 B blocks.
 #[cfg(selftest)]
 pub fn write_test_gpt(disk: usize, type_guid: [u8; 16], name: &str) -> Result<(u64, u64), BlockError> {
     let total = block::with_device(disk, |d| d.sector_count())?;
     let last_usable = total - 34;
     let (first, last) = (2048u64, last_usable);
-    // Ochronny MBR.
+    // Protective MBR.
     let mut mbr = [0u8; SECTOR_SIZE];
     mbr[446 + 4] = 0xEE;
     mbr[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
@@ -191,7 +191,7 @@ pub fn write_test_gpt(disk: usize, type_guid: [u8; 16], name: &str) -> Result<(u
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
     block::write(disk, 0, &mbr)?;
-    // Tablica: 128 wpisów x 128 B = 32 sektory od LBA 2.
+    // Table: 128 entries x 128 B = 32 sectors from LBA 2.
     let mut table = vec![0u8; 128 * 128];
     table[0..16].copy_from_slice(&type_guid);
     table[16..32].copy_from_slice(&[0x5a; 16]);

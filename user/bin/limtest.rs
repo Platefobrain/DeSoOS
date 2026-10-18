@@ -1,14 +1,14 @@
-// v0.35.2: test limitów – jeden program próbuje zająć zasoby całego systemu,
-// a jądro ma odpowiedzieć błędem (albo zabić tylko ten program) i działać dalej:
-//   1. bomba procesów: spawn aż do EAGAIN (limit procesów), potem kill wszystkich
-//      i znowu spawn działa,
-//   2. pamięć współdzielona: shm_create(16 MiB) aż do ENOMEM (zapas jądra),
-//   3. pożeracz pamięci: dziecko dotyka stron mmap aż jądro je zabije (brak
-//      ramek ponad zapasem) – rodzic i reszta systemu żyją,
-//   4. ramfs: pliki po 1 MiB aż do ENOSPC; seek daleko + zapis – ENOSPC, nie panika,
-//   5. bufory IPC: kolejki kanałów pełne komunikatów 4 KiB aż do ENOMEM; zapis
-//      do potoku w tym czasie – ENOMEM; po zamknięciu wszystko wraca.
-// Wynik: "limtest: N checks OK, ..." i kod 0.  Tryby dziecka: `limtest sleep`,
+// Limits test – one program tries to take the resources of the whole system,
+// and the kernel must answer with an error (or kill only that program) and keep running:
+//   1. process bomb: spawn until EAGAIN (process limit), then kill them all
+//      and spawn works again,
+//   2. shared memory: shm_create(16 MiB) until ENOMEM (kernel reserve),
+//   3. memory hog: a child touches mmap pages until the kernel kills it (no
+//      frames beyond the reserve) – the parent and the rest of the system survive,
+//   4. ramfs: 1 MiB files until ENOSPC; far seek + write – ENOSPC, not a panic,
+//   5. IPC buffers: channel queues full of 4 KiB messages until ENOMEM; a write
+//      to a pipe meanwhile – ENOMEM; after closing everything comes back.
+// Result: "limtest: N checks OK, ..." and exit code 0.  Child modes: `limtest sleep`,
 // `limtest hog`.
 #![no_std]
 #![no_main]
@@ -35,8 +35,8 @@ const MAX_KIDS: usize = 1100;
 static mut KIDS: [u64; MAX_KIDS] = [0; MAX_KIDS];
 static mut MSG: [u8; 4096] = [0x5a; 4096];
 
-/// Zapełnia kolejki kanałów (do `max` uchwytów, od numeru `first`) komunikatami
-/// 4 KiB; (wysłane, błąd inny niż EAGAIN albo 0).
+/// Fills channel queues (up to `max` handles, starting at handle `first`) with
+/// 4 KiB messages; returns (sent, error other than EAGAIN or 0).
 fn fill_queues(ch: &mut [u64; 64], max: usize) -> (usize, usize, i64) {
     let mut c = 0;
     while c + 2 <= max {
@@ -55,7 +55,7 @@ fn fill_queues(ch: &mut [u64; 64], max: usize) -> (usize, usize, i64) {
         loop {
             let r = chan_send(e, msg, CHAN_NONBLOCK);
             if r == EAGAIN {
-                break; // ta kolejka pełna – następna
+                break; // this queue is full – next one
             }
             if r < 0 {
                 return (c, sent, r);
@@ -66,7 +66,7 @@ fn fill_queues(ch: &mut [u64; 64], max: usize) -> (usize, usize, i64) {
     (c, sent, 0)
 }
 
-/// Pomocnik: zajmuje część budżetu IPC, zgłasza się na uchwycie 0 i czeka.
+/// Helper: takes part of the IPC budget, reports on handle 0 and waits.
 fn filler() -> i32 {
     let mut ch = [0u64; 64];
     let _ = fill_queues(&mut ch, 56);
@@ -76,8 +76,8 @@ fn filler() -> i32 {
 }
 
 fn hog() -> i32 {
-    // 4 GiB obszaru, dotykamy strona po stronie – jądro w końcu odmówi ramki
-    // (zapas) i zabije proces.  Gdyby nie zabiło: kod 0 = błąd testu.
+    // 4 GiB region, touched page by page – the kernel eventually refuses a frame
+    // (reserve) and kills the process.  If it did not: exit code 0 = test failure.
     let Ok(base) = mmap(4 << 30, PROT_READ | PROT_WRITE) else { return 2 };
     let mut off = 0u64;
     while off < (4 << 30) {
@@ -100,7 +100,7 @@ fn main(args: Args) -> i32 {
     let mut n = 0;
     let kids = unsafe { &mut *core::ptr::addr_of_mut!(KIDS) };
 
-    // 1. Bomba procesów.
+    // 1. Process bomb.
     let mut k = 0;
     let err = loop {
         if k == MAX_KIDS {
@@ -127,7 +127,7 @@ fn main(args: Args) -> i32 {
     kill(pid as u64);
     let _ = wait(pid as u64, 0);
 
-    // 2. Pamięć współdzielona aż do ENOMEM (uchwytów najwyżej ~60).
+    // 2. Shared memory until ENOMEM (at most ~60 handles).
     let mut shm = [0u64; 64];
     let mut s = 0;
     let serr = loop {
@@ -149,13 +149,13 @@ fn main(args: Args) -> i32 {
     check!(n, h >= 0, "shm_create must work again after closing: {}", h);
     close(h as u64);
 
-    // 3. Pożeracz pamięci – ginie on, nie system.
+    // 3. Memory hog – it dies, not the system.
     let pid = spawn_ex("/bin/limtest", &["limtest", "hog"], &[], 0);
     check!(n, pid > 0, "spawn hog: {}", pid);
     let st = wait(pid as u64, 0);
     check!(n, matches!(st, Ok((_, s)) if s & STATUS_SIGNALED != 0), "memory hog must be killed by the kernel: {:?}", st);
 
-    // 4. ramfs aż do ENOSPC.
+    // 4. ramfs until ENOSPC.
     let _ = mkdir("/limt");
     let mut files = 0;
     let mut name = *b"/limt/f00";
@@ -199,8 +199,8 @@ fn main(args: Args) -> i32 {
     unlink("/limt/far");
     unlink("/limt");
 
-    // 5. Bufory IPC aż do ENOMEM.  Jeden proces ma 64 uchwyty (~16 MiB kolejek),
-    // więc część budżetu zajmuje pomocnik (`limtest fill`), reszta – my.
+    // 5. IPC buffers until ENOMEM.  One process has 64 handles (~16 MiB of queues),
+    // so part of the budget is taken by a helper (`limtest fill`), the rest by us.
     let (p, q) = channel_create().unwrap_or((0, 0));
     let fpid = spawn_ex("/bin/limtest", &["limtest", "fill"], &[(q, 0)], 0);
     check!(n, fpid > 0, "spawn filler: {}", fpid);
@@ -214,8 +214,8 @@ fn main(args: Args) -> i32 {
     let pr = pipe();
     check!(n, pr.is_ok(), "pipe");
     let (pr_r, pr_w) = pr.unwrap_or((0, 0));
-    // Resztka budżetu (< jeden komunikat 4 KiB) – potok bierze, ile się zmieści,
-    // potem ENOMEM.
+    // Leftover budget (< one 4 KiB message) – the pipe takes as much as fits,
+    // then ENOMEM.
     let msg = unsafe { &*core::ptr::addr_of!(MSG) };
     let mut piped = 0i64;
     let r = loop {

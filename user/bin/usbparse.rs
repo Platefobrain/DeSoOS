@@ -1,12 +1,12 @@
-// M20.c: test parsera deskryptorów USB bez sprzętu (USB TEST 1/3).
-// Deskryptory przychodzą z urządzenia – parser musi odrzucić złośliwe dane, nie
-// czytać poza buforem, nie zapętlić się i nie spanikować (panika = koniec
-// procesu = test nie przechodzi).
-//   1. poprawne próbki: klawiatura HID, pamięć masowa, kamera z 20 ustawieniami
-//      alternatywnymi, 9 interfejsów (limit 8 -> pominięte, nie błąd), urządzenie,
-//   2. tabela złośliwych przypadków z oczekiwanym błędem,
-//   3. 10 000 losowych mutacji próbek (ustalone ziarno): każdy wynik to błąd
-//      albo poprawna struktura w limitach.
+// USB descriptor parser test without hardware (USB TEST 1/3).
+// Descriptors come from the device – the parser must reject malicious data, not
+// read past the buffer, not loop forever and not panic (panic = end of the
+// process = the test fails).
+//   1. valid samples: HID keyboard, mass storage, a camera with 20 alternate
+//      settings, 9 interfaces (limit 8 -> skipped, not an error), a device,
+//   2. a table of malicious cases with the expected error,
+//   3. 10 000 random mutations of the samples (fixed seed): every result is an error
+//      or a valid structure within the limits.
 #![no_std]
 #![no_main]
 
@@ -32,23 +32,23 @@ macro_rules! check {
 }
 
 const KBD: [u8; 34] = [
-    9, 2, 34, 0, 1, 1, 0, 0xA0, 50, // konfiguracja
-    9, 4, 0, 0, 1, 3, 1, 1, 0, // interfejs HID, boot, klawiatura
-    9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63, 0, // HID, raport 63 B
-    7, 5, 0x81, 3, 8, 0, 10, // endpoint IN 1, przerwania, 8 B
+    9, 2, 34, 0, 1, 1, 0, 0xA0, 50, // configuration
+    9, 4, 0, 0, 1, 3, 1, 1, 0, // HID interface, boot, keyboard
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63, 0, // HID, 63 B report
+    7, 5, 0x81, 3, 8, 0, 10, // endpoint IN 1, interrupt, 8 B
 ];
 
 const STORAGE: [u8; 32] = [
     9, 2, 32, 0, 1, 1, 0, 0x80, 50, //
-    9, 4, 0, 0, 2, 8, 6, 0x50, 0, // pamięć masowa, SCSI, bulk-only
+    9, 4, 0, 0, 2, 8, 6, 0x50, 0, // mass storage, SCSI, bulk-only
     7, 5, 0x81, 2, 0, 2, 0, // bulk IN 512
     7, 5, 0x02, 2, 0, 2, 0, // bulk OUT 512
 ];
 
 const DEVICE: [u8; 18] = [18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x27, 0x06, 0x01, 0x00, 0x00, 0x01, 1, 2, 3, 1];
 
-/// Kamera: IAD, interfejs sterujący z deskryptorem klasy, interfejs strumienia
-/// z 20 ustawieniami alternatywnymi (endpoint izochroniczny w każdym).
+/// Camera: IAD, a control interface with a class descriptor, a streaming interface
+/// with 20 alternate settings (an isochronous endpoint in each).
 fn webcam(b: &mut [u8; 4096]) -> usize {
     let mut n = 0;
     let mut put = |d: &[u8], b: &mut [u8; 4096]| {
@@ -71,7 +71,7 @@ fn webcam(b: &mut [u8; 4096]) -> usize {
     total
 }
 
-/// 9 interfejsów bez endpointów (limit zapamiętanych: 8).
+/// 9 interfaces without endpoints (limit of remembered ones: 8).
 fn nine_ifaces(b: &mut [u8; 4096]) -> usize {
     b[..9].copy_from_slice(&[9, 2, 0, 0, 9, 1, 0, 0x80, 50]);
     let mut n = 9;
@@ -83,7 +83,7 @@ fn nine_ifaces(b: &mut [u8; 4096]) -> usize {
     n
 }
 
-/// xorshift64 – powtarzalne „losowe” mutacje.
+/// xorshift64 – repeatable "random" mutations.
 struct Rng(u64);
 
 impl Rng {
@@ -100,7 +100,7 @@ impl Rng {
     }
 }
 
-/// Struktura w limitach (gdy parser powiedział Ok).
+/// Structure within the limits (when the parser said Ok).
 fn sane(c: &Config, len: usize) -> bool {
     c.n_ifaces <= IFACES_MAX
         && c.total as usize <= len
@@ -123,7 +123,7 @@ fn with(base: &[u8], at: usize, v: u8) -> ([u8; 64], usize) {
 fn main(_args: Args) -> i32 {
     let mut n = 0;
 
-    // 1. Poprawne próbki.
+    // 1. Valid samples.
     let k = parse_config(&KBD);
     check!(n, k.is_ok(), "keyboard config: {:?}", k.err());
     let k = k.unwrap();
@@ -152,7 +152,7 @@ fn main(_args: Args) -> i32 {
     check!(n, &out[..m] == b"QEMU", "string descriptor -> {:?}", &out[..m]);
     check!(n, first_langid(&[4, 3, 0x09, 0x04]) == Some(0x0409) && first_langid(&[2, 3]).is_none(), "language list");
 
-    // 2. Złośliwe przypadki z oczekiwanym błędem.
+    // 2. Malicious cases with the expected error.
     use DescError::*;
     let cases: [(&str, ([u8; 64], usize), DescError); 13] = [
         ("bLength 0 (endless loop without the check)", with(&KBD, 18, 0), BadLength),
@@ -174,12 +174,12 @@ fn main(_args: Args) -> i32 {
         let r = parse_config(&b[..len]);
         check!(n, r.err() == Some(want), "{}: got {:?}, want {:?}", name, r.err(), want);
     }
-    // Endpoint przed interfejsem (poprawne długości).
+    // Endpoint before the interface (valid lengths).
     let mut orphan = [0u8; 16];
     orphan[..9].copy_from_slice(&[9, 2, 16, 0, 1, 1, 0, 0x80, 50]);
     orphan[9..16].copy_from_slice(&[7, 5, 0x81, 3, 8, 0, 10]);
     check!(n, parse_config(&orphan).err() == Some(OrphanEndpoint), "orphan endpoint");
-    // 65 deskryptorów interfejsu.
+    // 65 interface descriptors.
     let mut big = [0u8; 4096];
     big[..9].copy_from_slice(&[9, 2, 0, 0, 1, 1, 0, 0x80, 50]);
     let mut len = 9;
@@ -190,7 +190,7 @@ fn main(_args: Args) -> i32 {
     big[2] = len as u8;
     big[3] = (len >> 8) as u8;
     check!(n, parse_config(&big[..len]).err() == Some(TooManyInterfaces), "65 interface descriptors");
-    // Urządzenie.
+    // Device.
     check!(n, parse_device(&DEVICE[..17], false).err() == Some(Truncated), "device descriptor 17 B");
     check!(n, parse_device(&with(&DEVICE, 0, 10).0[..18], false).err() == Some(BadLength), "device bLength 10");
     check!(n, parse_device(&with(&DEVICE, 7, 7).0[..18], false).err() == Some(BadMaxPacket0), "bMaxPacketSize0 7");
@@ -198,7 +198,7 @@ fn main(_args: Args) -> i32 {
     check!(n, parse_device(&with(&DEVICE, 1, 2).0[..18], false).err() == Some(WrongType), "device type 2");
     check!(n, string_ascii(&[255, 3, b'A', 0], &mut out) == 1, "string with bLength past the buffer is clipped");
 
-    // 3. Mutacje.
+    // 3. Mutations.
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let (mut ok, mut rejected) = (0u64, 0u64);
     for _ in 0..10_000 {

@@ -1,4 +1,4 @@
-// M12: samotesty schedulera (tylko build z --cfg selftest).
+// Scheduler self-tests (only builds with --cfg selftest).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -15,7 +15,7 @@ macro_rules! check {
     };
 }
 
-/// Czeka (śpiąc po 1 ms), aż `cond` będzie prawdą; false po `ms`.
+/// Waits (sleeping 1 ms at a time) until `cond` is true; false after `ms`.
 fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     let end = ticks() + ms;
     while !cond() {
@@ -54,7 +54,7 @@ fn yielder(_: usize) {
 }
 
 fn spinner(_: usize) {
-    // Nigdy nie oddaje CPU sam – działa tylko dzięki wywłaszczaniu.
+    // Never yields the CPU on its own – works only thanks to preemption.
     while !STOP.load(Ordering::SeqCst) {
         SPIN.fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
@@ -77,7 +77,7 @@ fn locker(_: usize) {
         let _g = TEST_LOCK.lock();
         let mut v = SHARED.lock();
         let old = *v;
-        yield_now(); // wywłaszczenie w środku sekcji krytycznej
+        yield_now(); // preemption in the middle of a critical section
         *v = old + 1;
     }
     DONE.fetch_add(1, Ordering::SeqCst);
@@ -87,14 +87,14 @@ pub fn self_test() {
     serial_println!("[SCHED TEST] Starting scheduler tests...");
     crate::selftest::begin();
 
-    // 1. Start: zadanie 1 (kernel) działa, idle istnieje.
+    // 1. Start: task 1 (kernel) is running, idle exists.
     let list = tasks();
     check!(current_id() == BOOT_ID, "current = {}", current_id());
     check!(list.iter().any(|t| t.id == BOOT_ID && t.state == State::Running), "kernel task not running");
     check!(list.iter().any(|t| t.id == IDLE_ID), "no idle task");
     serial_println!("[SCHED TEST] 1/8 kernel + idle tasks PASS");
 
-    // 2. spawn -> zadanie działa i kończy się; stos wraca do alokatora.
+    // 2. spawn -> the task runs and finishes; its stack returns to the allocator.
     reap();
     let frames = crate::sched::stack::free_frames_flushed();
     FLAG.store(false, Ordering::SeqCst);
@@ -107,7 +107,7 @@ pub fn self_test() {
     };
     check!(wait_for(100, || FLAG.load(Ordering::SeqCst)), "spawned task did not run");
     check!(wait_for(100, || !alive(id)), "task did not exit");
-    // Sprząta też idle – może być w trakcie zwalniania stosu, więc czekamy.
+    // Idle also reaps – it may be in the middle of freeing the stack, so we wait.
     check!(
         wait_for(100, || {
             reap();
@@ -119,7 +119,7 @@ pub fn self_test() {
     );
     serial_println!("[SCHED TEST] 2/8 spawn + exit + stack freed PASS");
 
-    // 3. yield: dwa zadania na zmianę (100 przełączeń).
+    // 3. yield: two tasks taking turns (100 switches).
     COUNTER.store(0, Ordering::SeqCst);
     DONE.store(0, Ordering::SeqCst);
     let sw0 = total_switches();
@@ -130,7 +130,7 @@ pub fn self_test() {
     check!(total_switches() - sw0 >= 100, "only {} switches", total_switches() - sw0);
     serial_println!("[SCHED TEST] 3/8 yield ping-pong ({} switches) PASS", total_switches() - sw0);
 
-    // 4. Wywłaszczanie: zadanie bez yield + zadanie 1 też w pętli bez hlt.
+    // 4. Preemption: a task without yield + task 1 also looping without hlt.
     SPIN.store(0, Ordering::SeqCst);
     STOP.store(false, Ordering::SeqCst);
     let sid = spawn("t-spin", spinner, 0);
@@ -151,7 +151,7 @@ pub fn self_test() {
     check!(wait_for(100, || !alive(sid)), "spinner did not stop");
     serial_println!("[SCHED TEST] 4/8 preemption (busy task got {} ms of 60) PASS", cpu);
 
-    // 5. sleep: zadanie śpi 30 ms (nie zajmuje CPU).
+    // 5. sleep: a task sleeps 30 ms (does not occupy the CPU).
     SLEPT.store(0, Ordering::SeqCst);
     let zid = spawn("t-sleep", sleeper, 30).unwrap_or(0);
     check!(zid != 0, "spawn sleeper");
@@ -162,7 +162,7 @@ pub fn self_test() {
     check!(task_info(zid).map(|t| t.cpu_ticks).unwrap_or(0) <= 2, "sleeper used CPU");
     serial_println!("[SCHED TEST] 5/8 sleep 30 ms -> {} ms, blocked meanwhile PASS", slept);
 
-    // 6. WaitQueue: pobudka przez wake_all i limit czasu.
+    // 6. WaitQueue: wake-up via wake_all and a timeout.
     FLAG.store(false, Ordering::SeqCst);
     DONE.store(0, Ordering::SeqCst);
     let wid = spawn("t-wait", waiter, 0).unwrap_or(0);
@@ -178,7 +178,7 @@ pub fn self_test() {
     check!(!r && (20..=25).contains(&waited), "timeout: result {} after {} ms", r, waited);
     serial_println!("[SCHED TEST] 6/8 wait queue: wake_all + 20 ms timeout ({} ms) PASS", waited);
 
-    // 7. Mutex: 3 zadania x 200 inkrementacji z yield w sekcji krytycznej.
+    // 7. Mutex: 3 tasks x 200 increments with yield in the critical section.
     *SHARED.lock() = 0;
     DONE.store(0, Ordering::SeqCst);
     for _ in 0..3 {
@@ -199,7 +199,7 @@ pub fn self_test() {
         TEST_LOCK.contended()
     );
 
-    // 8. Stos zadania: strona-strażnik pod stosem, sprzątanie wszystkiego.
+    // 8. Task stack: guard page below the stack, everything cleaned up.
     let gid = spawn("t-guard", set_flag, 0).unwrap_or(0);
     let top = task_info(gid).map(|t| t.stack_top).unwrap_or(0);
     check!(top != 0, "no stack info");

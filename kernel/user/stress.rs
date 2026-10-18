@@ -1,17 +1,17 @@
-// M17a: stress test SMP – odpalany po każdym kroku zdejmowania BKL.
+// SMP stress test – run after every change that narrows the use of the BKL.
 //
-// Przez `ms` milisekund naraz:
-//   * pula procesów (shell ze skryptem: katalogi, pliki, spawn/wait;
-//     `primes`), każdy zakończony od razu sprawdzany (kod wyjścia, wyjście)
-//     i zastępowany nowym,
-//   * procesy `xmm` (rejestry FPU/SSE przy przełączaniu i migracji),
-//   * zadania kernela, które BEZ Big Kernel Lock (bkl::unlocked) biją w
-//     spinlocki: licznik pod SpinLock musi się zgodzić co do sztuki z sumą
-//     lokalnych liczników zadań.
-// Na końcu: brak raportów zakleszczeń, wszystkie zadania sprzątnięte,
-// wolne ramki wracają do stanu sprzed testu (brak wycieku).
+// For `ms` milliseconds, all at once:
+//   * a pool of processes (shell with a script: directories, files, spawn/wait;
+//     `primes`), each one checked as soon as it finishes (exit code, output)
+//     and replaced with a new one,
+//   * `xmm` processes (FPU/SSE registers across context switches and migration),
+//   * kernel tasks that hammer spinlocks WITHOUT the Big Kernel Lock (bkl::unlocked):
+//     the counter under a SpinLock must match exactly the sum of the tasks'
+//     local counters.
+// At the end: no deadlock reports, all tasks cleaned up,
+// free frames back to the pre-test level (no leak).
 //
-// Samotest `[STRESS TEST]` (krótko) i komenda `stress [s]` (dłużej, ręcznie).
+// Self-test `[STRESS TEST]` (short) and the `stress [s]` command (longer, manual).
 
 use alloc::format;
 use alloc::string::String;
@@ -29,18 +29,18 @@ static SPIN_COUNTER: SpinLock<u64> = SpinLock::new("stress-counter", level::TEST
 static IRQ_COUNTER: IrqSpinLock<u64> = IrqSpinLock::new("stress-irq-counter", level::TEST_IRQ, 0);
 static LOCAL: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static TICK_HITS: AtomicU64 = AtomicU64::new(0);
-/// M17a.c: alokacje heapa i ramek bez BKL (zadania + przerwanie zegara).
+/// Heap and frame allocations without the BKL (tasks + timer interrupt).
 static ALLOC_OPS: AtomicU64 = AtomicU64::new(0);
 static FRAME_OPS: AtomicU64 = AtomicU64::new(0);
-/// Pierwszy wykryty błąd alokacji (0 = brak): 1 = dane w bloku heapa
-/// nadpisane, 2 = dane w ramce nadpisane, 3 = brak pamięci.
+/// First detected allocation error (0 = none): 1 = data in a heap block
+/// overwritten, 2 = data in a frame overwritten, 3 = out of memory.
 static ALLOC_BAD: AtomicU64 = AtomicU64::new(0);
 
-/// Wynik testu.
+/// Test result.
 pub struct Report {
     pub ms: u64,
     pub cpus: usize,
-    /// Skrypty shella, primes, M18.f: zadania IPC (ipcload).
+    /// Shell scripts, primes, IPC tasks (ipcload).
     pub jobs: [u64; 3],
     pub xmm: usize,
     pub spin_ops: u64,
@@ -49,22 +49,22 @@ pub struct Report {
     pub frames: u64,
     pub bkl_taken: u64,
     pub bkl_waited: u64,
-    /// M17a.g2: ile procent czasu CPU (wszystkich) spędzono w `hlt` idle.
+    /// Percentage of (all) CPU time spent in idle `hlt`.
     pub idle_pct: u64,
-    /// M17a.g5: ile procent czasu pętla sterująca stressu pracowała (poza
-    /// snem 2 ms) – blisko 100% = stress ogranicza sam siebie.
+    /// Percentage of time the stress driver loop was working (outside
+    /// its 2 ms sleep) – close to 100% = the stress test limits itself.
     pub driver_pct: u64,
-    /// M17a.g8: liczba pętli sterujących.
+    /// Number of driver loops.
     pub drivers: usize,
-    /// M17b.h2: wielkość puli procesów (konfiguracja pomiaru).
+    /// Size of the process pool (measurement configuration).
     pub pool: usize,
-    /// M17b.f: profil wejść do kernela (prof.rs).
+    /// Kernel entry profile (prof.rs).
     pub prof: Vec<String>,
 }
 
 impl Report {
-    /// Wynik w kilku krótkich liniach – na ekran (autostress, `stress`); jedna
-    /// długa linia wychodziła poza szerokość ekranu.
+    /// Result in a few short lines – for the screen (autostress, `stress`); a single
+    /// long line did not fit the screen width.
     pub fn lines(&self) -> Vec<String> {
         alloc::vec![
             format!("{} ms on {} CPU(s)", self.ms, self.cpus),
@@ -102,24 +102,24 @@ impl core::fmt::Display for Report {
     }
 }
 
-/// v0.34.3: operacje na wspólnym liczniku w jednej rundzie (potem alokacje i
-/// sen 1 ms).  Było 500: 16 zadań kręciło się na jednej blokadzie – na Legionie
-/// 7,9% CPU w samym czekaniu, stress mierzył bardziej siebie niż system.  50
-/// nadal daje miliony operacji z tłokiem (test gubienia zwiększeń zostaje).
+/// Operations on the shared counter per round (followed by allocations and
+/// a 1 ms sleep).  With 500, 16 tasks spun on a single lock – on real hardware
+/// a large share of CPU went to waiting alone, so stress measured itself more than the system.  50
+/// still gives millions of contended operations (the lost-increment test remains).
 const HAMMER_OPS: usize = 50;
 
-/// Zadanie kernela: pętle na spinlockach bez BKL, co chwilę krótki sen.
+/// Kernel task: loops on spinlocks without the BKL, with a short sleep every so often.
 fn hammer(i: usize) {
-    // M17a.g3: cała pętla bez BKL – także sen (scheduler bez BKL od f2).
-    // Wcześniej BKL wracał po każdej rundzie tylko na sleep_ms(1): na
-    // Legionie 187 tys. wzięć "end of bkl::unlocked", 10,6 s czekania.
+    // The whole loop runs without the BKL – including the sleep (the scheduler does not need the BKL).
+    // Re-taking the BKL after every round just for sleep_ms(1) caused
+    // a huge number of "end of bkl::unlocked" acquisitions and seconds of waiting.
     bkl::unlocked(|| while !STOP.load(Ordering::Relaxed) {
         {
             for _ in 0..HAMMER_OPS {
                 {
                     let mut g = SPIN_COUNTER.lock();
-                    // Nieatomowe czytaj-zmień-zapisz: bez wzajemnego
-                    // wykluczania gubiłoby zwiększenia.
+                    // Non-atomic read-modify-write: without mutual
+                    // exclusion it would lose increments.
                     let v = core::hint::black_box(*g);
                     *g = v + 1;
                 }
@@ -129,16 +129,16 @@ fn hammer(i: usize) {
                     *g += 1;
                 }
             }
-            // M17a.c: heap i alokator ramek bez BKL, na wielu CPU naraz.
+            // Heap and frame allocator without the BKL, on many CPUs at once.
             alloc_round(i);
         }
         crate::time::sleep_ms(1);
     });
 }
 
-/// M17a.c: runda alokacji (bez BKL): bloki różnych rozmiarów z wzorem
-/// zależnym od zadania (nadpisanie przez inny CPU = błąd), co 8. runda
-/// ramka z alokatora ramek (zapis przez direct mapę, sprawdzenie, zwrot).
+/// Allocation round (without the BKL): blocks of various sizes with a pattern
+/// that depends on the task (overwrite by another CPU = error), every 8th round
+/// a frame from the frame allocator (write via the direct map, check, free).
 fn alloc_round(i: usize) {
     let seed = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut kept: Vec<Vec<u64>> = Vec::new();
@@ -181,8 +181,8 @@ fn alloc_round(i: usize) {
     }
 }
 
-/// Hook ticku zegara (przerwanie na BSP) – ta sama IrqSpinLock co zadania;
-/// M17a.c: także alokacja z przerwania (heap pod IrqSpinLock).
+/// Timer tick hook (interrupt on the BSP) – the same IrqSpinLock as the tasks;
+/// also allocates from the interrupt (heap under an IrqSpinLock).
 fn tick_hook(_: u64) {
     let mut g = IRQ_COUNTER.lock();
     *g += 1;
@@ -199,13 +199,13 @@ fn tick_hook(_: u64) {
 enum Job {
     Shell,
     Primes,
-    /// M18.f: /bin/ipcload – para procesów na kanale + pamięci współdzielonej,
-    /// dziecko zabijane w trakcie czekania.  Jedno na pętlę sterującą, POZA pulą
-    /// (pula skryptów bez zmian – tryb porównawczy zostaje porównywalny).
+    /// /bin/ipcload – a pair of processes on a channel + shared memory,
+    /// the child is killed while waiting.  One per driver loop, OUTSIDE the pool
+    /// (the script pool is unchanged – the comparison mode stays comparable).
     Ipc,
 }
 
-/// Wymian w jednym ipcload (user/bin/ipcload.rs, ROUNDS).
+/// Exchanges in one ipcload run (user/bin/ipcload.rs, ROUNDS).
 const IPCLOAD_ROUNDS: u64 = 200;
 
 fn start_job(kind: Job, n: u64) -> Result<TaskId, String> {
@@ -220,7 +220,7 @@ fn start_job(kind: Job, n: u64) -> Result<TaskId, String> {
         Job::Primes => ("/bin/primes", alloc::vec!["primes", "20000"], String::new()),
         Job::Ipc => ("/bin/ipcload", alloc::vec!["ipcload"], String::new()),
     };
-    // foreground: normalny koniec bez komunikatu na konsoli (tysiące procesów).
+    // foreground: normal exit without a console message (thousands of processes).
     let opts = SpawnOptions { stdin: Some(script.into_bytes()), capture: true, foreground: true, ..SpawnOptions::default() };
     let t0 = prof::start();
     let r = exec(path, &args, "/", &opts).map_err(|e| format!("{}", e));
@@ -267,8 +267,8 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-// M17a.g8: pętle sterujące stressu – każda ma swoją część puli i swoje
-// numery zadań (d, d + D, d + 2D, ...).
+// Stress driver loops – each has its own part of the pool and its own
+// task numbers (d, d + D, d + 2D, ...).
 static DRV_END: AtomicU64 = AtomicU64::new(0);
 static DRV_COUNT: AtomicU64 = AtomicU64::new(1);
 static DRV_POOL: AtomicU64 = AtomicU64::new(1);
@@ -279,7 +279,7 @@ static DRV_JOBS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU
 static DRV_ERR: crate::sched::sync::Mutex<Option<String>> = crate::sched::sync::Mutex::new(None);
 
 fn driver(d: usize) {
-    // Bez BKL: exec, sprawdzanie wyników i VFS mają własne blokady.
+    // Without the BKL: exec, result checking and the VFS have their own locks.
     bkl::unlocked(|| driver_loop(d));
     DRV_DONE.fetch_add(1, Ordering::SeqCst);
 }
@@ -296,7 +296,7 @@ fn driver_loop(d: usize) {
     let mut err: Option<String> = None;
     while err.is_none() && !STOP.load(Ordering::Relaxed) && (ticks() < end || !running.is_empty()) {
         let loop_t0 = crate::arch::x86_64::clock::stamp();
-        // Zakończone.
+        // Finished.
         let mut i = 0;
         while i < running.len() {
             let (kind, num, id) = running[i];
@@ -312,14 +312,14 @@ fn driver_loop(d: usize) {
                 i += 1;
             }
         }
-        // M18.f: jedno zadanie IPC na pętlę, poza pulą.
+        // One IPC task per loop, outside the pool.
         if err.is_none() && ticks() < end && !running.iter().any(|r| matches!(r.0, Job::Ipc)) {
             match start_job(Job::Ipc, next) {
                 Ok(id) => running.push((Job::Ipc, next, id)),
                 Err(e) => err = Some(format!("cannot start ipcload: {}", e)),
             }
         }
-        // Nowe (do końca czasu).
+        // New ones (until time runs out).
         while err.is_none() && ticks() < end && running.iter().filter(|r| !matches!(r.0, Job::Ipc)).count() < pool {
             let kind = if next % 3 == 2 { Job::Primes } else { Job::Shell };
             match start_job(kind, next) {
@@ -346,7 +346,7 @@ fn driver_loop(d: usize) {
     }
 }
 
-/// Stress test przez `ms` ms.  Err = opis pierwszego błędu.
+/// Stress test for `ms` ms.  Err = description of the first error.
 pub fn run(ms: u64) -> Result<Report, String> {
     let n = smp::online_count();
     let frames0 = crate::sched::stack::free_frames_flushed();
@@ -367,14 +367,14 @@ pub fn run(ms: u64) -> Result<Report, String> {
         l.store(0, Ordering::SeqCst);
     }
 
-    // Zadania kernela na spinlockach (po jednym na CPU, najwyżej 8).
+    // Kernel tasks on spinlocks (one per CPU, at most 8).
     let mut hammers = Vec::new();
     for i in 0..n.clamp(2, 8) {
         hammers.push(sched::spawn("stress-spin", hammer, i).map_err(|e| format!("spawn hammer: {}", e))?);
     }
     crate::time::set_tick_hook(Some(tick_hook));
 
-    // Procesy xmm (rejestry FPU/SSE), najwyżej tyle, ile CPU.
+    // xmm processes (FPU/SSE registers), at most as many as there are CPUs.
     let xmm_code = programs::code("xmm").ok_or("no xmm program")?;
     let mut xmm = Vec::new();
     let mut xmm_left: Vec<TaskId> = Vec::new();
@@ -383,7 +383,7 @@ pub fn run(ms: u64) -> Result<Report, String> {
         xmm.push(id);
         xmm_left.push(id);
     }
-    // Wynik xmm sprawdzany zaraz po końcu (rejestr zakończeń trzyma 64 ostatnie).
+    // xmm result checked right after exit (the exit log keeps the last 64).
     let check_xmm = |left: &mut Vec<TaskId>| -> Result<(), String> {
         let mut i = 0;
         while i < left.len() {
@@ -401,21 +401,21 @@ pub fn run(ms: u64) -> Result<Report, String> {
         Ok(())
     };
 
-    // Pula procesów: zakończony = sprawdzony i zastąpiony.
-    // M17a.g3: 3 na CPU, najwyżej 48 (było 2 na CPU, najwyżej 12 – na Legionie
-    // CPU były w 76% bezczynne, więc stress mierzył opóźnienie jednego
-    // zadania, a nie przepustowość).  Bufor przechwyconego wyjścia trzyma
-    // CAPTURED_LOG = 256 ostatnich, dziennik zakończeń EXIT_LOG = 2048 – z zapasem.
-    // M17b.h2: dwa tryby pomiaru.  Domyślny (3 na CPU, najwyżej 48) – stały,
-    // porównywalny między wersjami.  Pełne obciążenie: build z
-    // DESOOS_STRESS_POOL=P (P na CPU, najwyżej 128 – dziennik przechwyconego
-    // wyjścia trzyma 256 ostatnich).  Legion v0.17.34 w trybie domyślnym: 32%
-    // bezczynności – stress ogranicza sam siebie.
+    // Process pool: finished = checked and replaced.
+    // 3 per CPU, at most 48 (with 2 per CPU, at most 12, the CPUs on real hardware
+    // were mostly idle, so stress measured the latency of a single
+    // task rather than throughput).  The captured output buffer keeps
+    // the last CAPTURED_LOG = 256, the exit log EXIT_LOG = 2048 – with headroom.
+    // Two measurement modes.  Default (3 per CPU, at most 48) – fixed,
+    // comparable between versions.  Full load: build with
+    // DESOOS_STRESS_POOL=P (P per CPU, at most 128 – the captured
+    // output log keeps the last 256).  In default mode a noticeable share of
+    // idle time remains – the stress test limits itself.
     let per_cpu = pool_per_cpu();
     let pool = if per_cpu == 0 { (n * 3).clamp(2, 48) } else { (n * per_cpu).clamp(2, 128) };
-    // M17a.g8: kilka pętli sterujących (zadania kernela bez BKL) – jedna była
-    // w 90% zajęta i ograniczała stress (Legion v0.17.16).  Po 1 na 4 CPU,
-    // najwyżej 4; pula dzielona między nie.
+    // Several driver loops (kernel tasks without the BKL) – a single one was
+    // ~90% busy and limited the stress test.  One per 4 CPUs,
+    // at most 4; the pool is split between them.
     let drivers = (n / 4).clamp(1, 4);
     let end = ticks() + ms;
     DRV_END.store(end, Ordering::SeqCst);
@@ -467,7 +467,7 @@ pub fn run(ms: u64) -> Result<Report, String> {
     let driver_pct =
         (DRV_BUSY_US.load(Ordering::SeqCst) * 100 / DRV_TOTAL_US.load(Ordering::SeqCst).max(1)).min(100);
 
-    // Sprzątanie: stop zadań kernela, koniec xmm.
+    // Cleanup: stop the kernel tasks, end xmm.
     STOP.store(true, Ordering::SeqCst);
     crate::time::set_tick_hook(None);
     if !wait_for(5_000, || hammers.iter().all(|&h| !sched::task_exists(h))) {
@@ -487,7 +487,7 @@ pub fn run(ms: u64) -> Result<Report, String> {
         return Err(e);
     }
 
-    // Spinlocki: licznik == suma lokalnych.
+    // Spinlocks: counter == sum of local counters.
     let local: u64 = LOCAL.iter().map(|l| l.load(Ordering::SeqCst)).sum();
     let counted = *SPIN_COUNTER.lock();
     if counted != local {
@@ -510,14 +510,14 @@ pub fn run(ms: u64) -> Result<Report, String> {
         return Err(format!("{} deadlock report(s) during the test", dl1 - dl0));
     }
 
-    // Wszystko sprzątnięte, ramki wróciły (idle sprząta zakończone zadania).
+    // Everything cleaned up, frames returned (idle reaps finished tasks).
     if !wait_for(3_000, || sched::tasks().len() == tasks0) {
         return Err(format!("{} task(s) left over", sched::tasks().len() as i64 - tasks0 as i64));
     }
-    // Strony, które heap jeszcze trzyma (oddaje je powyżej SHRINK_AT), to
-    // nie wyciek; tablice stron obszarów kernela mogą chwilę zostać.
-    // Prawdziwy wyciek to kilka ramek na proces x setki procesów, więc
-    // tolerancja PT_SLACK go nie ukryje.
+    // Pages the heap still holds (it returns them above SHRINK_AT) are
+    // not a leak; page tables of kernel regions may linger for a while.
+    // A real leak is a few frames per process x hundreds of processes, so
+    // the PT_SLACK tolerance will not hide it.
     const PT_SLACK: u64 = 32;
     let heap_growth = || (crate::memory::heap::mapped_bytes() as u64).saturating_sub(heap0) / 4096;
     if !wait_for(3_000, || crate::sched::stack::free_frames_flushed() + heap_growth() + PT_SLACK >= frames0) {
@@ -551,12 +551,12 @@ pub fn run(ms: u64) -> Result<Report, String> {
 
 
 // ------------------------------------------------------------
-// M17a.b: automatyczny stress test po starcie
+// Automatic stress test after boot
 // ------------------------------------------------------------
 
-/// Sekundy z buildu (`DESOOS_AUTOSTRESS=60 ./make-usb.sh ...` albo
-/// `./build.sh --autostress=60`); 0 = wyłączony.
-/// Procesy na CPU z buildu (`DESOOS_STRESS_POOL`); 0 = tryb domyślny.
+/// Seconds from the build (`DESOOS_AUTOSTRESS=60 ./make-usb.sh ...` or
+/// `./build.sh --autostress=60`); 0 = disabled.
+/// Processes per CPU from the build (`DESOOS_STRESS_POOL`); 0 = default mode.
 pub fn pool_per_cpu() -> usize {
     match option_env!("DESOOS_STRESS_POOL") {
         Some(s) => s.trim().parse::<usize>().unwrap_or(0).min(32),
@@ -571,8 +571,8 @@ pub fn auto_seconds() -> u64 {
     }
 }
 
-/// Uruchamia zadanie kernela, które po 5 s robi stress test i wypisuje wynik
-/// oraz `cpus` i `mem` (serial + ekran).  System działa dalej normalnie.
+/// Starts a kernel task that runs the stress test after 5 s and prints the result
+/// plus `cpus` and `mem` (serial + screen).  The system keeps running normally.
 pub fn start_auto_from_build() {
     let secs = auto_seconds();
     if secs == 0 {
@@ -585,9 +585,9 @@ pub fn start_auto_from_build() {
 }
 
 // ------------------------------------------------------------
-// M20.g: usbd w autostressie – w trakcie stressu zadanie czyta w kółko
-// największy plik z pendrive'a (/usbN, np. pendrive startowy na Legionie);
-// każde przejście liczy sumę kontrolną – wszystkie muszą być równe.
+// usbd in autostress – during the stress test a task keeps reading
+// the largest file from the USB stick (/usbN, e.g. the boot stick on real hardware);
+// every pass computes a checksum – all of them must be equal.
 // ------------------------------------------------------------
 
 static USB_STOP: AtomicBool = AtomicBool::new(false);
@@ -598,7 +598,7 @@ static USB_PASSES: AtomicU64 = AtomicU64::new(0);
 static USB_MISMATCH: AtomicU64 = AtomicU64::new(0);
 static USB_FILE: SpinLock<String> = SpinLock::new("autostress usb file", level::TEST_OUTER, String::new());
 
-/// Największy plik (≤ 64 MiB) pod `dir`, do 4 poziomów katalogów.
+/// Largest file (≤ 64 MiB) under `dir`, up to 4 directory levels deep.
 fn largest_file(dir: &str, depth: u32, best: &mut (u64, String)) {
     let Ok(entries) = crate::fs::read_dir(dir) else { return };
     for e in entries {
@@ -624,7 +624,7 @@ fn usb_stress_task(_: usize) {
         let mut ok = true;
         loop {
             if USB_STOP.load(Ordering::SeqCst) {
-                ok = false; // niepełne przejście – bez porównania
+                ok = false; // incomplete pass – no comparison
                 break;
             }
             match crate::fs::read(&path, off, &mut buf) {
@@ -658,7 +658,7 @@ fn usb_stress_task(_: usize) {
     USB_DONE.store(true, Ordering::SeqCst);
 }
 
-/// Start czytania z pendrive'a (jeśli jest zamontowany): Some(plik).
+/// Starts reading from the USB stick (if mounted): Some(file).
 fn usb_stress_start() -> Option<String> {
     let mount = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb"))?;
     let mut best = (0u64, String::new());
@@ -680,7 +680,7 @@ fn auto_task(secs: usize) {
     crate::time::sleep_ms(5_000);
     let cpus = crate::arch::x86_64::smp::online_count();
     crate::serial_println!("[AUTOSTRESS v{}] {} s on {} CPU(s)...", crate::shell::VERSION, secs, cpus);
-    // M20.h: odczyt z pendrive'a na spokojnym systemie (przed stressem).
+    // Read from the USB stick on an idle system (before the stress test).
     let usb_calm = usb_calm_bench();
     let usb_file = usb_stress_start();
     let t_usb = ticks();
@@ -699,7 +699,7 @@ fn auto_task(secs: usize) {
     for line in out.lines() {
         crate::serial_println!("[AUTOSTRESS v{}] {}", crate::shell::VERSION, line);
     }
-    // M18.f: pomiar IPC po stressie (system spokojny).
+    // IPC measurement after the stress test (idle system).
     let bench = run_ipcbench();
     let v = crate::shell::VERSION;
     match &result {
@@ -739,8 +739,8 @@ fn auto_task(secs: usize) {
             String::new()
         }
     };
-    // M20.h: klawiatura USB – od przerwania xHCI do znaku w jądrze (wszystkie
-    // wciśnięcia od startu, także w trakcie stressu).
+    // USB keyboard – from the xHCI interrupt to the character in the kernel (all
+    // key presses since boot, including during the stress test).
     let (hn, havg, hmin, hmax) = crate::input::hid_latency();
     if hn == 0 {
         crate::serial_println!("[AUTOSTRESS v{}]   usb keyboard: no USB key presses since boot - latency not measured", v);
@@ -763,7 +763,7 @@ fn auto_task(secs: usize) {
         usb_line.push(' ');
         usb_line.push_str(kv);
     }
-    // M18.f: jedna linia do maszynowego porównywania wersji (agent / skrypt).
+    // A single line for machine comparison of versions (agent / script).
     let mode = if pool_per_cpu() == 0 { String::from("compare") } else { format!("max{}", pool_per_cpu()) };
     let calm_ok = usb_calm.as_ref().map_or(true, |c| c.3);
     let pass = result.is_ok() && bench.is_ok() && ue == 0 && um == 0 && calm_ok;
@@ -792,8 +792,8 @@ fn auto_task(secs: usize) {
     }
 }
 
-/// M20.h: największy plik z /usbN (najwyżej 64 MiB) buforem 256 KiB i 4 KiB:
-/// (plik, KiB/s, KiB/s, te same dane).  None – brak pendrive'a / błąd.
+/// Largest file from /usbN (at most 64 MiB) with a 256 KiB and a 4 KiB buffer:
+/// (file, KiB/s, KiB/s, same data).  None – no USB stick / error.
 fn usb_calm_bench() -> Option<(String, u64, u64, bool)> {
     let mount = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb"))?;
     let mut best = (0u64, String::new());
@@ -805,7 +805,7 @@ fn usb_calm_bench() -> Option<(String, u64, u64, bool)> {
     let big = crate::user::ublk::read_bench(&best.1, 256 * 1024, max);
     let small = crate::user::ublk::read_bench(&best.1, 4096, max.min(16 << 20));
     let kbs = |r: &Result<(u64, u64, u64), crate::fs::FsError>| r.as_ref().map(|&(b, us, _)| b * 1_000_000 / 1024 / us).unwrap_or(0);
-    // Ta sama długość -> sumy muszą być równe (4 KiB czyta najwyżej 16 MiB).
+    // Same length -> sums must be equal (4 KiB reads at most 16 MiB).
     let same = match (&big, &small) {
         (Ok((b1, _, s1)), Ok((b2, _, s2))) => b1 != b2 || s1 == s2,
         _ => false,
@@ -813,7 +813,7 @@ fn usb_calm_bench() -> Option<(String, u64, u64, bool)> {
     Some((best.1, kbs(&big), kbs(&small), same))
 }
 
-/// M18.f: /bin/ipcbench – (linia dla ludzi, "k=v ..." do [RESULT]).
+/// /bin/ipcbench – (line for humans, "k=v ..." for [RESULT]).
 fn run_ipcbench() -> Result<(String, String), String> {
     let opts = SpawnOptions { stdin: Some(Vec::new()), capture: true, ..SpawnOptions::default() };
     let id = exec("/bin/ipcbench", &["ipcbench"], "/", &opts).map_err(|e| format!("{}", e))?;

@@ -1,4 +1,4 @@
-// M15: wypisuje swoje argumenty (argc/argv ze stosu procesu).
+// Prints its arguments (argc/argv from the process stack).
 #![no_std]
 #![no_main]
 

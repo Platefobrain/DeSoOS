@@ -1,4 +1,4 @@
-// M16: touch <plik>... – tworzy puste pliki (istniejące zostają bez zmian).
+// touch <file>... – creates empty files (existing ones are left unchanged).
 #![no_std]
 #![no_main]
 

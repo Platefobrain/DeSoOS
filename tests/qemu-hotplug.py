@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# M20.d: podłączanie USB w locie w ./test.sh.  Czyta log QEMU (serial jądra) i
-# każdą linię „[HOTPLUG] <komenda>” wysyła do monitora QEMU (HMP przez gniazdo
-# unix) – np. „device_del hubdisk”.  Samotest jądra (USB TEST 6/6) wypisuje te
-# linie i patrzy, czy dysk / hub naprawdę zniknął i wrócił.
+# USB hot-plugging in ./test.sh.  Reads the QEMU log (kernel serial) and
+# sends every „[HOTPLUG] <command>” line to the QEMU monitor (HMP over a unix
+# socket) – e.g. „device_del hubdisk”.  The kernel self-test (USB TEST 6/6) prints these
+# lines and checks whether the disk / hub really disappeared and came back.
 #
 #   python3 tests/qemu-hotplug.py logs/test.log /tmp/desoos-monitor.sock
 #
-# Kończy się sam, gdy QEMU zamknie monitor (koniec testów).
+# Exits by itself when QEMU closes the monitor (end of the tests).
 import os
 import socket
 import sys
@@ -16,7 +16,7 @@ MARK = "[HOTPLUG] "
 
 
 def connect(path):
-    for _ in range(600):  # QEMU startuje – do 60 s
+    for _ in range(600):  # QEMU is starting – up to 60 s
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.connect(path)
@@ -38,10 +38,10 @@ def main():
     pos = 0
     rest = b""
     while True:
-        # Odpowiedzi monitora tylko odbieramy (inaczej bufor gniazda się zapcha).
+        # We only drain monitor replies (otherwise the socket buffer fills up).
         try:
             if mon.recv(65536) == b"":
-                return 0  # QEMU zamknął monitor
+                return 0  # QEMU closed the monitor
         except BlockingIOError:
             pass
         except OSError:

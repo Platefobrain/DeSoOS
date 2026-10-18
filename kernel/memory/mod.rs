@@ -80,7 +80,7 @@ pub use demand::{
 #[cfg(selftest)]
 pub use paging::retarget_page_local;
 
-// Samotesty – tylko w buildzie `./build.sh --selftest`.
+// Self-tests – only in the `./build.sh --selftest` build.
 #[cfg(selftest)]
 pub use frame::self_test;
 #[cfg(selftest)]

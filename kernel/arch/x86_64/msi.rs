@@ -1,9 +1,9 @@
-// M16b: wektory przerwań MSI/MSI-X (0x30..0x3F).
+// MSI/MSI-X interrupt vectors (0x30..0x3F).
 //
-// Sterownik prosi o wektor (`alloc`), wpisuje go do capability MSI/MSI-X
-// urządzenia (drivers/pci.rs) razem z adresem LAPIC.  Przerwanie przychodzi
-// prosto do LAPIC, więc EOI idzie do LAPIC (nie do PIC-a).  Dalej jak przy
-// IRQ: wywłaszczenie i kill procesu w ring 3 (irq::after_interrupt).
+// A driver requests a vector (`alloc`) and writes it into the device's MSI/MSI-X capability
+// (drivers/pci.rs) together with the LAPIC address.  The interrupt arrives
+// directly at the LAPIC, so EOI goes to the LAPIC (not to the PIC).  After that, as with
+// an IRQ: preemption and killing of a ring 3 process (irq::after_interrupt).
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -17,7 +17,7 @@ pub type MsiHandler = fn(vector: u8);
 static HANDLERS: [AtomicUsize; MSI_VECTORS] = [const { AtomicUsize::new(0) }; MSI_VECTORS];
 static COUNTS: [AtomicU64; MSI_VECTORS] = [const { AtomicU64::new(0) }; MSI_VECTORS];
 
-/// Wolny wektor z handlerem; None, gdy nie ma LAPIC albo wektorów.
+/// A free vector with a handler; None when there is no LAPIC or no vectors left.
 pub fn alloc(handler: MsiHandler) -> Option<u8> {
     if !super::lapic::available() {
         return None;
@@ -30,9 +30,9 @@ pub fn alloc(handler: MsiHandler) -> Option<u8> {
     None
 }
 
-/// M19.d: zwalnia wektor (usługa w user space może się restartować – bez tego
-/// po 16 restartach zabrakłoby wektorów).  Przerwanie, które przyjdzie po
-/// zwolnieniu, zostaje tylko policzone (handler 0).
+/// Releases a vector (a user-space service may restart – without this
+/// we would run out of vectors after 16 restarts).  An interrupt arriving after
+/// the release is only counted (handler 0).
 pub fn free(vector: u8) {
     let i = (vector as usize).wrapping_sub(MSI_BASE);
     if i < MSI_VECTORS {
@@ -40,20 +40,20 @@ pub fn free(vector: u8) {
     }
 }
 
-/// M19.d: wolne wektory (testy wycieku wektorów).
+/// Free vectors (vector leak tests).
 #[allow(dead_code)]
 pub fn free_count() -> usize {
     HANDLERS.iter().filter(|h| h.load(Ordering::Relaxed) == 0).count()
 }
 
-/// Ile przerwań przyszło na wektorze (testy, diagnostyka).
+/// How many interrupts arrived on a vector (tests, diagnostics).
 #[allow(dead_code)]
 pub fn count(vector: u8) -> u64 {
     let i = (vector as usize).wrapping_sub(MSI_BASE);
     if i < MSI_VECTORS { COUNTS[i].load(Ordering::Relaxed) } else { 0 }
 }
 
-/// Z exception_dispatch dla wektorów 0x30..0x3F.
+/// Called from exception_dispatch for vectors 0x30..0x3F.
 pub fn dispatch(frame: &mut ExceptionFrame) {
     let i = frame.vector as usize - MSI_BASE;
     COUNTS[i].fetch_add(1, Ordering::Relaxed);

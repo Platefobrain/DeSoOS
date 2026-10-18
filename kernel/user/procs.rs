@@ -1,29 +1,29 @@
-// M16: rodzina procesów – rodzic/dziecko, zombie, wait, init.
+// Process family – parent/child, zombies, wait, init.
 //
-// * Każdy proces ma rodzica (Process.ppid).  0 = kernel (nadzorca init,
-//   shell kernela, samotesty) – takie procesy kernel sprząta sam, jak do tej
-//   pory (sched::task_info / user::exit_info).
-// * Proces z rodzicem-procesem po zakończeniu zostaje zombie: zadanie
-//   znika, ale kod wyjścia czeka na liście zombie rodzica, aż ten go odbierze
+// * Every process has a parent (Process.ppid).  0 = kernel (init supervisor,
+//   kernel shell, self-tests) – the kernel cleans up such processes itself, as it
+//   always has (sched::task_info / user::exit_info).
+// * A process with a process parent becomes a zombie when it exits: the task
+//   disappears, but the exit code waits on the parent's zombie list until the parent collects it
 //   (`wait`).
-// * Kończący się proces oddaje swoje dzieci (żywe i zombie) do init.  Gdy
-//   init jeszcze nie działa (samotesty, shell kernela) – do kernela: żywe
-//   dzieci działają dalej, zombie znikają.
-// * P1 (po M19): zombie żyją w procesie-rodzicu (`Process.zombies`, spinlock
-//   na rodzica) – zamiast jednej tablicy pod usypiającą blokadą, o którą
-//   biły się wszystkie procesy (Legion v0.19.7, pełne obciążenie: 12,3 mln
-//   wzięć, 168 s czekania w minucie).  Zasady:
-//     - dziecko dopisuje się pod blokadą schedulera (with_process na rodzicu)
-//       i blokadą listy rodzica, sprawdzając, że rodzic się nie kończy i że
-//       wciąż jest jego rodzicem (inaczej próbuje u nowego),
-//     - kończący się rodzic w JEDNEJ sekcji pod blokadą schedulera ustawia
-//       `exiting`, zabiera swoje zombie i oddaje żywe dzieci (reparent_with),
-//       potem zombie przekazuje init,
-//     - `wait` bierze tylko blokadę własnej listy; żywe dzieci liczy ten sam
-//       licznik, który dziecko zmniejsza razem z wpisem zombie.
+// * An exiting process hands its children (live and zombie) over to init.  When
+//   init is not running yet (self-tests, kernel shell) – to the kernel: live
+//   children keep running, zombies disappear.
+// * Zombies live in the parent process (`Process.zombies`, a spinlock
+//   per parent) – instead of a single table under a sleeping lock that
+//   all processes fought over (on a 16-thread machine under full load: 12.3 million
+//   acquisitions, 168 s of waiting per minute).  Rules:
+//     - a child appends itself under the scheduler lock (with_process on the parent)
+//       and the parent's list lock, checking that the parent is not exiting and that
+//       it is still its parent (otherwise it tries the new one),
+//     - an exiting parent, in ONE section under the scheduler lock, sets
+//       `exiting`, takes its zombies and hands over live children (reparent_with),
+//       then passes the zombies to init,
+//     - `wait` takes only the lock of its own list; live children are counted by the same
+//       counter that the child decrements together with the zombie entry.
 //
-// Status (wait): kod wyjścia 0..255 albo STATUS_SIGNALED | powód
-// (9 = kill/Ctrl+C, numer wyjątku CPU, 0xFF = zły adres powrotu).
+// Status (wait): exit code 0..255 or STATUS_SIGNALED | reason
+// (9 = kill/Ctrl+C, CPU exception number, 0xFF = bad return address).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -36,9 +36,9 @@ pub const STATUS_SIGNALED: u64 = 0x100;
 pub const REASON_KILLED: u64 = 9;
 pub const REASON_BAD_RETURN: u64 = 0xFF;
 
-/// wait(pid = ANY): dowolne dziecko.
+/// wait(pid = ANY): any child.
 pub const WAIT_ANY: u64 = u64::MAX;
-/// Flaga wait: nie czekaj (0, gdy żadne dziecko się jeszcze nie skończyło).
+/// wait flag: do not wait (0 when no child has finished yet).
 pub const WNOHANG: u64 = 1;
 
 #[derive(Clone, Copy, Default)]
@@ -47,12 +47,12 @@ pub struct Zombie {
     status: u64,
 }
 
-/// P1 (v0.20.2): blokada listy zombie w procesie.  NIE `IrqSpinLock`:
-/// RawSpin ma wyrównanie 64 B (linia cache), przez co cały `Process` miał
-/// wyrównanie 64 i każdy proces szedł wolną ścieżką heapa (bloki > 2 KiB albo
-/// wyrównanie > 16 – globalna lista): w v0.20.0/0.20.1 czekania na heap
-/// +50%.  Tu: jeden bajt + przerwania wyłączone na czas sekcji (kilka
-/// instrukcji), bez lockdep – brana tylko w procs.rs, nigdy dwie naraz.
+/// Lock of the zombie list inside a process.  NOT `IrqSpinLock`:
+/// RawSpin has 64 B alignment (a cache line), which gave the whole `Process`
+/// 64-byte alignment and sent every process down the heap slow path (blocks > 2 KiB or
+/// alignment > 16 – the global list): heap lock waits went up
+/// by 50%.  Here: one byte + interrupts disabled for the section (a few
+/// instructions), no lockdep – taken only in procs.rs, never two at once.
 pub struct ChildList {
     locked: core::sync::atomic::AtomicBool,
     list: core::cell::UnsafeCell<Zombies>,
@@ -75,7 +75,7 @@ impl ChildList {
         use crate::arch::x86_64::interrupts;
         let irq = interrupts::are_enabled();
         interrupts::disable();
-        // P4.0: czekanie odczytem, próba przejęcia dopiero przy wolnej blokadzie.
+        // Wait by reading, attempt to acquire only when the lock is free.
         while self.locked.load(Ordering::Relaxed) || self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
         }
@@ -105,10 +105,10 @@ impl Drop for ChildGuard<'_> {
     }
 }
 
-/// P1: lista zombie rodzica – pierwsze INLINE wpisy w samym procesie, dalej
-/// Vec.  Bez tego każdy proces z dziećmi alokował i zwalniał bufor na heapie
-/// (KVM v0.20.0: czekania na blokadę heapa +45%).  Kolejność odbioru: dowolna
-/// (POSIX jej nie gwarantuje).
+/// The parent's zombie list – the first INLINE entries in the process itself, then
+/// a Vec.  Without this every process with children allocated and freed a heap buffer
+/// (under KVM: heap lock waits +45%).  Collection order: arbitrary
+/// (POSIX does not guarantee one).
 const INLINE: usize = 4;
 
 pub struct Zombies {
@@ -131,7 +131,7 @@ impl Zombies {
         }
     }
 
-    /// Pierwszy wpis spełniający `f` – zdjęty z listy.
+    /// The first entry matching `f` – removed from the list.
     fn take_first(&mut self, f: impl Fn(&Zombie) -> bool) -> Option<Zombie> {
         if let Some(i) = self.inline[..self.n].iter().position(&f) {
             let z = self.inline[i];
@@ -162,9 +162,9 @@ impl Zombies {
     }
 }
 
-/// M17a.g11: rodzic czeka w kolejce wybranej po swoim numerze – koniec
-/// procesu budzi tylko jego rodzica (i ewentualnie init).
-#[repr(align(8))] // osobne adresy = osobne kubełki kanałów schedulera
+/// A parent waits on a queue chosen by its own pid – a process exit
+/// wakes only its parent (and possibly init).
+#[repr(align(8))] // distinct addresses = distinct scheduler channel buckets
 struct ChildQ(WaitQueue);
 const CHILD_QUEUES: usize = 64;
 static CHILD_EXIT: [ChildQ; CHILD_QUEUES] = [const { ChildQ(WaitQueue::new()) }; CHILD_QUEUES];
@@ -174,7 +174,7 @@ fn child_q(parent: TaskId) -> &'static WaitQueue {
 }
 static INIT_PID: AtomicU64 = AtomicU64::new(0);
 
-/// Init (0 = nie działa).
+/// Init (0 = not running).
 pub fn init_pid() -> TaskId {
     INIT_PID.load(Ordering::SeqCst)
 }
@@ -198,13 +198,13 @@ pub fn status_of(kind: ExitKind) -> u64 {
     }
 }
 
-/// Czy `pid` to żywy proces użytkownika, który jeszcze się nie kończy.
+/// Whether `pid` is a live user process that is not exiting yet.
 fn accepts_children(pid: TaskId) -> bool {
     pid != 0 && sched::with_process(pid, |p| !p.exiting.load(Ordering::SeqCst)).unwrap_or(false)
 }
 
-/// Bieżący proces się kończy (user::exit_current, przed sched::exit):
-/// dzieci do init, własny kod wyjścia do rodzica.
+/// The current process is exiting (user::exit_current, before sched::exit):
+/// children to init, own exit code to the parent.
 pub fn on_exit(me: TaskId, kind: ExitKind) {
     let Some(p) = sched::current_process() else { return };
     let p: &super::Process = p;
@@ -213,9 +213,9 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
         _ => 0,
     };
 
-    // 1. `exiting` + własne zombie zabrane + żywe dzieci -> init (albo kernel,
-    // gdy init nie działa lub to sam init) – jedna sekcja pod blokadą
-    // schedulera.  Bez dzieci (has_children) przegląd listy zadań pomijamy.
+    // 1. `exiting` + own zombies taken + live children -> init (or the kernel,
+    // when init is not running or this is init itself) – one section under the
+    // scheduler lock.  Without children (has_children) the task list scan is skipped.
     let mut orphans: Vec<Zombie> = Vec::new();
     let take = || {
         let mut z = p.zombies.lock();
@@ -244,8 +244,8 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
         }
     }
 
-    // 2. Własny status -> rodzic (żywy proces, który się nie kończy); rodzic
-    // ma o jedno żywe dziecko mniej – w tej samej sekcji co wpis zombie.
+    // 2. Own status -> parent (a live process that is not exiting); the parent
+    // has one live child fewer – in the same section as the zombie entry.
     enum Push {
         Done,
         Retry,
@@ -259,7 +259,7 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
         }
         let r = sched::with_process(ppid, |pp| {
             if p.ppid() != ppid {
-                return Push::Retry; // rodzic właśnie oddał nas dalej
+                return Push::Retry; // the parent has just handed us on
             }
             let mut z = pp.zombies.lock();
             if pp.exiting.load(Ordering::SeqCst) {
@@ -281,12 +281,12 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
     }
 }
 
-/// Czy rodzic odbierze status `pid` przez wait (proces z rodzicem-procesem).
+/// Whether the parent will collect the status of `pid` via wait (a process with a process parent).
 pub fn has_process_parent(p: &super::Process) -> bool {
     accepts_children(p.ppid())
 }
 
-/// wait(pid, flags): Ok((pid, status)), Ok((0, 0)) przy WNOHANG bez wyniku.
+/// wait(pid, flags): Ok((pid, status)), Ok((0, 0)) with WNOHANG and no result.
 pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
     use super::syscalls::{ECHILD, EINTR};
     let Some(p) = sched::current_process() else { return Err(ECHILD) };
@@ -306,7 +306,7 @@ pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
             sched::with_process(pid, |c| c.ppid() == me).unwrap_or(false)
         };
         if !waiting {
-            // Dziecko mogło dopisać zombie i zniknąć między sprawdzeniami.
+            // The child may have added a zombie and disappeared between the checks.
             if p.child_gen.load(Ordering::SeqCst) != seen {
                 continue;
             }
@@ -322,7 +322,7 @@ pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
     }
 }
 
-/// Zombie czekające na rodzica (ps, testy): (pid, rodzic, status).
+/// Zombies waiting for their parent (ps, tests): (pid, parent, status).
 #[allow(dead_code)]
 pub fn zombies() -> Vec<(TaskId, TaskId, u64)> {
     let mut out = Vec::new();

@@ -1,14 +1,14 @@
-// M20.e: uchwyt INPUT – wstrzykiwanie zdarzeń wejścia z usługi (usbd).
-// Projekt: ARCHITEKTURA.md, „USB”, „Wejście – input_inject (49)”.
+// INPUT handle – injecting input events from a service (usbd).
+// Design: ARCHITECTURE.md, "USB", "Input – `input_inject`".
 //
-// * Uchwyt tworzy tylko jądro dla init (slot 5); init daje kopię każdemu usbd.
-//   INPUT to w praktyce klawiatura systemu (może pisać do shella), więc ma go
-//   tylko kod systemu.
-// * Każda KOPIA uchwytu to osobne źródło (Clone tworzy nowe): jądro pamięta,
-//   które klawisze (HID usage) wcisnęło to źródło.  Zniknięcie kopii (koniec
-//   usbd, kill, close) = puszczenie wszystkich jej klawiszy – po awarii nie
-//   zostaje wciśnięty Shift ani Ctrl.  Puszczenie wykonuje zadanie jądra
-//   input-repeat pod BKL (Drop może biec w dowolnym kontekście – tu tylko atomiki).
+// * Only the kernel creates the handle, for init (slot 5); init gives a copy to each usbd.
+//   INPUT is effectively the system keyboard (it can type into the shell), so only
+//   system code gets it.
+// * Each COPY of the handle is a separate source (Clone creates a new one): the kernel
+//   remembers which keys (HID usage) this source has pressed.  When a copy disappears
+//   (usbd exit, kill, close) all its keys are released – after a crash no Shift or Ctrl
+//   stays stuck.  The release is done by the kernel's input-repeat task under the BKL
+//   (Drop may run in any context – only atomics here).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,7 +16,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct InputEnd {
     pub id: u64,
-    /// Wciśnięte klawisze (bit = HID usage 0..255).
+    /// Pressed keys (bit = HID usage 0..255).
     pressed: [AtomicU64; 4],
 }
 
@@ -39,7 +39,7 @@ impl InputEnd {
     }
 }
 
-/// Kopia uchwytu (dup, spawn_ex) = nowe źródło bez wciśniętych klawiszy.
+/// A copy of the handle (dup, spawn_ex) = a new source with no keys pressed.
 impl Clone for InputEnd {
     fn clone(&self) -> InputEnd {
         InputEnd::new()

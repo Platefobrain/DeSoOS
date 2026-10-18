@@ -1,12 +1,12 @@
-// M4: mapowanie on-demand.
+// On-demand mapping.
 //
-// Obszar DEMAND_START..DEMAND_START+DEMAND_SIZE jest "wirtualny": nie ma
-// żadnych stron, dopóki ktoś się do niego nie odwoła.  Pierwszy dostęp
-// (odczyt lub zapis) kończy się #PF; handler alokuje ramkę, zeruje ją
-// i mapuje pod adresem, który spowodował błąd, po czym CPU ponawia
-// instrukcję.
+// The area DEMAND_START..DEMAND_START+DEMAND_SIZE is "virtual": it has no
+// pages until someone touches it.  The first access
+// (read or write) ends in #PF; the handler allocates a frame, zeroes it
+// and maps it at the faulting address, after which the CPU retries the
+// instruction.
 //
-// Zwolnienie: unmap_page(addr) + free_frame(ramka).
+// Freeing: unmap_page(addr) + free_frame(frame).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,12 +21,12 @@ use super::{free_frame_count, translate, unmap_page};
 
 const PAGE_SIZE: u64 = 4096;
 
-// PML4[416]; z dala od direct mapy (PML4[256..384)), heapa (PML4[384])
-// i slotu rekurencyjnego (PML4[510]).
+// PML4[416]; away from the direct map (PML4[256..384)), the heap (PML4[384])
+// and the recursive slot (PML4[510]).
 pub const DEMAND_START: u64 = 0xffff_d000_0000_0000;
 pub const DEMAND_SIZE: u64 = 256 * 1024 * 1024;
 
-// Bity kodu błędu #PF.
+// #PF error code bits.
 const PF_PROTECTION: u64 = 1 << 0;
 const PF_USER: u64 = 1 << 2;
 const PF_RESERVED: u64 = 1 << 3;
@@ -43,10 +43,10 @@ pub fn faults_handled() -> u64 {
     FAULTS_HANDLED.load(Ordering::SeqCst)
 }
 
-/// Wołane z handlera #PF.  `true` = fault obsłużony, instrukcję można
-/// ponowić; `false` = to prawdziwy błąd.
+/// Called from the #PF handler.  `true` = fault handled, the instruction can be
+/// retried; `false` = a genuine fault.
 pub fn handle_page_fault(address: u64, error_code: u64) -> bool {
-    // Tylko dostęp do nieobecnej strony w trybie kernela, nie fetch instrukcji.
+    // Only an access to a non-present page in kernel mode, not an instruction fetch.
     if error_code & (PF_PROTECTION | PF_USER | PF_RESERVED | PF_INSTRUCTION_FETCH) != 0 {
         return false;
     }
@@ -60,8 +60,8 @@ pub fn handle_page_fault(address: u64, error_code: u64) -> bool {
         return false;
     };
 
-    // Nowa strona zawsze zerowa (ramka mogła zawierać cudze dane).
-    // Pamięć fizyczna jest zmapowana identycznie, więc piszemy wprost.
+    // A new page is always zeroed (the frame could contain someone else's data).
+    // Physical memory is identity-mapped, so we write directly.
     unsafe {
         core::ptr::write_bytes(super::phys_to_virt(frame) as *mut u8, 0, PAGE_SIZE as usize);
     }
@@ -76,7 +76,7 @@ pub fn handle_page_fault(address: u64, error_code: u64) -> bool {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -94,8 +94,8 @@ pub fn self_test() {
     serial_println!("[MM TEST] Starting on-demand paging tests...");
     crate::selftest::begin();
 
-    // Ramka z "śmieciami" trafia na szczyt listy wolnych, więc pierwszy
-    // demand fault dostanie właśnie ją – test zerowania jest wtedy uczciwy.
+    // A frame with "garbage" lands on top of the free list, so the first
+    // demand fault gets exactly that frame – making the zeroing test honest.
     let dirty = match alloc_frame() {
         Some(f) => f,
         None => {
@@ -111,13 +111,13 @@ pub fn self_test() {
     let free_start = free_frame_count();
     let faults_start = faults_handled();
 
-    // 1. Region pusty, dopóki nikt go nie dotknie.
+    // 1. The region is empty until someone touches it.
     check!(translate(DEMAND_START).is_none(), "demand region pre-mapped");
     check!(in_demand_region(DEMAND_START) && !in_demand_region(DEMAND_START + DEMAND_SIZE), "region bounds");
     serial_println!("[MM TEST] 1/7 demand region initially unmapped PASS");
 
-    // 2. Pierwszy zapis: fault -> ramka + 2 tablice (PD, PT; PDPT górnej
-    //    połowy istnieje od startu – M13a), dane zapisane, reszta zerowa.
+    // 2. First write: fault -> frame + 2 tables (PD, PT; the upper-half PDPT
+    //    exists from boot), data written, the rest zeroed.
     let p0 = DEMAND_START as *mut u64;
     unsafe {
         core::ptr::write_volatile(p0, 0x1234_5678_9abc_def0);
@@ -137,7 +137,7 @@ pub fn self_test() {
     }
     serial_println!("[MM TEST] 2/7 write fault maps a zeroed page PASS");
 
-    // 3. Odczyt też mapuje (zerową stronę).
+    // 3. A read also maps (a zero page).
     let read_addr = DEMAND_START + 3 * PAGE_SIZE;
     let v = unsafe { core::ptr::read_volatile(read_addr as *const u64) };
     check!(v == 0, "read of fresh page = {:#x}", v);
@@ -145,7 +145,7 @@ pub fn self_test() {
     check!(translate(read_addr).is_some(), "read fault did not map");
     serial_println!("[MM TEST] 3/7 read fault maps a page PASS");
 
-    // 4. Rzadki dostęp: inne PT (100 MiB dalej) i inny PD (2 GiB dalej).
+    // 4. Sparse access: a different PT (100 MiB further) and a different PD (2 GiB further).
     let far1 = DEMAND_START + 100 * 1024 * 1024;
     let far2 = DEMAND_START + 200 * 1024 * 1024;
     unsafe {
@@ -157,7 +157,7 @@ pub fn self_test() {
     check!(faults_handled() == faults_start + 4, "sparse faults not counted");
     serial_println!("[MM TEST] 4/7 sparse access across page tables PASS");
 
-    // 5. Ciągły zakres: 64 strony, każda z własnym wzorcem.
+    // 5. Contiguous range: 64 pages, each with its own pattern.
     let base = DEMAND_START + 8 * 1024 * 1024;
     for i in 0..64u64 {
         unsafe {
@@ -171,8 +171,8 @@ pub fn self_test() {
     check!(faults_handled() == faults_start + 4 + 64, "range faults not counted");
     serial_println!("[MM TEST] 5/7 64-page range PASS");
 
-    // 6. Adresy poza obszarem on-demand nadal kończą się prawdziwym błędem:
-    //    strona 0 (pułapka na null z M2) i pierwszy bajt za obszarem.
+    // 6. Addresses outside the on-demand area still end in a genuine fault:
+    //    page 0 (the null trap) and the first byte past the area.
     for address in [0u64, DEMAND_START + DEMAND_SIZE, DEMAND_START - PAGE_SIZE] {
         let faults_before = faults_handled();
         match probe_read(address) {
@@ -190,7 +190,7 @@ pub fn self_test() {
     }
     serial_println!("[MM TEST] 6/7 faults outside the region stay errors PASS");
 
-    // 7. Sprzątanie: unmap + free zwraca też opustoszałe tablice.
+    // 7. Cleanup: unmap + free also returns emptied tables.
     let mut addresses = [0u64; 64 + 5];
     let mut n = 0;
     for a in [DEMAND_START, read_addr, far1, far2] {

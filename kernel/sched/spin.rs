@@ -1,36 +1,36 @@
-// M17a: spinlocki – blokady na krótkie sekcje krytyczne przy wielu CPU.
+// Spinlocks – locks for short critical sections on multiple CPUs.
 //
-// Dwa rodzaje:
-//   * SpinLock<T>    – przerwania zostają włączone, ale wywłaszczanie tego
-//                      CPU jest wstrzymane (licznik preempt w cpu.rs), żeby
-//                      właściciel nie oddał CPU zadaniu, które czeka na tę
-//                      samą blokadę.  NIE wolno jej brać w przerwaniu.
-//   * IrqSpinLock<T> – dodatkowo wyłącza przerwania (stan IF przywracany
-//                      przy zwolnieniu).  Dla danych, których dotyka też
-//                      handler przerwania (na tym samym CPU zwykły SpinLock
-//                      dałby zakleszczenie z samym sobą).
+// Two kinds:
+//   * SpinLock<T>    – interrupts stay enabled, but preemption of this
+//                      CPU is suspended (preempt counter in cpu.rs), so that
+//                      the owner does not give the CPU to a task waiting for the
+//                      same lock.  It MUST NOT be taken in an interrupt.
+//   * IrqSpinLock<T> – additionally disables interrupts (IF state restored
+//                      on release).  For data also touched by an
+//                      interrupt handler (on the same CPU a plain SpinLock
+//                      would deadlock with itself).
 //
-// Zasada dla przerwań: blokada brana w handlerze przerwania (IrqSpinLock)
-// musi mieć poziom WYŻSZY niż każdy SpinLock trzymany z włączonymi
-// przerwaniami – handler może wskoczyć w środek takiej sekcji.  Sprawdzacz
-// kolejności to wychwytuje (przerwanie dopisuje się do blokad tego CPU).
+// Rule for interrupts: a lock taken in an interrupt handler (IrqSpinLock)
+// must have a level HIGHER than every SpinLock held with interrupts
+// enabled – the handler can jump into the middle of such a section.  The order
+// checker catches this (the interrupt adds itself to this CPU's locks).
 //
-// Diagnostyka (lockdep w wersji mini):
-//   * kolejność: każda blokada ma poziom (`level`); na jednym CPU wolno brać
-//     tylko blokady o poziomie WYŻSZYM niż wszystkie już trzymane – spisana
-//     kolejność w ARCHITEKTURA.md, stałe w `level`.  Złamanie = panic z
-//     nazwami obu blokad i miejscami w kodzie,
-//   * rekurencja: ten sam CPU bierze blokadę, którą już ma -> panic (inaczej
-//     kręciłby się w nieskończoność),
-//   * zakleszczenie: czekanie dłużej niż DEADLOCK_REPORT_US (2 s, zegar
-//     clock.rs – HPET, nie TSC) -> raport (kto czeka, gdzie; kto trzyma, od
-//     kiedy i skąd), po DEADLOCK_PANIC_US (10 s) -> panic,
-//   * spanie ze spinlockiem (schedule() przy trzymanej blokadzie) -> panic
-//     (sched::schedule sprawdza `held_count`).
+// Diagnostics (a mini lockdep):
+//   * ordering: every lock has a level (`level`); on one CPU you may only take
+//     locks with a level HIGHER than all those already held – the order is
+//     documented in ARCHITECTURE.md, constants in `level`.  A violation = panic with
+//     the names of both locks and their code locations,
+//   * recursion: the same CPU takes a lock it already holds -> panic (otherwise
+//     it would spin forever),
+//   * deadlock: waiting longer than DEADLOCK_REPORT_US (2 s, clock.rs
+//     time – HPET, not TSC) -> report (who waits and where; who holds it, since
+//     when and from where), after DEADLOCK_PANIC_US (10 s) -> panic,
+//   * sleeping with a spinlock (schedule() with a lock held) -> panic
+//     (sched::schedule checks `held_count`).
 //
-// Kolejność względem Big Kernel Lock: BKL jest "na zewnątrz" – trzymając
-// spinlock nie wolno czekać na BKL.  Dlatego oddanie BKL w ticku zegara
-// i w `hlt` jest pomijane, gdy CPU trzyma jakikolwiek spinlock.
+// Order relative to the Big Kernel Lock: the BKL is "outside" – while holding
+// a spinlock you must not wait for the BKL.  That is why releasing the BKL in the timer tick
+// and in `hlt` is skipped when the CPU holds any spinlock.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -40,94 +40,94 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use crate::arch::x86_64::cpu::{self, MAX_CPUS};
 use crate::arch::x86_64::{clock, interrupts};
 
-/// Poziomy blokad (kolejność brania: rosnąco).  Spis i uzasadnienie:
-/// ARCHITEKTURA.md, "Kolejność blokad".
+/// Lock levels (acquisition order: ascending).  List and rationale:
+/// ARCHITECTURE.md, "Lock ordering".
 #[allow(dead_code)]
 pub mod level {
-    /// VFS (zewnętrzna – woła block, heap, alokator).
+    /// VFS (outer – calls block, heap, the allocator).
     pub const VFS: u8 = 20;
-    /// Warstwa block i sterowniki dysków.
+    /// Block layer and disk drivers.
     pub const BLOCK: u8 = 30;
-    /// Procesy: tablica zombie, rodzina, deskryptory.
-    /// v0.35.1: przekazywanie końców kanałów w komunikatach (zasada „bez cykli”);
-    /// pod nią blokada kolejki kanału (PROCESS).
+    /// Processes: zombie table, family, descriptors.
+    /// Passing channel ends in messages (the "no cycles" rule);
+    /// the channel queue lock (PROCESS) is below it.
     pub const CHAN_XFER: u8 = 35;
     pub const PROCESS: u8 = 40;
-    /// M19.b: listy obserwatorów `wait_many` (kanały, potoki, przerwania) –
-    /// nad kolejkami kanałów / potoków (PROCESS), pod schedulerem (pobudka po
-    /// zwolnieniu listy).  IrqSpinLock: czyta ją też handler przerwania.
+    /// `wait_many` observer lists (channels, pipes, interrupts) –
+    /// above the channel / pipe queues (PROCESS), below the scheduler (wakeup after
+    /// releasing the list).  IrqSpinLock: an interrupt handler reads it too.
     pub const WAITERS: u8 = 45;
-    /// Scheduler (lista zadań, kolejki per CPU).
+    /// Scheduler (task list, per-CPU queues).
     pub const SCHED: u8 = 50;
-    /// Przestrzenie adresowe / tablice stron.
+    /// Address spaces / page tables.
     pub const PAGING: u8 = 55;
-    /// M17a.d: stan wyjścia procesów – przechwycone stdout (testy), linia
-    /// edytowana przez shell (komunikaty z tła).  Pod nią wolno alokować.
+    /// Process output state – captured stdout (tests), the line
+    /// being edited by the shell (background messages).  Allocation is allowed under it.
     pub const OUTPUT: u8 = 100;
-    /// Testy.
+    /// Tests.
     pub const TEST_OUTER: u8 = 200;
     pub const TEST_INNER: u8 = 210;
-    /// Testy: blokada brana też w handlerze przerwania – wyżej niż każda
-    /// trzymana przy włączonych przerwaniach (przerwanie zagnieżdża się w
-    /// dowolnym miejscu kodu z IF = 1).
+    /// Tests: a lock also taken in an interrupt handler – higher than any
+    /// lock held with interrupts enabled (an interrupt nests at
+    /// any point in code with IF = 1).
     pub const TEST_IRQ: u8 = 220;
-    /// M17a.g2: dziennik zakończeń procesów – zapisywany z przerwania (kill
-    /// procesu w ring 3) i z syscalli bez BKL; liść, bez alokacji.
+    /// Process exit log – written from interrupts (killing a
+    /// ring-3 process) and from syscalls without the BKL; a leaf, no allocation.
     pub const EXIT_LOG: u8 = 225;
-    /// M17a.c: heap kernela.  Alokować wolno z każdego miejsca – także z
-    /// handlera przerwania, który wskoczył w sekcję pod dowolnym SpinLockiem
-    /// (IF = 1) – więc heap i alokator ramek są prawie najbardziej wewnętrzne
-    /// (wyżej niż wszystko, co ktoś trzyma, alokując).  Heap woła alokator
-    /// ramek i TLB shootdown (zmniejszanie).
+    /// Kernel heap.  Allocation is allowed from anywhere – including from an
+    /// interrupt handler that jumped into a section under any SpinLock
+    /// (IF = 1) – so the heap and the frame allocator are nearly innermost
+    /// (higher than anything someone holds while allocating).  The heap calls the frame
+    /// allocator and TLB shootdown (when shrinking).
     pub const HEAP: u8 = 230;
-    /// Alokator ramek (woła go heap i tablice stron).
+    /// Frame allocator (called by the heap and page tables).
     pub const FRAMES: u8 = 240;
-    /// TLB shootdown – własna blokada żądania (tlb.rs, poza lockdep).
+    /// TLB shootdown – its own request lock (tlb.rs, outside lockdep).
     pub const TLB: u8 = 250;
-    /// Konsola / serial – własna blokada (console.rs, poza lockdep):
-    /// logować wolno zawsze.
+    /// Console / serial – its own lock (console.rs, outside lockdep):
+    /// logging is always allowed.
     pub const CONSOLE: u8 = 255;
 }
 
-/// Czekanie na spinlock dłuższe niż to = raport (sekcje krytyczne trwają
-/// mikrosekundy), a dłuższe niż DEADLOCK_PANIC_US = panic.  Mierzone zegarem
-/// clock.rs (HPET), bo TSC rdzeni bywa niezgodne.
+/// Waiting for a spinlock longer than this = report (critical sections take
+/// microseconds), and longer than DEADLOCK_PANIC_US = panic.  Measured with the
+/// clock.rs clock (HPET), because core TSCs can disagree.
 pub const DEADLOCK_REPORT_US: u64 = 2_000_000;
 pub const DEADLOCK_PANIC_US: u64 = 10_000_000;
 
-/// Najwięcej blokad trzymanych naraz przez jeden CPU.
+/// Maximum number of locks held at once by one CPU.
 const MAX_HELD: usize = 8;
 const HELD_IN_IRQ: usize = 1;
 
-/// Trzymane blokady każdego CPU (adres `RawSpin`, 0 = puste miejsce).
-/// v0.25.1: bit 0 adresu (RawSpin jest wyrównany do 64 B) = blokada wzięta w
-/// handlerze przerwania.  Kolejność poziomów sprawdzamy tylko w obrębie jednego
-/// kontekstu: handler przerwania (IrqSpinLock) nie łamie kolejności względem
-/// blokady trzymanej przez przerwany kod – ten nie może jej trzymać z IF = 0 i
-/// czekać na handler.  Wcześniej przerwanie MSI usbd (pobudka wait_many,
-/// 'waiters' poziom 45) na CPU, którego przerwany kod trzymał 'stress-counter'
-/// (210), dawało fałszywy PANIC lockdep przy pisaniu na klawiaturze USB w
-/// trakcie stressu.  Rekurencja (ta sama blokada) – nadal sprawdzana zawsze.
+/// Locks held by each CPU (`RawSpin` address, 0 = empty slot).
+/// Bit 0 of the address (RawSpin is 64 B aligned) = lock taken in an
+/// interrupt handler.  Level order is checked only within a single
+/// context: an interrupt handler (IrqSpinLock) does not violate the order relative to a
+/// lock held by the interrupted code – that code cannot hold it with IF = 0 and
+/// wait for the handler.  Previously a usbd MSI interrupt (wait_many wakeup,
+/// 'waiters' level 45) on a CPU whose interrupted code held 'stress-counter'
+/// (210) caused a false lockdep PANIC when typing on a USB keyboard
+/// during the stress test.  Recursion (the same lock) – still always checked.
 static HELD: crate::arch::x86_64::percpu::PerCpu<[AtomicUsize; MAX_HELD]> = crate::per_cpu!([const { AtomicUsize::new(0) }; MAX_HELD]);
 static HELD_COUNT: crate::arch::x86_64::percpu::PerCpu<AtomicUsize> = crate::per_cpu!(AtomicUsize::new(0));
 
-/// Statystyka (komenda `cpus`, testy).
+/// Statistics (`cpus` command, tests).
 static ACQUIRES: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static CONTENDED: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static DEADLOCK_REPORTS: AtomicU64 = AtomicU64::new(0);
 
-/// Liczba spinlocków trzymanych przez CPU `c` (raport watchdoga).
+/// Number of spinlocks held by CPU `c` (watchdog report).
 pub fn held_count_of(c: usize) -> usize {
     HELD_COUNT[c % MAX_CPUS].load(Ordering::Relaxed)
 }
 
-/// Liczba spinlocków trzymanych przez bieżący CPU.
+/// Number of spinlocks held by the current CPU.
 #[inline]
 pub fn held_count() -> usize {
     HELD_COUNT[cpu::id()].load(Ordering::Relaxed)
 }
 
-/// Pierwsza blokada trzymana przez ten CPU: (nazwa, miejsce wzięcia) – raporty.
+/// The first lock held by this CPU: (name, acquisition site) – reports.
 pub fn first_held() -> Option<(&'static str, &'static str, u32)> {
     for slot in HELD[cpu::id()].iter() {
         let a = slot.load(Ordering::Relaxed) & !HELD_IN_IRQ;
@@ -140,16 +140,16 @@ pub fn first_held() -> Option<(&'static str, &'static str, u32)> {
     None
 }
 
-/// (wzięcia, wzięcia z czekaniem, raporty zakleszczeń) – diagnostyka.
+/// (acquisitions, acquisitions with waiting, deadlock reports) – diagnostics.
 pub fn stats() -> (u64, u64, u64) {
     (ACQUIRES.get(), CONTENDED.get(), DEADLOCK_REPORTS.load(Ordering::Relaxed))
 }
 
 // ------------------------------------------------------------
-// M17b.f: czas czekania (kręcenia) per nazwa blokady
+// Wait (spin) time per lock name
 // ------------------------------------------------------------
 
-/// Wpis tabeli: wskaźnik i długość nazwy, liczba czekań, cykle TSC.
+/// Table entry: name pointer and length, number of waits, TSC cycles.
 struct SpinSlot {
     name: AtomicUsize,
     len: AtomicUsize,
@@ -159,8 +159,8 @@ struct SpinSlot {
 
 const SPIN_SLOTS: usize = 24;
 
-/// Tabela per CPU (tylko ten CPU pisze; przerwanie może wejść w środek –
-/// zajęcie wpisu przez CAS).
+/// Per-CPU table (only this CPU writes; an interrupt may come in the middle –
+/// entries are claimed with CAS).
 static SPIN_WAIT: crate::arch::x86_64::percpu::PerCpu<[SpinSlot; SPIN_SLOTS]> = crate::per_cpu!(
     [const { SpinSlot { name: AtomicUsize::new(0), len: AtomicUsize::new(0), n: AtomicU64::new(0), cyc: AtomicU64::new(0) } };
         SPIN_SLOTS]
@@ -188,7 +188,7 @@ pub fn spin_wait_reset() {
     }
 }
 
-/// (nazwa, czekania, cykle) – zsumowane ze wszystkich CPU, malejąco po cyklach.
+/// (name, waits, cycles) – summed over all CPUs, sorted by cycles descending.
 pub fn spin_wait_stats() -> alloc::vec::Vec<(&'static str, u64, u64)> {
     let mut v: alloc::vec::Vec<(&'static str, u64, u64)> = alloc::vec::Vec::new();
     for t in SPIN_WAIT.iter() {
@@ -214,29 +214,29 @@ pub fn spin_wait_stats() -> alloc::vec::Vec<(&'static str, u64, u64)> {
     v
 }
 
-/// Część wspólna obu rodzajów: stan blokady + diagnostyka.  M17b.e: w
-/// osobnej linii cache – sąsiednia gorąca blokada nie spowalnia tej.
+/// The part common to both kinds: lock state + diagnostics.  Kept in its
+/// own cache line – a neighbouring hot lock does not slow this one down.
 #[repr(align(64))]
 pub struct RawSpin {
     locked: AtomicBool,
-    /// Numer CPU właściciela + 1 (0 = wolna).
+    /// Owner CPU number + 1 (0 = free).
     owner: AtomicU32,
-    /// `&'static Location` miejsca wzięcia (diagnostyka).
+    /// `&'static Location` of the acquisition site (diagnostics).
     site: AtomicUsize,
-    /// Tick zegara systemowego (ms) chwili wzięcia – tani i wspólny dla CPU.
+    /// System clock tick (ms) at acquisition time – cheap and shared by all CPUs.
     since: AtomicU64,
     name: &'static str,
     level: u8,
 }
 
-/// Złamanie zasad blokad: opis (używają testy, żeby nie panikować).
+/// A lock rule violation: description (used by tests to avoid panicking).
 #[derive(Debug, PartialEq, Eq)]
 pub enum LockError {
-    /// Ten CPU już trzyma tę blokadę.
+    /// This CPU already holds this lock.
     Recursive,
-    /// Kolejność: trzymana blokada (nazwa, poziom) ma poziom >= nowej.
+    /// Ordering: a held lock (name, level) has a level >= the new one.
     Order { held: &'static str, held_level: u8 },
-    /// Za dużo blokad naraz.
+    /// Too many locks at once.
     TooMany,
 }
 
@@ -264,7 +264,7 @@ impl RawSpin {
         self.name
     }
 
-    /// Czy wzięcie tej blokady teraz, na tym CPU, łamie zasady.
+    /// Whether taking this lock now, on this CPU, breaks the rules.
     pub fn check(&self) -> Result<(), LockError> {
         let me = cpu::id();
         if self.owner.load(Ordering::Relaxed) == me as u32 + 1 {
@@ -277,7 +277,7 @@ impl RawSpin {
         let in_irq = cpu::in_interrupt();
         for slot in HELD[me].iter() {
             let a = slot.load(Ordering::Relaxed);
-            // W przerwaniu porównujemy tylko z blokadami wziętymi w przerwaniu.
+            // In an interrupt we compare only with locks taken in an interrupt.
             if a != 0 && (!in_irq || a & HELD_IN_IRQ != 0) {
                 let other = unsafe { &*((a & !HELD_IN_IRQ) as *const RawSpin) };
                 if other.level >= self.level {
@@ -301,7 +301,7 @@ impl RawSpin {
                     panic!("spinlock '{}': CPU {} takes it again at {}:{} (deadlock with itself)", self.name, cpu::id(), f, l)
                 }
                 LockError::Order { held, held_level } => panic!(
-                    "spinlock order: '{}' (level {}) taken at {}:{} while holding '{}' (level {}) - see ARCHITEKTURA.md",
+                    "spinlock order: '{}' (level {}) taken at {}:{} while holding '{}' (level {}) - see ARCHITECTURE.md",
                     self.name, self.level, f, l, held, held_level
                 ),
                 LockError::TooMany => panic!("spinlock '{}': more than {} locks held at {}:{}", self.name, MAX_HELD, f, l),
@@ -310,12 +310,12 @@ impl RawSpin {
         ACQUIRES.add(1);
         if !self.try_take() {
             CONTENDED.add(1);
-            // M17b.f: czas kręcenia per nazwa blokady (ten sam CPU – wywłaszczanie
-            // wyłączone przed acquire).
+            // Spin time per lock name (same CPU – preemption
+            // disabled before acquire).
             let spin_t0 = super::bkl::rdtsc();
-            // M17a.g14: wykrywanie zakleszczeń – HPET (TSC bywa niewiarygodny:
-            // TCG, różne TSC rdzeni), czytany dopiero przy pierwszym sprawdzeniu
-            // (co 1024 obroty), nigdy pod blokadą.
+            // Deadlock detection – HPET (TSC can be unreliable:
+            // TCG, differing core TSCs), read only at the first check
+            // (every 1024 spins), never under a lock.
             let mut start = 0u64;
             let mut reported = false;
             let mut n: u32 = 0;
@@ -323,7 +323,7 @@ impl RawSpin {
                 while self.locked.load(Ordering::Relaxed) {
                     core::hint::spin_loop();
                     n = n.wrapping_add(1);
-                    // M17a.b: IrqSpinLock czeka z IF = 0 – TLB shootdown tutaj.
+                    // IrqSpinLock waits with IF = 0 – handle TLB shootdown here.
                     if n % 64 == 0 {
                         crate::arch::x86_64::tlb::poll_from_wait();
                     }
@@ -412,7 +412,7 @@ impl RawSpin {
         );
     }
 
-    /// Testy: czeka najwyżej `us` mikrosekund; Err = (CPU właściciela, miejsce).
+    /// Tests: waits at most `us` microseconds; Err = (owner CPU, site).
     #[allow(dead_code)]
     pub fn try_lock_for(&self, us: u64) -> Result<(), (i64, &'static str, u32)> {
         let start = clock::stamp();
@@ -454,7 +454,7 @@ impl<T> SpinLock<T> {
         SpinLock { raw: RawSpin::new(name, level), data: UnsafeCell::new(value) }
     }
 
-    /// Bierze blokadę.  Wstrzymuje wywłaszczanie tego CPU do zwolnienia.
+    /// Takes the lock.  Suspends preemption of this CPU until release.
     #[track_caller]
     pub fn lock(&self) -> SpinGuard<'_, T> {
         debug_assert!(!cpu::in_interrupt(), "SpinLock '{}' in an interrupt - use IrqSpinLock", self.raw.name);
@@ -467,8 +467,8 @@ impl<T> SpinLock<T> {
         &self.raw
     }
 
-    /// Testy: jak `lock`, ale raport zakleszczenia już po `report_after`
-    /// mikrosekundach (bez panic).
+    /// Tests: like `lock`, but the deadlock report comes after `report_after`
+    /// microseconds (no panic).
     #[allow(dead_code)]
     #[track_caller]
     pub fn lock_reporting_after(&self, report_after: u64) -> SpinGuard<'_, T> {
@@ -520,7 +520,7 @@ impl<T> IrqSpinLock<T> {
         IrqSpinLock { raw: RawSpin::new(name, level), data: UnsafeCell::new(value) }
     }
 
-    /// Bierze blokadę z wyłączonymi przerwaniami (także z handlera przerwania).
+    /// Takes the lock with interrupts disabled (also from an interrupt handler).
     #[track_caller]
     pub fn lock(&self) -> IrqSpinGuard<'_, T> {
         let irq_was_enabled = interrupts::are_enabled();
@@ -559,28 +559,28 @@ impl<T> Drop for IrqSpinGuard<'_, T> {
 }
 
 // ------------------------------------------------------------
-// M17a.g16: RwSpinLock – kręcąca się blokada czytelnicy–pisarz
+// RwSpinLock – a spinning readers–writer lock
 // ------------------------------------------------------------
 //
-// Dla struktur czytanych bardzo często, zmienianych rzadziej, z sekcjami
-// rzędu µs (drzewo katalogów ramfs).  Usypiająca KRwLock płaciła za każde
-// czekanie uśpieniem i pobudką przez scheduler (Legion v0.17.26: 438 tys.
-// czekań odczytu, 505 s).  Zasady jak SpinLock: wywłaszczanie wstrzymane
-// (licznik preempt), nie wolno spać ani brać KMutex pod nią (schedule()
-// sprawdza held_count), nie w przerwaniu.  Pierwszeństwo pisarza: czekający
-// pisarz zatrzymuje NOWYCH czytelników (bez rekurencji odczytu!).  Bez
-// lockdep (nie ma poziomu) – pod nią wolno brać heap / ramki.
+// For structures read very often, changed less often, with sections
+// on the order of µs (the ramfs directory tree).  A sleeping KRwLock paid for every
+// wait with a sleep and a wakeup through the scheduler (on real hardware: hundreds of
+// thousands of read waits).  Rules as for SpinLock: preemption suspended
+// (preempt counter), you must not sleep or take a KMutex under it (schedule()
+// checks held_count), not in an interrupt.  Writer priority: a waiting
+// writer stops NEW readers (no read recursion!).  No
+// lockdep (it has no level) – heap / frames may be taken under it.
 
 const RW_WRITER: u32 = 1 << 31;
 
 pub struct RwSpinLock {
     name: &'static str,
-    /// RW_WRITER | liczba czytelników.
+    /// RW_WRITER | number of readers.
     state: AtomicU32,
     writers_waiting: AtomicU32,
     registered: AtomicBool,
-    // Statystyka (`cpus`): wzięcia, wzięcia z czekaniem, µs czekania (TSC,
-    // ten sam CPU – czekamy bez wywłaszczenia), µs trzymania (TSC).
+    // Statistics (`cpus`): acquisitions, acquisitions with waiting, µs of waiting (TSC,
+    // same CPU – we wait without preemption), µs of holding (TSC).
     reads: AtomicU64,
     writes: AtomicU64,
     read_waited: AtomicU64,
@@ -589,8 +589,8 @@ pub struct RwSpinLock {
     hold_tsc: AtomicU64,
 }
 
-/// Rejestr RwSpinLock z nazwą (statystyka) – wpis przy pierwszym wzięciu,
-/// wypis w Drop (blokada bywa częścią obiektu na heapie).
+/// Registry of named RwSpinLocks (statistics) – registered on first acquisition,
+/// unregistered in Drop (the lock is sometimes part of a heap object).
 static NAMED_RWSPIN: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
 
 pub struct RwSpinStats {
@@ -664,7 +664,7 @@ impl RwSpinLock {
         }
     }
 
-    /// Kręcenie z wykrywaniem zakleszczeń (HPET co 1024 obroty, jak RawSpin).
+    /// Spinning with deadlock detection (HPET every 1024 spins, like RawSpin).
     fn spin_wait(&self, mut ready: impl FnMut() -> bool) -> u64 {
         let (tsc0, cpu0) = clock::tsc_cpu();
         let mut start = 0u64;
@@ -673,7 +673,7 @@ impl RwSpinLock {
         while !ready() {
             core::hint::spin_loop();
             n = n.wrapping_add(1);
-            // P4.b: czekający z IF = 0 (tablica zadań) potwierdza TLB shootdown.
+            // A waiter with IF = 0 (task table) acknowledges TLB shootdown.
             if n % 64 == 0 {
                 crate::arch::x86_64::tlb::poll_from_wait();
             }
@@ -719,7 +719,7 @@ impl RwSpinLock {
         debug_assert!(!cpu::in_interrupt(), "RwSpinLock '{}' in an interrupt", self.name);
         self.register();
         cpu::preempt_disable();
-        // Liczy się jako trzymany spinlock: schedule() z nim = panic.
+        // Counts as a held spinlock: schedule() with it held = panic.
         HELD_COUNT[cpu::id()].fetch_add(1, Ordering::Relaxed);
         ACQUIRES.add(1);
     }
@@ -746,7 +746,7 @@ impl RwSpinLock {
         self.enter();
         if !self.try_write() {
             CONTENDED.add(1);
-            // Pierwszeństwo: nowi czytelnicy czekają, aż wejdziemy.
+            // Priority: new readers wait until we get in.
             self.writers_waiting.fetch_add(1, Ordering::Relaxed);
             let us = self.spin_wait(|| self.try_write());
             self.writers_waiting.fetch_sub(1, Ordering::Relaxed);
@@ -757,7 +757,7 @@ impl RwSpinLock {
         RwSpinWriteGuard { lock: self, t0: crate::sched::bkl::rdtsc() }
     }
 
-    /// Diagnostyka / testy: (pisarz, czytelnicy).
+    /// Diagnostics / tests: (writer, readers).
     #[allow(dead_code)]
     pub fn state(&self) -> (bool, u32) {
         let s = self.state.load(Ordering::Relaxed);

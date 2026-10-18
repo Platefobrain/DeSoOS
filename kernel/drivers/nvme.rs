@@ -1,36 +1,36 @@
-// M16b: sterownik dysków NVMe (PCIe, klasa 01:08:02).
+// NVMe disk driver (PCIe, class 01:08:02).
 //
-// Jak rozmawia się z NVMe:
-//   * Rejestry w BAR0: CAP (możliwości), CC (konfiguracja / włączenie),
-//     CSTS (stan), AQA/ASQ/ACQ (kolejki administracyjne) i "dzwonki"
-//     (doorbells) – po jednym na koniec kolejki zgłoszeń i początek kolejki
-//     odpowiedzi.
-//   * Polecenia (64 B) kernel wpisuje do kolejki zgłoszeń (SQ) w RAM-ie
-//     i "dzwoni"; kontroler czyta je sam (DMA), wykonuje i wpisuje odpowiedź
-//     (16 B) do kolejki odpowiedzi (CQ).  Bit fazy w odpowiedzi mówi, czy
-//     wpis jest nowy (zmienia się przy każdym obiegu kolejki).
-//   * Kolejka administracyjna (0): Identify, tworzenie kolejek I/O.
-//     Kolejka I/O (1): Read / Write.  Dane przez PRP – listę adresów
-//     fizycznych stron bufora.
-//   * Przerwanie: MSI-X (albo MSI) na wektor z arch/msi.rs.  Bez nich –
-//     odpytywanie.  Czekające zadanie i tak sprawdza kolejkę samo; przerwanie
-//     tylko je budzi.
+// How NVMe is driven:
+//   * Registers in BAR0: CAP (capabilities), CC (configuration / enable),
+//     CSTS (status), AQA/ASQ/ACQ (admin queues) and doorbells
+//     – one for the submission queue tail and one for the completion queue
+//     head.
+//   * The kernel writes commands (64 B) to the submission queue (SQ) in RAM
+//     and rings the doorbell; the controller fetches them itself (DMA), executes them and
+//     writes the completion (16 B) to the completion queue (CQ).  The phase bit in the completion
+//     tells whether the entry is new (it flips on every pass through the queue).
+//   * Admin queue (0): Identify, creating I/O queues.
+//     I/O queue (1): Read / Write.  Data via PRP – a list of physical
+//     addresses of the buffer pages.
+//   * Interrupt: MSI-X (or MSI) on a vector from arch/msi.rs.  Without them –
+//     polling.  The waiting task checks the queue itself anyway; the interrupt
+//     only wakes it up.
 //
-// "Kolejka wielu żądań": jeden odczyt/zapis dzielony jest na polecenia po
-// max MAX_CMD bajtów, wszystkie trafiają do kolejki naraz (jeden dzwonek),
-// a odpowiedzi zbieramy, gdy kontroler je kończy (w dowolnej kolejności).
+// "Multi-request queue": a single read/write is split into commands of at
+// most MAX_CMD bytes, all of them go into the queue at once (one doorbell),
+// and completions are collected as the controller finishes them (in any order).
 //
-// BEZPIECZEŃSTWO DANYCH (M16b – test na prawdziwym sprzęcie):
-//   * zapis jest dozwolony TYLKO dla kontrolera emulowanego przez QEMU
-//     (PCI 1b36:0010); każdy inny (prawdziwy SSD) jest "tylko do odczytu":
-//     write() zwraca ReadOnly, zanim cokolwiek trafi do urządzenia, a warstwa
-//     block i tak nie przepuszcza zapisu na taki dysk,
-//   * sterownik nie wysyła żadnych poleceń zmieniających nośnik (Write,
-//     Write Zeroes, DSM/TRIM, Format, Sanitize, Firmware) do prawdziwego SSD
-//     – tylko Identify, Get/Set Features (liczba kolejek – ustawienie
-//     ulotne), tworzenie kolejek i Read,
-//   * reset kontrolera (CC.EN = 0) przy starcie robi każdy system (Linux
-//     też) – niczego nie zapisuje na nośnik.
+// DATA SAFETY (for testing on real hardware):
+//   * writes are allowed ONLY for the controller emulated by QEMU
+//     (PCI 1b36:0010); any other (a real SSD) is "read-only":
+//     write() returns ReadOnly before anything reaches the device, and the block
+//     layer does not pass writes to such a disk anyway,
+//   * the driver sends no medium-modifying commands (Write,
+//     Write Zeroes, DSM/TRIM, Format, Sanitize, Firmware) to a real SSD
+//     – only Identify, Get/Set Features (number of queues – a volatile
+//     setting), queue creation and Read,
+//   * every OS resets the controller (CC.EN = 0) at boot (Linux
+//     too) – it writes nothing to the medium.
 
 use alloc::format;
 use alloc::string::String;
@@ -44,7 +44,7 @@ use crate::block::{self, BlockDevice, BlockError, SECTOR_SIZE};
 use crate::memory::{alloc_frames, map_mmio, phys_to_virt};
 use crate::serial_println;
 
-/// Kontroler NVMe emulowany przez QEMU – jedyny, do którego wolno pisać.
+/// NVMe controller emulated by QEMU – the only one we may write to.
 pub const QEMU_VENDOR: u16 = 0x1B36;
 pub const QEMU_DEVICE: u16 = 0x0010;
 
@@ -63,33 +63,33 @@ const CC_IOCQES: u32 = 4 << 20; // 16 B
 const CSTS_RDY: u32 = 1;
 const CSTS_CFS: u32 = 2;
 
-// Polecenia administracyjne.
+// Admin commands.
 const ADM_CREATE_SQ: u8 = 0x01;
 const ADM_CREATE_CQ: u8 = 0x05;
 const ADM_IDENTIFY: u8 = 0x06;
 const ADM_SET_FEATURES: u8 = 0x09;
-// Polecenia I/O.
+// I/O commands.
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
 
 const PAGE: usize = 4096;
 const QUEUE_ENTRIES: u16 = 64;
-/// Bufor danych DMA (fizycznie ciągły): 128 KiB.
+/// DMA data buffer (physically contiguous): 128 KiB.
 const DATA_FRAMES: usize = 32;
 const DATA_BUFFER: usize = DATA_FRAMES * PAGE;
-/// Największe pojedyncze polecenie (mniejsze, jeśli kontroler ma niższe MDTS).
+/// Largest single command (smaller if the controller has a lower MDTS).
 const MAX_CMD: usize = 32 * 1024;
-const PRP_SLOT: usize = 64; // bajtów listy PRP na polecenie (do 8 stron)
+const PRP_SLOT: usize = 64; // bytes of PRP list per command (up to 8 pages)
 const ADMIN_TIMEOUT_MS: u64 = 5000;
 const IO_TIMEOUT_MS: u64 = 10_000;
 
-/// Zadania czekające na odpowiedź z dowolnego kontrolera (budzi MSI).
+/// Tasks waiting for a completion from any controller (woken by MSI).
 static NVME_WAIT: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
 static IRQS: AtomicU64 = AtomicU64::new(0);
 static COMMANDS: AtomicU64 = AtomicU64::new(0);
 static MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
-/// Testy: wymuś "tylko do odczytu" także dla QEMU.
+/// Tests: force "read-only" for QEMU too.
 static FORCE_READ_ONLY: AtomicBool = AtomicBool::new(false);
 
 fn on_msi(_vector: u8) {
@@ -111,7 +111,7 @@ fn w64(a: u64, v: u64) {
     w32(a + 4, (v >> 32) as u32);
 }
 
-/// Wyzerowany, fizycznie ciągły blok `frames` stron.
+/// Zeroed, physically contiguous block of `frames` pages.
 fn dma(frames: usize) -> Option<u64> {
     let p = alloc_frames(frames, 1)?;
     unsafe { core::ptr::write_bytes(phys_to_virt(p) as *mut u8, 0, frames * PAGE) };
@@ -119,7 +119,7 @@ fn dma(frames: usize) -> Option<u64> {
 }
 
 struct Queue {
-    sq: u64, // adresy fizyczne
+    sq: u64, // physical addresses
     cq: u64,
     size: u16,
     sq_tail: u16,
@@ -145,7 +145,7 @@ impl Queue {
         })
     }
 
-    /// Wpisuje polecenie (bez dzwonka).
+    /// Writes a command (without ringing the doorbell).
     fn push(&mut self, cmd: &[u32; 16]) {
         let slot = phys_to_virt(self.sq) + self.sq_tail as u64 * 64;
         for (i, &dw) in cmd.iter().enumerate() {
@@ -159,7 +159,7 @@ impl Queue {
         w32(self.sq_doorbell, self.sq_tail as u32);
     }
 
-    /// Adres DW3 bieżącego wpisu CQ.
+    /// Address of DW3 of the current CQ entry.
     fn head_dw3(&self) -> u64 {
         phys_to_virt(self.cq) + self.cq_head as u64 * 16 + 12
     }
@@ -169,7 +169,7 @@ impl Queue {
         (dw3 >> 16 & 1 == 1) == self.phase
     }
 
-    /// Zdejmuje odpowiedź: (CID, status, DW0).
+    /// Pops a completion: (CID, status, DW0).
     fn pop(&mut self) -> (u16, u16, u32) {
         let e = phys_to_virt(self.cq) + self.cq_head as u64 * 16;
         fence(Ordering::SeqCst);
@@ -199,12 +199,12 @@ pub struct Nvme {
     firmware: String,
     version: u32,
     nsid: u32,
-    /// Rozmiar bloku przestrzeni nazw (512 albo 4096) i liczba bloków.
+    /// Namespace block size (512 or 4096) and number of blocks.
     lba_size: usize,
     lba_count: u64,
     max_cmd: usize,
-    data: u64, // bufor DMA (fizyczny)
-    prp: u64,  // strona list PRP (fizyczna)
+    data: u64, // DMA buffer (physical)
+    prp: u64,  // PRP list page (physical)
     vector: Option<u8>,
     irq_kind: &'static str,
     write_allowed: bool,
@@ -219,7 +219,7 @@ impl Nvme {
         self.next_cid
     }
 
-    /// Czeka, aż w kolejce będzie odpowiedź (przerwanie albo odpytywanie).
+    /// Waits until there is a completion in the queue (interrupt or polling).
     fn wait_completion(&self, admin: bool, deadline: u64) -> Result<(), BlockError> {
         let q = if admin { &self.admin } else { self.io.as_ref().unwrap() };
         loop {
@@ -234,8 +234,8 @@ impl Nvme {
                 return Err(BlockError::Timeout);
             }
             if interrupts::are_enabled() && crate::sched::can_block() {
-                // Śpimy do przerwania (MSI) albo najwyżej 10 ms – gdyby MSI
-                // nie dochodziło, i tak sprawdzimy kolejkę.
+                // Sleep until the interrupt (MSI) or at most 10 ms – in case MSI
+                // never arrives, we check the queue anyway.
                 let cq = q.head_dw3();
                 let phase = q.phase;
                 NVME_WAIT.wait_until(
@@ -248,8 +248,8 @@ impl Nvme {
         }
     }
 
-    /// Wysyła polecenia naraz (jeden dzwonek) i czeka na wszystkie.
-    /// Zwraca DW0 odpowiedzi (w kolejności poleceń).
+    /// Sends the commands at once (one doorbell) and waits for all of them.
+    /// Returns the completions' DW0 (in command order).
     fn run(&mut self, admin: bool, cmds: &mut [[u32; 16]], timeout_ms: u64) -> Result<Vec<u32>, BlockError> {
         let n = cmds.len();
         let mut cids = Vec::with_capacity(n);
@@ -311,7 +311,7 @@ impl Nvme {
         Ok(self.run(true, &mut c, ADMIN_TIMEOUT_MS)?[0])
     }
 
-    /// Identify do pierwszej strony bufora danych.
+    /// Identify into the first page of the data buffer.
     fn identify(&mut self, cns: u32, nsid: u32) -> Result<&'static [u8], BlockError> {
         let mut c = [0u32; 16];
         c[0] = ADM_IDENTIFY as u32;
@@ -323,7 +323,7 @@ impl Nvme {
         Ok(unsafe { core::slice::from_raw_parts(phys_to_virt(self.data) as *const u8, PAGE) })
     }
 
-    /// Polecenie I/O na `bytes` bajtów od offsetu `buf_off` w buforze DMA.
+    /// I/O command for `bytes` bytes starting at offset `buf_off` in the DMA buffer.
     fn io_cmd(&self, opcode: u8, lba: u64, bytes: usize, buf_off: usize, slot: usize) -> [u32; 16] {
         let mut c = [0u32; 16];
         c[0] = opcode as u32;
@@ -337,7 +337,7 @@ impl Nvme {
         } else if pages == 2 {
             addr + PAGE as u64
         } else {
-            // Lista PRP: adresy stron 2..n tego polecenia.
+            // PRP list: addresses of pages 2..n of this command.
             let list = self.prp + (slot * PRP_SLOT) as u64;
             for p in 1..pages {
                 unsafe { write_volatile((phys_to_virt(list) + (p as u64 - 1) * 8) as *mut u64, addr + (p * PAGE) as u64) };
@@ -348,12 +348,12 @@ impl Nvme {
         c[9] = (prp2 >> 32) as u32;
         c[10] = lba as u32;
         c[11] = (lba >> 32) as u32;
-        c[12] = (bytes / self.lba_size - 1) as u32; // liczba bloków - 1
+        c[12] = (bytes / self.lba_size - 1) as u32; // number of blocks - 1
         c
     }
 
-    /// Odczyt/zapis całych bloków NVMe przez bufor DMA (do DATA_BUFFER bajtów
-    /// naraz), polecenia po max_cmd bajtów – wszystkie w kolejce naraz.
+    /// Reads/writes whole NVMe blocks through the DMA buffer (up to DATA_BUFFER bytes
+    /// at once), commands of max_cmd bytes – all queued at once.
     fn transfer(&mut self, opcode: u8, lba: u64, bytes: usize) -> Result<(), BlockError> {
         debug_assert!(bytes <= DATA_BUFFER && bytes % self.lba_size == 0);
         let mut cmds = Vec::new();
@@ -378,7 +378,7 @@ impl Nvme {
         if base == 0 {
             return Err("BAR0 not assigned by the firmware");
         }
-        dev.enable(true, false); // pamięć + DMA, bez INTx
+        dev.enable(true, false); // memory + DMA, no INTx
         let regs = map_mmio(base, size.clamp(0x2000, 0x10000)).ok_or("cannot map NVMe registers")?;
 
         let cap = r64(regs + REG_CAP);
@@ -395,7 +395,7 @@ impl Nvme {
         }
         let version = r32(regs + REG_VS);
 
-        // 1. Reset: wyłącz kontroler i poczekaj, aż przestanie być gotowy.
+        // 1. Reset: disable the controller and wait until it is no longer ready.
         let cc = r32(regs + REG_CC);
         if cc & CC_EN != 0 {
             w32(regs + REG_CC, cc & !CC_EN);
@@ -408,14 +408,14 @@ impl Nvme {
             crate::time::sleep_ms(1);
         }
 
-        // 2. Kolejki administracyjne.
+        // 2. Admin queues.
         let qsize = QUEUE_ENTRIES.min(mqes);
         let admin = Queue::new(regs, stride, 0, qsize).ok_or("out of memory (admin queues)")?;
         w32(regs + REG_AQA, ((qsize as u32 - 1) << 16) | (qsize as u32 - 1));
         w64(regs + REG_ASQ, admin.sq);
         w64(regs + REG_ACQ, admin.cq);
 
-        // 3. Włącz (NVM, strony 4 KiB, SQE 64 B, CQE 16 B).
+        // 3. Enable (NVM, 4 KiB pages, 64 B SQE, 16 B CQE).
         w32(regs + REG_CC, CC_IOCQES | CC_IOSQES | CC_EN);
         let deadline = crate::time::ticks() + timeout_ms;
         loop {
@@ -459,7 +459,7 @@ impl Nvme {
             write_allowed,
         };
 
-        // 4. Przerwania: MSI-X, inaczej MSI, inaczej odpytywanie.
+        // 4. Interrupts: MSI-X, else MSI, else polling.
         if let Some(v) = msi::alloc(on_msi) {
             if dev.enable_msix(0, v).is_ok() {
                 me.vector = Some(v);
@@ -482,7 +482,7 @@ impl Nvme {
         }
         let namespaces = u32::from_le_bytes(id[516..520].try_into().unwrap());
 
-        // 6. Pierwsza aktywna przestrzeń nazw (lista aktywnych, CNS 2).
+        // 6. First active namespace (active list, CNS 2).
         if namespaces > 0 {
             if let Ok(list) = me.identify(2, 0) {
                 let first = u32::from_le_bytes(list[0..4].try_into().unwrap());
@@ -510,11 +510,11 @@ impl Nvme {
         me.lba_count = nsze;
         me.max_cmd = me.max_cmd.max(me.lba_size) / me.lba_size * me.lba_size;
 
-        // 7. Jedna para kolejek I/O (Set Features: Number of Queues – ulotne).
+        // 7. A single pair of I/O queues (Set Features: Number of Queues – volatile).
         let mut c = [0u32; 16];
         c[0] = ADM_SET_FEATURES as u32;
         c[10] = 0x07;
-        c[11] = 0; // 1 SQ + 1 CQ (wartości od zera)
+        c[11] = 0; // 1 SQ + 1 CQ (zero-based values)
         let _ = me.admin(c);
 
         let io = Queue::new(regs, stride, 1, qsize).ok_or("out of memory (I/O queues)")?;
@@ -523,7 +523,7 @@ impl Nvme {
         c[6] = io.cq as u32;
         c[7] = (io.cq >> 32) as u32;
         c[10] = ((qsize as u32 - 1) << 16) | 1;
-        // PC = fizycznie ciągła; IEN + wektor 0 (MSI-X wpis 0 / MSI).
+        // PC = physically contiguous; IEN + vector 0 (MSI-X entry 0 / MSI).
         c[11] = 1 | if me.vector.is_some() { 2 } else { 0 };
         me.admin(c).map_err(|_| "Create I/O Completion Queue failed")?;
         let mut c = [0u32; 16];
@@ -531,7 +531,7 @@ impl Nvme {
         c[6] = io.sq as u32;
         c[7] = (io.sq >> 32) as u32;
         c[10] = ((qsize as u32 - 1) << 16) | 1;
-        c[11] = (1 << 16) | 1; // CQ 1, fizycznie ciągła
+        c[11] = (1 << 16) | 1; // CQ 1, physically contiguous
         me.admin(c).map_err(|_| "Create I/O Submission Queue failed")?;
         me.io = Some(io);
         Ok(me)
@@ -541,7 +541,7 @@ impl Nvme {
         !self.write_allowed || FORCE_READ_ONLY.load(Ordering::Relaxed)
     }
 
-    /// Bloki NVMe pokrywające sektory 512 B [lba, lba+count).
+    /// NVMe blocks covering 512 B sectors [lba, lba+count).
     fn span(&self, lba: u64, count: u64) -> (u64, u64, usize) {
         let spb = (self.lba_size / SECTOR_SIZE) as u64;
         let first = lba / spb;
@@ -588,7 +588,7 @@ impl BlockDevice for Nvme {
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let count = block::check_range(self.sector_count(), lba, buf.len())?;
-        let per = (DATA_BUFFER / self.lba_size) as u64; // bloków NVMe na bufor
+        let per = (DATA_BUFFER / self.lba_size) as u64; // NVMe blocks per buffer
         let (mut first, mut blocks, mut skip) = self.span(lba, count);
         let mut out = 0;
         while blocks > 0 {
@@ -607,7 +607,7 @@ impl BlockDevice for Nvme {
 
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         let count = block::check_range(self.sector_count(), lba, buf.len())?;
-        // Ochrona danych: prawdziwy SSD – nic nie wysyłamy.
+        // Data protection: real SSD – send nothing.
         if self.read_only_now() {
             return Err(BlockError::ReadOnly);
         }
@@ -618,7 +618,7 @@ impl BlockDevice for Nvme {
             let n = blocks.min(per);
             let bytes = n as usize * self.lba_size;
             let take = (bytes - skip).min(buf.len() - done);
-            // Blok 4 KiB zapisywany częściowo: najpierw odczyt (read-modify-write).
+            // Partially written 4 KiB block: read first (read-modify-write).
             if skip != 0 || take != bytes {
                 self.transfer(IO_READ, first, bytes)?;
             }
@@ -643,13 +643,13 @@ impl BlockDevice for Nvme {
     }
 }
 
-/// Liczba przerwań MSI/MSI-X od NVMe (testy).
+/// Number of MSI/MSI-X interrupts from NVMe (tests).
 #[allow(dead_code)]
 pub fn irq_count() -> u64 {
     IRQS.load(Ordering::Relaxed)
 }
 
-/// Liczba wysłanych poleceń i największa liczba naraz w kolejce (testy).
+/// Number of commands sent and the largest number queued at once (tests).
 #[allow(dead_code)]
 pub fn stats() -> (u64, u64) {
     (COMMANDS.load(Ordering::Relaxed), MAX_IN_FLIGHT.load(Ordering::Relaxed))
@@ -660,8 +660,8 @@ pub fn set_force_read_only(on: bool) {
     FORCE_READ_ONLY.store(on, Ordering::Relaxed);
 }
 
-/// Szuka kontrolerów NVMe (klasa 01:08, interfejs 02), rejestruje dyski
-/// i ich partycje GPT.  Zwraca liczbę dysków.
+/// Looks for NVMe controllers (class 01:08, interface 02), registers disks
+/// and their GPT partitions.  Returns the number of disks.
 pub fn init() -> usize {
     let mut added = 0;
     for dev in pci::devices() {
@@ -670,7 +670,7 @@ pub fn init() -> usize {
         }
         match Nvme::new(dev, added) {
             Ok(d) => {
-                pci::set_kernel_owner(dev.address); // M19.c: usługa go nie przejmie
+                pci::set_kernel_owner(dev.address); // a service cannot claim it
                 serial_println!("[NVMe] {}: {}", d.name, d.description());
                 if !d.write_allowed {
                     serial_println!("[NVMe] {}: real SSD - write protection ON (nothing is ever written)", d.name);
@@ -689,7 +689,7 @@ pub fn init() -> usize {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (selftest build only, --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -711,7 +711,7 @@ pub fn self_test() {
     serial_println!("[NVME TEST] Starting ACPI / ECAM / MSI-X / NVMe / GPT tests...");
     crate::selftest::begin();
 
-    // 1. ACPI: RSDP -> XSDT, MCFG z ECAM (QEMU q35: 0xB0000000).
+    // 1. ACPI: RSDP -> XSDT, MCFG with ECAM (QEMU q35: 0xB0000000).
     let tables = crate::acpi::tables();
     check!(!tables.is_empty(), "no ACPI tables (RSDP from DSB missing?)");
     let names: Vec<&str> = tables.iter().map(|t| t.name()).collect();
@@ -720,7 +720,7 @@ pub fn self_test() {
     check!(mcfg.iter().any(|e| e.segment == 0 && e.base != 0), "MCFG without segment 0: {:?}", mcfg);
     serial_println!("[NVME TEST] 1/9 ACPI: {} tables ({}), MCFG ECAM {:#x} PASS", tables.len(), names.join(" "), mcfg[0].base);
 
-    // 2. ECAM włączone i zgodne z portami; rozszerzona konfiguracja czytelna.
+    // 2. ECAM enabled and consistent with the ports; extended config space readable.
     check!(pci::ecam_enabled(), "ECAM not enabled");
     for d in pci::devices() {
         for off in [0u8, 8, 0x2C] {
@@ -744,7 +744,7 @@ pub fn self_test() {
     check!(nvme_dev.command() & pci::CMD_INTX_DISABLE != 0, "INTx still enabled");
     serial_println!("[NVME TEST] 3/9 local APIC id {}, MSI-X enabled, INTx off PASS", lapic::id());
 
-    // 4. Dysk NVMe zarejestrowany, QEMU = zapis dozwolony.
+    // 4. NVMe disk registered, QEMU = writes allowed.
     let disk = block::find("nvme0n1");
     check!(disk.is_some(), "nvme0n1 not registered");
     let disk = disk.unwrap();
@@ -756,7 +756,7 @@ pub fn self_test() {
     check!(sectors >= 64 * 2048 - 1, "capacity {} sectors", sectors);
     serial_println!("[NVME TEST] 4/9 {}: {} PASS", "nvme0n1", desc);
 
-    // 5. Zapis + odczyt kontrolny (przywrócenie danych), z przerwaniami.
+    // 5. Write + verification read (data restored), with interrupts.
     let irq0 = irq_count();
     let lba = sectors - 300;
     let mut original = vec![0u8; 200 * SECTOR_SIZE];
@@ -769,13 +769,13 @@ pub fn self_test() {
     let same = back == pattern;
     check!(block::write(disk, lba, &original).is_ok(), "restore");
     check!(same, "data read back differs");
-    // Nierówne do bloku: 3 sektory od nieparzystego LBA.
+    // Not block-aligned: 3 sectors from an odd LBA.
     let mut three = [0u8; 3 * SECTOR_SIZE];
     check!(block::read(disk, lba + 1, &mut three).is_ok() && three[..] == original[512..2048], "unaligned read");
     check!(irq_count() > irq0, "no MSI-X interrupt from NVMe");
     serial_println!("[NVME TEST] 5/9 write + flush + read-back of 100 KiB (restored), {} interrupts PASS", irq_count() - irq0);
 
-    // 6. Kolejka: 256 KiB = polecenia po max 32 KiB, kilka naraz w kolejce.
+    // 6. Queue: 256 KiB = commands of max 32 KiB, several queued at once.
     let (c0, _) = stats();
     let mut big = vec![0u8; 512 * SECTOR_SIZE];
     check!(block::read(disk, 0, &mut big).is_ok(), "256 KiB read");
@@ -784,7 +784,7 @@ pub fn self_test() {
     check!(inflight >= 4, "max {} commands in flight (want >= 4)", inflight);
     serial_println!("[NVME TEST] 6/9 256 KiB read = {} commands, up to {} in the queue at once PASS", c1 - c0, inflight);
 
-    // 7. Ochrona zapisu (tak zachowuje się prawdziwy SSD).
+    // 7. Write protection (this is how a real SSD behaves).
     set_force_read_only(true);
     check!(block::is_read_only(disk), "force read-only not visible");
     check!(block::write(disk, lba, &pattern[..SECTOR_SIZE]) == Err(BlockError::ReadOnly), "write allowed on read-only");
@@ -795,7 +795,7 @@ pub fn self_test() {
     set_force_read_only(false);
     serial_println!("[NVME TEST] 7/9 write protection: block layer + driver + mkfs refuse, reads work PASS");
 
-    // 8. GPT: partycja EFI System -> dysk nvme0n1p1 -> FAT32 -> /esp.
+    // 8. GPT: EFI System partition -> disk nvme0n1p1 -> FAT32 -> /esp.
     let (first, len) = match crate::gpt::write_test_gpt(disk, crate::gpt::ESP, "DESOOS ESP") {
         Ok(v) => v,
         Err(e) => {
@@ -817,7 +817,7 @@ pub fn self_test() {
     check!(crate::fs::read_file("/esp/hello.txt").ok().as_deref() == Some(b"from DeSoOS\n".as_slice()), "read /esp/hello.txt");
     serial_println!("[NVME TEST] 8/9 GPT -> nvme0n1p1 (EFI System, {} MiB) -> FAT32 -> /esp PASS", len / 2048);
 
-    // 9. Ta sama partycja przy ochronie zapisu: czyta, nie zapisuje.
+    // 9. The same partition with write protection: reads, does not write.
     set_force_read_only(true);
     check!(crate::fs::read_file("/esp/hello.txt").is_ok(), "read on read-only /esp");
     check!(

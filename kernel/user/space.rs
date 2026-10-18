@@ -1,17 +1,17 @@
-// M13a: przestrzeń adresowa procesu.
+// Process address space.
 //
-//   PML4[0..256)   – tylko proces: kod, dane, stos (strony z bitem USER);
-//                    tablice pośrednie też z USER (o prawach decyduje wpis
-//                    końcowy).
-//   PML4[256..512) – kopia wpisów kernela: wskazują na te same PDPT co PML4
-//                    kernela (paging::init alokuje je wszystkie od razu, więc
-//                    kopia się nie zdezaktualizuje).  Bez USER – ring 3 nie
-//                    ma tam dostępu.
-//   PML4[510]      – mapowanie rekurencyjne wskazuje na WŁASNY PML4 procesu,
-//                    więc map_page działa też, gdy CR3 = proces.
+//   PML4[0..256)   – process only: code, data, stack (pages with the USER bit);
+//                    intermediate tables also have USER (the final entry
+//                    decides the rights).
+//   PML4[256..512) – copy of the kernel entries: they point to the same PDPTs as the kernel
+//                    PML4 (paging::init allocates all of them up front, so
+//                    the copy never goes stale).  No USER – ring 3 has
+//                    no access there.
+//   PML4[510]      – the recursive mapping points to the process's OWN PML4,
+//                    so map_page also works when CR3 = the process.
 //
-// Strony procesu mapujemy, chodząc po tablicach przez direct map – proces
-// nie musi być aktywny (CR3) w czasie budowania.
+// Process pages are mapped by walking the tables through the direct map – the process
+// does not have to be active (CR3) while it is being built.
 
 use crate::memory::{
     alloc_frame_user, free_frame, kernel_cr3, phys_to_virt, PRESENT, USER, WRITABLE,
@@ -20,15 +20,15 @@ use crate::memory::{
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const RECURSIVE_INDEX: usize = 510;
 const PAGE: u64 = 4096;
-/// Pierwszy adres górnej (kernelowej) połowy.
+/// First address of the upper (kernel) half.
 pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
 fn table(phys: u64) -> &'static mut [u64; 512] {
     unsafe { &mut *(phys_to_virt(phys) as *mut [u64; 512]) }
 }
 
-/// Ramka dla przestrzeni procesu (strony i tablice) – v0.35.2: tylko ponad
-/// zapasem jądra (`alloc_frame_user`).
+/// A frame for the process space (pages and tables) – only above
+/// the kernel reserve (`alloc_frame_user`).
 fn zeroed_frame() -> Option<u64> {
     let f = alloc_frame_user()?;
     unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE as usize) };
@@ -53,12 +53,12 @@ impl AddressSpace {
         Some(AddressSpace { pml4 })
     }
 
-    /// Wartość CR3 tej przestrzeni.
+    /// CR3 value of this space.
     pub fn cr3(&self) -> u64 {
         self.pml4
     }
 
-    /// Tablica niższego poziomu (tworzy ją z USER, gdy `create`).
+    /// Lower-level table (created with USER when `create`).
     fn next(parent: u64, i: usize, create: bool) -> Option<u64> {
         let e = &mut table(parent)[i];
         if *e & PRESENT == 0 {
@@ -70,7 +70,7 @@ impl AddressSpace {
         Some(*e & ADDRESS_MASK)
     }
 
-    /// Mapuje stronę procesu.  `flags` bez PRESENT (USER/WRITABLE/NX).
+    /// Maps a process page.  `flags` without PRESENT (USER/WRITABLE/NX).
     pub fn map(&mut self, va: u64, frame: u64, flags: u64) -> bool {
         if va % PAGE != 0 || va >= USER_SPACE_END || frame % PAGE != 0 {
             return false;
@@ -86,7 +86,7 @@ impl AddressSpace {
         true
     }
 
-    /// Nowa, wyzerowana strona pod `va`; zwraca jej ramkę.
+    /// A new, zeroed page at `va`; returns its frame.
     pub fn map_new(&mut self, va: u64, flags: u64) -> Option<u64> {
         let frame = zeroed_frame()?;
         if self.map(va, frame, flags) {
@@ -97,8 +97,8 @@ impl AddressSpace {
         }
     }
 
-    /// M17b.d: usuwa mapowanie strony; zwraca jej ramkę (TLB i zwolnienie
-    /// ramki – wołający).  Puste tablice pośrednie zostają (do końca procesu).
+    /// Removes a page mapping; returns its frame (TLB flush and freeing the
+    /// frame – the caller's job).  Empty intermediate tables stay (until the process ends).
     pub fn unmap(&mut self, va: u64) -> Option<u64> {
         if va >= USER_SPACE_END {
             return None;
@@ -115,7 +115,7 @@ impl AddressSpace {
         Some(frame)
     }
 
-    /// (adres fizyczny, flagi wpisu) dla `va` w dolnej połowie.
+    /// (physical address, entry flags) for `va` in the lower half.
     #[allow(dead_code)]
     pub fn translate(&self, va: u64) -> Option<(u64, u64)> {
         if va >= USER_SPACE_END {
@@ -131,7 +131,7 @@ impl AddressSpace {
         Some(((e & ADDRESS_MASK) + (va & (PAGE - 1)), e & !ADDRESS_MASK))
     }
 
-    /// M15: zmienia flagi zamapowanej strony (segmenty ELF dzielące stronę).
+    /// Changes the flags of a mapped page (ELF segments sharing a page).
     pub fn set_flags(&mut self, va: u64, flags: u64) -> bool {
         let Some(pdpt) = Self::next(self.pml4, index(va, 4), false) else { return false };
         let Some(pd) = Self::next(pdpt, index(va, 3), false) else { return false };
@@ -144,8 +144,8 @@ impl AddressSpace {
         true
     }
 
-    /// M15: zapisuje bajty pod adresem procesu (strony muszą być
-    /// zamapowane) – przez direct map, proces nie musi być aktywny.
+    /// Writes bytes at a process address (the pages must be
+    /// mapped) – through the direct map, the process does not have to be active.
     pub fn write_bytes(&mut self, va: u64, data: &[u8]) -> bool {
         let mut done = 0usize;
         while done < data.len() {
@@ -161,7 +161,7 @@ impl AddressSpace {
         true
     }
 
-    /// Wpis PML4 (testy: górna połowa wspólna z kernelem).
+    /// PML4 entry (tests: upper half shared with the kernel).
     #[allow(dead_code)]
     pub fn pml4_entry(&self, i: usize) -> u64 {
         table(self.pml4)[i]
@@ -169,8 +169,8 @@ impl AddressSpace {
 }
 
 impl Drop for AddressSpace {
-    /// Oddaje wszystkie strony procesu, tablice i PML4.  Przestrzeń nie
-    /// może być wtedy aktywna (CR3) – sprząta ją inne zadanie.
+    /// Frees all of the process's pages, tables and the PML4.  The space must not
+    /// be active (CR3) at that time – another task cleans it up.
     fn drop(&mut self) {
         let pml4 = table(self.pml4);
         for i4 in 0..256 {

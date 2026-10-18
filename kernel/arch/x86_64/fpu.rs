@@ -1,29 +1,29 @@
-// M13b: stan FPU/SSE procesów (FXSAVE/FXRSTOR).
+// FPU/SSE state of processes (FXSAVE/FXRSTOR).
 //
-// Kernel jest soft-float – sam nigdy nie używa x87/SSE.  Rejestry FPU/XMM
-// należą więc zawsze do procesu użytkownika, który ostatnio działał.
-// Scheduler przełącza je "na twardo" (eager) przy każdej zmianie zadania:
-//   * z procesu  -> FXSAVE do jego Task (512 B),
-//   * do procesu -> CR0.TS = 0 i FXRSTOR z jego Task,
-//   * do zadania kernela -> CR0.TS = 1 (instrukcja FPU/SSE w kernelu = #NM
-//     = raport błędu kernela).
-// Bez leniwego przełączania (pierwsze użycie -> #NM -> zapis): prościej
-// i bez podatności typu LazyFP, a przy SMP (M17) nie trzeba śledzić, który
-// rdzeń trzyma czyj stan.
+// The kernel is soft-float – it never uses x87/SSE itself.  The FPU/XMM registers
+// therefore always belong to the user process that ran last.
+// The scheduler switches them eagerly on every task switch:
+//   * from a process  -> FXSAVE into its Task (512 B),
+//   * to a process -> CR0.TS = 0 and FXRSTOR from its Task,
+//   * to a kernel task -> CR0.TS = 1 (an FPU/SSE instruction in the kernel = #NM
+//     = kernel error report).
+// No lazy switching (first use -> #NM -> save): simpler
+// and free of LazyFP-type vulnerabilities, and with SMP there is no need to track which
+// core holds whose state.
 //
-// Instrukcje jako bajty (`fxsave64 [rdi]` / `fxrstor64 [rdi]`), żeby nie
-// zależeć od tego, czy asembler przyjmie je w buildzie soft-float.
-// XSAVE/XRSTOR (AVX, CPUID, XCR0) – później.
+// Instructions as bytes (`fxsave64 [rdi]` / `fxrstor64 [rdi]`), so as not to
+// depend on whether the assembler accepts them in a soft-float build.
+// XSAVE/XRSTOR (AVX, CPUID, XCR0) – later.
 
 use core::arch::asm;
 
-/// Obraz FXSAVE (512 B, wyrównany do 16).
+/// FXSAVE image (512 B, 16-byte aligned).
 #[repr(C, align(16))]
 pub struct FxState(pub [u8; 512]);
 
 impl FxState {
-    /// Stan po FNINIT + domyślny MXCSR: FCW = 0x037F (wszystkie wyjątki x87
-    /// zamaskowane), MXCSR = 0x1F80 (wyjątki SSE zamaskowane), rejestry 0.
+    /// State after FNINIT + default MXCSR: FCW = 0x037F (all x87 exceptions
+    /// masked), MXCSR = 0x1F80 (SSE exceptions masked), registers 0.
     pub const fn initial() -> Self {
         let mut b = [0u8; 512];
         b[0] = 0x7F;
@@ -41,8 +41,8 @@ const CR0_NE: u64 = 1 << 5;
 const CR4_OSFXSR: u64 = 1 << 9;
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
 
-/// CR0/CR4 pod FXSAVE i SSE w ring 3; zostawia CR0.TS = 1 (bieżące zadanie
-/// to kernel).
+/// CR0/CR4 set up for FXSAVE and SSE in ring 3; leaves CR0.TS = 1 (the current task
+/// is the kernel).
 pub fn init() {
     unsafe {
         let mut cr0: u64;
@@ -82,13 +82,13 @@ pub fn cr4() -> u64 {
     v
 }
 
-/// FXSAVE64 – wymaga CR0.TS = 0.
+/// FXSAVE64 – requires CR0.TS = 0.
 #[inline]
 pub unsafe fn save(state: *mut FxState) {
     unsafe { asm!(".byte 0x48, 0x0f, 0xae, 0x07", in("rdi") state, options(nostack)) };
 }
 
-/// FXRSTOR64 – wymaga CR0.TS = 0.
+/// FXRSTOR64 – requires CR0.TS = 0.
 #[inline]
 pub unsafe fn restore(state: *const FxState) {
     unsafe { asm!(".byte 0x48, 0x0f, 0xae, 0x0f", in("rdi") state, options(nostack)) };

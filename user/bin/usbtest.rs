@@ -1,17 +1,17 @@
-// M20.b/c: test kontrolera USB (xHCI) i usługi usbd – samotest jądra USB TEST.
+// USB controller (xHCI) and usbd service test – the kernel's USB TEST self-test.
 //
-// Z HW_ROOT w slocie 3 (USB TEST 1/2):
-//   - dev_find: tylko z HW_ROOT (EBADF), klasa > 24 bity (EINVAL), kontrolery
-//     xHCI po klasie 0C0330, ENOENT za ostatnim i dla klasy, której nie ma,
-//   - usbd na pierwszym kontrolerze: start (reset, pierścienie, przerwanie),
-//     "status" (No-Op zakończone, porty, podłączony pendrive startowy QEMU),
-//     "noop 2000", zła prośba,
-//   - kill usbd w trakcie serii komend -> nowa instancja robi pełny reset i
-//     działa (kontroler przerwany w połowie pracy),
-//   - samodzielny koniec usbd, gdy nikt nie może go już wywołać; urządzenie wolne.
-// Z kanałem svc w slocie 3 (USB TEST 2/2, `init test /bin/usbtest`): init sam
-// znalazł kontroler po klasie i uruchomił usługę usb0 – rozmowa przez svc.
-// Wynik: "usbtest: N checks OK, ..." i linia "usbtest-result k=v".
+// With HW_ROOT in slot 3 (USB TEST 1/2):
+//   - dev_find: HW_ROOT only (EBADF), class > 24 bits (EINVAL), xHCI
+//     controllers by class 0C0330, ENOENT past the last one and for a class that does not exist,
+//   - usbd on the first controller: start (reset, rings, interrupt),
+//     "status" (No-Op completed, ports, the QEMU boot flash drive attached),
+//     "noop 2000", an invalid request,
+//   - kill usbd during a series of commands -> a new instance does a full reset and
+//     works (controller interrupted mid-work),
+//   - usbd exits on its own once nobody can call it anymore; the device is free.
+// With the svc channel in slot 3 (USB TEST 2/2, `init test /bin/usbtest`): init itself
+// found the controller by class and started the usb0 service – we talk over svc.
+// Result: "usbtest: N checks OK, ..." and a line "usbtest-result k=v".
 #![no_std]
 #![no_main]
 
@@ -35,14 +35,14 @@ macro_rules! check {
     };
 }
 
-/// Wartość `klucz=` z linii "usbd-status".
+/// Value of `key=` from the "usbd-status" line.
 fn field(text: &str, key: &str) -> Option<u64> {
     let line = text.lines().find(|l| l.starts_with("usbd-status"))?;
     let v = line.split(' ').find_map(|w| w.strip_prefix(key)?.strip_prefix('='))?;
     v.parse().ok()
 }
 
-/// Prośba do usbd i odpowiedź (tekst w `out`).
+/// Request to usbd and its reply (text in `out`).
 fn ask<'a>(c: u64, req: &str, out: &'a mut [u8]) -> Option<&'a str> {
     if chan_send(c, req.as_bytes(), 0) != 0 {
         return None;
@@ -55,8 +55,8 @@ fn ask<'a>(c: u64, req: &str, out: &'a mut [u8]) -> Option<&'a str> {
     core::str::from_utf8(&out[..r as usize]).ok()
 }
 
-/// usbd na urządzeniu `bdf`: (pid, kanał połączeń).  EBUSY (poprzednia
-/// instancja jeszcze się kończy) – ponawia do 2 s.
+/// usbd on device `bdf`: (pid, connection channel).  EBUSY (the previous
+/// instance is still exiting) – retries for up to 2 s.
 fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
     let t0 = uptime_ms();
     let dev = loop {
@@ -70,9 +70,9 @@ fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
         sleep_ms(5);
     };
     let (listen, srv) = channel_create().ok()?;
-    // M20.e: kopia uchwytu INPUT (jeśli jądro go dało) – w slocie 5, jak od init.
+    // Copy of the INPUT handle (if the kernel gave one) – in slot 5, as from init.
     let input = (3..16).find(|&h| handle_info(h).map(|(k, _)| k) == Ok(KIND_INPUT));
-    // M20.f: i kopia BLK (slot 6) – pendrive'y jako dyski jądra.
+    // And a copy of BLK (slot 6) – flash drives as kernel disks.
     let blk = (3..16).find(|&h| handle_info(h).map(|(k, _)| k) == Ok(KIND_BLK));
     let mut map = [(1u64, 1u64), (dev, 3), (srv, 4), (0, 0), (0, 0)];
     let mut n = 3;
@@ -94,7 +94,7 @@ fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
     Some((pid as u64, listen))
 }
 
-/// M20.f: katalog /usbN z testowym pendrive'em (plik DESOOS.TST); czeka do `ms`.
+/// /usbN directory with the test flash drive (file DESOOS.TST); waits up to `ms`.
 fn find_disk(ms: u64) -> Option<(u8, u64)> {
     let t0 = uptime_ms();
     loop {
@@ -112,7 +112,7 @@ fn find_disk(ms: u64) -> Option<(u8, u64)> {
     }
 }
 
-/// "/usbN/plik" w buforze.
+/// "/usbN/file" in the buffer.
 fn usb_path<'a>(buf: &'a mut [u8; 20], n: u8, file: &str) -> &'a str {
     let mut k = 0;
     for &c in b"/usb" {
@@ -134,7 +134,7 @@ fn usb_path<'a>(buf: &'a mut [u8; 20], n: u8, file: &str) -> &'a str {
     core::str::from_utf8(&buf[..k]).unwrap_or("/")
 }
 
-/// Cały plik do `buf` (≤ rozmiar bufora); -errno albo długość.
+/// Whole file into `buf` (≤ buffer size); -errno or the length.
 fn read_file(path: &str, buf: &mut [u8]) -> i64 {
     let fd = open(path, O_READ);
     if fd < 0 {
@@ -169,13 +169,13 @@ fn connect(listen: u64) -> Option<u64> {
     Some(mine)
 }
 
-/// Tryb usługi: init uruchomił usb0 – status przez kanał svc.
+/// Service mode: init started usb0 – status over the svc channel.
 fn via_init() -> i32 {
     let mut n = 0;
     let mut out = [0u8; 2048];
     let t0 = uptime_ms();
     let mut status: Option<usize> = None;
-    // usbd startuje równolegle z testem – ponawiaj do 3 s.
+    // usbd starts in parallel with the test – retry for up to 3 s.
     while status.is_none() && uptime_ms() - t0 < 3000 {
         if let Ok(c) = svc_connect("usb0") {
             if let Some(t) = ask(c, "status", &mut out) {
@@ -194,7 +194,7 @@ fn via_init() -> i32 {
     check!(n, field(text, "noops").unwrap_or(0) >= 203 && field(text, "errors") == Some(0), "usb0 status: {:?}", text);
     check!(n, field(text, "connected").unwrap_or(0) >= 1, "usb0 sees no connected device: {:?}", text);
     check!(n, field(text, "devices") == Some(5) && field(text, "hubs") == Some(1), "usb0 devices (want 5, 1 hub): {:?}", text);
-    // lsusb przez kanał svc (jak z shella).
+    // lsusb over the svc channel (as from the shell).
     let mut l = [0u8; 4096];
     let mut len = 0;
     if let Ok((r, w)) = pipe() {
@@ -216,15 +216,15 @@ fn via_init() -> i32 {
     check!(n, lt.contains("usb0 port") && lt.contains("03/01/01") && lt.contains("08/06/50"), "lsusb output: {:?}", lt);
     check!(n, lt.contains("keyboard ready (input to kernel)"), "init did not give usbd the INPUT handle: {:?}", lt);
 
-    // M20.f: pendrive testowy (obraz FAT32 z test.sh) – jądro zamontowało go
-    // samo; pliki czytane przez VFS -> FAT32 -> ublk -> usbd -> xHCI.
+    // Test flash drive (FAT32 image from test.sh) – the kernel mounted it
+    // by itself; files are read via VFS -> FAT32 -> ublk -> usbd -> xHCI.
     let disk = find_disk(10_000);
     check!(n, disk.is_some(), "test USB disk (DESOOS.TST) not mounted in /usb0..3");
     let (u, mount_ms) = disk.unwrap();
     let l2 = ask_lsusb(&mut l);
     check!(n, l2.matches("disk sd").count() == 2 && l2.contains("read-only"), "lsusb: 2 disks ready, read-only: {:?}", l2);
-    // Pliki identyczne z /bin (te same programy wgrane do obrazu).
-    // Bufory na stercie (stos procesu jest mały).
+    // Files identical to /bin (the same programs copied into the image).
+    // Buffers on the heap (the process stack is small).
     let (Ok(av), Ok(bv)) = (mmap(131072, PROT_READ | PROT_WRITE), mmap(131072, PROT_READ | PROT_WRITE)) else { return 2 };
     let a = unsafe { core::slice::from_raw_parts_mut(av as *mut u8, 131072) };
     let b = unsafe { core::slice::from_raw_parts_mut(bv as *mut u8, 131072) };
@@ -234,7 +234,7 @@ fn via_init() -> i32 {
         let lb = read_file(bin, b);
         check!(n, la > 0 && la == lb && a[..la as usize] == b[..lb as usize], "/usb{}/{} differs from {} ({} vs {} bytes)", u, usb, bin, la, lb);
     }
-    // 4 MiB wzoru: każde słowo sprawdzone, czas -> KiB/s.
+    // 4 MiB of pattern: every word checked, time -> KiB/s.
     let mut p = [0u8; 20];
     let fd = open(usb_path(&mut p, u, "DATA.BIN"), O_READ);
     check!(n, fd >= 0, "open DATA.BIN: {}", fd);
@@ -258,7 +258,7 @@ fn via_init() -> i32 {
     close(fd as u64);
     check!(n, total == 4 * 1024 * 1024 && bad == 0, "DATA.BIN: {} bytes, {} bad words", total, bad);
     let kbs = total * 1000 / 1024 / ms;
-    // Zapis: każda próba odrzucona, nic się nie zmienia.
+    // Writes: every attempt rejected, nothing changes.
     let mut p = [0u8; 20];
     let newf = usb_path(&mut p, u, "NEW.TXT");
     let w = open(newf, O_WRITE | O_CREATE);
@@ -284,7 +284,7 @@ fn via_init() -> i32 {
     0
 }
 
-/// lsusb (przez kanał svc) do bufora.
+/// lsusb (over the svc channel) into a buffer.
 fn ask_lsusb(l: &mut [u8; 4096]) -> &str {
     let mut len = 0;
     if let Ok((r, w)) = pipe() {
@@ -305,9 +305,9 @@ fn ask_lsusb(l: &mut [u8; 4096]) -> &str {
     core::str::from_utf8(&l[..len]).unwrap_or("")
 }
 
-/// M20.d: `init test /bin/usbtest hotplug` – jądro (USB TEST 6/6) każe QEMU
-/// odłączyć dysk za hubem, podłączyć go z powrotem i odłączyć cały hub; tu
-/// obserwujemy usb0: urządzeń 5 -> 4 -> 5 -> 2, bez błędów enumeracji.
+/// `init test /bin/usbtest hotplug` – the kernel (USB TEST 6/6) tells QEMU to
+/// detach the disk behind the hub, reattach it and detach the whole hub; here
+/// we watch usb0: devices 5 -> 4 -> 5 -> 2, with no enumeration errors.
 fn hotplug() -> i32 {
     let mut n = 0;
     let mut out = [0u8; 2048];
@@ -321,7 +321,7 @@ fn hotplug() -> i32 {
         }
     }
     check!(n, c != 0, "no usb0 service");
-    // Kolejne liczby urządzeń, jakie mamy zobaczyć.
+    // Successive device counts we expect to see.
     let want = [5u64, 4, 5, 2];
     let mut seen = 0usize;
     let mut last = 0u64;
@@ -352,9 +352,9 @@ fn hotplug() -> i32 {
     0
 }
 
-/// M20.g: `usbtest reader PLIK` – czyta plik w kółko, aż odczyt się nie uda;
-/// kod 0 = błąd przyszedł (z czasem od ostatniego udanego odczytu), 1 = 30 s bez
-/// błędu albo zawieszenie (rodzic i tak zmierzy czas).
+/// `usbtest reader FILE` – reads the file in a loop until a read fails;
+/// code 0 = the error arrived (with the time since the last successful read), 1 = 30 s without
+/// an error or a hang (the parent measures the time anyway).
 fn reader(path: &str) -> i32 {
     let Ok(buf) = mmap(65536, PROT_READ | PROT_WRITE) else { return 2 };
     let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, 65536) };
@@ -387,7 +387,7 @@ fn reader(path: &str) -> i32 {
     }
 }
 
-/// pid usługi z listy init ("usb0 running pid 12 restarts 0 (/bin/usbd)").
+/// Service pid from init's list ("usb0 running pid 12 restarts 0 (/bin/usbd)").
 fn service(name: &str) -> Option<(u64, bool)> {
     let mut b = [0u8; 1024];
     let n = svc_list(&mut b).ok()?;
@@ -397,7 +397,7 @@ fn service(name: &str) -> Option<(u64, bool)> {
     Some((pid, line.contains(" broken ")))
 }
 
-/// Czeka na działającą instancję usługi z pid innym niż `old`.
+/// Waits for a running service instance with a pid other than `old`.
 fn new_instance(name: &str, old: u64, ms: u64) -> Option<u64> {
     let t0 = uptime_ms();
     while uptime_ms() - t0 < ms {
@@ -411,9 +411,9 @@ fn new_instance(name: &str, old: u64, ms: u64) -> Option<u64> {
     None
 }
 
-/// M20.g: `init test /bin/usbtest robust` – kill usbd w trakcie odczytu
-/// pliku z pendrive'a (czytający dostaje błąd, nie wisi), restart przez init
-/// (dysk i klawiatura wracają, pliki dalej poprawne), 5 awarii w 30 s → broken.
+/// `init test /bin/usbtest robust` – kill usbd while reading a
+/// file from the flash drive (the reader gets an error, does not hang), restart by init
+/// (disk and keyboard come back, files still correct), 5 failures in 30 s → broken.
 fn robust() -> i32 {
     let mut n = 0;
     let disk = find_disk(15_000);
@@ -421,7 +421,7 @@ fn robust() -> i32 {
     let (u, _) = disk.unwrap();
     let pid0 = service("usb0").map(|x| x.0).unwrap_or(0);
     check!(n, pid0 != 0, "usb0 pid not known (svc list)");
-    // 1. Kill w trakcie odczytu.
+    // 1. Kill during a read.
     let mut p = [0u8; 20];
     let path = usb_path(&mut p, u, "DATA.BIN");
     let rd = match pipe() {
@@ -442,7 +442,7 @@ fn robust() -> i32 {
     let rtext = core::str::from_utf8(&out[..k.max(0) as usize]).unwrap_or("").trim();
     check!(n, w.map(|(_, s)| s) == Ok(0) && t_err < 3000, "reader after kill: {:?} in {} ms: {:?}", w, t_err, rtext);
     check!(n, rtext.contains("bytes") && !rtext.starts_with("reader: 0 bytes"), "reader read nothing before the kill: {:?}", rtext);
-    // 2. Restart: nowa instancja, dysk z powrotem, pliki poprawne, klawiatura gotowa.
+    // 2. Restart: new instance, disk back, files correct, keyboard ready.
     let t_restart = uptime_ms();
     let pid1 = new_instance("usb0", pid0, 5000);
     check!(n, pid1.is_some(), "usb0 not restarted by init");
@@ -467,7 +467,7 @@ fn robust() -> i32 {
         sleep_ms(50);
     }
     check!(n, kbd, "keyboard not back after the restart");
-    // 3. Jeszcze 4 awarie (kill zaraz po starcie) – razem 5 w 30 s → broken.
+    // 3. 4 more failures (kill right after start) – 5 in total within 30 s → broken.
     let mut last = pid1.unwrap();
     for i in 0..4 {
         if i > 0 {
@@ -535,9 +535,9 @@ fn main(args: Args) -> i32 {
     check!(n, st.contains("usbd-status"), "usbd status: {:?}", st);
     check!(n, field(st, "noops").unwrap_or(0) >= 203 && field(st, "errors") == Some(0), "No-Op commands not completed: {:?}", st);
     check!(n, field(st, "ports").unwrap_or(0) >= 1, "no ports: {:?}", st);
-    // QEMU: pendrive startowy (usb-storage) wisi na tym kontrolerze.
+    // QEMU: the boot flash drive (usb-storage) is attached to this controller.
     check!(n, field(st, "connected").unwrap_or(0) >= 1, "boot USB stick not seen on any port: {:?}", st);
-    // M20.c: urządzenia rozpoznane.
+    // Devices recognized.
     check!(n, field(st, "devices") == Some(5) && field(st, "failures") == Some(0) && field(st, "hubs") == Some(1), "QEMU USB devices not enumerated (want 5: 2 storage, keyboard, hub, mouse behind it): {:?}", st);
     let (hid_n, inp, r0) = (field(st, "hid"), field(st, "input"), field(st, "hid_reports").unwrap_or(0));
     let mut lbuf = [0u8; 4096];
@@ -547,16 +547,16 @@ fn main(args: Args) -> i32 {
     check!(n, l.contains("03/01/02") && l.contains("mouse"), "list: no HID boot mouse 03/01/02: {:?}", l);
     let lines = l.lines().filter(|x| x.contains(": ")).count();
     check!(n, lines == 5 && l.contains("0627:0001") && l.contains("address "), "list: {} lines: {:?}", lines, l);
-    // M20.d: hub i urządzenia za nim (port „N.1”, „N.2”).
+    // Hub and the devices behind it (ports "N.1", "N.2").
     check!(n, l.contains("hub ready (8 ports, USB 2)") && l.contains(".1: 0627:0001") && l.contains(".2: 46f4:0001"), "list: hub with mouse (.1) and disk (.2) behind it: {:?}", l);
-    // M20.f: oba pendrive'y w jądrze (sdX), testowy zamontowany przez jądro.
+    // Both flash drives in the kernel (sdX), the test one mounted by the kernel.
     let disk = find_disk(10_000);
     check!(n, disk.is_some(), "test USB disk not mounted (blk_attach / usb-disks)");
     let mount_ms = disk.unwrap().1;
     let st3 = ask(c, "status", &mut out).unwrap_or("");
     check!(n, field(st3, "storage") == Some(2) && field(st3, "disks") == Some(2) && field(st3, "blk") == Some(1) && field(st3, "stor_errors") == Some(0) && field(st3, "stor_reads").unwrap_or(0) > 0, "storage status: {:?}", st3);
-    // M20.e: klawiatura i mysz skonfigurowane, raporty płyną (Set Idle 16 ms –
-    // QEMU wysyła wtedy raport co 16 ms także bez wciśniętych klawiszy).
+    // Keyboard and mouse configured, reports flowing (Set Idle 16 ms –
+    // QEMU then sends a report every 16 ms even with no keys pressed).
     check!(n, hid_n == Some(2) && inp == Some(1), "HID keyboard + mouse not configured: hid {:?} input {:?}", hid_n, inp);
     check!(n, l.contains("keyboard ready (input to kernel)") && l.contains("mouse ready"), "list: HID not ready: {:?}", l);
     let r = ask(c, "idle 16", &mut out).unwrap_or("");
@@ -576,7 +576,7 @@ fn main(args: Args) -> i32 {
     let r = ask(c, "format c:", &mut out).unwrap_or("");
     check!(n, r.starts_with("error"), "unknown request must fail: {:?}", r);
 
-    // Kill w trakcie serii komend -> nowa instancja (pełny reset) działa.
+    // Kill during a series of commands -> a new instance (full reset) works.
     check!(n, chan_send(c, b"noop 100000", 0) == 0, "send noop 100000");
     sleep_ms(30);
     kill(pid);
@@ -593,10 +593,10 @@ fn main(args: Args) -> i32 {
     let restart_ms = uptime_ms() - t1;
     check!(n, field(st, "noops").unwrap_or(0) >= 203 && field(st, "errors") == Some(0), "restarted usbd: {:?}", st);
     check!(n, field(st, "devices") == Some(5), "devices after restart: {:?}", st);
-    // Dysk zniknął razem z poprzednim usbd i wrócił z nowym.
+    // The disk disappeared with the previous usbd and came back with the new one.
     check!(n, find_disk(10_000).is_some(), "test USB disk not mounted again after the usbd restart");
 
-    // Kill w trakcie enumeracji (start + debounce 100 ms) -> nowa instancja działa.
+    // Kill during enumeration (start + 100 ms debounce) -> a new instance works.
     close(c);
     close(listen);
     kill(pid);
@@ -615,12 +615,12 @@ fn main(args: Args) -> i32 {
     let c = connect(listen).unwrap_or(0);
     let st = ask(c, "status", &mut out).unwrap_or("");
     check!(n, field(st, "devices") == Some(5) && field(st, "errors") == Some(0), "after kill during enumeration: {:?}", st);
-    // M20.h: czas enumeracji (reset portu -> urządzenie gotowe) – 5 urządzeń tej instancji.
+    // Enumeration time (port reset -> device ready) – 5 devices of this instance.
     let enum_avg = field(st, "enum_avg_ms").unwrap_or(0);
     let enum_max = field(st, "enum_max_ms").unwrap_or(0);
     check!(n, field(st, "enum_count") == Some(5) && enum_max >= enum_avg, "enumeration times: {:?}", st);
 
-    // Koniec: nikt nie może już wywołać usbd -> kończy się sam (kod 0).
+    // End: nobody can call usbd anymore -> it exits on its own (code 0).
     close(c);
     close(listen);
     let w = wait(pid, 0);

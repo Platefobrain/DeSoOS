@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# M20.f: obraz testowego pendrive'a dla ./test.sh (QEMU usb-storage, tylko do
-# odczytu) – bez mtools i bez sudo: MBR z jedną partycją FAT32 (typ 0x0C, od
-# sektora 2048, jak na prawdziwym pendrivie), klaster 512 B, katalog główny:
-#   DESOOS.TST  – znacznik (tekst),
-#   DATA.BIN    – 4 MiB wzoru: słowo 32-bit nr k = (k * 2654435761) mod 2^32
-#                 (jądro / usbtest sprawdzają każdy bajt i mierzą MB/s),
-#   pliki z argumentów (nazwa 8.3 = nazwa pliku wielkimi literami).
+# Test USB stick image for ./test.sh (QEMU usb-storage, read-
+# only) – no mtools and no sudo: an MBR with one FAT32 partition (type 0x0C, starting
+# at sector 2048, as on a real USB stick), 512 B clusters, root directory:
+#   DESOOS.TST  – marker (text),
+#   DATA.BIN    – 4 MiB pattern: 32-bit word no. k = (k * 2654435761) mod 2^32
+#                 (the kernel / usbtest check every byte and measure MB/s),
+#   files from the arguments (8.3 name = file name in upper case).
 #
-#   python3 tests/mkfat32.py obraz.img [plik ...]
+#   python3 tests/mkfat32.py image.img [file ...]
 import struct
 import sys
 import os
@@ -45,7 +45,7 @@ def main():
 
     total = SIZE_MB * 1024 * 1024 // SECTOR
     part = total - PART_START
-    # Rozmiar FAT: klastry = (part - zarezerwowane - FAT-y) / 1; wpis 4 B.
+    # FAT size: clusters = (part - reserved - FATs) / 1; 4 B per entry.
     fat = 1
     while True:
         clusters = part - RESERVED - NUM_FATS * fat
@@ -57,18 +57,18 @@ def main():
 
     img = bytearray(total * SECTOR)
 
-    # MBR: jedna partycja FAT32 LBA (0x0C).
+    # MBR: one FAT32 LBA partition (0x0C).
     mbr = bytearray(SECTOR)
     mbr[446:462] = struct.pack("<B3sB3sII", 0x80, b"\xfe\xff\xff", 0x0C, b"\xfe\xff\xff", PART_START, part)
     mbr[510:512] = b"\x55\xaa"
     img[0:SECTOR] = mbr
 
-    # Klastry: 2 = katalog główny, potem pliki (ciągłe).
+    # Clusters: 2 = root directory, then the files (contiguous).
     fat_entries = [0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF]
     next_cluster = 3
     root = bytearray(SECTOR)
     root[0:11] = LABEL
-    root[11] = 0x08  # etykieta wolumenu
+    root[11] = 0x08  # volume label
     entries = 1
     for name, data in files:
         n = max(1, (len(data) + SECTOR - 1) // SECTOR) if data else 0
@@ -99,7 +99,7 @@ def main():
         off = (PART_START + RESERVED + c * fat) * SECTOR
         img[off:off + len(fat_bytes)] = fat_bytes
 
-    # Sektor startowy FAT32 (+ kopia w sektorze 6) i FSInfo (sektor 1, kopia 7).
+    # FAT32 boot sector (+ a copy in sector 6) and FSInfo (sector 1, copy in 7).
     bs = bytearray(SECTOR)
     bs[0:3] = b"\xeb\x58\x90"
     bs[3:11] = b"DESOOS  "
@@ -115,9 +115,9 @@ def main():
     struct.pack_into("<I", fsinfo, 0, 0x41615252)
     struct.pack_into("<III", fsinfo, 484, 0x61417272, clusters - (next_cluster - 2), next_cluster)
     struct.pack_into("<I", fsinfo, 508, 0xAA550000)
-    # M20.h: główny FSInfo celowo NIEAKTUALNY („wszystko wolne” – jak pendrive
-    # zapisany przez system, który go nie poprawia); kopia w sektorze 7 –
-    # prawdziwa liczba.  Jądro ma policzyć wolne z FAT (test porównuje z kopią).
+    # The primary FSInfo is deliberately STALE („everything free” – like a USB stick
+    # written by a system that does not update it); the copy in sector 7 has the
+    # real number.  The kernel must count free clusters from the FAT (the test compares with the copy).
     stale = bytearray(fsinfo)
     struct.pack_into("<I", stale, 488, clusters)
     for s, data in ((0, bs), (1, stale), (6, bs), (7, fsinfo)):

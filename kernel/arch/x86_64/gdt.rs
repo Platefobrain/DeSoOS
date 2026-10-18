@@ -1,16 +1,16 @@
-// M4: GDT + TSS.
+// GDT + TSS.
 //
-// Układ selektorów (zgodny z wymaganiami SYSCALL/SYSRET na M13–M14:
+// Selector layout (matching the SYSCALL/SYSRET requirements:
 // STAR[47:32] = 0x08 -> CS = 0x08, SS = 0x10;
 // STAR[63:48] = 0x13 -> SS = 0x13 + 8 = 0x1b, CS = 0x13 + 16 = 0x23 – RPL 3
-// już w selektorze, bo AMD go nie wymusza, patrz syscall.rs):
+// already in the selector, because AMD does not enforce it, see syscall.rs):
 //
 //   0x00  null
 //   0x08  kernel code (64-bit)
 //   0x10  kernel data
 //   0x18  user data   (DPL 3)
 //   0x20  user code   (DPL 3, 64-bit)
-//   0x28  TSS (deskryptor 16-bajtowy, zajmuje sloty 5 i 6)
+//   0x28  TSS (16-byte descriptor, occupies slots 5 and 6)
 
 use core::arch::asm;
 use core::mem::size_of;
@@ -29,75 +29,75 @@ pub const TSS_SELECTOR: u16 = 0x28;
 
 pub const GDT_ENTRIES: usize = 7;
 
-// Numery IST (1..=7) używane przez bramki IDT.
+// IST numbers (1..=7) used by the IDT gates.
 pub const IST_DOUBLE_FAULT: u8 = 1;
 pub const IST_NMI: u8 = 2;
 pub const IST_MACHINE_CHECK: u8 = 3;
-/// #UD, #NP, #SS, #GP, #TS – wyjątki po których kernel i tak się zatrzymuje.
+/// #UD, #NP, #SS, #GP, #TS – exceptions after which the kernel halts anyway.
 pub const IST_FATAL: u8 = 4;
-/// M17b.c: #PF już bez IST (stos zadania) – stos 5 zostaje w rezerwie.
+/// #PF no longer uses IST (task stack) – stack 5 stays in reserve.
 #[allow(dead_code)]
 pub const IST_PAGE_FAULT: u8 = 5;
 
 const IST_COUNT: usize = 5;
 pub const IST_STACK_SIZE: usize = 16 * 1024;
 
-// RSP0 – stos, na który CPU przełączy się przy przerwaniu / wyjątku z ring 3.
-// Jeden TSS na CPU; M13a: scheduler przy każdym przełączeniu wpisuje tu
-// szczyt stosu kernela bieżącego zadania (`set_rsp0`).  Na starcie: stos
-// startowy z DSB.
+// RSP0 – the stack the CPU switches to on an interrupt / exception from ring 3.
+// One TSS per CPU; on every switch the scheduler writes here the
+// top of the current task's kernel stack (`set_rsp0`).  At boot: the boot
+// stack from the bootloader.
 fn kernel_stack_top() -> u64 {
     crate::memory::kernel_layout().stack_top
 }
 
-/// TSS procesora `c` (M17: każdy CPU ma własny TSS i własną GDT – deskryptor
-/// TSS w GDT dostaje bit "busy" po `ltr`, więc nie da się ich współdzielić).
+/// TSS of processor `c` (every CPU has its own TSS and its own GDT – the TSS
+/// descriptor in the GDT gets the "busy" bit after `ltr`, so they cannot be shared).
 fn tss(c: usize) -> *mut Tss {
     unsafe { addr_of_mut!(TSS[c]) }
 }
 
-/// Ustawia TSS.RSP0 bieżącego CPU (wołać przy wyłączonych przerwaniach – scheduler).
+/// Sets TSS.RSP0 of the current CPU (call with interrupts disabled – scheduler).
 pub fn set_rsp0(top: u64) {
     unsafe { core::ptr::write_unaligned(addr_of_mut!((*tss(cpu::id())).rsp[0]), top) };
 }
 
-/// Aktualne TSS.RSP0 bieżącego CPU (testy / diagnostyka).
+/// Current TSS.RSP0 of the current CPU (tests / diagnostics).
 #[allow(dead_code)]
 pub fn rsp0() -> u64 {
     unsafe { core::ptr::read_unaligned(addr_of!((*tss(cpu::id())).rsp[0])) }
 }
 
-/// Deskryptor GDT (testy: segmenty użytkownika).
+/// GDT descriptor (tests: user segments).
 #[allow(dead_code)]
 pub fn descriptor(index: usize) -> u64 {
     unsafe { (*addr_of!(GDT[cpu::id()]))[index] }
 }
 
-// Stosy IST na start (.bss, bez stron-strażników).  M16: po starcie
-// pamięci `move_ist_to_guarded_stacks` przenosi IST na stosy z obszaru
-// stosów zadań (strona-strażnik pod spodem – przepełnienie = #PF/#DF,
-// a nie ciche nadpisanie sąsiednich danych w .bss).
+// Boot IST stacks (.bss, no guard pages).  After memory
+// init `move_ist_to_guarded_stacks` moves the IST onto stacks from the
+// task stack area (guard page below – overflow = #PF/#DF,
+// not a silent overwrite of neighbouring data in .bss).
 #[repr(C, align(16))]
 struct IstStack([u8; IST_STACK_SIZE]);
 
 static mut IST_STACKS: [IstStack; IST_COUNT] =
     [const { IstStack([0; IST_STACK_SIZE]) }; IST_COUNT];
 
-/// Zakresy [dół, szczyt) stosów IST w użyciu (po przeniesieniu: nowe),
-/// M17: dla każdego CPU.
+/// [bottom, top) ranges of the IST stacks in use (after the move: the new ones),
+/// for every CPU.
 static IST_RANGES: [[[core::sync::atomic::AtomicU64; 2]; IST_COUNT]; MAX_CPUS] =
     [const { [const { [core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0)] }; IST_COUNT] }; MAX_CPUS];
 
-/// Szczyt stosu IST nr `ist` (1..=IST_COUNT) z TSS bieżącego CPU (testy / diagnostyka).
+/// Top of IST stack number `ist` (1..=IST_COUNT) from the current CPU's TSS (tests / diagnostics).
 #[allow(dead_code)]
 pub fn ist_top(ist: u8) -> u64 {
     unsafe { core::ptr::read_unaligned(addr_of!((*tss(cpu::id())).ist[ist as usize - 1])) }
 }
 
-/// Czy `rsp` leży na którymś stosie IST (starym w .bss albo nowym).
-/// M16: scheduler nie może przełączyć zadania na stosie IST – kolejny
-/// wyjątek tego typu zacząłby od szczytu tego samego stosu i nadpisał
-/// ramkę zadania, które oddało CPU.
+/// Whether `rsp` lies on one of the IST stacks (the old one in .bss or a new one).
+/// The scheduler must not switch tasks on an IST stack – the next
+/// exception of that type would start from the top of the same stack and overwrite
+/// the frame of the task that gave up the CPU.
 pub fn on_ist_stack(rsp: u64) -> bool {
     use core::sync::atomic::Ordering;
     let bss_start = addr_of!(IST_STACKS) as u64;
@@ -111,7 +111,7 @@ pub fn on_ist_stack(rsp: u64) -> bool {
     })
 }
 
-/// IST procesora `c` na nowe stosy ze stronami-strażnikami; `false` = brak pamięci.
+/// Moves the IST of processor `c` onto new stacks with guard pages; `false` = out of memory.
 fn guarded_ist_for(c: usize) -> usize {
     use core::sync::atomic::Ordering;
     let mut moved = 0;
@@ -120,7 +120,7 @@ fn guarded_ist_for(c: usize) -> usize {
             continue;
         };
         let (bottom, top) = (stack.bottom(), stack.top());
-        core::mem::forget(stack); // stos IST żyje do końca działania systemu
+        core::mem::forget(stack); // the IST stack lives until the system shuts down
         IST_RANGES[c][i][0].store(bottom, Ordering::Relaxed);
         IST_RANGES[c][i][1].store(top, Ordering::Relaxed);
         unsafe { core::ptr::write_unaligned(addr_of_mut!((*tss(c)).ist[i]), top) };
@@ -129,21 +129,21 @@ fn guarded_ist_for(c: usize) -> usize {
     moved
 }
 
-/// M17: przygotowuje GDT + TSS procesora AP `c` (stosy IST ze strażnikami).
-/// Woła BSP przed obudzeniem AP; `false` – brak pamięci na stosy.
+/// Prepares the GDT + TSS of AP processor `c` (IST stacks with guard pages).
+/// Called by the BSP before waking the AP; `false` – out of memory for the stacks.
 pub fn prepare_cpu(c: usize) -> bool {
     build(c);
     guarded_ist_for(c) == IST_COUNT
 }
 
-/// M17: AP ładuje swoją GDT i TSS (przygotowane przez `prepare_cpu`).
+/// The AP loads its GDT and TSS (prepared by `prepare_cpu`).
 pub fn load_cpu(c: usize) {
     unsafe { load(c) };
 }
 
-/// M16: przenosi IST na stosy ze stronami-strażnikami (stack.rs).  Wołać po
-/// starcie pamięci, przy wyłączonych przerwaniach i NIE na stosie IST.
-/// Stare stosy w .bss zostają (nieużywane).
+/// Moves the IST onto stacks with guard pages (stack.rs).  Call after
+/// memory init, with interrupts disabled and NOT on an IST stack.
+/// The old stacks in .bss remain (unused).
 pub fn move_ist_to_guarded_stacks() {
     let moved = guarded_ist_for(0);
     if moved < IST_COUNT {
@@ -185,7 +185,7 @@ struct DescriptorPointer {
     base: u64,
 }
 
-// Bit "accessed" ustawiony z góry, żeby CPU nie musiał zapisywać do GDT.
+// The "accessed" bit is set up front so that the CPU does not have to write to the GDT.
 const KERNEL_CODE: u64 = 0x00AF_9B00_0000_FFFF;
 const KERNEL_DATA: u64 = 0x00CF_9300_0000_FFFF;
 const USER_DATA: u64 = 0x00CF_F300_0000_FFFF;
@@ -201,8 +201,8 @@ fn tss_descriptor(base: u64, limit: u64) -> (u64, u64) {
     (low, high)
 }
 
-/// Wypełnia GDT i TSS procesora `c` (RSP0 = stos startowy, IST z .bss
-/// tylko dla BSP – AP dostaje swoje w `prepare_cpu`).
+/// Fills the GDT and TSS of processor `c` (RSP0 = boot stack, IST from .bss
+/// only for the BSP – APs get their own in `prepare_cpu`).
 fn build(c: usize) {
     unsafe {
         let tss = tss(c);
@@ -213,7 +213,7 @@ fn build(c: usize) {
                 core::ptr::write_unaligned(addr_of_mut!((*tss).ist[i]), base + IST_STACK_SIZE as u64);
             }
         }
-        // Brak I/O permission bitmap: offset poza limitem TSS.
+        // No I/O permission bitmap: offset beyond the TSS limit.
         core::ptr::write_unaligned(addr_of_mut!((*tss).iomap_base), size_of::<Tss>() as u16);
 
         let (tss_low, tss_high) = tss_descriptor(tss as u64, size_of::<Tss>() as u64 - 1);
@@ -229,7 +229,7 @@ fn build(c: usize) {
     }
 }
 
-/// lgdt + przeładowanie segmentów + ltr dla procesora `c`.
+/// lgdt + segment reload + ltr for processor `c`.
 unsafe fn load(c: usize) {
     unsafe {
         let gdt = addr_of_mut!(GDT[c]);
@@ -244,8 +244,8 @@ unsafe fn load(c: usize) {
             options(readonly, nostack, preserves_flags)
         );
 
-        // Przeładowanie CS wymaga far return; reszta rejestrów segmentowych
-        // ładuje się zwykłym mov.
+        // Reloading CS requires a far return; the other segment registers
+        // are loaded with a plain mov.
         asm!(
             "push {cs}",
             "lea {tmp}, [rip + 2f]",

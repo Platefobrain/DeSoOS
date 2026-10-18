@@ -8,7 +8,7 @@ mod arch;
 mod block;
 mod bootinfo;
 mod console;
-// M15: parser ELF wspólny z DSB.
+// ELF parser shared with DSB.
 #[path = "../common/elf.rs"]
 mod elf;
 mod initrd;
@@ -29,8 +29,8 @@ use bootinfo::BootInfo;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 
-// M10: DSB skacze tu z gotowym stosem (RSP = BootInfo.stack_top, pod nim
-// strona-strażnik) i RDI = BootInfo w direct mapie.  Kernel działa już pod
+// DSB jumps here with a ready stack (RSP = BootInfo.stack_top, with a guard
+// page below it) and RDI = BootInfo in the direct map.  The kernel already runs at
 // 0xffff_ffff_8000_0000.
 global_asm!(r#"
     .section .text.entry
@@ -55,12 +55,12 @@ pub extern "sysv64" fn kernel_main(
         clear_bss();
     }
 
-    // M17: numer CPU (TSC_AUX = 0 dla BSP) i Big Kernel Lock – kod kernela
-    // trzyma go zawsze, gdy działa (sched/bkl.rs).
+    // CPU number (TSC_AUX = 0 for the BSP) and the Big Kernel Lock – kernel code
+    // always holds it while running (sched/bkl.rs).
     arch::x86_64::cpu::init_bsp();
     sched::bkl::acquire_tagged(&sched::bkl::tag::BOOT);
 
-    // M10: adresy kernela i stosu z BootInfo (potrzebne m.in. dla TSS).
+    // Kernel and stack addresses from BootInfo (needed e.g. for the TSS).
     memory::layout::init(boot);
 
     drivers::serial::init();
@@ -77,80 +77,80 @@ pub extern "sysv64" fn kernel_main(
         boot.stack_top
     );
 
-    // M11: ./test.sh – po testach QEMU wyłączy się z wynikiem.
+    // ./test.sh – after the tests QEMU shuts down with the result.
     #[cfg(selftest)]
     selftest::detect_autotest();
 
-    // M4: GDT/IDT jak najwcześniej – potem każdy błąd ma czytelny raport.
+    // GDT/IDT as early as possible – after that every fault gets a readable report.
     arch::x86_64::init();
     #[cfg(selftest)]
     arch::x86_64::self_test();
 
-    // M1
+    // Physical memory (frame allocator).
     memory::init(boot);
     #[cfg(selftest)]
     memory::self_test();
 
-    // M2
+    // Paging.
     memory::paging_init();
     #[cfg(selftest)]
     memory::paging_self_test();
 
-    // M3
+    // Kernel heap.
     memory::heap_init();
     #[cfg(selftest)]
     memory::heap_self_test();
-    // M17b.h: listy bloków per CPU – po samoteście (sprawdza dokładne liczniki).
+    // Per-CPU block lists – after the self-test (it checks exact counters).
     memory::heap::enable_cpu_caches();
-    memory::enable_frame_caches(); // P3
+    memory::enable_frame_caches(); // per-CPU frame caches
 
-    // M16: stosy IST ze stronami-strażnikami (zamiast tablic w .bss).
+    // IST stacks with guard pages (instead of arrays in .bss).
     arch::x86_64::gdt::move_ist_to_guarded_stacks();
 
-    // M4: mapowanie on-demand (potrzebuje #PF + frame allocator + paging)
-    // – działa zawsze, test uruchamiany tylko w buildzie selftest.
+    // On-demand mapping (needs #PF + frame allocator + paging)
+    // – always active, the test runs only in the selftest build.
     #[cfg(selftest)]
     memory::demand_self_test();
 
-    // M7: konsola na framebufferze (od teraz logi także na ekranie).
+    // Framebuffer console (from now on logs also go to the screen).
     console::init(boot);
 
-    // M16b: tablice ACPI (MCFG -> PCIe ECAM) i Local APIC (przerwania MSI).
+    // ACPI tables (MCFG -> PCIe ECAM) and the Local APIC (MSI interrupts).
     acpi::init(boot.acpi_rsdp);
     arch::x86_64::lapic::init();
-    // M17a: HPET – zegar odcinków czasu niezależny od TSC (watchdog, spinlocki).
+    // HPET – interval clock independent of the TSC (watchdog, spinlocks).
     arch::x86_64::clock::init();
 
-    // M5: PIC 8259 (remap) + PIT (IRQ0, 1000 Hz) -> ticki, potem sti.
+    // PIC 8259 (remap) + PIT (IRQ0, 1000 Hz) -> ticks, then sti.
     arch::x86_64::irq::init();
     time::init();
-    // M17a.g14: punkt odniesienia zegara ściennego (dalej bez portów CMOS).
+    // Wall-clock reference point (no CMOS port access after this).
     crate::drivers::rtc::init();
     arch::x86_64::interrupts::enable();
     serial_println!("[ARCH] Interrupts enabled");
     #[cfg(selftest)]
     time::self_test();
 
-    // M12: scheduler – od teraz ten kod to zadanie 1 ("kernel"), obok
-    // zadanie idle; tick PIT wywłaszcza zadania.
+    // Scheduler – from now on this code is task 1 ("kernel"), next to
+    // the idle task; the PIT tick preempts tasks.
     sched::init();
     #[cfg(selftest)]
     sched::self_test();
 
-    // M13–M14: ring 3 (FPU/SSE, SMEP, SMAP, SYSCALL); testy procesów, FPU, syscalli.
+    // Ring 3 (FPU/SSE, SMEP, SMAP, SYSCALL); process, FPU and syscall tests.
     user::init();
     #[cfg(selftest)]
     user::self_test();
     #[cfg(selftest)]
     user::fpu_self_test();
 
-    // M6: kontroler PS/2 + klawiatura (IRQ1) -> input (kolejka zdarzeń).
+    // PS/2 controller + keyboard (IRQ1) -> input (event queue).
     let keyboard = drivers::keyboard::init();
     #[cfg(selftest)]
     if keyboard {
         drivers::keyboard::self_test();
     }
-    // M11b: mysz PS/2 (kółko przewija konsolę).
+    // PS/2 mouse (the wheel scrolls the console).
     let mouse = keyboard && drivers::mouse::init();
     #[cfg(selftest)]
     if mouse {
@@ -158,69 +158,69 @@ pub extern "sysv64" fn kernel_main(
     }
     let _ = mouse;
 
-    // M7: odbiór z seriala (pisanie w terminalu) + shell.
+    // Serial input (typing in a terminal) + shell.
     if !drivers::serial::enable_rx_interrupts() {
         serial_println!("[CON] WARNING: serial input not available");
     }
     #[cfg(selftest)]
     shell::self_test();
 
-    // M8: PCI -> virtio-blk -> warstwa block.  M16b: + NVMe (prawdziwy SSD
-    // tylko do odczytu) i partycje GPT.
+    // PCI -> virtio-blk -> block layer, plus NVMe (a real SSD,
+    // read-only) and GPT partitions.
     drivers::pci::init();
     drivers::virtio_blk::init();
     #[cfg(selftest)]
     drivers::virtio_blk::self_test();
     drivers::nvme::init();
 
-    // M9: VFS – ramfs w "/", FAT32 z dysku w "/disk".
+    // VFS – ramfs at "/", FAT32 from disk at "/disk".
     fs::init();
     #[cfg(selftest)]
     fs::self_test();
-    // M16b: ACPI, ECAM, MSI-X, NVMe, GPT (potrzebuje VFS – partycja /esp).
+    // ACPI, ECAM, MSI-X, NVMe, GPT (needs the VFS – the /esp partition).
     #[cfg(selftest)]
     drivers::nvme::self_test();
 
-    // M14: syscalle (potrzebują VFS – test plików); M15: programy ELF z /bin.
+    // Syscalls (they need the VFS – file test); ELF programs from /bin.
     #[cfg(selftest)]
     user::syscall_self_test();
     #[cfg(selftest)]
     user::elf_self_test();
-    // M16: spawn/wait/rodzic, shell w user space, init.
+    // spawn/wait/parent, user-space shell, init.
     #[cfg(selftest)]
     user::init_self_test();
 
-    // M17: pozostałe rdzenie (INIT-SIPI-SIPI); od teraz procesy działają
-    // równolegle, kernel pod Big Kernel Lock.
+    // Remaining cores (INIT-SIPI-SIPI); from now on processes run
+    // in parallel, the kernel under the Big Kernel Lock.
     arch::x86_64::smp::init();
     #[cfg(selftest)]
     user::smp_self_test();
-    // M17a: spinlocki i stress test SMP (odpalany po każdym kroku M17a).
+    // Spinlocks and the SMP stress test.
     #[cfg(selftest)]
     user::lock_self_test();
-    // M17a.b: TLB shootdown.
+    // TLB shootdown.
     #[cfg(selftest)]
     user::tlb_self_test();
-    // M17a.c: heap i alokator ramek bez BKL.
+    // Heap and frame allocator without the BKL.
     #[cfg(selftest)]
     user::alloc_self_test();
-    // M17a.d: syscalle bez BKL.
+    // Syscalls without the BKL.
     #[cfg(selftest)]
     user::nobkl_self_test();
-    // M17b: obiekty plików, potoki, pamięć procesu.
+    // File objects, pipes, process memory.
     #[cfg(selftest)]
     user::files_self_test();
-    // M18: IPC – uchwyty z prawami, kanały, pamięć współdzielona.
+    // IPC – handles with rights, channels, shared memory.
     #[cfg(selftest)]
     user::ipc_self_test();
-    // M19: usługi w user space.
+    // User-space services.
     #[cfg(selftest)]
     user::svc_self_test();
-    // M20.e: autorepeat klawiatur USB (zadanie jądra; przed samotestami USB).
+    // USB keyboard autorepeat (kernel task; before the USB self-tests).
     input::start_repeat_task();
-    // M20.f: zadanie usb-disks (montowanie dysków USB) – od startu, przed samotestami.
+    // usb-disks task (mounting USB disks) – from boot, before the self-tests.
     user::ublk::start_monitor();
-    // M20: USB – kontroler xHCI i usbd w user space.
+    // USB – xHCI controller and usbd in user space.
     #[cfg(selftest)]
     user::usb_self_test();
     #[cfg(selftest)]
@@ -237,18 +237,18 @@ pub extern "sysv64" fn kernel_main(
         serial_println!("[DeSoOS] No PS/2 keyboard - type in the serial terminal");
     }
 
-    // M16b: bez portu szeregowego (laptop) – pasek stanu w rogu ekranu
-    // (czas, klawiatura): widać, czy system żyje i co dochodzi z 8042.
+    // No serial port (laptop) – status bar in the screen corner
+    // (time, keyboard): shows whether the system is alive and what arrives from the 8042.
     if !drivers::serial::present() {
         drivers::keyboard::start_status_bar();
     }
 
-    // M17a.b: automatyczny stress test po starcie (build z DESOOS_AUTOSTRESS=s,
-    // np. na laptop bez działającej klawiatury) – wynik na ekranie.
+    // Automatic stress test after boot (build with DESOOS_AUTOSTRESS=s,
+    // e.g. on a laptop without a working keyboard) – result on screen.
     user::stress::start_auto_from_build();
 
-    // M16: kernel uruchamia tylko /bin/init (resztą zarządza user space)
-    // i pilnuje go; bez /bin/init albo gdy init ciągle pada – shell kernela.
+    // The kernel starts only /bin/init (user space manages the rest)
+    // and watches it; without /bin/init or when init keeps crashing – kernel shell.
     user::run_init()
 }
 
@@ -283,7 +283,7 @@ unsafe fn clear_bss() {
 fn panic(
     info: &PanicInfo
 ) -> ! {
-    // M17: pozostałe CPU stop (IPI), zanim zaczniemy raport.
+    // Stop the other CPUs (IPI) before we start the report.
     arch::x86_64::smp::halt_others();
     serial_println!(
         "[DeSoOS] PANIC: {}",

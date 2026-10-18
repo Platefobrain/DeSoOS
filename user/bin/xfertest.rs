@@ -1,16 +1,16 @@
-// M18.d: test przekazywania uchwytów w komunikatach i spawn_ex – uchwyt
-// przechodzi przez kanał (znika u nadawcy, działa u odbiorcy, prawa bez
-// zmian), bez R_TRANSFER – EACCES i uchwyt zostaje, koniec kanału nie może
-// podróżować przez ten kanał (EINVAL), za mało miejsca na uchwyty (EMSGSIZE)
-// albo pełna tablica (EMFILE) – komunikat zostaje, uchwyty w komunikacie do
-// zamkniętego końca są zwalniane, spawn_ex daje dziecku tylko wskazane
-// uchwyty, a dziecko dostaje przez kanał plik tylko do odczytu.
-// Wynik: "xfertest: N checks OK" i kod 0, albo opis pierwszego błędu i kod 1.
-// Uruchamia go IPC TEST (samotesty).
+// Test of passing handles in messages and of spawn_ex – a handle
+// travels through a channel (gone from the sender, works at the receiver, rights
+// unchanged), without R_TRANSFER – EACCES and the handle stays, a channel end cannot
+// travel through its own channel (EINVAL), too little room for handles (EMSGSIZE)
+// or a full table (EMFILE) – the message stays, handles in a message sent to a
+// closed end are released, spawn_ex gives the child only the listed
+// handles, and the child receives a read-only file through a channel.
+// Result: "xfertest: N checks OK" and exit code 0, or a description of the first error and code 1.
+// Started by IPC TEST (self-tests).
 //
-// `xfertest child` – tryb dziecka uruchamianego przez spawn_ex z jednym
-// uchwytem: 0 = koniec kanału.  Kod 0 = wszystko się zgadza, 10+ = numer
-// nieudanego sprawdzenia.
+// `xfertest child` – mode of a child started by spawn_ex with a single
+// handle: 0 = channel end.  Exit code 0 = everything matches, 10+ = number
+// of the failed check.
 #![no_std]
 #![no_main]
 
@@ -35,10 +35,10 @@ macro_rules! check {
     };
 }
 
-/// Dziecko: ma TYLKO uchwyt 0 (kanał).  Dostaje przez kanał plik tylko do
-/// odczytu, czyta go, nie może pisać, odsyła liczbę przeczytanych bajtów.
+/// Child: has ONLY handle 0 (channel).  Receives a read-only file through the
+/// channel, reads it, cannot write, sends back the number of bytes read.
 fn child() -> i32 {
-    // Nic poza uchwytem 0 – ani konsoli, ani niczego od rodzica.
+    // Nothing besides handle 0 – no console, nothing from the parent.
     if handle_info(0).map(|(k, _)| k) != Ok(KIND_CHANNEL) {
         return 10;
     }
@@ -92,7 +92,7 @@ fn main(args: Args) -> i32 {
         }
     };
 
-    // 1. Uchwyt przez kanał: znika u nadawcy, działa u odbiorcy, wspólny obiekt.
+    // 1. Handle through a channel: gone from the sender, works at the receiver, shared object.
     let ro = handle_dup(fd, R_READ | R_TRANSFER) as u64;
     check!(n, chan_send_h(a, b"file", &[ro], 0) == 0, "send with a handle");
     check!(n, handle_info(ro) == Err(-9), "sent handle must leave the sender's table");
@@ -105,7 +105,7 @@ fn main(args: Args) -> i32 {
     check!(n, write(got, b"x") == -9, "received read-only handle must not write");
     close(got);
 
-    // 2. Bez R_TRANSFER – EACCES, uchwyt zostaje u nadawcy; powtórzony uchwyt – EINVAL.
+    // 2. Without R_TRANSFER – EACCES, the handle stays with the sender; duplicated handle – EINVAL.
     let nt = handle_dup(fd, R_READ | R_DUP) as u64;
     check!(n, chan_send_h(a, b"x", &[nt], 0) == -13, "send without R_TRANSFER must be EACCES");
     check!(n, handle_info(nt).is_ok(), "handle must stay after a refused send");
@@ -115,7 +115,7 @@ fn main(args: Args) -> i32 {
     check!(n, chan_send_h(a, b"x", &[99], 0) == -9, "bad handle in the list must be EBADF");
     check!(n, handle_info(t).is_ok(), "handle must stay after EINVAL");
 
-    // 3. Koniec kanału nie podróżuje przez ten kanał (żaden z dwóch) – EINVAL; przez inny – tak.
+    // 3. A channel end does not travel through its own channel (neither end) – EINVAL; through another one it does.
     check!(n, chan_send_h(a, b"x", &[a], 0) == -22 && chan_send_h(a, b"x", &[b], 0) == -22, "own channel end must be EINVAL");
     let (c, d) = channel_create().unwrap_or((0, 0));
     check!(n, chan_send_h(a, b"end", &[d], 0) == 0, "send another channel's end");
@@ -126,14 +126,14 @@ fn main(args: Args) -> i32 {
     close(c);
     close(d2);
 
-    // 4. Za mało miejsca na uchwyty – EMSGSIZE (info.handles = 1), komunikat zostaje.
+    // 4. Too little room for handles – EMSGSIZE (info.handles = 1), the message stays.
     check!(n, chan_send_h(a, b"x", &[t], 0) == 0, "send t");
     let mut none: [u64; 0] = [];
     check!(n, chan_recv_h(b, &mut buf, &mut none, 0, &mut info) == EMSGSIZE && info.handles == 1, "no room for handles: {:?}", info);
     check!(n, chan_recv_h(b, &mut buf, &mut hs, 0, &mut info) == 1 && info.handles == 1, "message must stay after EMSGSIZE");
     let t = hs[0];
 
-    // 5. Pełna tablica uchwytów u odbiorcy – EMFILE, komunikat zostaje; po zwolnieniu miejsca – przechodzi.
+    // 5. Receiver's handle table full – EMFILE, the message stays; after freeing a slot – it goes through.
     check!(n, chan_send_h(a, b"y", &[t], 0) == 0, "send for EMFILE test");
     let mut extra = [0u64; 64];
     let mut k = 0;
@@ -153,7 +153,7 @@ fn main(args: Args) -> i32 {
     }
     close(hs[0]);
 
-    // 6. Uchwyty w komunikacie do zamkniętego końca są zwalniane (koniec kanału w środku też).
+    // 6. Handles in a message sent to a closed end are released (including a channel end inside).
     let (e, g) = channel_create().unwrap_or((0, 0));
     check!(n, chan_send_h(a, b"z", &[g], 0) == 0, "send g");
     close(b);
@@ -161,7 +161,7 @@ fn main(args: Args) -> i32 {
     close(e);
     close(a);
 
-    // 7. spawn_ex: dziecko dostaje tylko uchwyt 0 (kanał), plik przez kanał.
+    // 7. spawn_ex: the child gets only handle 0 (channel), the file through the channel.
     let (p, q) = channel_create().unwrap_or((0, 0));
     check!(n, spawn_ex("/bin/xfertest", &["xfertest", "child"], &[(q, 0), (q, 0)], 0) == -22, "duplicate child slot must be EINVAL");
     check!(n, spawn_ex("/bin/xfertest", &["xfertest", "child"], &[(q, 64)], 0) == -22, "child slot >= 64 must be EINVAL");
@@ -181,9 +181,9 @@ fn main(args: Args) -> i32 {
     close(p);
     close(t);
 
-    // 8. Bez cykli: koniec kanału, w którego kolejce leży inny koniec kanału,
-    // nie może podróżować (EBUSY) – inaczej dwa kanały trzymałyby się nawzajem
-    // po zamknięciu wszystkich uchwytów i pamięć nigdy by nie wróciła.
+    // 8. No cycles: a channel end whose queue holds another channel end
+    // cannot travel (EBUSY) – otherwise two channels would keep each other alive
+    // after all handles are closed and the memory would never come back.
     let (x0, x1) = channel_create().unwrap_or((0, 0));
     let (y0, y1) = channel_create().unwrap_or((0, 0));
     let (z0, z1) = channel_create().unwrap_or((0, 0));
@@ -192,8 +192,8 @@ fn main(args: Args) -> i32 {
     check!(n, handle_info(x1).is_ok(), "x1 must stay after EBUSY");
     check!(n, chan_send_h(z1, b"x1", &[x1], 0) == EBUSY, "x1 must not travel through any channel");
     check!(n, chan_send_h(x0, b"data", &[], 0) == 0 && chan_send_h(y1, b"data", &[], 0) == 0, "plain messages still pass");
-    // Po odebraniu y0 kolejka x1 nie ma kanałów – x1 może podróżować; teraz to
-    // y0 (w jego kolejce leży x1) nie może.
+    // After receiving y0, x1's queue holds no channels – x1 may travel; now it is
+    // y0 (x1 lies in its queue) that cannot.
     let r = chan_recv_h(x1, &mut buf, &mut hs, 0, &mut info);
     check!(n, r == 2 && info.handles == 1, "x1 receives y0: {} {:?}", r, info);
     let y0b = hs[0];
@@ -201,7 +201,7 @@ fn main(args: Args) -> i32 {
     check!(n, chan_send_h(y1, b"x1", &[x1], 0) == 0, "x1 travels once its queue holds no channel");
     check!(n, chan_send_h(x0, b"y0", &[y0b], 0) == EBUSY, "y0 (x1 in its queue) must not travel: cycle refused");
     check!(n, chan_send_h(z1, b"y0", &[y0b], 0) == EBUSY, "y0 must not travel through a third channel either");
-    // Łańcuch bez cyklu dalej działa: z0 (pusta kolejka) w kolejce x1, która jest w drodze.
+    // A chain without a cycle still works: z0 (empty queue) in the queue of x1, which is in transit.
     check!(n, chan_send_h(x0, b"z0", &[z0], 0) == 0, "a chain without a cycle is allowed");
     close(x0);
     close(y0b);

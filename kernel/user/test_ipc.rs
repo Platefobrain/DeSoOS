@@ -1,6 +1,6 @@
-// M18: samotesty IPC – uchwyty z prawami, kanały, pamięć współdzielona
-// (tylko build z --cfg selftest).  Testy biegną w programach z /bin
-// (prawdziwe syscalle z ring 3); kernel sprawdza kod wyjścia i wyjście.
+// IPC self-tests – handles with rights, channels, shared memory
+// (only in builds with --cfg selftest).  The tests run in programs from /bin
+// (real syscalls from ring 3); the kernel checks the exit code and output.
 
 use alloc::string::String;
 
@@ -27,7 +27,7 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-/// Program z /bin z przechwyconym wyjściem; (sposób zakończenia, wyjście).
+/// Program from /bin with captured output; (how it terminated, output).
 fn run(path: &str, args: &[&str], ms: u64) -> Option<(ExitKind, String)> {
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
     let id = exec(path, args, "/", &opts).ok()?;
@@ -44,8 +44,8 @@ pub fn self_test() {
     crate::selftest::begin();
     let frames0 = crate::selftest::settled_free_frames();
 
-    // 1. M18.b: uchwyty z prawami – handle_dup tylko zmniejsza, read / write
-    // bez prawa = EBADF, kopie bez DUP = EACCES, dziecko dziedziczy prawa,
+    // 1. Handles with rights – handle_dup only reduces, read / write
+    // without the right = EBADF, copies without DUP = EACCES, the child inherits rights,
     // limit 64.
     let r = run("/bin/handletest", &["handletest"], 10_000);
     check!(r.is_some(), "handletest did not finish");
@@ -53,39 +53,39 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "handletest: {:?} {:?}", kind, out.trim());
     serial_println!("[IPC TEST] 1/5 handle rights: reduce only, EBADF / EACCES, inherited by a child, 64 per process: {} PASS", out.trim());
 
-    // 2. M18.c: kanały – obie strony, nadawca od jądra, EAGAIN, EMSGSIZE,
-    // prawa SEND / RECV, EPIPE po zamknięciu, ping-pong z dzieckiem, kill
-    // dziecka czekającego w recv.
+    // 2. Channels – both ends, sender from the kernel, EAGAIN, EMSGSIZE,
+    // SEND / RECV rights, EPIPE after close, ping-pong with a child, kill
+    // of a child waiting in recv.
     let r = run("/bin/chantest", &["chantest"], 60_000);
     check!(r.is_some(), "chantest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "chantest: {:?} {:?}", kind, out.trim());
     serial_println!("[IPC TEST] 2/5 channels: both ways, sender from the kernel, EAGAIN, EMSGSIZE, rights, EPIPE, kill while waiting: {} PASS", out.trim());
 
-    // 3. M18.d: uchwyty w komunikatach (przeniesienie, prawa, TRANSFER, własny
-    // kanał, EMSGSIZE / EMFILE bez utraty), zwalnianie z zamkniętej kolejki,
-    // spawn_ex – dziecko tylko z jednym uchwytem dostaje plik przez kanał.
+    // 3. Handles in messages (transfer, rights, TRANSFER, own
+    // channel, EMSGSIZE / EMFILE without loss), release from a closed queue,
+    // spawn_ex – a child with a single handle receives a file over the channel.
     let live0 = super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
     let r = run("/bin/xfertest", &["xfertest"], 20_000);
     check!(r.is_some(), "xfertest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "xfertest: {:?} {:?}", kind, out.trim());
-    // v0.35.1: wszystkie kanały z testu (także te w komunikatach w drodze) zwolnione.
+    // All channels from the test (including those in in-flight messages) are freed.
     let live = || super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
     check!(wait_for(2_000, || live() <= live0), "channels leaked: {} live before xfertest, {} after", live0, live());
     serial_println!("[IPC TEST] 3/5 handles in messages + spawn_ex: moved with rights, TRANSFER, own channel refused, nothing lost on EMSGSIZE / EMFILE, child with one handle, no channel cycles (EBUSY), no channel leaked: {} PASS", out.trim());
 
-    // 4. M18.e: pamięć współdzielona – dwa mapowania i dwa procesy na tych
-    // samych stronach, dane + dzwonek przez kanał, tylko do odczytu, NX,
-    // munmap w całości, obiekt żyje, dopóki jest zamapowany.
+    // 4. Shared memory – two mappings and two processes on the same
+    // pages, data + doorbell over a channel, read-only, NX,
+    // munmap as a whole, the object lives as long as it is mapped.
     let r = run("/bin/shmtest", &["shmtest"], 30_000);
     check!(r.is_some(), "shmtest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "shmtest: {:?} {:?}", kind, out.trim());
     serial_println!("[IPC TEST] 4/5 shared memory: same pages in 2 mappings / 2 processes, doorbell over a channel, read-only, NX, whole munmap, lives while mapped: {} PASS", out.trim());
 
-    // 5. M18.f: zadanie stressu (ipcload: shm + dzwonek, kill dziecka w
-    // trakcie czekania), pokaz (ipcdemo) i pomiar (ipcbench – wynik w logu).
+    // 5. Stress task (ipcload: shm + doorbell, kill of a child while
+    // waiting), demo (ipcdemo) and measurement (ipcbench – result in the log).
     let r = run("/bin/ipcload", &["ipcload"], 30_000);
     check!(r.is_some(), "ipcload did not finish");
     let (kind, out) = r.unwrap();

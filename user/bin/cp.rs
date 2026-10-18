@@ -1,4 +1,4 @@
-// M16: cp <źródło> <cel> – kopiuje plik (cel może być katalogiem).
+// cp <source> <dest> – copies a file (dest may be a directory).
 #![no_std]
 #![no_main]
 

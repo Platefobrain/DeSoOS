@@ -1,5 +1,5 @@
-// M15: cat [plik...] – wypisuje pliki; bez argumentów czyta linie
-// z klawiatury aż do Ctrl+D.
+// cat [file...] – prints files; without arguments reads lines
+// from the keyboard until Ctrl+D.
 #![no_std]
 #![no_main]
 

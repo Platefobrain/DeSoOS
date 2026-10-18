@@ -1,4 +1,4 @@
-// M15: pierwszy program w Ruście ładowany jako plik ELF (/bin/hello).
+// The first Rust program loaded as an ELF file (/bin/hello).
 #![no_std]
 #![no_main]
 

@@ -1,27 +1,27 @@
-// M12: scheduler – zadania kernela, round-robin z wywłaszczaniem.
+// Scheduler – kernel tasks, preemptive round-robin.
 //
-// * Zadanie = własny stos (stack.rs, ze stroną-strażnikiem) + zapisany RSP.
-//   Przełączenie (`sched_switch`) odkłada na stos rejestry zachowywane
-//   przez wołanego (rbx, rbp, r12–r15), zapisuje RSP i ładuje RSP innego
-//   zadania.  Reszta rejestrów jest już zapisana przez kompilator (zwykłe
-//   wywołanie) albo przez isr_common (przerwanie).
-// * Zadanie 1 ("kernel") to wątek startowy – działa na stosie od DSB i po
-//   samotestach zostaje shellem.  Zadanie 0 ("idle") robi `hlt`, gdy nikt
-//   inny nie jest gotowy, i sprząta zakończone zadania.
-// * Wywłaszczanie: tick PIT (on_tick) odlicza kwant QUANTUM_TICKS i budzi
-//   śpiące zadania; przełączenie dzieje się w irq::dispatch PO wysłaniu EOI
-//   (`preempt`).  Zadanie obudzone przez przerwanie (klawiatura, dysk)
-//   dostaje CPU od razu po tym przerwaniu.
-// * Cały stan schedulera zmienia się przy wyłączonych przerwaniach.  M17:
-//   na wielu rdzeniach wyłączność daje dodatkowo Big Kernel Lock (bkl.rs) –
-//   kod kernela, w tym scheduler, wykonuje jeden CPU naraz.
-// * M17: każdy CPU ma własne `current`, kwant i zadanie idle (przypięte do
-//   niego); zwykłe zadania biorą dowolny wolny CPU (wspólna lista).
-// * FPU/SSE (M13b): kernel jest soft-float; stan x87/SSE procesów
-//   użytkownika zapisuje/odtwarza schedule() (FXSAVE/FXRSTOR, arch/fpu.rs).
+// * Task = its own stack (stack.rs, with a guard page) + a saved RSP.
+//   A switch (`sched_switch`) pushes the callee-saved registers
+//   (rbx, rbp, r12–r15) onto the stack, saves RSP and loads another task's
+//   RSP.  The remaining registers are already saved by the compiler (ordinary
+//   call) or by isr_common (interrupt).
+// * Task 1 ("kernel") is the boot thread – it runs on the stack from DSB and after
+//   the self-tests becomes the shell.  Task 0 ("idle") executes `hlt` when nobody
+//   else is ready, and cleans up finished tasks.
+// * Preemption: the PIT tick (on_tick) counts down the QUANTUM_TICKS quantum and wakes
+//   sleeping tasks; the switch happens in irq::dispatch AFTER sending EOI
+//   (`preempt`).  A task woken by an interrupt (keyboard, disk)
+//   gets the CPU right after that interrupt.
+// * All scheduler state changes with interrupts disabled.  On
+//   multiple cores, exclusivity is additionally provided by the Big Kernel Lock (bkl.rs) –
+//   kernel code, including the scheduler, runs on one CPU at a time.
+// * Each CPU has its own `current`, quantum and idle task (pinned to
+//   it); ordinary tasks take any free CPU (shared list).
+// * FPU/SSE: the kernel is soft-float; the x87/SSE state of user processes
+//   is saved/restored by schedule() (FXSAVE/FXRSTOR, arch/fpu.rs).
 
 pub mod bkl;
-// M17a krok a: narzędzia; pierwsi użytkownicy w kroku c (alokator ramek, heap).
+// Per-CPU helpers; first users: the frame allocator and the heap.
 #[allow(dead_code)]
 pub mod spin;
 pub mod stack;
@@ -43,7 +43,7 @@ pub type TaskId = u64;
 pub const IDLE_ID: TaskId = 0;
 pub const BOOT_ID: TaskId = 1;
 
-/// Kwant czasu w tickach (1 tick = 1 ms).
+/// Time quantum in ticks (1 tick = 1 ms).
 pub const QUANTUM_TICKS: u32 = 10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,52 +70,52 @@ struct Task {
     name: String,
     state: State,
     rsp: u64,
-    stack: Option<TaskStack>, // None = stos startowy (zadanie 1) / idle
-    wait_channel: usize,      // 0 = sen bez kolejki
-    wake_at: u64,             // tick pobudki (u64::MAX = bez limitu)
-    /// M17a.g12: liczy tick CPU, na którym zadanie działa – bez blokady.
+    stack: Option<TaskStack>, // None = boot stack (task 1) / idle
+    wait_channel: usize,      // 0 = sleep without a queue
+    wake_at: u64,             // wake-up tick (u64::MAX = no limit)
+    /// Counts ticks of the CPU the task runs on – lock-free.
     cpu_ticks: AtomicU64,
     switches: u64,
     exit_requested: bool,
-    /// M13a/M14: proces użytkownika (przestrzeń adresowa, deskryptory
-    /// plików); None = zadanie kernela (CR3 kernela).
+    /// User process (address space, file
+    /// descriptors); None = kernel task (kernel CR3).
     process: Option<Box<crate::user::Process>>,
-    /// M13b: rejestry x87/SSE procesu, gdy nie działa (FXSAVE).
+    /// The process's x87/SSE registers while it is not running (FXSAVE).
     fpu: FxState,
-    /// M17: zadanie idle procesora o tym numerze (przypięte do niego).
+    /// Idle task of the processor with this number (pinned to it).
     idle_cpu: Option<u8>,
-    /// M17: ostatni CPU, na którym działało, i maska wszystkich użytych CPU.
+    /// Last CPU it ran on, and the mask of all CPUs it has used.
     last_cpu: u8,
     cpu_mask: u16,
-    /// M17a.f1: głębokość blokady schedulera w chwili przełączenia (zadanie
-    /// po powrocie zwalnia tyle poziomów, ile miało – blokada należy do CPU).
+    /// Scheduler lock depth at the moment of the switch (the task,
+    /// on return, releases as many levels as it had – the lock belongs to the CPU).
     sched_depth: u32,
-    /// M17b.f: cykle TSC na CPU (od wejścia do wyjścia ze schedulera, zawsze
-    /// mierzone na jednym CPU – TSC rdzeni Legiona nie są zgrane).
+    /// TSC cycles of CPU time (from scheduler exit to scheduler entry, always
+    /// measured on a single CPU – core TSCs are not synchronized on some machines).
     run_tsc: AtomicU64,
-    /// M17a.f2: zadanie oddało BKL przy przełączeniu (schedule) – weźmie go
-    /// z powrotem po wyjściu ze schedulera (`after_switch`).
+    /// The task gave up the BKL at a switch (schedule) – it will take it
+    /// back after leaving the scheduler (`after_switch`).
     bkl_dropped: bool,
-    /// M17a.f3a: jest w kolejce gotowych (`Scheduler::ready`).
+    /// It is in the ready queue (`Scheduler::ready`).
     queued: bool,
-    /// M17a.f3b: łącza list wbudowane w zadanie (bez alokacji pod blokadą
-    /// schedulera): kolejka gotowych, kubełek kanału, lista terminów,
-    /// kubełek numeru.
+    /// List links embedded in the task (no allocation under the scheduler
+    /// lock): ready queue, channel bucket, deadline list,
+    /// id bucket.
     rq: Link,
     wq: Link,
     sq: Link,
     in_sleepers: bool,
     id_next: *mut Task,
-    /// P4.b: lustro `state == Dead` dla czytających pod blokadą tablicy zadań
-    /// (bez blokady schedulera – `state` zmienia się pod nią).
+    /// Mirror of `state == Dead` for readers under the task-table lock
+    /// (without the scheduler lock – `state` changes under it).
     dead: AtomicBool,
-    /// P4.c: zadanie jest (jeszcze) na jakimś CPU – od wybrania przez
-    /// schedule() do chwili, gdy CPU, który z niego schodzi, skończy
-    /// przełączenie (rejestry i FPU zapisane, stos opuszczony).  Inny CPU nie
-    /// przełączy się na zadanie z tą flagą, reap go nie zwolni.
+    /// The task is (still) on some CPU – from being picked by
+    /// schedule() until the CPU leaving it finishes the
+    /// switch (registers and FPU saved, stack abandoned).  Another CPU will not
+    /// switch to a task with this flag set, and reap will not free it.
     on_cpu: AtomicBool,
-    /// P4.b: znacznik życia (testy: zwolnione zadanie widziane przez
-    /// czytającego tablicę = TASK_FREED).
+    /// Liveness marker (tests: a freed task seen by a
+    /// table reader = TASK_FREED).
     magic: AtomicU64,
 }
 
@@ -128,7 +128,7 @@ impl Drop for Task {
     }
 }
 
-/// M17a.f3b: łącze listy dwukierunkowej (wskaźniki na Box<Task>).
+/// Doubly linked list link (pointers to Box<Task>).
 #[derive(Clone, Copy)]
 struct Link {
     prev: *mut Task,
@@ -139,7 +139,7 @@ impl Link {
     const NONE: Link = Link { prev: core::ptr::null_mut(), next: core::ptr::null_mut() };
 }
 
-/// Lista dwukierunkowa zadań (łącze wybiera `link`).
+/// Doubly linked list of tasks (`link` selects the link).
 #[derive(Clone, Copy)]
 struct TList {
     head: *mut Task,
@@ -210,7 +210,7 @@ fn wait_bucket(channel: usize) -> usize {
 }
 
 impl Task {
-    /// Szczyt stosu kernela zadania (TSS.RSP0, gdy zadanie jest w ring 3).
+    /// Top of the task's kernel stack (TSS.RSP0, when the task is in ring 3).
     fn kernel_stack_top(&self) -> u64 {
         match &self.stack {
             Some(st) => st.top(),
@@ -226,7 +226,7 @@ impl Task {
     }
 }
 
-/// Informacje o zadaniu (dla `ps` i testów).
+/// Task information (for `ps` and tests).
 #[derive(Clone)]
 pub struct TaskInfo {
     pub id: TaskId,
@@ -236,46 +236,46 @@ pub struct TaskInfo {
     pub switches: u64,
     #[allow(dead_code)]
     pub stack_top: u64,
-    /// Proces użytkownika (ring 3, własna przestrzeń adresowa).
+    /// User process (ring 3, its own address space).
     pub user: bool,
-    /// M16: rodzic procesu (0 = kernel; zadania kernela też 0).
+    /// Parent of the process (0 = kernel; kernel tasks also 0).
     pub ppid: TaskId,
-    /// M17: CPU, na którym działa teraz (None = nie działa) / działało ostatnio.
+    /// CPU it is running on now (None = not running) / ran on last.
     pub cpu: Option<usize>,
     pub last_cpu: usize,
-    /// M17: maska CPU, na których zadanie kiedykolwiek działało.
+    /// Mask of CPUs the task has ever run on.
     #[allow(dead_code)]
     pub cpu_mask: u16,
 }
 
 use crate::arch::x86_64::cpu::MAX_CPUS;
 
-/// Zadanie bieżące na CPU, na którym nic nie działa (jeszcze nie uruchomiony).
+/// Current task on a CPU where nothing is running (not started yet).
 const NO_TASK: TaskId = u64::MAX;
 
 struct Scheduler {
     tasks: Vec<Box<Task>>,
-    /// M17: zadanie bieżące każdego CPU.
+    /// Current task of each CPU.
     current: [TaskId; MAX_CPUS],
     next_id: TaskId,
-    /// M17: zadanie idle każdego CPU (NO_TASK = CPU nie uruchomiony).
+    /// Idle task of each CPU (NO_TASK = CPU not started).
     idle: [TaskId; MAX_CPUS],
-    // M17a.f3a: struktury zamiast przeglądania całej listy zadań pod blokadą
-    // schedulera (Legion v0.17.17: 65% wzięć czeka, 232 s – każde
-    // schedule / pobudka / tick przeglądało wszystkie zadania).  Wskaźniki
-    // na Box<Task> (adres stały do reap; zadanie w kolejce nigdy nie jest
-    // martwe, więc reap ich nie unieważnia).
-    // M17a.f3b: listy wbudowane w zadania i tablice kubełków – żadnej
-    // alokacji pod blokadą schedulera (v0.17.18 z BTreeMap/Vec alokowała przy
-    // każdym uśpieniu i pobudce – pod blokadą heapa, z IF = 0: Legion 79%
-    // czekania, 335 s).
-    /// Gotowe zadania (stan Ready, nie idle) – FIFO, round-robin.
+    // Dedicated structures instead of scanning the whole task list under the
+    // scheduler lock (previously 65% of acquisitions waited, 232 s in total – every
+    // schedule / wake-up / tick scanned all tasks).  Pointers
+    // to Box<Task> (address stable until reap; a queued task is never
+    // dead, so reap does not invalidate them).
+    // Lists embedded in tasks and bucket arrays – no
+    // allocation under the scheduler lock (an earlier version with BTreeMap/Vec allocated on
+    // every sleep and wake-up – under the heap lock, with IF = 0: 79%
+    // waiting, 335 s).
+    /// Ready tasks (state Ready, not idle) – FIFO, round-robin.
     ready: TList,
-    /// Zadanie po numerze: kubełki (numer % ID_BUCKETS), łańcuch `id_next`.
+    /// Task by id: buckets (id % ID_BUCKETS), chain `id_next`.
     ids: [*mut Task; ID_BUCKETS],
-    /// Uśpione na kanale (WaitQueue): kubełki po adresie kanału.
+    /// Sleeping on a channel (WaitQueue): buckets by channel address.
     waiters: [TList; WAIT_BUCKETS],
-    /// Uśpione z terminem (tick przegląda tylko je).
+    /// Sleeping with a deadline (the tick scans only these).
     sleepers: TList,
 }
 
@@ -290,10 +290,10 @@ static mut SCHED: Scheduler = Scheduler {
     sleepers: TList::EMPTY,
 };
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-/// M17a.d: adres struktury zadania bieżącego każdego CPU (Box<Task> – adres
-/// stały, zadanie nie jest zwalniane, dopóki jest bieżące gdziekolwiek).
-/// Ścieżki bez BKL (syscalle getpid/uptime/write) czytają stąd swoje zadanie
-/// i proces zamiast z listy zadań (ta zmienia się pod BKL).
+/// Address of each CPU's current task structure (Box<Task> – the address
+/// is stable, the task is not freed while it is current anywhere).
+/// BKL-free paths (getpid/uptime/write syscalls) read their task
+/// and process from here instead of from the task list (which changes under the BKL).
 static CUR_TASK: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicUsize> = crate::per_cpu!(core::sync::atomic::AtomicUsize::new(0));
 
 fn publish_current(s: &Scheduler, c: usize) {
@@ -301,17 +301,17 @@ fn publish_current(s: &Scheduler, c: usize) {
     CUR_TASK[c].store(addr, Ordering::Release);
 }
 
-/// M17a.d: zadanie bieżące tego CPU bez BKL.  Wołać z IF = 0 (inaczej
-/// zadanie mogłoby się przenieść między odczytem numeru CPU a wskaźnika).
+/// Current task of this CPU without the BKL.  Call with IF = 0 (otherwise
+/// the task could migrate between reading the CPU number and the pointer).
 fn current_task_unlocked() -> Option<&'static Task> {
     debug_assert!(!crate::arch::x86_64::interrupts::are_enabled());
     let a = CUR_TASK[cpu()].load(Ordering::Acquire);
     (a != 0).then(|| unsafe { &*(a as *const Task) })
 }
 
-/// M17a.d: (id, proces) bieżącego zadania bez BKL – dla syscalli bez BKL.
-/// Proces jest jednowątkowy: jego deskryptory i pamięć zmienia tylko on sam
-/// (w syscallach), więc własny proces wolno czytać bez blokady.  Z IF = 0.
+/// (id, process) of the current task without the BKL – for BKL-free syscalls.
+/// A process is single-threaded: its descriptors and memory are changed only by itself
+/// (in syscalls), so its own process may be read without a lock.  With IF = 0.
 pub fn current_unlocked() -> Option<(TaskId, &'static mut crate::user::Process)> {
     let t = current_task_unlocked()?;
     let id = t.id;
@@ -319,8 +319,8 @@ pub fn current_unlocked() -> Option<(TaskId, &'static mut crate::user::Process)>
     Some((id, unsafe { &mut *(p as *mut crate::user::Process) }))
 }
 
-/// M17a.d: `kill` / Ctrl+C dla bieżącego zadania – bez BKL (odczyt flagi
-/// ustawianej przez inny CPU pod BKL).  Z IF = 0.
+/// `kill` / Ctrl+C for the current task – without the BKL (reads a flag
+/// set by another CPU under the BKL).  With IF = 0.
 pub fn should_exit_unlocked() -> bool {
     match current_task_unlocked() {
         Some(t) => unsafe { core::ptr::read_volatile(&t.exit_requested) },
@@ -328,7 +328,7 @@ pub fn should_exit_unlocked() -> bool {
     }
 }
 
-/// M17a.b: tick przy poprzednim on_tick (BSP).
+/// Tick at the previous on_tick (BSP).
 static LAST_BSP_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static NEED_RESCHED: crate::arch::x86_64::percpu::PerCpu<AtomicBool> = crate::per_cpu!(AtomicBool::new(false));
 
@@ -337,46 +337,46 @@ fn cpu() -> usize {
     crate::arch::x86_64::cpu::id()
 }
 
-/// Zadanie bieżące tego CPU.
+/// Current task of this CPU.
 #[inline]
 fn cur_id(s: &Scheduler) -> TaskId {
     s.current[cpu()]
 }
 static TOTAL_SWITCHES: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 
-/// Dostęp do stanu: tylko przy wyłączonych przerwaniach.
+/// Access to the state: only with interrupts disabled.
 fn sched() -> &'static mut Scheduler {
     debug_assert!(!interrupts::are_enabled());
-    // M17a.f2: lista zadań i stan schedulera tylko pod blokadą schedulera
-    // (BKL już nie jest potrzebny).
+    // Task list and scheduler state only under the scheduler lock
+    // (the BKL is no longer needed).
     assert!(sched_lock_held(), "sched: task list touched on CPU {} without the scheduler lock", cpu());
     unsafe { &mut *core::ptr::addr_of_mut!(SCHED) }
 }
 
 // ------------------------------------------------------------
-// P4.b: tablica zadań pod własną blokadą RW
+// Task table under its own RW lock
 // ------------------------------------------------------------
 //
-// `tasks` + `ids` (lista zadań i kubełki numerów) zmieniają się pod blokadą
-// schedulera ORAZ zapisem tej blokady (dodanie: spawn, idle, init; usunięcie:
-// reap).  Czytający, którym wystarczy „zadanie o numerze X i jego proces”
-// (with_process, task_exists, children_of, for_each_process), biorą tylko ją
-// do odczytu – równolegle, bez blokady schedulera (Legion v0.29.0:
-// with_process 11 mln wzięć blokady schedulera na minutę).  reparent_with –
-// zapis (wyklucza with_process jak dotąd blokada schedulera).
-// * Kolejność: scheduler -> tablica.  Czytający / reparent NIE biorą blokady
-//   schedulera, trzymając tablicę.
-// * Zawsze z IF = 0 (także czytający): pisarz trzyma blokadę schedulera z
-//   IF = 0 i czeka na czytających – czytający przerwany przez pobudkę
-//   (wake_channel -> blokada schedulera) zakleszczyłby się z nim.
-// * Zadanie żyje, dopóki jest w tablicy (reap usuwa pod zapisem), więc
-//   referencja z odczytu jest ważna do zwolnienia blokady.  `state` czytający
-//   nie widzą – tylko lustro `dead`.
+// `tasks` + `ids` (the task list and id buckets) change under the scheduler
+// lock AND the write side of this lock (add: spawn, idle, init; remove:
+// reap).  Readers that only need "task with id X and its process"
+// (with_process, task_exists, children_of, for_each_process) take only this lock
+// for reading – in parallel, without the scheduler lock (with_process used to take
+// the scheduler lock ~11 million times per minute).  reparent_with –
+// write side (excludes with_process as the scheduler lock used to).
+// * Order: scheduler -> table.  Readers / reparent do NOT take the scheduler
+//   lock while holding the table.
+// * Always with IF = 0 (readers too): a writer holds the scheduler lock with
+//   IF = 0 and waits for readers – a reader interrupted by a wake-up
+//   (wake_channel -> scheduler lock) would deadlock with it.
+// * A task lives as long as it is in the table (reap removes it under the write lock), so
+//   a reference obtained while reading is valid until the lock is released.  Readers do not
+//   see `state` – only the `dead` mirror.
 static TABLE: spin::RwSpinLock = spin::RwSpinLock::new("task table");
 
-/// Stan schedulera do odczytu tablicy zadań (tylko `tasks`, `ids` i pola
-/// zadań niezmienne lub atomowe) – pod `TABLE` z IF = 0.
-/// P4.b (testy): zadania o złym znaczniku widziane pod blokadą tablicy.
+/// Scheduler state for reading the task table (only `tasks`, `ids` and
+/// immutable or atomic task fields) – under `TABLE` with IF = 0.
+/// (tests) Tasks with a bad marker seen under the table lock.
 static TABLE_BAD: AtomicU64 = AtomicU64::new(0);
 
 #[cfg_attr(not(selftest), allow(dead_code))]
@@ -384,9 +384,9 @@ pub fn table_bad() -> u64 {
     TABLE_BAD.load(Ordering::Relaxed)
 }
 
-/// P4.b: sprawdzenie znacznika zadania znalezionego w tablicy (build z
-/// samotestami: z chwilą kręcenia, żeby zwolnienie bez blokady tablicy miało
-/// okno, w którym test je złapie).
+/// Checks the marker of a task found in the table (in builds with
+/// self-tests: with a spin delay, so that freeing without the table lock has a
+/// window in which the test catches it).
 #[inline]
 fn table_check(t: &Task) {
     #[cfg(selftest)]
@@ -405,94 +405,94 @@ fn table() -> &'static Scheduler {
 }
 
 // ------------------------------------------------------------
-// M17a.f1: blokada schedulera
+// Scheduler lock
 // ------------------------------------------------------------
 //
-// Jedna blokada na listę zadań i stan schedulera (current, idle, kwant).
-// M17a.f1 – obok BKL; od M17a.f2 – sama (scheduler nie potrzebuje BKL).
+// One lock for the task list and scheduler state (current, idle, quantum).
+// It originally lived alongside the BKL; now it stands alone (the scheduler does not need the BKL).
 //
-// BKL przy przełączeniu (f2, jak release/reacquire_kernel_lock w Linuksie
-// 2.x): zadanie, które trzyma BKL i ODDAJE CPU (schedule przełącza), zwalnia
-// go tuż przed przełączeniem (zwalniać wolno pod blokadą schedulera –
-// czekać na BKL już nie) i bierze z powrotem po wyjściu ze schedulera, gdy
-// nie trzyma już blokady schedulera (`after_switch`).  Gdy schedule() nie
-// przełącza (warunek spełniony, brak innych zadań), BKL zostaje – kod pod
-// BKL nie traci go "po drodze".  Nowe zadanie bierze BKL na start
-// (sched_new_task_start), jak dotąd.
+// BKL at a switch (like release/reacquire_kernel_lock in Linux
+// 2.x): a task that holds the BKL and GIVES UP the CPU (schedule switches) releases
+// it right before the switch (releasing under the scheduler lock is allowed –
+// waiting for the BKL is not) and takes it back after leaving the scheduler, when
+// it no longer holds the scheduler lock (`after_switch`).  When schedule() does not
+// switch (condition met, no other tasks), the BKL stays – code under the
+// BKL does not lose it "along the way".  A new task takes the BKL at start
+// (sched_new_task_start), as before.
 //
-// * Rekurencyjna na tym samym CPU (wake_channel -> kick, sleep_until ->
-//   block_current -> schedule), zawsze z IF = 0 (bierze ją też przerwanie
-//   zegara i pobudka z przerwania).
-// * P4.c (v0.32.0): NIE jest już trzymana przez przełączenie – schedule()
-//   oddaje ją po wyborze następnego zadania, a zadanie na CPU chroni flaga
-//   `on_cpu` (patrz finish_switch); strażniki sprzed przełączenia po powrocie
-//   zadania nic nie zwalniają (SCHED_SKIP).  Opis sprzed P4.c:
-// * Należy do CPU, nie do zadania, i jest trzymana PRZEZ przełączenie:
-//   schedule() bierze ją w starym zadaniu, a oddaje nowe zadanie (po powrocie
-//   ze swojego schedule() albo w sched_new_task_start).  Dzięki temu żaden
-//   inny CPU nie weźmie starego zadania, zanim jego rejestry nie są zapisane.
-//   Głębokość per CPU jest zapisywana w zadaniu przy przełączeniu
-//   (Task::sched_depth) i odtwarzana po powrocie – każde zadanie zwalnia
-//   tyle poziomów, ile samo wzięło.
-// * Kolejność: BKL -> blokada schedulera -> heap / ramki (alokacje pod nią
-//   dozwolone).  Trzymając ją nie wolno CZEKAĆ na BKL (zwolnić – wolno) ani
-//   na KMutex, robić TLB shootdown (stosy zadań zwalniamy po jej oddaniu)
-//   ani spać.
-// * Poza lockdep (jak blokady TLB i konsoli): rekurencja i przejście przez
-//   przełączenie zadań są tu celowe.
+// * Recursive on the same CPU (wake_channel -> kick, sleep_until ->
+//   block_current -> schedule), always with IF = 0 (it is also taken by the timer
+//   interrupt and by wake-ups from interrupts).
+// * It is NO LONGER held across the switch – schedule()
+//   releases it after picking the next task, and the task on the CPU is protected by the
+//   `on_cpu` flag (see finish_switch); guards taken before the switch release nothing
+//   when the task returns (SCHED_SKIP).  Earlier design, for reference:
+// * It belonged to the CPU, not to the task, and was held ACROSS the switch:
+//   schedule() took it in the old task, and the new task released it (after returning
+//   from its own schedule() or in sched_new_task_start).  Thanks to that no
+//   other CPU would take the old task before its registers were saved.
+//   The per-CPU depth was saved in the task at the switch
+//   (Task::sched_depth) and restored on return – each task released
+//   as many levels as it had taken itself.
+// * Order: BKL -> scheduler lock -> heap / frames (allocations under it
+//   are allowed).  While holding it one must not WAIT for the BKL (releasing is fine) nor
+//   for a KMutex, do a TLB shootdown (task stacks are freed after releasing it)
+//   nor sleep.
+// * Outside lockdep (like the TLB and console locks): recursion and crossing
+//   task switches are intentional here.
 
-/// Właściciel (numer CPU + 1; 0 = wolna) i głębokość per CPU.
-/// M17b.e: w osobnej linii cache (najgorętsza blokada jądra).
+/// Owner (CPU number + 1; 0 = free) and per-CPU depth.
+/// In its own cache line (the hottest lock in the kernel).
 static SCHED_OWNER: crate::arch::x86_64::percpu::CacheLine<core::sync::atomic::AtomicU32> =
     crate::arch::x86_64::percpu::CacheLine(core::sync::atomic::AtomicU32::new(0));
 static SCHED_DEPTH: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicU32> = crate::per_cpu!(core::sync::atomic::AtomicU32::new(0));
-/// Statystyka: wzięcia (pierwszy poziom), wzięcia z czekaniem, µs czekania.
+/// Statistics: acquisitions (first level), acquisitions with waiting, µs of waiting.
 static SCHED_ACQ: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static SCHED_CONT: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static SCHED_WAIT_US: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
-/// v0.32.1 (diagnostyka spadku stressu): najdłuższe pojedyncze czekanie na
-/// blokadę schedulera (µs), miejsce tego czekania, ile czekań > 100 µs, ile
-/// czekań z przerwania (on_tick, pobudka z IRQ) i najdłuższe z nich.
+/// Diagnostics: the longest single wait for the
+/// scheduler lock (µs), the location of that wait, how many waits > 100 µs, how many
+/// waits from interrupts (on_tick, wake-up from IRQ) and the longest of them.
 static SCHED_WAIT_MAX: AtomicU64 = AtomicU64::new(0);
 static SCHED_WAIT_MAX_SITE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SCHED_WAIT_LONG: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static SCHED_WAIT_IRQ_MAX: AtomicU64 = AtomicU64::new(0);
 
-/// (najdłuższe czekanie µs, jego miejsce, czekania > 100 µs, najdłuższe w przerwaniu µs).
+/// (longest wait µs, its location, waits > 100 µs, longest in interrupt µs).
 pub fn sched_wait_extremes() -> (u64, &'static str, u64, u64) {
     let site = SCHED_WAIT_MAX_SITE.load(Ordering::Relaxed);
     let name: &'static str = if site == 0 { "-" } else { unsafe { *(site as *const &'static str) } };
     (SCHED_WAIT_MAX.load(Ordering::Relaxed), name, SCHED_WAIT_LONG.get(), SCHED_WAIT_IRQ_MAX.load(Ordering::Relaxed))
 }
-/// M17a.g12: kto bierze blokadę schedulera (plik:linia), czekanie i trzymanie.
+/// Who takes the scheduler lock (file:line), waiting and holding times.
 static SCHED_SITES: bkl::SiteTable = bkl::SiteTable::new();
-/// Wpis (+1) i TSC wzięcia na tym CPU (zwalnia ten sam CPU – IF = 0).
+/// Entry (+1) and acquisition TSC on this CPU (released by the same CPU – IF = 0).
 static SCHED_HOLD_SLOT: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicUsize> = crate::per_cpu!(core::sync::atomic::AtomicUsize::new(0));
 static SCHED_HOLD_TSC: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 
-/// P4.c: przełączenia poza blokadą schedulera i czekania na `on_cpu`
-/// (wybrane zadanie jeszcze schodziło z innego CPU): liczba, takty TSC.
+/// Switches outside the scheduler lock and waits for `on_cpu`
+/// (the picked task was still leaving another CPU): count, TSC ticks.
 static SWITCH_N: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static ONCPU_WAITS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static ONCPU_TSC: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
-/// P4.c: zadanie, z którego ten CPU właśnie schodzi (zdejmuje mu `on_cpu`
-/// pierwsze, co wykona następne zadanie – `finish_switch`).
+/// The task this CPU is just leaving (the next task clears its `on_cpu`
+/// as the first thing it does – `finish_switch`).
 static PREV_TASK: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicUsize> = crate::per_cpu!(core::sync::atomic::AtomicUsize::new(0));
-/// P4.c: strażniki blokady schedulera wzięte PRZED przełączeniem przez
-/// zadanie, które właśnie wróciło – blokada jest już zwolniona (schedule
-/// oddaje ją przed przełączeniem), więc ich Drop nic nie zwalnia.
+/// Scheduler lock guards taken BEFORE the switch by the
+/// task that has just returned – the lock is already released (schedule
+/// releases it before switching), so their Drop releases nothing.
 static SCHED_SKIP: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicU32> = crate::per_cpu!(core::sync::atomic::AtomicU32::new(0));
 
-/// (przełączenia, czekania na on_cpu, µs tych czekań) – `cpus`.
+/// (switches, waits for on_cpu, µs of those waits) – `cpus`.
 pub fn switch_stats() -> (u64, u64, u64) {
     let per_ms = crate::arch::x86_64::lapic::tsc_per_ms().max(1);
     (SWITCH_N.get(), ONCPU_WAITS.get(), ONCPU_TSC.get() * 1000 / per_ms)
 }
 
-/// P4.c: po przełączeniu (nowe zadanie, IF = 0, bez blokady schedulera) –
-/// poprzednie zadanie tego CPU jest już zapisane: zdjęcie `on_cpu` (od teraz
-/// inny CPU może je uruchomić, reap – zwolnić).  `skip` – ile strażników
-/// blokady to zadanie wzięło przed swoim przełączeniem.
+/// After a switch (new task, IF = 0, without the scheduler lock) –
+/// this CPU's previous task is already saved: clears `on_cpu` (from now on
+/// another CPU may run it, and reap may free it).  `skip` – how many scheduler lock
+/// guards this task took before its own switch.
 fn finish_switch(skip: u32) {
     let c = cpu();
     SCHED_SKIP[c].store(skip, Ordering::Relaxed);
@@ -512,20 +512,20 @@ fn sched_hold_end(me: usize) {
     }
 }
 
-/// Miejsca wzięcia blokady schedulera (`cpus`, autostress) i nieśledzone wzięcia.
+/// Scheduler lock acquisition sites (`cpus`, autostress) and untracked acquisitions.
 pub fn sched_lock_sites() -> (alloc::vec::Vec<bkl::SiteInfo>, u64) {
     (SCHED_SITES.stats(), SCHED_SITES.overflow())
 }
 
-/// Po tylu µs czekania na blokadę schedulera – raport (sekcje trwają µs).
+/// After this many µs of waiting for the scheduler lock – report (sections last µs).
 const SCHED_REPORT_US: u64 = 2_000_000;
 
 fn sched_lock_held() -> bool {
     SCHED_OWNER.load(Ordering::Relaxed) == cpu() as u32 + 1
 }
 
-/// Strażnik blokady schedulera (rekurencyjnej).  Zwolnienie na CPU, na
-/// którym zadanie jest w chwili zwolnienia (po przełączeniu może być inny).
+/// Guard of the (recursive) scheduler lock.  Released on the CPU
+/// the task is on at release time (after a switch it may be a different one).
 struct SchedGuard {
     irq: bool,
 }
@@ -552,20 +552,20 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
     }
     if SCHED_OWNER.compare_exchange(0, tag, Ordering::Acquire, Ordering::Relaxed).is_err() {
         SCHED_CONT.add(1);
-        // M17a.g13: TSC (IF = 0 – ten sam CPU), nie HPET – odczyt po wzięciu
-        // blokady wydłużał jej trzymanie.
-        // M17a.g14: statystyka – TSC tego CPU (IF = 0); raport o długim
-        // czekaniu – HPET (TSC bywa niewiarygodny), czytany co 4096 obrotów.
+        // TSC (IF = 0 – same CPU), not HPET – reading it after taking
+        // the lock lengthened the hold time.
+        // Statistics – this CPU's TSC (IF = 0); the long-wait
+        // report – HPET (TSC can be unreliable), read every 4096 spins.
         let (tsc0, cpu0) = crate::arch::x86_64::clock::tsc_cpu();
         let mut start = 0u64;
         let mut n: u32 = 0;
         let mut reported = false;
-        // P4.0: czekanie samym ODCZYTEM (test-and-test-and-set) – próba
-        // przejęcia (instrukcja atomowa) dopiero, gdy blokada wygląda na wolną.
-        // Wcześniej każdy obrót pętli był compare_exchange: 15 czekających CPU
-        // zabierało sobie nawzajem i trzymającemu linię pamięci podręcznej z
-        // blokadą – trzymający wolniej ją oddawał (Legion v0.29.0: 41% wzięć
-        // czeka, 18,9 s).  Tak czekają już zwykłe spinlocki (spin.rs).
+        // Wait by READING only (test-and-test-and-set) – an acquisition attempt
+        // (atomic instruction) only when the lock looks free.
+        // Previously every loop iteration was a compare_exchange: 15 waiting CPUs
+        // kept stealing the cache line holding the lock from each other and from the holder
+        // – the holder released it more slowly (41% of acquisitions
+        // waited, 18.9 s).  Ordinary spinlocks (spin.rs) already wait this way.
         loop {
             if SCHED_OWNER.load(Ordering::Relaxed) == 0
                 && SCHED_OWNER.compare_exchange_weak(0, tag, Ordering::Acquire, Ordering::Relaxed).is_ok()
@@ -619,7 +619,7 @@ fn lock_sched_at(site: &'static &'static str) -> SchedGuard {
 impl Drop for SchedGuard {
     fn drop(&mut self) {
         let me = cpu();
-        // P4.c: strażnik sprzed przełączenia – blokadę oddało już schedule().
+        // Guard from before the switch – schedule() has already released the lock.
         let skip = SCHED_SKIP[me].load(Ordering::Relaxed);
         if skip > 0 {
             SCHED_SKIP[me].store(skip - 1, Ordering::Relaxed);
@@ -639,28 +639,28 @@ impl Drop for SchedGuard {
     }
 }
 
-/// Pierwsze wejście nowego zadania (task_trampoline, IF = 0): blokada
-/// schedulera wzięta przez schedule() poprzedniego zadania – oddajemy całą.
+/// First entry of a new task (task_trampoline, IF = 0): the scheduler lock
+/// taken by the previous task's schedule() – release all of it.
 #[unsafe(no_mangle)]
 extern "sysv64" fn sched_new_task_start() {
-    // P4.c: blokada schedulera jest już wolna (schedule() oddaje ją przed
-    // przełączeniem); tylko poprzednie zadanie dostaje zdjęte `on_cpu`.
+    // The scheduler lock is already free (schedule() releases it before the
+    // switch); only the previous task gets its `on_cpu` cleared.
     finish_switch(0);
-    // M17a.f2: zadanie startuje z BKL (zadania kernela działają pod BKL,
-    // procesy oddają go w enter_user) – poprzednie zadanie oddało go przy
-    // przełączeniu.  Dopiero PO oddaniu blokady schedulera (kolejność).
-    // M17a.g3: proces użytkownika startuje bez BKL – jego wejście
-    // (user_task_entry -> enter_user) czyta tylko własny proces i od razu
-    // skacze do ring 3 (wcześniej: weź BKL, żeby za chwilę oddać – 308 tys.
-    // razy w stressie na Legionie).
+    // The task starts with the BKL (kernel tasks run under the BKL,
+    // processes give it up in enter_user) – the previous task gave it up at the
+    // switch.  Only AFTER releasing the scheduler lock (ordering).
+    // A user process starts without the BKL – its entry
+    // (user_task_entry -> enter_user) reads only its own process and immediately
+    // jumps to ring 3 (previously: take the BKL only to release it a moment later –
+    // hundreds of thousands of times under stress).
     let user = current_task_unlocked().is_some_and(|t| t.process.is_some());
     if !user {
         bkl::acquire_if_needed_tagged(&bkl::tag::NEW_TASK);
     }
 }
 
-/// M17a.f2: po wyjściu ze schedulera (bez blokady schedulera) – jeśli to
-/// zadanie oddało BKL przy przełączeniu, bierze go z powrotem.  Wołają:
+/// After leaving the scheduler (without the scheduler lock) – if this
+/// task gave up the BKL at the switch, it takes it back.  Called by:
 /// wait_event, sleep_until, yield_now, preempt.
 fn after_switch(why: &'static &'static str) {
     without_interrupts(|| {
@@ -677,8 +677,8 @@ fn after_switch(why: &'static &'static str) {
     });
 }
 
-/// M17a.f2: flaga "oddał BKL" bieżącego zadania – zdjęcie / ustawienie (IF = 0,
-/// tylko własne zadanie; preempt odkłada flagę przerwanego kontekstu).
+/// "Gave up the BKL" flag of the current task – clear / set (IF = 0,
+/// own task only; preempt saves the flag of the interrupted context).
 fn take_bkl_dropped() -> bool {
     let a = CUR_TASK[cpu()].load(Ordering::Acquire);
     if a == 0 {
@@ -695,12 +695,12 @@ fn set_bkl_dropped(v: bool) {
     }
 }
 
-/// M17a.f2: czeka na kanale `channel`, aż `cond()` będzie prawdą albo minie
-/// tick `deadline` – sprawdzenie warunku i uśpienie pod blokadą schedulera,
-/// a pobudka (wake_channel) też ją bierze, więc pobudka z innego CPU nie
-/// przepada (wcześniej gwarantował to BKL).  `cond` działa z IF = 0 pod
-/// blokadą schedulera: tylko atomiki / krótkie odczyty, bez KMutex i BKL.
-/// Wymaga schedulera i zadania, które może spać (sync::WaitQueue sprawdza).
+/// Waits on channel `channel` until `cond()` is true or tick
+/// `deadline` passes – checking the condition and going to sleep happen under the scheduler lock,
+/// and the wake-up (wake_channel) takes it too, so a wake-up from another CPU is not
+/// lost (previously the BKL guaranteed this).  `cond` runs with IF = 0 under
+/// the scheduler lock: only atomics / short reads, no KMutex or BKL.
+/// Requires the scheduler and a task that may sleep (sync::WaitQueue checks).
 pub fn wait_event(channel: usize, deadline: u64, cond: &mut dyn FnMut() -> bool) -> bool {
     let had_bkl = bkl::held();
     let result = loop {
@@ -720,7 +720,7 @@ pub fn wait_event(channel: usize, deadline: u64, cond: &mut dyn FnMut() -> bool)
             break r;
         }
     };
-    // Niezmiennik f2: kto czekał z BKL, wraca z BKL (patrz preempt).
+    // Invariant: whoever waited holding the BKL returns holding the BKL (see preempt).
     if had_bkl && !bkl::held() {
         let flag = without_interrupts(|| {
             let a = CUR_TASK[cpu()].load(Ordering::Acquire);
@@ -738,19 +738,19 @@ pub fn wait_event(channel: usize, deadline: u64, cond: &mut dyn FnMut() -> bool)
     result
 }
 
-/// Testy: (właściciel blokady schedulera: numer CPU + 1, głębokość na tym CPU).
+/// Tests: (scheduler lock owner: CPU number + 1, depth on this CPU).
 #[allow(dead_code)]
 pub fn sched_lock_state() -> (u32, u32) {
     without_interrupts(|| (SCHED_OWNER.load(Ordering::Relaxed), SCHED_DEPTH[cpu()].load(Ordering::Relaxed)))
 }
 
-/// (wzięcia, wzięcia z czekaniem, µs czekania) blokady schedulera – `cpus`.
+/// (acquisitions, acquisitions with waiting, µs of waiting) of the scheduler lock – `cpus`.
 pub fn sched_lock_stats() -> (u64, u64, u64) {
     (SCHED_ACQ.get(), SCHED_CONT.get(), SCHED_WAIT_US.get())
 }
 
-/// Bez sprawdzania BKL – tylko raporty błędów (panic, watchdog), które nie
-/// mogą czekać na BKL.
+/// Without checking the BKL – only error reports (panic, watchdog), which must
+/// not wait for the BKL.
 fn sched_raw() -> &'static Scheduler {
     unsafe { &*core::ptr::addr_of!(SCHED) }
 }
@@ -760,7 +760,7 @@ fn index_of(s: &Scheduler, id: TaskId) -> Option<usize> {
 }
 
 // ------------------------------------------------------------
-// M17a.f3a: kolejki schedulera (wszystko pod blokadą schedulera)
+// Scheduler queues (everything under the scheduler lock)
 // ------------------------------------------------------------
 
 #[inline]
@@ -768,7 +768,7 @@ fn tm(p: *mut Task) -> &'static mut Task {
     unsafe { &mut *p }
 }
 
-/// Zadanie po numerze (kubełek – kilka porównań).
+/// Task by id (bucket – a few comparisons).
 fn find(s: &Scheduler, id: TaskId) -> Option<*mut Task> {
     let mut p = s.ids[(id as usize) % ID_BUCKETS];
     while !p.is_null() {
@@ -801,7 +801,7 @@ fn id_remove(s: &mut Scheduler, p: *mut Task) {
     }
 }
 
-/// Nowe zadanie na listę (i do kolejki gotowych, jeśli gotowe).
+/// New task onto the list (and into the ready queue, if ready).
 fn add_task(s: &mut Scheduler, mut t: Box<Task>) {
     let p: *mut Task = &mut *t;
     {
@@ -812,7 +812,7 @@ fn add_task(s: &mut Scheduler, mut t: Box<Task>) {
     enqueue(s, p);
 }
 
-/// Do kolejki gotowych (tylko Ready, nie idle, bez powtórzeń).
+/// Into the ready queue (Ready only, not idle, no duplicates).
 fn enqueue(s: &mut Scheduler, p: *mut Task) {
     let t = tm(p);
     if t.state == State::Ready && t.idle_cpu.is_none() && !t.queued {
@@ -822,7 +822,7 @@ fn enqueue(s: &mut Scheduler, p: *mut Task) {
     }
 }
 
-/// Zdjęcie z kolejki gotowych (jeśli jest).
+/// Removal from the ready queue (if present).
 fn dequeue(s: &mut Scheduler, p: *mut Task) {
     if tm(p).queued {
         tm(p).queued = false;
@@ -831,7 +831,7 @@ fn dequeue(s: &mut Scheduler, p: *mut Task) {
     }
 }
 
-/// Uśpione -> gotowe: zdjęcie z kubełka kanału i z listy terminów.
+/// Sleeping -> ready: removal from the channel bucket and from the deadline list.
 fn unblock(s: &mut Scheduler, p: *mut Task) {
     let t = tm(p);
     if t.state != State::Blocked {
@@ -852,13 +852,13 @@ fn unblock(s: &mut Scheduler, p: *mut Task) {
 
 
 // ------------------------------------------------------------
-// Przełączanie kontekstu
+// Context switching
 // ------------------------------------------------------------
 
 global_asm!(r#"
     .section .text
     .global sched_switch
-    // rdi = &mut u64 (gdzie zapisać RSP bieżącego zadania), rsi = RSP nowego
+    // rdi = &mut u64 (where to save the current task's RSP), rsi = new task's RSP
     sched_switch:
         push rbp
         push rbx
@@ -877,10 +877,10 @@ global_asm!(r#"
         ret
 
     .global task_trampoline
-    // Pierwsze wejście w nowe zadanie: r12 = funkcja, rbx = argument.
+    // First entry into a new task: r12 = function, rbx = argument.
     task_trampoline:
-        // M17a.f1: nowe zadanie startuje w środku schedule() poprzedniego –
-        // blokada schedulera jest wzięta; zwalniamy ją, zanim włączymy IF.
+        // A new task starts in the middle of the previous task's schedule() –
+        // the scheduler lock is held; release it before enabling IF.
         call sched_new_task_start
         mov rdi, r12
         mov rsi, rbx
@@ -901,10 +901,10 @@ extern "sysv64" fn task_main(entry: usize, arg: usize) -> ! {
     exit()
 }
 
-/// Wybiera następne zadanie i przełącza.  Wołać z wyłączonymi przerwaniami.
+/// Picks the next task and switches.  Call with interrupts disabled.
 fn schedule() {
-    // M16: nigdy na stosie IST (handler wyjątku na IST nie może usypiać
-    // ani przełączać zadań – patrz gdt::on_ist_stack).
+    // Never on an IST stack (an exception handler on an IST stack must not sleep
+    // or switch tasks – see gdt::on_ist_stack).
     let rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
     assert!(
@@ -912,8 +912,8 @@ fn schedule() {
         "sched: task switch on an IST stack (rsp {:#x}) - exception handler tried to block",
         rsp
     );
-    // M17a: przełączenie (sen, yield) ze spinlockiem = zakleszczenie, gdy
-    // następne zadanie na tym CPU zechce tej samej blokady.
+    // A switch (sleep, yield) while holding a spinlock = deadlock, if
+    // the next task on this CPU wants the same lock.
     assert!(
         spin::held_count() == 0,
         "sched: task switch on CPU {} while holding {} spinlock(s), first {:?}",
@@ -921,8 +921,8 @@ fn schedule() {
         spin::held_count(),
         spin::first_held()
     );
-    // M17a.f2: bez BKL – tylko blokada schedulera.
-    // Raw TSC: w schedule() bez migracji, a CUR_TASK zmienia się w środku.
+    // Without the BKL – only the scheduler lock.
+    // Raw TSC: no migration inside schedule(), and CUR_TASK changes midway.
     let t_prof = idle_tsc();
     let _g = lock_sched_at(&"schedule");
     let s = sched();
@@ -930,7 +930,7 @@ fn schedule() {
     let Some(curp) = find(s, s.current[me]) else {
         return;
     };
-    // M17a.f3a: następne z kolejki gotowych (FIFO) zamiast przeglądania listy.
+    // Next one from the ready queue (FIFO) instead of scanning the list.
     let mut nextp = None;
     while let Some(p) = s.ready.pop_front(rq_link) {
         READY_N.store(s.ready.len, Ordering::Relaxed);
@@ -944,7 +944,7 @@ fn schedule() {
     let cur = tm(curp);
     let nextp = match nextp {
         Some(p) => p,
-        // Nic gotowego: bieżące działa dalej, jeśli może; inaczej idle.
+        // Nothing ready: the current task keeps running if it can; otherwise idle.
         None if cur.state == State::Running => {
             QUANTUM[me].store(QUANTUM_TICKS, Ordering::Relaxed);
             return;
@@ -955,9 +955,9 @@ fn schedule() {
         },
     };
     QUANTUM[me].store(QUANTUM_TICKS, Ordering::Relaxed);
-    // P4.c: wybrane zadanie mogło jeszcze schodzić z innego CPU (obudzone albo
-    // oddane do kolejki tuż przed jego przełączeniem) – czekamy, aż tamten CPU
-    // zapisze jego rejestry (zdejmuje flagę bez blokady schedulera: kilkaset ns).
+    // The picked task may still be leaving another CPU (woken or
+    // put back in the queue right before its switch) – wait until that CPU
+    // saves its registers (it clears the flag without the scheduler lock: a few hundred ns).
     if tm(nextp).on_cpu.load(Ordering::Acquire) {
         let t0 = bkl::rdtsc();
         let mut n: u32 = 0;
@@ -977,15 +977,15 @@ fn schedule() {
     tm(nextp).on_cpu.store(true, Ordering::Relaxed);
     if cur.state == State::Running {
         cur.state = State::Ready;
-        enqueue(s, curp); // na koniec kolejki (idle – nie)
+        enqueue(s, curp); // to the end of the queue (not for idle)
     }
     let next = tm(nextp);
     next.state = State::Running;
-    // v0.34.0: koniec bezczynności tego CPU – dopasowanie okna kręcenia.
+    // End of this CPU's idleness – adjust the spin window.
     if cur.idle_cpu.is_some() && next.idle_cpu.is_none() {
         idle_feedback(me);
     }
-    // Statystyka: proces wznowiony na innym CPU niż ostatnio (SMP TEST 5).
+    // Statistics: a process resumed on a different CPU than last time (SMP TEST 5).
     if next.process.is_some() && next.switches > 0 && next.last_cpu != me as u8 {
         USER_MIGRATIONS.fetch_add(1, Ordering::Relaxed);
     }
@@ -997,36 +997,36 @@ fn schedule() {
     TOTAL_SWITCHES.add(1);
     SWITCH_N.add(1);
 
-    // M17a.f1: zadanie nie może działać na dwóch CPU – następne nie jest
-    // bieżącym żadnego innego CPU.
+    // A task must not run on two CPUs – the next one is not
+    // the current task of any other CPU.
     debug_assert!(
         !s.current.iter().enumerate().any(|(c, &id)| c != me && id == next.id),
         "sched: task {} is already current on another CPU",
         next.id
     );
-    // Decyzje zależne od stanu – jeszcze pod blokadą (po jej oddaniu inny CPU
-    // może zmienić `state` bieżącego zadania, np. obudzić je).
+    // State-dependent decisions – still under the lock (after releasing it another CPU
+    // may change the current task's `state`, e.g. wake it).
     let save_fpu = cur.process.is_some() && cur.state != State::Dead;
     let idle_switch = (cur.idle_cpu.is_some(), next.idle_cpu.is_some());
     let cr3 = next.cr3();
     let cr3_changes = cr3 != cur.cr3();
-    // P4.c: blokada schedulera oddana PRZED przełączeniem – pod nią zostały
-    // tylko kolejki i stany.  Bieżące zadanie chroni `on_cpu` (nikt go nie
-    // uruchomi ani nie zwolni, zanim następne zadanie nie zdejmie flagi w
-    // finish_switch), następne – nasza flaga `on_cpu`.  Strażniki wzięte przez
-    // bieżące zadanie (głębokość) po jego powrocie nic nie zwalniają.
+    // The scheduler lock is released BEFORE the switch – only the queues and states
+    // remained under it.  The current task is protected by `on_cpu` (nobody will
+    // run or free it before the next task clears the flag in
+    // finish_switch), the next one – by our `on_cpu` flag.  Guards taken by
+    // the current task (depth) release nothing after it returns.
     cur.sched_depth = SCHED_DEPTH[me].load(Ordering::Relaxed);
     PREV_TASK[me].store(curp as usize, Ordering::Relaxed);
     SCHED_DEPTH[me].store(0, Ordering::Relaxed);
     sched_hold_end(me);
     SCHED_OWNER.store(0, Ordering::Release);
 
-    // M13a/M14: stos kernela dla przerwań z ring 3 (TSS.RSP0) i dla SYSCALL
-    // (blok per CPU) oraz przestrzeń adresowa.
+    // Kernel stack for interrupts from ring 3 (TSS.RSP0) and for SYSCALL
+    // (per-CPU block), plus the address space.
     crate::arch::x86_64::gdt::set_rsp0(next.kernel_stack_top());
     crate::arch::x86_64::syscall::set_kernel_stack(next.kernel_stack_top());
-    // M13b: FPU/SSE – zapis stanu procesu, który oddaje CPU, odtworzenie
-    // stanu następnego; zadania kernela działają z CR0.TS = 1.
+    // FPU/SSE – save the state of the process giving up the CPU, restore the
+    // state of the next one; kernel tasks run with CR0.TS = 1.
     if save_fpu {
         unsafe { fpu::save(&mut cur.fpu) };
     }
@@ -1037,21 +1037,21 @@ fn schedule() {
         fpu::set_ts();
     }
 
-    // M17a.b: CR3 tylko przy zmianie przestrzeni adresowej (do M17a.a przy
-    // SMP przeładowywany zawsze).  Zmiany górnej połowy unieważnia TLB
-    // shootdown; dolnej – samo przeładowanie: CPU, który opuszcza proces,
-    // zawsze ładuje inny CR3, a proces działa naraz na jednym CPU (tlb.rs).
+    // CR3 only when the address space changes (earlier SMP code
+    // reloaded it always).  Changes to the upper half are invalidated by TLB
+    // shootdown; to the lower half – by the reload itself: a CPU leaving a process
+    // always loads a different CR3, and a process runs on one CPU at a time (tlb.rs).
     if cr3_changes {
         unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
     }
 
-    // M17a.f2: BKL nie przechodzi na następne zadanie – oddajemy go (weźmiemy
-    // z powrotem w after_switch, po wyjściu ze schedulera).
+    // The BKL does not pass to the next task – we release it (we will take it
+    // back in after_switch, after leaving the scheduler).
     if bkl::held() {
         bkl::release();
         cur.bkl_dropped = true;
     }
-    // M17a.g2: czas w idle (statystyka "% idle").
+    // Time in idle (the "% idle" statistic).
     if idle_switch.0 || idle_switch.1 {
         let now = idle_tsc();
         if idle_switch.0 {
@@ -1064,8 +1064,8 @@ fn schedule() {
     }
     let old: *mut u64 = &mut cur.rsp;
     let new = next.rsp;
-    // M17b.f: czas CPU zadania – od jego wejścia na ten CPU do teraz (oba
-    // odczyty TSC na tym samym CPU).
+    // Task CPU time – from its entry onto this CPU until now (both
+    // TSC reads on the same CPU).
     {
         let now = idle_tsc();
         let since = SWITCHED_IN[me].swap(now, Ordering::Relaxed);
@@ -1075,8 +1075,8 @@ fn schedule() {
         crate::user::prof::add(crate::user::prof::CTX_SWITCH, now.saturating_sub(t_prof));
     }
     unsafe { sched_switch(old, new) };
-    // Wróciliśmy (może na innym CPU): poprzednie zadanie tego CPU dostaje
-    // zdjęte `on_cpu`; nasze strażniki sprzed przełączenia nic nie zwalniają.
+    // We are back (possibly on a different CPU): this CPU's previous task gets
+    // `on_cpu` cleared; our guards from before the switch release nothing.
     let depth = current_task_unlocked().map_or(0, |t| t.sched_depth);
     finish_switch(depth);
 }
@@ -1121,7 +1121,7 @@ fn new_task(id: TaskId, name: &str, stack: Option<TaskStack>, rsp: u64, state: S
     })
 }
 
-/// Startuje scheduler: bieżący kod staje się zadaniem 1, powstaje idle.
+/// Starts the scheduler: the current code becomes task 1, idle is created.
 pub fn init() {
     without_interrupts(|| {
         let _g = lock_sched_at(&"init");
@@ -1132,7 +1132,7 @@ pub fn init() {
         s.current[0] = BOOT_ID;
         publish_current(s, 0);
     });
-    // idle przez zwykły spawn (dostaje własny stos), potem zmiana ID na 0.
+    // idle via an ordinary spawn (gets its own stack), then its ID is changed to 0.
     let id = spawn("idle", idle_task, 0).expect("sched: cannot create idle task");
     without_interrupts(|| {
         let _g = lock_sched_at(&"init #2");
@@ -1140,7 +1140,7 @@ pub fn init() {
         if let Some(p) = find(s, id) {
             let _t = TABLE.write();
             id_remove(s, p);
-            // idle nie bywa w kolejce gotowych (spawn go tam wstawił)
+            // idle never sits in the ready queue (spawn put it there)
             dequeue(s, p);
             let t = tm(p);
             t.id = IDLE_ID;
@@ -1162,14 +1162,14 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Tworzy zadanie kernela wykonujące `entry(arg)`.  Kończy się, gdy
-/// `entry` wróci (albo przez `exit()`).
+/// Creates a kernel task executing `entry(arg)`.  It ends when
+/// `entry` returns (or via `exit()`).
 pub fn spawn(name: &str, entry: fn(usize), arg: usize) -> Result<TaskId, &'static str> {
     spawn_in(name, entry, arg, None, false)
 }
 
-/// M13a: zadanie z własną przestrzenią adresową (proces).  `entry` działa
-/// w ring 0 na stosie kernela zadania, z CR3 procesu – i stamtąd skacze do
+/// A task with its own address space (a process).  `entry` runs
+/// in ring 0 on the task's kernel stack, with the process's CR3 – and from there jumps to
 /// ring 3 (user::enter_user).
 pub fn spawn_user(
     name: &str,
@@ -1188,18 +1188,18 @@ fn spawn_in(
     process: Option<Box<crate::user::Process>>,
     foreground: bool,
 ) -> Result<TaskId, &'static str> {
-    // M17a: najpierw sprzątamy zakończone zadania.  Wcześniej robił to tylko
-    // idle – przy wielu CPU pod obciążeniem idle prawie nie działa i martwe
-    // zadania (stos 64 KiB + pamięć procesu) piętrzyły się w tysiące, aż
-    // kończyła się pamięć (stress: 2308 martwych zadań, "out of memory").
+    // First reap finished tasks.  Previously only idle did this
+    // – with many CPUs under load idle barely runs and dead
+    // tasks (64 KiB stack + process memory) piled up into the thousands until
+    // memory ran out (stress: 2308 dead tasks, "out of memory").
     if DEAD_TASKS.load(Ordering::Relaxed) > 0 {
         reap();
     }
     let stack = TaskStack::new().ok_or("out of memory for the task stack")?;
     let top = stack.top();
-    // Początkowa ramka dla sched_switch (patrz wyżej): r15 r14 r13 r12 rbx
-    // rbp, adres powrotu = task_trampoline, 2 x 0 (wyrównanie: po `ret`
-    // RSP % 16 == 0, więc `call task_main` daje poprawne wyrównanie ABI).
+    // Initial frame for sched_switch (see above): r15 r14 r13 r12 rbx
+    // rbp, return address = task_trampoline, 2 x 0 (alignment: after `ret`
+    // RSP % 16 == 0, so `call task_main` gives correct ABI alignment).
     let frame: [u64; 9] = [
         0,                            // r15
         0,                            // r14
@@ -1224,19 +1224,19 @@ fn spawn_in(
         let mut task = task;
         task.id = id;
         add_task(s, task);
-        // M17a.f2: proces na pierwszy plan – zanim zadanie stanie się
-        // widoczne dla innych CPU (blokada schedulera): nie ruszy, zanim
-        // Ctrl+C nie będzie go widział.
+        // Process to the foreground – before the task becomes
+        // visible to other CPUs (scheduler lock): it will not start before
+        // Ctrl+C can see it.
         if foreground {
             crate::console::push_foreground(id);
         }
-        // M17: nowe zadanie od razu na bezczynny CPU (jeśli jest).
+        // New task straight onto an idle CPU (if there is one).
         kick_idle(s);
         id
     }))
 }
 
-/// Oddaje CPU innym gotowym zadaniom.
+/// Yields the CPU to other ready tasks.
 #[allow(dead_code)]
 pub fn yield_now() {
     if !active() {
@@ -1249,7 +1249,7 @@ pub fn yield_now() {
     after_switch(&bkl::tag::AFTER_YIELD);
 }
 
-/// Kończy bieżące zadanie (zadania 1 nie wolno zakończyć).
+/// Ends the current task (task 1 must not be ended).
 pub fn exit() -> ! {
     interrupts::disable();
     let _g = lock_sched_at(&"exit");
@@ -1272,11 +1272,11 @@ pub fn current_id() -> TaskId {
     if !active() {
         return BOOT_ID;
     }
-    // M17a.e: bez listy zadań (ta jest pod BKL) – wskaźnik per CPU.
+    // Without the task list (it is under the BKL) – a per-CPU pointer.
     without_interrupts(|| current_task_unlocked().map(|t| t.id).unwrap_or(BOOT_ID))
 }
 
-/// Nazwa bieżącego zadania (raporty błędów; bez alokacji).
+/// Name of the current task (error reports; no allocation).
 pub fn with_current_name<R>(f: impl FnOnce(TaskId, &str) -> R) -> Option<R> {
     if !active() {
         return None;
@@ -1288,13 +1288,13 @@ pub fn with_current_name<R>(f: impl FnOnce(TaskId, &str) -> R) -> Option<R> {
     })
 }
 
-/// Czy bieżące zadanie może zasnąć (scheduler działa i to nie idle).
+/// Whether the current task may sleep (the scheduler is running and it is not idle).
 pub fn can_block() -> bool {
     active() && without_interrupts(|| current_task_unlocked().is_some_and(|t| t.idle_cpu.is_none()))
 }
 
-/// Usypia bieżące zadanie na kanale `channel` do pobudki albo do ticku
-/// `deadline`.  Wołać z wyłączonymi przerwaniami (patrz sync::WaitQueue).
+/// Puts the current task to sleep on channel `channel` until woken or until tick
+/// `deadline`.  Call with interrupts disabled (see sync::WaitQueue).
 pub fn block_current(channel: usize, deadline: u64) {
     let _g = lock_sched_at(&"block_current");
     let s = sched();
@@ -1303,7 +1303,7 @@ pub fn block_current(channel: usize, deadline: u64) {
         t.state = State::Blocked;
         t.wait_channel = channel;
         t.wake_at = deadline;
-        // M17a.f3a: na listę kanału i listę terminów (pobudka bez przeglądania).
+        // Onto the channel list and the deadline list (wake-up without scanning).
         if channel != 0 {
             s.waiters[wait_bucket(channel)].push_back(p, wq_link);
         }
@@ -1316,25 +1316,25 @@ pub fn block_current(channel: usize, deadline: u64) {
     schedule();
 }
 
-/// Budzi zadania czekające na kanale (bezpieczne w przerwaniu).
+/// Wakes the tasks waiting on a channel (safe in interrupt context).
 pub fn wake_channel(channel: usize) {
     if !active() {
         return;
     }
-    // M17a.f2: tylko blokada schedulera (bez BKL) – także z przerwania.
+    // Only the scheduler lock (no BKL) – also from interrupts.
     without_interrupts(|| {
         let _g = lock_sched_at(&"wake_channel");
         let s = sched();
         if channel == 0 {
             return;
         }
-        // M17a.f3a/b: tylko kubełek tego kanału.
+        // Only this channel's bucket.
         let mut woke = 0;
         let mut p = s.waiters[wait_bucket(channel)].head;
         while !p.is_null() {
             let next = tm(p).wq.next;
             if tm(p).state == State::Blocked && tm(p).wait_channel == channel {
-                unblock(s, p); // zdejmuje z kubełka
+                unblock(s, p); // removes it from the bucket
                 woke += 1;
             }
             p = next;
@@ -1345,11 +1345,11 @@ pub fn wake_channel(channel: usize) {
     });
 }
 
-/// M17a.g10: budzi JEDNO zadanie czekające na kanale – najdłużej czekające
-/// (kubełek jest kolejką FIFO).  `true` – obudzono.  Blokady usypiające
-/// przekazują się tak jednemu czekającemu zamiast budzić wszystkich (stado:
-/// wszyscy przez scheduler, jeden bierze blokadę, reszta wraca spać) – jak
-/// mutex w Linuksie (pierwszy z wait_list) i WAKEUP_FIRST w HelenOS.
+/// Wakes ONE task waiting on the channel – the one waiting longest
+/// (the bucket is a FIFO queue).  `true` – one was woken.  Sleeping locks
+/// hand themselves over to a single waiter this way instead of waking all of them (thundering herd:
+/// all go through the scheduler, one takes the lock, the rest go back to sleep) – like
+/// the mutex in Linux (first from wait_list) and WAKEUP_FIRST in HelenOS.
 pub fn wake_one_channel(channel: usize) -> bool {
     if !active() || channel == 0 {
         return false;
@@ -1371,16 +1371,16 @@ pub fn wake_one_channel(channel: usize) -> bool {
     })
 }
 
-/// Śpi do ticku `deadline` (time::sleep_* woła to po starcie schedulera).
+/// Sleeps until tick `deadline` (time::sleep_* calls this once the scheduler has started).
 pub fn sleep_until(deadline: u64) {
-    // M17a.f2: bez BKL; BKL (jeśli był) wraca w after_switch.
+    // Without the BKL; the BKL (if held) comes back in after_switch.
     let had_bkl = bkl::held();
     without_interrupts(|| {
         while crate::time::ticks() < deadline {
             let g = lock_sched_at(&"sleep_until");
             let s = sched();
             if find(s, cur_id(s)).map(|p| tm(p).exit_requested).unwrap_or(false) {
-                break; // `kill` – zadanie ma się zakończyć, nie spać dalej
+                break; // `kill` – the task is to exit, not keep sleeping
             }
             block_current(0, deadline);
             drop(g);
@@ -1390,7 +1390,7 @@ pub fn sleep_until(deadline: u64) {
     assert!(!had_bkl || bkl::held(), "sleep_until returned without the BKL on CPU {}", cpu());
 }
 
-/// Prośba o zakończenie zadania (zadanie samo sprawdza `should_exit`).
+/// Request to end a task (the task itself checks `should_exit`).
 pub fn request_exit(id: TaskId) -> bool {
     if id == BOOT_ID || id == IDLE_ID {
         return false;
@@ -1400,7 +1400,7 @@ pub fn request_exit(id: TaskId) -> bool {
         let s = sched();
         find(s, id).is_some_and(|p| tm(p).idle_cpu.is_some())
     }) {
-        return false; // zadania idle (każdego CPU) nie kończymy
+        return false; // idle tasks (of each CPU) are never ended
     }
     without_interrupts(|| {
         let _g = lock_sched_at(&"request_exit #2");
@@ -1408,9 +1408,9 @@ pub fn request_exit(id: TaskId) -> bool {
         match find(s, id) {
             Some(p) if tm(p).state != State::Dead => {
                 tm(p).exit_requested = true;
-                // Czekające zadanie budzimy, żeby mogło to zauważyć (warunki
-                // czekania w syscallach sprawdzają should_exit; inne po prostu
-                // zasną ponownie).
+                // Wake the waiting task so it can notice (wait
+                // conditions in syscalls check should_exit; others simply
+                // go back to sleep).
                 if tm(p).state == State::Blocked {
                     unblock(s, p);
                     kick(s);
@@ -1422,26 +1422,26 @@ pub fn request_exit(id: TaskId) -> bool {
     })
 }
 
-/// M14: proces bieżącego zadania.  Do procesu sięga tylko jego własne
-/// zadanie (syscalle), a struktura jest w Box – adres się nie zmienia, więc
-/// referencja jest ważna do końca zadania.  Sprzątanie (reap) dotyczy tylko
-/// zakończonych zadań.
+/// Process of the current task.  Only its own task accesses the process
+/// (syscalls), and the structure is in a Box – its address does not change, so
+/// the reference is valid until the task ends.  Cleanup (reap) only concerns
+/// finished tasks.
 pub fn current_process() -> Option<&'static mut crate::user::Process> {
     if !active() {
         return None;
     }
-    // M17a.e: bez listy zadań – wskaźnik per CPU (działa także bez BKL).
+    // Without the task list – a per-CPU pointer (works even without the BKL).
     without_interrupts(|| current_unlocked().map(|(_, p)| p))
 }
 
-/// M16: `f` na procesie zadania `pid` (None: brak zadania, zadanie
-/// kernela albo zakończone).  Przy wyłączonych przerwaniach – tylko krótkie
-/// odczyty pól atomowych / niezmiennych.
+/// `f` on the process of task `pid` (None: no such task, a kernel
+/// task or a finished one).  With interrupts disabled – only short
+/// reads of atomic / immutable fields.
 pub fn with_process<R>(pid: TaskId, f: impl FnOnce(&crate::user::Process) -> R) -> Option<R> {
     if !active() {
         return None;
     }
-    // P4.b: tylko tablica zadań do odczytu (bez blokady schedulera).
+    // Only the task table, for reading (without the scheduler lock).
     without_interrupts(|| {
         let _t = TABLE.read();
         let t = unsafe { &*find(table(), pid)? };
@@ -1453,7 +1453,7 @@ pub fn with_process<R>(pid: TaskId, f: impl FnOnce(&crate::user::Process) -> R) 
     })
 }
 
-/// M16: żywe procesy, których rodzicem jest `ppid`.
+/// Live processes whose parent is `ppid`.
 #[allow(dead_code)]
 pub fn children_of(ppid: TaskId) -> Vec<TaskId> {
     if !active() {
@@ -1475,19 +1475,19 @@ pub fn children_of(ppid: TaskId) -> Vec<TaskId> {
     out
 }
 
-/// M16: dzieci procesu `from` dostają nowego rodzica `to` (0 = kernel).
-/// P1: `first` (pod blokadą schedulera – np. kończący się rodzic ustawia
-/// `exiting` i zabiera swoje zombie), potem żywe dzieci `from` dostają rodzica
-/// `to`, a `to` – licznik żywych dzieci +n.  Jedna sekcja: dziecko kończące
-/// się w tym samym czasie (with_process na rodzicu) widzi albo starego
-/// rodzica, który jeszcze przyjmuje, albo już nowego.
+/// Children of process `from` get a new parent `to` (0 = kernel).
+/// `first` (under the scheduler lock – e.g. an exiting parent sets
+/// `exiting` and takes its zombies), then the live children of `from` get parent
+/// `to`, and `to` – its live-children counter +n.  One section: a child exiting
+/// at the same time (with_process on the parent) sees either the old
+/// parent, which still accepts, or already the new one.
 pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
     if !active() {
         first();
         return 0;
     }
     without_interrupts(|| {
-        // P4.b: zapis tablicy zadań (wyklucza with_process – patrz wyżej).
+        // Write side of the task table (excludes with_process – see above).
         let _t = TABLE.write();
         first();
         let s = table();
@@ -1502,7 +1502,7 @@ pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
                 }
             }
         }
-        // M17a.g11: nowy rodzic ma teraz dzieci (jego koniec musi je oddać).
+        // The new parent now has children (its exit must hand them over).
         if n > 0 && to != 0 {
             if let Some(t) = find(s, to) {
                 if let Some(p) = unsafe { &*t }.process.as_deref() {
@@ -1515,7 +1515,7 @@ pub fn reparent_with(from: TaskId, to: TaskId, first: impl FnOnce()) -> usize {
     })
 }
 
-/// P1: `f` dla każdego żywego procesu (testy: zombie we wszystkich rodzicach).
+/// `f` for each live process (tests: zombies in all parents).
 #[allow(dead_code)]
 pub fn for_each_process(mut f: impl FnMut(TaskId, &crate::user::Process)) {
     if !active() {
@@ -1533,7 +1533,7 @@ pub fn for_each_process(mut f: impl FnMut(TaskId, &crate::user::Process)) {
     })
 }
 
-/// Szczyt stosu kernela bieżącego zadania (powrót z ring 3 do kernela).
+/// Top of the current task's kernel stack (return from ring 3 to the kernel).
 pub fn current_kernel_stack_top() -> u64 {
     without_interrupts(|| {
         let _g = lock_sched_at(&"current_kernel_stack_top");
@@ -1543,11 +1543,11 @@ pub fn current_kernel_stack_top() -> u64 {
 }
 
 pub fn should_exit() -> bool {
-    // M17a.e: bez BKL (flaga bieżącego zadania przez wskaźnik per CPU).
+    // Without the BKL (the current task's flag via the per-CPU pointer).
     active() && without_interrupts(should_exit_unlocked)
 }
 
-/// Lista zadań (bez zakończonych).
+/// List of tasks (excluding finished ones).
 pub fn tasks() -> Vec<TaskInfo> {
     if !active() {
         return Vec::new();
@@ -1578,8 +1578,8 @@ pub fn tasks() -> Vec<TaskInfo> {
     out
 }
 
-/// M17a.g6: czy zadanie jeszcze istnieje (bez kopiowania listy zadań –
-/// pętla stressu pytała task_info o 48 zadań co 2 ms).
+/// Whether a task still exists (without copying the task list –
+/// the stress loop asked task_info about 48 tasks every 2 ms).
 pub fn task_exists(id: TaskId) -> bool {
     without_interrupts(|| {
         let _t = TABLE.read();
@@ -1595,24 +1595,24 @@ pub fn total_switches() -> u64 {
     TOTAL_SWITCHES.get()
 }
 
-/// Zwalnia zakończone zadania (stos, struktura).  Woła idle i testy.
-/// Ile razy proces użytkownika wznowiono na innym CPU niż poprzednio.
+/// Frees finished tasks (stack, structure).  Called by idle and tests.
+/// How many times a user process was resumed on a different CPU than before.
 static USER_MIGRATIONS: AtomicU64 = AtomicU64::new(0);
 
-/// Licznik migracji procesów między CPU (testy).
+/// Counter of process migrations between CPUs (tests).
 #[allow(dead_code)]
 pub fn user_migrations() -> u64 {
     USER_MIGRATIONS.load(Ordering::Relaxed)
 }
 
-/// M17a.g1: zakończone zadania czekające na sprzątanie (pętla idle sprawdza
-/// to bez BKL i bierze go tylko wtedy, gdy jest co sprzątać).
+/// Finished tasks waiting for cleanup (the idle loop checks
+/// this without the BKL and takes it only when there is something to clean up).
 static DEAD_TASKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 pub fn reap() -> usize {
     let t0 = crate::user::prof::start();
-    // M17a.f3b: miejsce przygotowane przed blokadą schedulera (bez alokacji
-    // pod nią; więcej martwych niż miejsca – zostaną na następny raz).
+    // Space prepared before taking the scheduler lock (no allocation
+    // under it; more dead tasks than space – they will wait for next time).
     let room = DEAD_TASKS.load(Ordering::Relaxed).clamp(1, 64);
     let mut dead: Vec<Box<Task>> = Vec::with_capacity(room);
     without_interrupts(|| {
@@ -1621,7 +1621,7 @@ pub fn reap() -> usize {
         let _t = TABLE.write();
         let mut i = 0;
         while i < s.tasks.len() {
-            // P4.c: martwe zadanie może jeszcze schodzić z CPU (on_cpu).
+            // A dead task may still be leaving a CPU (on_cpu).
             if dead.len() < room
                 && s.tasks[i].state == State::Dead
                 && !s.current.contains(&s.tasks[i].id)
@@ -1639,36 +1639,36 @@ pub fn reap() -> usize {
         let _ = DEAD_TASKS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(dead.len())));
     });
     let n = dead.len();
-    drop(dead); // stosy odmapowane, ramki wracają (z włączonymi przerwaniami)
+    drop(dead); // stacks unmapped, frames returned (with interrupts enabled)
     crate::user::prof::stop(crate::user::prof::REAP, t0);
     n
 }
 
 // ------------------------------------------------------------
-// Przerwania: tick + wywłaszczenie
+// Interrupts: tick + preemption
 // ------------------------------------------------------------
 
-// M17a.g12: tick bez blokady schedulera, gdy nie ma kogo budzić.  Czas CPU
-// i kwant to dane tego CPU (zadanie bieżące zmienia tylko ten CPU, a w
-// przerwaniu IF = 0), a "są gotowe zadania" – licznik READY_N (podpowiedź;
-// pobudka i tak wysyła IPI).  Wcześniej każdy CPU co 1 ms brał globalną
-// blokadę: na Legionie ~16 tys. wzięć/s tylko na liczenie czasu.
-/// Kwant zadania bieżącego każdego CPU (ms).
+// Tick without the scheduler lock when there is nobody to wake.  CPU time
+// and quantum are this CPU's data (only this CPU changes its current task, and in an
+// interrupt IF = 0), and "there are ready tasks" – the READY_N counter (a hint;
+// a wake-up sends an IPI anyway).  Previously every CPU took the global
+// lock every 1 ms: ~16 thousand acquisitions/s on a 16-CPU machine just for time accounting.
+/// Quantum of each CPU's current task (ms).
 static QUANTUM: crate::arch::x86_64::percpu::PerCpu<AtomicU32> = crate::per_cpu!(AtomicU32::new(QUANTUM_TICKS));
-/// Długość kolejki gotowych (pisana pod blokadą, czytana bez – podpowiedź).
+/// Length of the ready queue (written under the lock, read without it – a hint).
 static READY_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-/// Najwcześniejszy termin na liście `sleepers` (u64::MAX = pusta); po
-/// pobudce przed terminem może być za wcześnie – wtedy tylko zbędne wzięcie.
+/// Earliest deadline on the `sleepers` list (u64::MAX = empty); after a
+/// wake-up before the deadline it may be too early – then just a needless acquisition.
 static NEXT_WAKE: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Z IRQ0 (time::on_tick) – tylko BSP (PIT, 1 tick = 1 ms): budzi śpiące
-/// zadania i liczy kwant zadania BSP.
+/// From IRQ0 (time::on_tick) – BSP only (PIT, 1 tick = 1 ms): wakes sleeping
+/// tasks and counts the BSP task's quantum.
 pub fn on_tick(now: u64) {
     if !active() {
         return;
     }
-    // M17a.b: tick może przeskoczyć o kilka ms (doganianie HPET po zgubionych
-    // przerwaniach PIT) – czas CPU i kwant liczone według zegara.
+    // The tick may jump by a few ms (HPET catch-up after lost
+    // PIT interrupts) – CPU time and quantum are counted by the clock.
     let last = LAST_BSP_TICK.swap(now, core::sync::atomic::Ordering::Relaxed);
     let ms = if last == 0 { 1 } else { now.saturating_sub(last).clamp(1, 1000) as u32 };
     tick_cpu(ms);
@@ -1679,13 +1679,13 @@ pub fn on_tick(now: u64) {
     let s = sched();
     let mut woke = 0;
     let mut next = u64::MAX;
-    // M17a.f3a/b: tylko zadania z terminem (lista bez sortowania – jest ich
-    // niewiele: śpiące `sleep`, czekania z timeoutem).
+    // Only tasks with a deadline (unsorted list – there are
+    // few of them: `sleep` sleepers, waits with a timeout).
     let mut p = s.sleepers.head;
     while !p.is_null() {
         let nextp = tm(p).sq.next;
         if tm(p).wake_at <= now {
-            unblock(s, p); // zdejmuje też z listy terminów
+            unblock(s, p); // also removes it from the deadline list
             woke += 1;
         } else {
             next = next.min(tm(p).wake_at);
@@ -1698,13 +1698,13 @@ pub fn on_tick(now: u64) {
     }
 }
 
-/// M17a: flaga "przełącz przy najbliższej okazji" CPU `c` (diagnostyka).
+/// "Switch at the next opportunity" flag of CPU `c` (diagnostics).
 #[allow(dead_code)]
 pub fn need_resched_of(c: usize) -> bool {
     NEED_RESCHED[c % MAX_CPUS].load(Ordering::Relaxed)
 }
 
-/// M17a: liczba gotowych zadań (nie idle) – diagnostyka.
+/// Number of ready tasks (not idle) – diagnostics.
 #[allow(dead_code)]
 pub fn ready_count() -> usize {
     without_interrupts(|| {
@@ -1713,7 +1713,7 @@ pub fn ready_count() -> usize {
     })
 }
 
-/// M17: tick timera LAPIC procesora AP (co `ms` ms).
+/// LAPIC timer tick of an AP (every `ms` ms).
 pub fn ap_tick(ms: u32) {
     if !active() {
         return;
@@ -1721,8 +1721,8 @@ pub fn ap_tick(ms: u32) {
     tick_cpu(ms);
 }
 
-/// Czas CPU zadania bieżącego tego procesora i jego kwant (z przerwania
-/// zegara, IF = 0, bez blokady schedulera – patrz QUANTUM).
+/// CPU time of this processor's current task and its quantum (from the timer
+/// interrupt, IF = 0, without the scheduler lock – see QUANTUM).
 fn tick_cpu(ms: u32) {
     let me = cpu();
     let Some(cur) = current_task_unlocked() else { return };
@@ -1732,16 +1732,16 @@ fn tick_cpu(ms: u32) {
     if q == 0 {
         NEED_RESCHED[me].store(true, Ordering::Relaxed);
     }
-    // Idle, a są gotowe zadania (np. pobudka bez IPI) – bierzemy je.
+    // Idle, and there are ready tasks (e.g. a wake-up without an IPI) – take them.
     if cur.idle_cpu.is_some() && READY_N.load(Ordering::Relaxed) > 0 {
         NEED_RESCHED[me].store(true, Ordering::Relaxed);
     }
 }
 
-/// M17: jakieś zadanie stało się gotowe – kto ma je wziąć.  Jeśli ten CPU
-/// stoi w idle – on sam (po przerwaniu).  Inaczej pierwszy bezczynny CPU,
-/// budzony przerwaniem IPI (z `hlt`).  Gdy wszystkie są zajęte – ten CPU
-/// (wywłaszczenie, jak na jednym rdzeniu).
+/// Some task became ready – who should take it.  If this CPU
+/// is idle – itself (after the interrupt).  Otherwise the first idle CPU,
+/// woken by an IPI (from `hlt`).  When all are busy – this CPU
+/// (preemption, as on a single core).
 fn kick(s: &mut Scheduler) {
     let me = cpu();
     if s.current[me] == s.idle[me] {
@@ -1753,7 +1753,7 @@ fn kick(s: &mut Scheduler) {
     }
 }
 
-/// Budzi jeden bezczynny CPU (inny niż ten); `false` – nie ma takiego.
+/// Wakes one idle CPU (other than this one); `false` – there is none.
 fn kick_idle(s: &mut Scheduler) -> bool {
     let me = cpu();
     for c in 0..MAX_CPUS {
@@ -1763,7 +1763,7 @@ fn kick_idle(s: &mut Scheduler) -> bool {
             && crate::arch::x86_64::smp::online(c)
             && !NEED_RESCHED[c].swap(true, Ordering::SeqCst)
         {
-            // v0.34.0: CPU kręci się w idle – zobaczy flagę sam, bez przerwania.
+            // The CPU is spinning in idle – it will see the flag itself, no interrupt needed.
             if POLLING[c].load(Ordering::SeqCst) {
                 IPI_SKIPPED.add(1);
             } else {
@@ -1775,39 +1775,39 @@ fn kick_idle(s: &mut Scheduler) -> bool {
     false
 }
 
-/// Z irq::dispatch, po EOI: przełącza, jeśli trzeba.
-/// Wywłaszczenie z końca przerwania.  `had_bkl` – czy przerwany kontekst
-/// trzymał BKL.  M17a.g2: jeśli nie (proces w ring 3, kod bez BKL, idle),
-/// po powrocie BKL NIE jest brany z powrotem – reszta przerwania (kill
-/// procesu: dziennik zakończeń ma własną blokadę) go nie potrzebuje, a wyjście
-/// z przerwania i tak by go oddało.  Legion v0.17.10: takie "weź, żeby
-/// oddać" było dużą częścią 434 tys. wzięć po przełączeniu.
+/// From irq::dispatch, after EOI: switches if needed.
+/// Preemption at the end of an interrupt.  `had_bkl` – whether the interrupted context
+/// held the BKL.  If not (process in ring 3, BKL-free code, idle),
+/// the BKL is NOT taken back after return – the rest of the interrupt (killing
+/// a process: the exit log has its own lock) does not need it, and exiting
+/// the interrupt would release it anyway.  Such "take it only to
+/// release it" was a large share of the acquisitions after a switch.
 pub fn preempt_irq(had_bkl: bool) {
-    // M17a: CPU trzyma SpinLock – przełączenie poczeka (NEED_RESCHED zostaje).
+    // The CPU holds a SpinLock – the switch will wait (NEED_RESCHED stays set).
     if crate::arch::x86_64::cpu::preempt_count() > 0 {
         return;
     }
     if active() && NEED_RESCHED[cpu()].swap(false, Ordering::Relaxed) {
-        // M17a.f2: przerwanie mogło wskoczyć między uśpieniem zadania a jego
-        // after_switch (IF = 1 na chwilę) – flaga "oddał BKL" należy wtedy do
-        // przerwanego kontekstu, nie do przerwania.  Odkładamy ją na czas
-        // przełączenia tutaj i przywracamy (znalezione: SCHED TEST 7,
-        // "wait_event lost BKL" – przerwanie zabierało flagę i oddawało BKL).
+        // An interrupt may have hit between putting the task to sleep and its
+        // after_switch (IF = 1 briefly) – the "gave up the BKL" flag then belongs to the
+        // interrupted context, not to the interrupt.  We stash it for the duration of the
+        // switch here and restore it (found by: SCHED TEST 7,
+        // "wait_event lost BKL" – the interrupt took the flag and released the BKL).
         let pending = take_bkl_dropped();
         schedule();
         if had_bkl {
             after_switch(&bkl::tag::AFTER_PREEMPT);
         } else {
-            // BKL wzięło tylko to przerwanie – nie wracamy po niego.
+            // Only this interrupt took the BKL – we do not reacquire it.
             let _ = take_bkl_dropped();
         }
         set_bkl_dropped(pending);
     }
 }
 
-/// M17: rejestruje kontekst startowy procesora `cpu` (AP) jako jego zadanie
-/// idle – na stosie `stack`.  Woła BSP przed obudzeniem AP; AP po starcie
-/// po prostu wykonuje `idle_loop` na tym stosie.
+/// Registers the boot context of processor `cpu` (AP) as its idle
+/// task – on stack `stack`.  Called by the BSP before waking the AP; the AP after start
+/// simply runs `idle_loop` on that stack.
 pub fn spawn_idle_for_cpu(cpu_index: usize, stack: TaskStack) -> TaskId {
     without_interrupts(|| {
         let _g = lock_sched_at(&"spawn_idle_for_cpu");
@@ -1828,7 +1828,7 @@ pub fn spawn_idle_for_cpu(cpu_index: usize, stack: TaskStack) -> TaskId {
     })
 }
 
-/// Szczyt stosu zadania (AP: stos startowy = stos jego idle).
+/// Top of a task's stack (AP: boot stack = its idle stack).
 pub fn task_stack_top(id: TaskId) -> Option<u64> {
     without_interrupts(|| {
         let _g = lock_sched_at(&"task_stack_top");
@@ -1837,21 +1837,21 @@ pub fn task_stack_top(id: TaskId) -> Option<u64> {
     })
 }
 
-/// M17: pętla idle (BSP: zadanie 0; AP: kontekst startowy procesora).
-/// M17a.g2: jeden sprzątający naraz (pętla idle).
+/// Idle loop (BSP: task 0; AP: the processor's boot context).
+/// One reaper at a time (idle loop).
 static REAPER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// M17a.g2: takty TSC, przez które CPU wykonywał swoje zadanie idle (liczone
-/// w schedule() przy przełączeniu z / na idle – pomiar wokół `hlt` liczyłby
-/// też czas zadań, na które przerwanie przełączyło w środku), i początek
-/// bieżącego okresu idle.  TSC zawsze tego samego CPU.
+/// TSC ticks during which the CPU ran its idle task (counted
+/// in schedule() when switching from / to idle – measuring around `hlt` would
+/// also count the time of tasks the interrupt switched to midway), and the start of
+/// the current idle period.  Always the same CPU's TSC.
 static IDLE_TSC: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static IDLE_SINCE: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 
-/// M17b.f: TSC chwili, w której bieżące zadanie tego CPU weszło na CPU.
+/// TSC at the moment this CPU's current task got onto the CPU.
 static SWITCHED_IN: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 
-/// M17b.f: cykle CPU bieżącego zadania do tej chwili (monotoniczne dla
-/// zadania, także po migracji; czas, gdy nie działało, się nie liczy).
+/// CPU cycles of the current task up to now (monotonic for the
+/// task, also after migration; time when it was not running does not count).
 pub fn task_cpu_cycles() -> u64 {
     crate::arch::x86_64::interrupts::without_interrupts(|| {
         let me = cpu();
@@ -1872,7 +1872,7 @@ fn idle_tsc() -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-/// Mikrosekundy w `hlt` pętli idle na CPU `c` (0 bez kalibracji TSC).
+/// Microseconds in `hlt` of the idle loop on CPU `c` (0 without TSC calibration).
 pub fn idle_us(c: usize) -> u64 {
     let per_ms = crate::arch::x86_64::lapic::tsc_per_ms();
     if per_ms == 0 {
@@ -1881,14 +1881,14 @@ pub fn idle_us(c: usize) -> u64 {
     IDLE_TSC[c % MAX_CPUS].load(Ordering::Relaxed).saturating_mul(1000) / per_ms
 }
 
-/// v0.32.2: ile µs bezczynny CPU kręci się przed `hlt` (z buildu:
-/// `DESOOS_IDLE_POLL_US`, domyślnie 50; 0 = od razu hlt).  Hipoteza: na
-/// prawdziwym sprzęcie `hlt` usypia rdzeń głębiej (AMD: C1 → CC6), pobudka
-/// trwa dziesiątki µs i wydłuża każde przekazanie zadania – od P4 rdzenie
-/// mniej kręcą się na blokadzie, a częściej śpią (Legion: idle 26 → 28–32%,
-/// stress −5%; KVM bez spadku).  Jak `haltpoll` w Linuksie.
-/// v0.34.0: to jest GÓRNA granica okna; okno każdego CPU dobiera się samo
-/// (`DESOOS_IDLE_POLL_ADAPT`, domyślnie 1), patrz `idle_adapt`.
+/// How many µs an idle CPU spins before `hlt` (from the build:
+/// `DESOOS_IDLE_POLL_US`, default 200; 0 = hlt immediately).  Rationale: on
+/// real hardware `hlt` puts the core into a deeper sleep (AMD: C1 → CC6), the wake-up
+/// takes tens of µs and lengthens every task hand-off – with less lock contention
+/// cores spin less and sleep more often (on real hardware: idle 26 → 28–32%,
+/// stress −5%; no drop under KVM).  Like `haltpoll` in Linux.
+/// This is the UPPER bound of the window; each CPU's window adapts itself
+/// (`DESOOS_IDLE_POLL_ADAPT`, default 1), see `idle_adapt`.
 pub fn idle_poll_us() -> u64 {
     match option_env!("DESOOS_IDLE_POLL_US") {
         Some(s) => s.trim().parse::<u64>().unwrap_or(200).min(10_000),
@@ -1896,40 +1896,40 @@ pub fn idle_poll_us() -> u64 {
     }
 }
 
-/// v0.34.0: okno kręcenia dobierane per CPU (jak `haltpoll` w Linuksie):
-/// praca przyszła w ciągu `idle_poll_us()` od uśpienia – okno ×2 (kręcenie
-/// by ją złapało); dłuższa bezczynność – okno /2, aż do 0 (bezczynny system
-/// nie kręci się – bateria).  0 – stałe okno = `idle_poll_us()`.
+/// Spin window adapted per CPU (like `haltpoll` in Linux):
+/// work arrived within `idle_poll_us()` of going to sleep – window ×2 (spinning
+/// would have caught it); longer idleness – window /2, down to 0 (an idle system
+/// does not spin – battery).  0 – fixed window = `idle_poll_us()`.
 pub fn idle_adapt() -> bool {
     !matches!(option_env!("DESOOS_IDLE_POLL_ADAPT").map(|s| s.trim()), Some("0"))
 }
 
 const POLL_GROW_MIN_US: u64 = 10;
 
-/// (pobudki w trakcie kręcenia, wejścia w hlt) – `cpus`.
+/// (wake-ups while spinning, hlt entries) – `cpus`.
 static IDLE_POLL_HITS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static IDLE_HALTS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
-/// v0.34.0: CPU kręci się w pętli idle – pobudka bez IPI (wystarczy flaga).
+/// The CPU is spinning in the idle loop – wake-up without an IPI (the flag is enough).
 static POLLING: crate::arch::x86_64::percpu::PerCpu<AtomicBool> = crate::per_cpu!(AtomicBool::new(false));
 static IPI_SKIPPED: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
-/// v0.34.0: bieżące okno kręcenia (µs) każdego CPU i TSC pierwszego `hlt`
-/// w obecnym okresie bezczynności (0 = nie spał).
+/// Current spin window (µs) of each CPU and the TSC of the first `hlt`
+/// in the current idle period (0 = did not sleep).
 static POLL_WIN: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(50));
 static HLT_AT: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static POLL_GROWS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 static POLL_SHRINKS: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 
-/// (pobudki w kręceniu, hlt, pominięte IPI, wzrosty okna, spadki okna, średnie okno µs).
+/// (wake-ups while spinning, hlt, skipped IPIs, window increases, window decreases, average window µs).
 pub fn idle_poll_stats() -> (u64, u64, u64, u64, u64, u64) {
     let n = crate::arch::x86_64::smp::online_count().max(1);
     let sum: u64 = (0..n).map(|c| POLL_WIN[c].load(Ordering::Relaxed)).sum();
-    // Stałe okno: pokaż faktyczną wartość, nie startowe POLL_WIN.
+    // Fixed window: show the actual value, not the initial POLL_WIN.
     let avg = if idle_adapt() { sum / n as u64 } else { idle_poll_us() };
     (IDLE_POLL_HITS.get(), IDLE_HALTS.get(), IPI_SKIPPED.get(), POLL_GROWS.get(), POLL_SHRINKS.get(), avg)
 }
 
-/// v0.34.0: CPU `me` zaczyna pracę po bezczynności – jeśli spał (`hlt`),
-/// dopasuj okno: praca przyszła szybko – większe, po długim śnie – mniejsze.
+/// CPU `me` starts working after being idle – if it slept (`hlt`),
+/// adjust the window: work came quickly – larger, after a long sleep – smaller.
 fn idle_feedback(me: usize) {
     let t = HLT_AT[me].swap(0, Ordering::Relaxed);
     if t == 0 || !idle_adapt() {
@@ -1950,26 +1950,26 @@ fn idle_feedback(me: usize) {
 }
 
 pub fn idle_loop() -> ! {
-    // M17a.g1: pętla idle bez BKL.  Wcześniej trzymała go stale: oddawała na
-    // czas `hlt` i brała z powrotem po każdej pobudce – także po IPI TLB
-    // shootdown (wektor 0x43 nie bierze BKL), tylko po to, żeby zawołać reap
-    // i znowu usnąć.  Legion (v0.17.9, 16 CPU): 2,37 mln takich wzięć, 89% z
-    // czekaniem – 129 s z 173 s całego czekania na BKL.  Teraz BKL tylko na
-    // sprzątanie (zwolnienie procesu i jego przestrzeni – jeszcze pod BKL),
-    // i tylko gdy jest co sprzątać.
+    // Idle loop without the BKL.  Previously it held it permanently: released it for
+    // the duration of `hlt` and took it back after every wake-up – also after a TLB
+    // shootdown IPI (vector 0x43 does not take the BKL), only to call reap
+    // and go back to sleep.  On a 16-CPU machine: 2.37 million such acquisitions, 89% with
+    // waiting – 129 s out of 173 s of total BKL waiting.  Now the BKL is taken only for
+    // cleanup (freeing a process and its address space – still under the BKL),
+    // and only when there is something to clean up.
     interrupts::disable();
     if bkl::held() {
         bkl::release();
     }
-    // Pierwszy okres idle tego CPU (AP startuje od razu w idle).
+    // First idle period of this CPU (an AP starts directly in idle).
     if IDLE_SINCE[cpu()].load(Ordering::Relaxed) == 0 {
         IDLE_SINCE[cpu()].store(idle_tsc(), Ordering::Relaxed);
     }
     interrupts::enable();
     loop {
-        // M17a.g2: sprząta jeden CPU naraz – pozostałe bezczynne CPU nie stają
-        // w kolejce do BKL po to samo zadanie (Legion v0.17.10: 143 tys. wzięć,
-        // 78% z czekaniem).
+        // One CPU reaps at a time – the other idle CPUs do not queue up
+        // for the BKL for the same task (previously 143 thousand acquisitions,
+        // 78% with waiting).
         if DEAD_TASKS.load(Ordering::Relaxed) > 0
             && REAPER.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
         {
@@ -1984,9 +1984,9 @@ pub fn idle_loop() -> ! {
             }
             REAPER.store(false, Ordering::Release);
         }
-        // v0.32.2: najpierw krótkie kręcenie z IF = 1 – pobudka (IPI) trafia w
-        // działający rdzeń i od razu przełącza na zadanie (preempt na końcu
-        // przerwania); po kręceniu `hlt` jak dotąd.
+        // First a short spin with IF = 1 – a wake-up (IPI) hits a
+        // running core and switches to the task immediately (preempt at the end of the
+        // interrupt); after spinning, `hlt` as before.
         let me = cpu();
         let max = idle_poll_us();
         let poll = if idle_adapt() { POLL_WIN[me].load(Ordering::Relaxed).min(max) } else { max };
@@ -1995,10 +1995,10 @@ pub fn idle_loop() -> ! {
             let t0 = bkl::rdtsc();
             let mut hit = false;
             let mut reap_due = false;
-            // v0.34.0: flaga „kręcę się” – budzący nie wysyła IPI.  Kolejność
-            // (Dekker): budzący ustawia NEED_RESCHED, potem czyta POLLING; my
-            // zdejmujemy POLLING, potem jeszcze raz czytamy NEED_RESCHED –
-            // jedno z dwojga zawsze zobaczy drugie, pobudka nie przepada.
+            // "I am spinning" flag – the waker does not send an IPI.  Ordering
+            // (Dekker): the waker sets NEED_RESCHED, then reads POLLING; we
+            // clear POLLING, then read NEED_RESCHED once more –
+            // one of the two always sees the other, the wake-up is not lost.
             POLLING[me].store(true, Ordering::SeqCst);
             while bkl::rdtsc().wrapping_sub(t0) < poll * per_us {
                 if NEED_RESCHED[me].load(Ordering::SeqCst) {
@@ -2026,8 +2026,8 @@ pub fn idle_loop() -> ! {
                 continue;
             }
         }
-        // Przed hlt: ostatnie sprawdzenie z IF = 0 (pobudka bez IPI mogła
-        // przyjść tuż przed zdjęciem POLLING); IPI po tym punkcie obudzi hlt.
+        // Before hlt: a final check with IF = 0 (a wake-up without an IPI may have
+        // arrived right before POLLING was cleared); an IPI after this point will wake hlt.
         interrupts::disable();
         if NEED_RESCHED[me].load(Ordering::SeqCst) {
             interrupts::enable();
@@ -2044,15 +2044,15 @@ pub fn idle_loop() -> ! {
     }
 }
 
-/// M17a: numer zadania bieżącego CPU `c` bez blokad i alokacji (raport
-/// watchdoga – stan może być w trakcie zmiany, to tylko wskazówka).
+/// Id of CPU `c`'s current task without locks or allocation (watchdog
+/// report – the state may be changing, this is only a hint).
 pub fn current_id_on(c: usize) -> Option<TaskId> {
     let s = unsafe { &*core::ptr::addr_of!(SCHED) };
     let id = s.current[c % MAX_CPUS];
     (id != NO_TASK).then_some(id)
 }
 
-/// M17: zadanie bieżące procesora `cpu` (diagnostyka: `cpus`).
+/// Current task of processor `cpu` (diagnostics: `cpus`).
 pub fn current_on(cpu_index: usize) -> Option<(TaskId, String, bool)> {
     if !active() || cpu_index >= MAX_CPUS {
         return None;

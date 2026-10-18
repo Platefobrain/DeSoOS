@@ -1,13 +1,13 @@
-// M19.e: test DMA w user space – dma_alloc (prawa, rozmiary, szyna adresów,
-// limit 16 MiB na urządzenie), dma_phys, urządzenie `edu` samo czyta bufor
-// usługi (RAM -> edu) i zapisuje do niego (edu -> RAM), koniec transferu
-// zgłoszony przerwaniem, zabicie procesu z buforem DMA i przypiętym
-// przerwaniem – urządzenie wraca (jądro sprawdza ramki i bus mastering).
-// Wynik: "dmatest: N checks OK, ..." i kod 0, albo opis błędu i kod 1.
-// Uruchamia go SVC TEST z uchwytem HW_ROOT (QEMU z `-device edu,addr=06`).
+// User-space DMA test – dma_alloc (rights, sizes, address bus width,
+// 16 MiB per-device limit), dma_phys, the `edu` device itself reads the
+// service's buffer (RAM -> edu) and writes into it (edu -> RAM), transfer completion
+// signalled by an interrupt, killing a process that holds a DMA buffer and a bound
+// interrupt – the device comes back (the kernel checks frames and bus mastering).
+// Result: "dmatest: N checks OK, ..." and exit code 0, or an error description and code 1.
+// Started by SVC TEST with the HW_ROOT handle (QEMU with `-device edu,addr=06`).
 //
-// Tryb dziecka: `dmatest holder` (uchwyt 0 = urządzenie) – bufor DMA 1 MiB,
-// przerwanie, czeka w wait_many (do kill).
+// Child mode: `dmatest holder` (handle 0 = device) – 1 MiB DMA buffer,
+// interrupt, waits in wait_many (until killed).
 #![no_std]
 #![no_main]
 
@@ -26,14 +26,14 @@ const REG_DMA_SRC: u64 = 0x80;
 const REG_DMA_DST: u64 = 0x88;
 const REG_DMA_COUNT: u64 = 0x90;
 const REG_DMA_CMD: u64 = 0x98;
-/// Rozkaz DMA: start, kierunek edu -> RAM, przerwanie po końcu.
+/// DMA command: start, direction edu -> RAM, interrupt on completion.
 const DMA_START: u64 = 1;
 const DMA_TO_RAM: u64 = 2;
 const DMA_IRQ: u64 = 4;
 const IRQ_DMA: u32 = 0x100;
-/// Bufor wewnątrz edu (4 KiB) – adres w przestrzeni urządzenia.
+/// Buffer inside edu (4 KiB) – address in the device's address space.
 const EDU_BUF: u64 = 0x40000;
-/// edu widzi tylko 28 bitów adresu (QEMU: dma_mask) – wyższe bity obcina.
+/// edu sees only 28 address bits (QEMU: dma_mask) – higher bits are truncated.
 const EDU_BITS: u64 = 28;
 const MIB: u64 = 1024 * 1024;
 const KILLED: u64 = 0x100 | 9;
@@ -60,7 +60,7 @@ fn wr64(base: u64, reg: u64, v: u64) {
     unsafe { core::ptr::write_volatile((base + reg) as *mut u64, v) }
 }
 
-/// Jeden transfer DMA edu zakończony przerwaniem; true – przerwanie przyszło.
+/// One edu DMA transfer finished by an interrupt; true – the interrupt arrived.
 fn dma(m: u64, irq: u64, src: u64, dst: u64, len: u64, to_ram: bool) -> bool {
     wr64(m, REG_DMA_SRC, src);
     wr64(m, REG_DMA_DST, dst);
@@ -80,7 +80,7 @@ fn holder() -> i32 {
     }
     let _ = shm_map(buf as u64, PROT_READ | PROT_WRITE);
     let _ = wait_many(&[(irq as u64, W_IRQ)], FOREVER);
-    31 // tu nie dochodzi – proces ma zginąć w wait_many
+    31 // never reached – the process is supposed to die in wait_many
 }
 
 fn main(args: Args) -> i32 {
@@ -99,7 +99,7 @@ fn main(args: Args) -> i32 {
     check!(n, m != 0 && irq >= 0, "map / irq_bind: {:#x} {}", m, irq);
     let irq = irq as u64;
 
-    // 1. Błędy: prawa, rozmiar, szyna adresów; dma_phys tylko dla buforów DMA.
+    // 1. Errors: rights, size, address bus; dma_phys only for DMA buffers.
     let ro = handle_dup(dev, R_MAP_READ | R_DUP) as u64;
     check!(n, dma_alloc(ro, 4096, EDU_BITS) == -13, "dma_alloc without R_MAP_WRITE must be EACCES");
     close(ro);
@@ -110,7 +110,7 @@ fn main(args: Args) -> i32 {
     check!(n, dma_phys(plain) == Err(-22), "dma_phys on plain shared memory must be EINVAL");
     close(plain);
 
-    // 2. Bufor: uchwyt pamięci współdzielonej, adres fizyczny w zasięgu edu.
+    // 2. Buffer: shared-memory handle, physical address within edu's reach.
     let buf = dma_alloc(dev, 5000, EDU_BITS);
     check!(n, buf >= 0, "dma_alloc: {}", strerror(buf));
     let buf = buf as u64;
@@ -122,8 +122,8 @@ fn main(args: Args) -> i32 {
     let mem = unsafe { core::slice::from_raw_parts_mut(a as *mut u8, 8192) };
     check!(n, a != 0 && mem.iter().all(|&b| b == 0), "new DMA buffer mapped and zeroed");
 
-    // 3. edu czyta bufor (RAM -> edu), potem zapisuje go z powrotem w drugą
-    //    połowę (edu -> RAM); każdy transfer kończy przerwanie.
+    // 3. edu reads the buffer (RAM -> edu), then writes it back into the second
+    //    half (edu -> RAM); every transfer ends with an interrupt.
     for (i, b) in mem[..4096].iter_mut().enumerate() {
         *b = (i as u32).wrapping_mul(13).wrapping_add(7) as u8;
     }
@@ -131,15 +131,15 @@ fn main(args: Args) -> i32 {
     check!(n, dma(m, irq, EDU_BUF, phys + 4096, 4096, true), "DMA edu -> RAM: no interrupt");
     let same = mem[..4096] == mem[4096..];
     check!(n, same, "device copied the buffer: first difference at {:?}", (0..4096).find(|&i| mem[i] != mem[4096 + i]));
-    // Drugi przebieg z innym wzorem – edu naprawdę czyta pamięć, a nie stary bufor.
+    // Second pass with a different pattern – edu really reads memory, not a stale buffer.
     for b in mem[..4096].iter_mut() {
         *b = !*b;
     }
     check!(n, dma(m, irq, phys, EDU_BUF, 4096, false) && dma(m, irq, EDU_BUF, phys + 4096, 4096, true), "second DMA round trip");
     check!(n, mem[..4096] == mem[4096..], "second pattern copied");
 
-    // 3b. Zamknięcie uchwytu nie zwalnia bufora (urządzenie mogłoby jeszcze do
-    //     niego pisać): nowy bufor nie może dostać tych samych ramek.
+    // 3b. Closing the handle does not free the buffer (the device could still
+    //     write to it): a new buffer must not get the same frames.
     munmap(a, 8192);
     close(buf);
     let b2 = dma_alloc(dev, 4096, EDU_BITS);
@@ -147,7 +147,7 @@ fn main(args: Args) -> i32 {
     check!(n, b2 >= 0 && (p2 + 4096 <= phys || p2 >= phys + 8192), "closed buffer reused while the device is claimed: {:#x} in {:#x}+8 KiB", p2, phys);
     close(b2 as u64);
 
-    // 4. Limit 16 MiB na urządzenie: 12 KiB już jest, więc 2 MiB zmieści się 7 razy.
+    // 4. 16 MiB per-device limit: 12 KiB is already used, so 2 MiB fits 7 times.
     let mut big = 0;
     loop {
         let b = dma_alloc(dev, 2 * MIB, EDU_BITS);
@@ -156,19 +156,19 @@ fn main(args: Args) -> i32 {
             break;
         }
         big += 1;
-        close(b as u64); // bufor zostaje (żyje z przejęciem) – limit dalej liczony
+        close(b as u64); // the buffer stays (lives with the claim) – still counted against the limit
         if big > 8 {
             break;
         }
     }
     check!(n, big == 7, "2 MiB buffers within 16 MiB: {}", big);
 
-    // 5. Zabity proces z buforem DMA i przypiętym przerwaniem – urządzenie wraca.
+    // 5. Killed process holding a DMA buffer and a bound interrupt – the device comes back.
     close(irq);
     munmap(m, MIB);
     let pid = spawn_ex("/bin/dmatest", &["dmatest", "holder"], &[(dev, 0), (1, 1)], 0);
     check!(n, pid > 0, "spawn holder: {}", strerror(pid));
-    close(dev); // ostatnie przejęcie trzyma teraz dziecko – bufory 15 MiB zwolnione
+    close(dev); // the child now holds the last claim – the 15 MiB of buffers are freed
     sleep_ms(30);
     check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device busy while the holder runs");
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill holder");

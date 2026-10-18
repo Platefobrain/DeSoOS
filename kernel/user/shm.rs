@@ -1,13 +1,13 @@
-// M18.e: pamięć współdzielona – obiekt z ramkami, mapowany do przestrzeni
-// kilku procesów.  Projekt: ARCHITEKTURA.md, „IPC”.
+// Shared memory – an object with frames, mapped into the address spaces of
+// several processes.  Design: ARCHITECTURE.md, "IPC".
 //
-// * `shm_create(rozmiar)` – ramki brane od razu i zerowane, rozmiar
-//   zaokrąglony do 4 KiB, najwyżej SHM_MAX.
-// * Obiekt liczony przez Arc: uchwyty (Fd::Shm) i mapowania (ProcMem.shared).
-//   Ramki wracają do alokatora w Drop – gdy znika ostatni uchwyt i ostatnie
-//   mapowanie.  Przestrzeń adresowa procesu NIGDY nie zwalnia ramek obiektu:
-//   munmap / koniec procesu tylko zdejmuje wpisy (vm.rs, Process::drop).
-// * Mapowanie zawsze z NX; zapis tylko z prawem MAP_WRITE.
+// * `shm_create(size)` – frames are taken immediately and zeroed, size
+//   rounded up to 4 KiB, at most SHM_MAX.
+// * The object is reference-counted via Arc: handles (Fd::Shm) and mappings (ProcMem.shared).
+//   Frames return to the allocator in Drop – when the last handle and the last
+//   mapping are gone.  A process address space NEVER frees the object's frames:
+//   munmap / process exit only removes the entries (vm.rs, Process::drop).
+// * Always mapped with NX; writable only with the MAP_WRITE right.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -15,18 +15,18 @@ use alloc::vec::Vec;
 use super::syscalls::{EINVAL, ENOMEM};
 use crate::memory::{alloc_frame_user, alloc_frames_below, free_frame, phys_to_virt};
 
-/// Największy obiekt (bajty).
+/// Largest object (bytes).
 pub const SHM_MAX: u64 = 16 * 1024 * 1024;
 const PAGE: u64 = 4096;
 
 pub struct ShmObj {
     frames: Vec<u64>,
-    /// M19.e: bufor DMA – ramki ciągłe od tego adresu fizycznego (dma_phys).
+    /// DMA buffer – contiguous frames starting at this physical address (dma_phys).
     dma_phys: Option<u64>,
 }
 
 impl ShmObj {
-    /// Nowy obiekt `size` bajtów (zaokrąglone w górę do strony), wyzerowany.
+    /// New object of `size` bytes (rounded up to a page), zeroed.
     pub fn new(size: u64) -> Result<Arc<ShmObj>, i64> {
         if size == 0 || size > SHM_MAX {
             return Err(EINVAL);
@@ -35,7 +35,7 @@ impl ShmObj {
         let mut frames = Vec::new();
         frames.try_reserve_exact(pages).map_err(|_| ENOMEM)?;
         for _ in 0..pages {
-            // v0.35.2: ponad zapasem jądra.
+            // Beyond the kernel's reserve.
             let Some(f) = alloc_frame_user() else {
                 for &f in frames.iter() {
                     free_frame(f);
@@ -48,8 +48,8 @@ impl ShmObj {
         Ok(Arc::new(ShmObj { frames, dma_phys: None }))
     }
 
-    /// M19.e: bufor DMA – `size` bajtów w CIĄGŁYCH ramkach leżących całe
-    /// poniżej `limit` (szyna adresów urządzenia), wyzerowany.
+    /// DMA buffer – `size` bytes in CONTIGUOUS frames lying entirely
+    /// below `limit` (the device's address bus), zeroed.
     pub fn new_dma(size: u64, limit: u64) -> Result<Arc<ShmObj>, i64> {
         if size == 0 || size > SHM_MAX {
             return Err(EINVAL);
@@ -70,7 +70,7 @@ impl ShmObj {
         self.dma_phys
     }
 
-    /// Rozmiar w bajtach (wielokrotność strony).
+    /// Size in bytes (a multiple of the page size).
     pub fn len(&self) -> u64 {
         self.frames.len() as u64 * PAGE
     }

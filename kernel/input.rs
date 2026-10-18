@@ -1,19 +1,19 @@
-// M6: podsystem wejścia – wspólny interfejs dla wszystkich klawiatur.
+// Input subsystem – a common interface for all keyboards.
 //
-// Sterownik (PS/2 teraz, USB w M19) zamienia swoje kody na `KeyCode`
-// i woła `handle_key(key, pressed)`.  Wszystko dalej – modyfikatory,
-// Caps/Num Lock, układ klawiatury, kolejka zdarzeń – dzieje się tutaj,
-// więc reszta systemu nie wie, skąd przyszedł klawisz.
+// A driver (PS/2 or USB) translates its codes to `KeyCode`
+// and calls `handle_key(key, pressed)`.  Everything after that – modifiers,
+// Caps/Num Lock, keyboard layout, the event queue – happens here,
+// so the rest of the system does not know where a key came from.
 //
-// Układ: polski programisty (US QWERTY + AltGr dla ąćęłńóśźż, AltGr+u = €).
+// Layout: Polish programmer's (US QWERTY + AltGr for ąćęłńóśźż, AltGr+u = €).
 //
-// Kolejka: 256 zdarzeń.  Producent = handler IRQ (IF=0), konsument = kod
-// kernela; pobieranie odbywa się z wyłączonymi przerwaniami.  Przy
-// przepełnieniu nowe zdarzenia są odrzucane (licznik `dropped()`).
+// Queue: 256 events.  Producer = IRQ handler (IF=0), consumer = kernel
+// code; dequeuing is done with interrupts disabled.  On
+// overflow new events are dropped (counter `dropped()`).
 
 use crate::arch::x86_64::interrupts::without_interrupts;
 
-/// Kod klawisza niezależny od sprzętu i układu (pozycja na klawiaturze US).
+/// Key code independent of hardware and layout (position on a US keyboard).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
 pub enum KeyCode {
@@ -32,7 +32,7 @@ pub enum KeyCode {
     Kp0, Kp1, Kp2, Kp3, Kp4, Kp5, Kp6, Kp7, Kp8, Kp9,
 }
 
-/// Stan modyfikatorów i blokad w chwili zdarzenia.
+/// Modifier and lock state at the time of the event.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Modifiers(u16);
 
@@ -82,8 +82,8 @@ impl Modifiers {
     }
 }
 
-/// Jedno zdarzenie klawiatury.  `ch` jest ustawione tylko przy wciśnięciu
-/// (także przy autorepeat) klawisza, który daje znak.
+/// A single keyboard event.  `ch` is set only on a press
+/// (also on autorepeat) of a key that produces a character.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct KeyEvent {
     pub key: KeyCode,
@@ -102,18 +102,18 @@ impl KeyEvent {
 }
 
 // ------------------------------------------------------------
-// Stan (dostęp tylko z wyłączonymi przerwaniami)
+// State (accessed only with interrupts disabled)
 // ------------------------------------------------------------
 
 const QUEUE_SIZE: usize = 256;
 
 struct State {
     queue: [KeyEvent; QUEUE_SIZE],
-    head: usize, // następny do odczytu
+    head: usize, // next to read
     len: usize,
     dropped: u64,
     mods: Modifiers,
-    // Które klawisze blokad są wciśnięte – autorepeat nie może ich przełączać.
+    // Which lock keys are held down – autorepeat must not toggle them.
     lock_keys_down: u16,
 }
 
@@ -131,7 +131,7 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 // ------------------------------------------------------------
-// Układ klawiatury
+// Keyboard layout
 // ------------------------------------------------------------
 
 fn letter(key: KeyCode) -> Option<u8> {
@@ -145,7 +145,7 @@ fn letter(key: KeyCode) -> Option<u8> {
     })
 }
 
-/// AltGr + litera w polskim układzie programisty: (mała, wielka).
+/// AltGr + letter in the Polish programmer's layout: (lowercase, uppercase).
 fn polish(letter: u8) -> Option<(char, char)> {
     Some(match letter {
         b'a' => ('ą', 'Ą'),
@@ -161,7 +161,7 @@ fn polish(letter: u8) -> Option<(char, char)> {
     })
 }
 
-/// Klawisze nieliterowe: (bez shift, z shift).
+/// Non-letter keys: (without shift, with shift).
 fn symbol(key: KeyCode) -> Option<(char, char)> {
     use KeyCode::*;
     Some(match key {
@@ -179,7 +179,7 @@ fn symbol(key: KeyCode) -> Option<(char, char)> {
     })
 }
 
-/// Znak dla wciśniętego klawisza przy danych modyfikatorach.
+/// Character for a pressed key with the given modifiers.
 pub fn translate(key: KeyCode, mods: Modifiers) -> Option<char> {
     use KeyCode::*;
 
@@ -192,7 +192,7 @@ pub fn translate(key: KeyCode, mods: Modifiers) -> Option<char> {
             return polish(l).map(|(lo, up)| if upper { up } else { lo });
         }
         if mods.ctrl() {
-            // Ctrl+A..Z -> 0x01..0x1A (Ctrl+C = 0x03 itd.)
+            // Ctrl+A..Z -> 0x01..0x1A (Ctrl+C = 0x03 etc.)
             return Some((l - b'a' + 1) as char);
         }
         let c = if upper { l.to_ascii_uppercase() } else { l };
@@ -226,13 +226,13 @@ pub fn translate(key: KeyCode, mods: Modifiers) -> Option<char> {
 }
 
 // ------------------------------------------------------------
-// API dla sterowników
+// API for drivers
 // ------------------------------------------------------------
 
-/// Sterownik zgłasza wciśnięcie / puszczenie klawisza.  Zwraca `true`,
-/// jeśli zmienił się stan blokad (Caps/Num/Scroll) – sterownik może wtedy
-/// zaktualizować diody.  Wołać z wyłączonymi przerwaniami (handler IRQ)
-/// albo z dowolnego miejsca – sama pilnuje IF.
+/// A driver reports a key press / release.  Returns `true`
+/// if the lock state (Caps/Num/Scroll) changed – the driver can then
+/// update the LEDs.  Call with interrupts disabled (IRQ handler)
+/// or from anywhere – it manages IF itself.
 pub fn handle_key(key: KeyCode, pressed: bool) -> bool {
     with_state(|s| {
         let mut locks_changed = false;
@@ -275,9 +275,9 @@ pub fn handle_key(key: KeyCode, pressed: bool) -> bool {
         }
 
         let ch = if pressed { translate(key, s.mods) } else { None };
-        // M14: Ctrl+C przy procesie na pierwszym planie kończy proces i nie
-        // trafia do kolejki (shell nie zobaczy "^C").
-        // Jak w terminalu: wpisane wcześniej, nieodczytane znaki przepadają.
+        // Ctrl+C with a foreground process terminates the process and does not
+        // reach the queue (the shell will not see "^C").
+        // As in a terminal: previously typed, unread characters are discarded.
         if ch == Some('\u{3}') && crate::console::interrupt_foreground() {
             s.head = 0;
             s.len = 0;
@@ -298,16 +298,16 @@ pub fn handle_key(key: KeyCode, pressed: bool) -> bool {
     })
 }
 
-/// Bieżący stan modyfikatorów i blokad.
+/// Current modifier and lock state.
 pub fn modifiers() -> Modifiers {
     with_state(|s| s.mods)
 }
 
 // ------------------------------------------------------------
-// API dla konsumentów (konsola, później shell / procesy)
+// API for consumers (console, shell / processes)
 // ------------------------------------------------------------
 
-/// Następne zdarzenie z kolejki (bez czekania).
+/// Next event from the queue (without waiting).
 pub fn read_event() -> Option<KeyEvent> {
     with_state(|s| {
         if s.len == 0 {
@@ -320,12 +320,12 @@ pub fn read_event() -> Option<KeyEvent> {
     })
 }
 
-/// Czy w kolejce są zdarzenia.
+/// Whether there are events in the queue.
 pub fn has_events() -> bool {
     with_state(|s| s.len > 0)
 }
 
-/// Następny znak (pomija zdarzenia bez znaku), bez czekania.
+/// Next character (skips events without a character), without waiting.
 #[allow(dead_code)]
 pub fn read_char() -> Option<char> {
     while let Some(e) = read_event() {
@@ -336,26 +336,26 @@ pub fn read_char() -> Option<char> {
     None
 }
 
-/// Czeka (hlt) na następne zdarzenie.  Wymaga włączonych przerwań.
+/// Waits (hlt) for the next event.  Requires interrupts enabled.
 #[allow(dead_code)]
 pub fn wait_event() -> KeyEvent {
     loop {
         if let Some(e) = read_event() {
             return e;
         }
-        // M12: śpi w kolejce wejścia (budzi IRQ klawiatury).
+        // Sleeps on the input queue (woken by the keyboard IRQ).
         crate::console::INPUT_WAIT.wait_until(has_events, None);
     }
 }
 
-/// Ile zdarzeń odrzucono, bo kolejka była pełna.
+/// How many events were dropped because the queue was full.
 #[allow(dead_code)]
 pub fn dropped() -> u64 {
     with_state(|s| s.dropped)
 }
 
-/// M14: wyrzuca nieodczytane zdarzenia (Ctrl+C przy procesie na
-/// pierwszym planie).
+/// Discards unread events (Ctrl+C with a foreground
+/// process).
 pub fn discard_events() {
     with_state(|s| {
         s.head = 0;
@@ -363,7 +363,7 @@ pub fn discard_events() {
     });
 }
 
-/// Czyści kolejkę i modyfikatory (testy).
+/// Clears the queue and modifiers (tests).
 #[cfg(selftest)]
 pub fn reset() {
     with_state(|s| {
@@ -381,19 +381,19 @@ pub fn pending() -> usize {
 }
 
 // ------------------------------------------------------------
-// M20.e: wejście z USB (usbd przez syscall input_inject)
+// Input from USB (usbd via the input_inject syscall)
 //
-// usbd przysyła kody HID (usage, strona 7) – tu tłumaczymy je na `KeyCode`
-// i dalej wszystko jak przy PS/2.  Klawiatura USB (w przeciwieństwie do PS/2)
-// sama nie powtarza klawiszy, więc autorepeat robi jądro: 500 ms, potem co
-// 33 ms (~30/s).  Jeden powtarzany klawisz naraz – ostatnio wciśnięty, jak na
-// zwykłej klawiaturze.  Puszczenie klawiszy źródła, które zniknęło (koniec
-// usbd), też tutaj.
+// usbd sends HID codes (usage, page 7) – here we translate them to `KeyCode`
+// and from there on everything works as with PS/2.  A USB keyboard (unlike PS/2)
+// does not repeat keys by itself, so the kernel does autorepeat: 500 ms, then every
+// 33 ms (~30/s).  One repeated key at a time – the most recently pressed, as on
+// a regular keyboard.  Releasing the keys of a source that disappeared (usbd
+// exit) is also handled here.
 //
-// v0.25.1: robi to zadanie jądra "input-repeat" (pod BKL), NIE tick zegara.
-// W v0.25.0 był to tick: przerwanie zegara budziło czekających na wejście
-// (blokada 'waiters', poziom 45) na CPU, którego przerwany kod trzymał
-// 'stress-counter' (210) – lockdep: PANIC przy pisaniu w trakcie stressu.
+// This is done by the kernel task "input-repeat" (under the BKL), NOT by the timer tick.
+// Doing it in the tick made the timer interrupt wake input waiters
+// ('waiters' lock, level 45) on a CPU whose interrupted code held
+// 'stress-counter' (210) – lockdep PANIC when typing during stress.
 // ------------------------------------------------------------
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -401,18 +401,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub const REPEAT_DELAY_MS: u64 = 500;
 pub const REPEAT_PERIOD_MS: u64 = 33;
 
-/// Powtarzany klawisz: HID usage (0 = brak), źródło, następna chwila (ms).
+/// Repeated key: HID usage (0 = none), source, next deadline (ms).
 static REPEAT_USAGE: AtomicU64 = AtomicU64::new(0);
 static REPEAT_SRC: AtomicU64 = AtomicU64::new(0);
 static REPEAT_NEXT: AtomicU64 = AtomicU64::new(0);
-/// Klawisze źródeł, które zniknęły – do puszczenia w ticku.
+/// Keys of sources that disappeared – to be released in the tick.
 static ORPHANS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ORPHANS_PENDING: AtomicBool = AtomicBool::new(false);
-/// Liczniki (testy, `sysinfo`): zdarzenia z USB i powtórzenia.
+/// Counters (tests, `sysinfo`): USB events and repeats.
 static USB_EVENTS: AtomicU64 = AtomicU64::new(0);
 static USB_REPEATS: AtomicU64 = AtomicU64::new(0);
 
-/// HID usage (strona 7) -> KeyCode.
+/// HID usage (page 7) -> KeyCode.
 pub fn hid_key(usage: u8) -> Option<KeyCode> {
     use KeyCode::*;
     const LETTERS: [KeyCode; 26] = [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z];
@@ -476,13 +476,13 @@ pub fn hid_key(usage: u8) -> Option<KeyCode> {
     })
 }
 
-/// Klawisze, które się nie powtarzają (modyfikatory, blokady).
+/// Keys that do not repeat (modifiers, locks).
 fn no_repeat(k: KeyCode) -> bool {
     use KeyCode::*;
     matches!(k, LeftShift | RightShift | LeftCtrl | RightCtrl | LeftAlt | RightAlt | LeftGui | RightGui | CapsLock | NumLock | ScrollLock | Pause | PrintScreen)
 }
 
-/// Klawisz z USB (syscall input_inject – pod BKL).
+/// Key from USB (input_inject syscall – under the BKL).
 pub fn usb_key(src: u64, usage: u8, pressed: bool, now: u64) {
     let Some(k) = hid_key(usage) else { return };
     USB_EVENTS.fetch_add(1, Ordering::Relaxed);
@@ -499,7 +499,7 @@ pub fn usb_key(src: u64, usage: u8, pressed: bool, now: u64) {
     crate::console::wake_input();
 }
 
-/// Mysz z USB: kółko przewija konsolę (jak PS/2; dodatnie = w dół).
+/// USB mouse: the wheel scrolls the console (as with PS/2; positive = down).
 pub fn usb_mouse(_buttons: u8, wheel: i8) {
     USB_EVENTS.fetch_add(1, Ordering::Relaxed);
     if wheel != 0 {
@@ -507,8 +507,8 @@ pub fn usb_mouse(_buttons: u8, wheel: i8) {
     }
 }
 
-/// Źródło zniknęło (Drop uchwytu INPUT): jego klawisze do puszczenia przez
-/// zadanie input-repeat (tu tylko atomiki).
+/// A source disappeared (INPUT handle Drop): its keys are released by the
+/// input-repeat task (only atomics here).
 pub fn usb_release_all(bits: [u64; 4], src: u64) {
     if REPEAT_SRC.load(Ordering::Relaxed) == src {
         REPEAT_USAGE.store(0, Ordering::Release);
@@ -521,11 +521,11 @@ pub fn usb_release_all(bits: [u64; 4], src: u64) {
     }
 }
 
-/// Zadanie "input-repeat": czeka (WaitQueue) do terminu powtórzenia albo na
-/// pobudkę z usb_key; puszczenie klawiszy zniknięłych źródeł – co 100 ms (Drop
-/// uchwytu nie budzi zadania – może biec w kontekście z blokadami).
+/// "input-repeat" task: waits (WaitQueue) until the repeat deadline or for a
+/// wakeup from usb_key; releases keys of vanished sources every 100 ms (handle Drop
+/// does not wake the task – it may run in a context holding locks).
 static REPEAT_WAIT: crate::sched::sync::WaitQueue = crate::sched::sync::WaitQueue::new();
-/// Rośnie przy każdej pobudce – zadanie przelicza termin (nowy klawisz).
+/// Incremented on every wakeup – the task recomputes the deadline (new key).
 static REPEAT_GEN: AtomicU64 = AtomicU64::new(0);
 
 fn repeat_task(_: usize) {
@@ -538,7 +538,7 @@ fn repeat_task(_: usize) {
         let timeout = if usage != 0 {
             REPEAT_NEXT.load(Ordering::Relaxed).saturating_sub(now).max(1)
         } else if USB_EVENTS.load(Ordering::Relaxed) == 0 {
-            1000 // jeszcze żadnej klawiatury USB – rzadko
+            1000 // no USB keyboard yet – rare
         } else {
             100
         };
@@ -547,20 +547,20 @@ fn repeat_task(_: usize) {
     }
 }
 
-/// Start zadania autorepeat (raz, przy starcie jądra – przed samotestami USB).
+/// Starts the autorepeat task (once, at kernel startup – before the USB self-tests).
 pub fn start_repeat_task() {
     if crate::sched::spawn("input-repeat", repeat_task, 0).is_err() {
         crate::serial_println!("[INPUT] cannot start the USB key repeat task - no autorepeat for USB keyboards");
     }
 }
 
-/// Czy zadanie ma coś do zrobienia (same atomiki).
+/// Whether the task has anything to do (atomics only).
 pub fn repeat_due(now: u64) -> bool {
     ORPHANS_PENDING.load(Ordering::Acquire)
         || (REPEAT_USAGE.load(Ordering::Acquire) != 0 && now >= REPEAT_NEXT.load(Ordering::Relaxed))
 }
 
-/// Zadanie input-repeat (pod BKL): puszczenie klawiszy po zniknięciu źródła, autorepeat.
+/// input-repeat task (under the BKL): releasing keys after a source disappears, autorepeat.
 pub fn repeat_tick(now: u64) {
     if ORPHANS_PENDING.swap(false, Ordering::AcqRel) {
         for (w, o) in ORPHANS.iter().enumerate() {
@@ -586,17 +586,17 @@ pub fn repeat_tick(now: u64) {
     }
 }
 
-/// Diody klawiatury dla usbd: bit 0 Num Lock, 1 Caps Lock, 2 Scroll Lock (jak
-/// raport wyjściowy HID).
+/// Keyboard LEDs for usbd: bit 0 Num Lock, 1 Caps Lock, 2 Scroll Lock (as in
+/// the HID output report).
 pub fn led_bits() -> u64 {
     let m = modifiers();
     (m.num_lock() as u64) | (m.caps_lock() as u64) << 1 | (m.scroll_lock() as u64) << 2
 }
 
-// M20.h: opóźnienie klawiatury USB – od przerwania kontrolera xHCI (handler
-// jądra) do znaku w kolejce wejścia jądra (po usbd: obudzenie, zdarzenie z
-// pierścienia, raport HID, input_inject).  Tylko wciśnięcia; > 1 s pomijane
-// (to nie było przerwanie tego raportu).
+// USB keyboard latency – from the xHCI controller interrupt (kernel
+// handler) to the character in the kernel input queue (after usbd: wakeup, event from
+// the ring, HID report, input_inject).  Presses only; > 1 s is skipped
+// (that was not this report's interrupt).
 static HID_N: AtomicU64 = AtomicU64::new(0);
 static HID_SUM: AtomicU64 = AtomicU64::new(0);
 static HID_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -612,7 +612,7 @@ pub fn hid_latency_record(us: u64) {
     HID_MAX.fetch_max(us, Ordering::Relaxed);
 }
 
-/// (liczba, średnia, min, max) w µs; min = 0 przy braku pomiarów.
+/// (count, average, min, max) in µs; min = 0 when there are no measurements.
 pub fn hid_latency() -> (u64, u64, u64, u64) {
     let n = HID_N.load(Ordering::Relaxed);
     let min = HID_MIN.load(Ordering::Relaxed);
@@ -627,7 +627,7 @@ pub fn hid_latency_reset() {
     HID_MAX.store(0, Ordering::Relaxed);
 }
 
-/// (zdarzenia z USB, powtórzenia) – testy i statystyki.
+/// (USB events, repeats) – tests and statistics.
 #[allow(dead_code)]
 pub fn usb_stats() -> (u64, u64) {
     (USB_EVENTS.load(Ordering::Relaxed), USB_REPEATS.load(Ordering::Relaxed))

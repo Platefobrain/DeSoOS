@@ -1,25 +1,25 @@
-// M17b.e: dane per CPU w osobnych liniach cache.
+// Per-CPU data in separate cache lines.
 //
-// Gęsta tablica `[AtomicU32; MAX_CPUS]` trzyma 16 liczników CPU w jednej-dwóch
-// liniach cache (64 B): CPU piszący swój element unieważnia linię u
-// pozostałych (false sharing).  Tak było z licznikiem wywłaszczania i
-// trzymanych spinlocków (zapis przy każdym wzięciu / zwolnieniu), stanem
-// blokady schedulera, kwantem, statystykami.  Do tego globalne liczniki
-// statystyk (`fetch_add` z każdego CPU na tę samą linię).  Legion: drobna
-// zmiana układu zmiennych (M17b.c – nowa tablica per CPU) zmieniała wynik
-// stressu o ~7% – za dużo jak na kod, który się w nim nie wykonywał.
+// A dense `[AtomicU32; MAX_CPUS]` array keeps 16 CPU counters in one or two
+// cache lines (64 B): a CPU writing its element invalidates the line on the
+// others (false sharing).  That was the case for the preemption counter and the
+// held-spinlock counter (written on every acquire / release), the scheduler
+// lock state, the quantum, statistics.  On top of that, global statistics
+// counters (`fetch_add` from every CPU on the same line).  On real hardware a small
+// change in variable layout (a new per-CPU array) changed the stress result
+// by ~7% – too much for code that did not even run in it.
 //
 //   static X: PerCpu<AtomicU32> = crate::per_cpu!(AtomicU32::new(0));
-//   X[cpu::id()].fetch_add(1, ...);          // jak tablica
+//   X[cpu::id()].fetch_add(1, ...);          // like an array
 //   static N: PerCpuCounter = PerCpuCounter::new();
-//   N.add(1); N.get()                         // suma ze wszystkich CPU
+//   N.add(1); N.get()                         // sum over all CPUs
 
 use core::ops::{Deref, Index};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::cpu::MAX_CPUS;
 
-/// Wartość w osobnej linii cache (64 B).
+/// A value in its own cache line (64 B).
 #[repr(C, align(64))]
 pub struct CacheLine<T>(pub T);
 
@@ -30,7 +30,7 @@ impl<T> Deref for CacheLine<T> {
     }
 }
 
-/// Element dla każdego CPU, każdy w osobnej linii cache.
+/// One element per CPU, each in its own cache line.
 pub struct PerCpu<T>(pub [CacheLine<T>; MAX_CPUS]);
 
 impl<T> Index<usize> for PerCpu<T> {
@@ -47,7 +47,7 @@ impl<T> PerCpu<T> {
     }
 }
 
-/// `per_cpu!(wyrażenie stałe)` – PerCpu z tą samą wartością początkową.
+/// `per_cpu!(const expression)` – PerCpu with the same initial value.
 #[macro_export]
 macro_rules! per_cpu {
     ($init:expr) => {
@@ -57,7 +57,7 @@ macro_rules! per_cpu {
     };
 }
 
-/// Licznik statystyki: każdy CPU dodaje do swojego, odczyt sumuje.
+/// Statistics counter: each CPU adds to its own, reading sums them.
 pub struct PerCpuCounter(PerCpu<AtomicU64>);
 
 impl PerCpuCounter {

@@ -1,8 +1,8 @@
-// M5: sterowanie flagą IF (maskowalne przerwania sprzętowe).
+// Control of the IF flag (maskable hardware interrupts).
 //
-// `without_interrupts` to jednordzeniowy odpowiednik blokady: kod w środku
-// nie zostanie przerwany przez IRQ.  Zagnieżdżanie jest bezpieczne – na
-// wyjściu przywracany jest stan IF sprzed wejścia (a nie ślepe `sti`).
+// `without_interrupts` is the single-core equivalent of a lock: the code inside
+// will not be interrupted by an IRQ.  Nesting is safe – on
+// exit the IF state from before entry is restored (not a blind `sti`).
 
 use core::arch::asm;
 
@@ -11,9 +11,9 @@ const RFLAGS_IF: u64 = 1 << 9;
 #[inline]
 pub fn enable() {
     unsafe {
-        // Bez `nomem`: sti/cli/hlt muszą być barierą dla kompilatora – przerwanie
-        // może zmienić pamięć (kolejki klawiatury, seriala, ticki), więc odczyty
-        // nie mogą być przenoszone przez te instrukcje ani zapamiętywane.
+        // No `nomem`: sti/cli/hlt must be a compiler barrier – an interrupt
+        // can change memory (keyboard and serial queues, ticks), so reads
+        // must not be moved across these instructions or cached.
         asm!("sti", options(nostack));
     }
 }
@@ -34,15 +34,15 @@ pub fn are_enabled() -> bool {
     rflags & RFLAGS_IF != 0
 }
 
-/// `sti; hlt` jako jedna sekwencja: `sti` włącza przerwania dopiero po
-/// następnej instrukcji, więc IRQ nie może "wskoczyć" między nie i zostać
-/// przegapione (CPU zawsze obudzi się z hlt).
+/// `sti; hlt` as one sequence: `sti` enables interrupts only after
+/// the next instruction, so an IRQ cannot "slip in" between them and be
+/// missed (the CPU always wakes up from hlt).
 ///
-/// M17: na czas snu CPU oddaje Big Kernel Lock (inaczej inny CPU, który
-/// obsługuje przerwanie potrzebne do pobudki, czekałby na blokadę w
-/// nieskończoność).  Po pobudce bierze ją z powrotem – zwykle ma ją już
-/// handler przerwania, które obudziło CPU (przerwał kod kernela, więc jej
-/// nie oddał).  Wraca z włączonymi przerwaniami, jak zwykłe `sti; hlt`.
+/// While sleeping the CPU gives up the Big Kernel Lock (otherwise another CPU that
+/// handles the interrupt needed for the wakeup would wait for the lock
+/// forever).  After waking it takes it back – usually it is already held by
+/// the handler of the interrupt that woke the CPU (it interrupted kernel code, so it
+/// did not release it).  Returns with interrupts enabled, like a plain `sti; hlt`.
 #[inline]
 #[allow(dead_code)]
 pub fn enable_and_hlt() {
@@ -62,7 +62,7 @@ pub fn enable_and_hlt() {
     }
 }
 
-/// Uruchamia `f` z wyłączonymi przerwaniami i przywraca poprzedni stan IF.
+/// Runs `f` with interrupts disabled and restores the previous IF state.
 #[inline]
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     let was_enabled = are_enabled();

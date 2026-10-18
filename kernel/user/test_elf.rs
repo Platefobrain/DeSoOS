@@ -1,4 +1,4 @@
-// M15: samotesty ładowania programów ELF (tylko build z --cfg selftest).
+// Self-tests of ELF program loading (selftest build only, --cfg selftest).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -29,7 +29,7 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-/// `exec` z przechwyceniem wyjścia; (sposób zakończenia, wyjście).
+/// `exec` with captured output; (how it ended, output).
 fn run(path: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<(ExitKind, String), String> {
     let opts = SpawnOptions { stdin: stdin.map(|s| s.to_vec()), capture: true, ..SpawnOptions::default() };
     let id = exec(path, args, "/tmp", &opts).map_err(|e| alloc::format!("exec: {}", e))?;
@@ -54,12 +54,12 @@ fn get_u64(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
-/// Przesunięcie nagłówka programu nr `i`.
+/// Offset of program header number `i`.
 fn phdr(b: &[u8], i: usize) -> usize {
     get_u64(b, 32) as usize + i * 56
 }
 
-/// Indeks pierwszego segmentu PT_LOAD z danymi flagami (PF_*).
+/// Index of the first PT_LOAD segment with the given flags (PF_*).
 fn find_load(b: &[u8], flags: u32) -> usize {
     let n = u16::from_le_bytes([b[56], b[57]]) as usize;
     (0..n)
@@ -70,7 +70,7 @@ fn find_load(b: &[u8], flags: u32) -> usize {
         .unwrap_or(0)
 }
 
-/// Odczyt qworda z przestrzeni procesu (przez direct map).
+/// Reads a qword from the process address space (via the direct map).
 fn peek(space: &AddressSpace, va: u64) -> Option<u64> {
     let (phys, _) = space.translate(va)?;
     Some(unsafe { core::ptr::read(crate::memory::phys_to_virt(phys) as *const u64) })
@@ -95,7 +95,7 @@ pub fn self_test() {
     crate::selftest::begin();
     let frames = crate::selftest::settled_free_frames();
 
-    // 1. /bin z initrd: każdy plik to poprawny ELF dla procesu.
+    // 1. /bin from the initrd: every file is a valid ELF for a process.
     let bin = crate::fs::read_dir("/bin").unwrap_or_default();
     check!(bin.len() >= 5, "/bin has {} files", bin.len());
     for e in &bin {
@@ -106,7 +106,7 @@ pub fn self_test() {
     }
     serial_println!("[ELF TEST] 1/9 /bin ({} programs from the initrd) parse and load PASS", bin.len());
 
-    // 2. Uszkodzone pliki są odrzucane (zanim powstanie proces).
+    // 2. Corrupted files are rejected (before a process is created).
     let good = crate::fs::read_file("/bin/hello").unwrap_or_default();
     check!(good.len() > 4096, "/bin/hello missing");
     let text = phdr(&good, find_load(&good, PF_R | PF_X));
@@ -133,7 +133,7 @@ pub fn self_test() {
         let got = elf_loader::load(&b, &["x"]).err();
         check!(got == Some(want), "{}: {:?} (want {:?})", what, got, want);
     }
-    // Offset danych poza plikiem; zbyt dużo argumentów.
+    // Data offset beyond the file; too many arguments.
     let mut b = good.clone();
     put_u64(&mut b, rodata + 8, 0x10_0000);
     check!(
@@ -144,7 +144,7 @@ pub fn self_test() {
     check!(elf_loader::load(&good, &many).err() == Some(LoadError::TooManyArgs), "40 args accepted");
     serial_println!("[ELF TEST] 2/9 14 broken files rejected (magic, class, machine, ET_DYN, W^X, ranges...) PASS");
 
-    // 3. Prawa stron: text RX, rodata R+NX, data RW+NX, stos RW+NX, .bss zerowane.
+    // 3. Page permissions: text RX, rodata R+NX, data RW+NX, stack RW+NX, .bss zeroed.
     let mut b = good.clone();
     let filesz = get_u64(&b, data + 32);
     put_u64(&mut b, data + 40, filesz + 0x2000); // + 8 KiB .bss
@@ -170,7 +170,7 @@ pub fn self_test() {
     let bss = (dv + filesz + 7) & !7;
     check!(peek(&l.space, bss) == Some(0) && peek(&l.space, dv + filesz + 0x1ff0) == Some(0), ".bss not zero");
     check!(peek(&l.space, dv) == Some(get_u64(&b, get_u64(&b, data + 8) as usize)), "data not copied");
-    // 4. Stos: RSP % 16 == 0, argc, argv[], NULL, envp NULL.
+    // 4. Stack: RSP % 16 == 0, argc, argv[], NULL, envp NULL.
     check!(l.rsp % 16 == 0, "rsp {:#x} not aligned", l.rsp);
     check!(peek(&l.space, l.rsp) == Some(3), "argc {:?}", peek(&l.space, l.rsp));
     let argv: Vec<String> = (0..3).map(|i| peek_str(&l.space, peek(&l.space, l.rsp + 8 + i * 8).unwrap_or(0))).collect();
@@ -196,7 +196,7 @@ pub fn self_test() {
     );
     serial_println!("[ELF TEST] 5/9 exec /bin/hello, /bin/args (argv passed) PASS");
 
-    // 6. Pliki: save (ścieżka względna do cwd /tmp) + cat; błąd ENOENT.
+    // 6. Files: save (path relative to cwd /tmp) + cat; ENOENT error.
     let _ = crate::fs::remove("/tmp/elf.txt");
     let r = run("/bin/save", &["save", "elf.txt", "written", "by", "save"], None);
     check!(r == Ok((ExitKind::Exit(0), String::from("saved elf.txt\n"))), "save: {:?}", r);
@@ -219,7 +219,7 @@ pub fn self_test() {
     let _ = crate::fs::remove("/tmp/elf.txt");
     serial_println!("[ELF TEST] 6/9 save + cat (relative path, cwd), ENOENT, stdin, exit codes PASS");
 
-    // 7. Obliczenia w Rust w ring 3.
+    // 7. Computation in Rust in ring 3.
     let r = run("/bin/primes", &["primes", "10000"], None);
     check!(
         matches!(&r, Ok((ExitKind::Exit(0), o)) if o.starts_with("1229 primes below 10000 (")),
@@ -228,7 +228,7 @@ pub fn self_test() {
     );
     serial_println!("[ELF TEST] 7/9 primes 10000 = 1229 PASS");
 
-    // 8. Błędy exec: brak pliku, katalog, nie-ELF.
+    // 8. exec errors: missing file, directory, non-ELF.
     check!(matches!(exec("/bin/nope", &["nope"], "/", &SpawnOptions::default()), Err(ExecError::Fs(_))), "missing file");
     check!(matches!(exec("/bin", &["bin"], "/", &SpawnOptions::default()), Err(ExecError::Fs(_))), "directory");
     let _ = crate::fs::write_file("/tmp/notelf", b"#!/bin/sh\necho hi\n");
@@ -242,7 +242,7 @@ pub fn self_test() {
     let _ = crate::fs::remove("/tmp/notelf");
     serial_println!("[ELF TEST] 8/9 exec errors: missing file, directory, not an ELF PASS");
 
-    // 9. Brak wycieku ramek po wszystkich procesach.
+    // 9. No frame leak after all processes.
     let back = wait_for(500, || {
         sched::reap();
         crate::sched::stack::free_frames_flushed() == frames

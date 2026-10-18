@@ -1,14 +1,14 @@
-// M4: obsługa wyjątków CPU.
+// CPU exception handling.
 //
-// * #PF – najpierw próbuje mapowania on-demand (memory::handle_page_fault),
-//   dopiero potem traktuje fault jako błąd.
-// * #BP – nieszkodliwy, wraca do kodu.
-// * Reszta – czytelny raport na serialu i zatrzymanie CPU.
+// * #PF – first tries on-demand mapping (memory::handle_page_fault),
+//   and only then treats the fault as an error.
+// * #BP – harmless, returns to the code.
+// * The rest – a readable report on serial and the CPU is halted.
 //
-// Mechanizm "recovery" (RESUME_RIP/RESUME_RSP) istnieje po to, żeby self-test
-// mógł sprowokować wyjątek, zobaczyć czy handler go poprawnie złapał
-// i wrócić do kodu testu.  Bez uzbrojenia (RESUME_RIP == 0) każdy błąd jest
-// śmiertelny.
+// The "recovery" mechanism (RESUME_RIP/RESUME_RSP) exists so that a self-test
+// can provoke an exception, see whether the handler caught it correctly
+// and return to the test code.  When not armed (RESUME_RIP == 0) every error is
+// fatal.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use super::gdt::{GDT_ENTRIES, IST_FATAL, KERNEL_CS, KERNEL_DS, TSS_SELECTOR};
 use super::idt::{gate_ist, gate_present};
 use crate::serial_println;
 
-/// Ramka odłożona na stos przez `isr_common` (kolejność = odwrotność push).
+/// Frame pushed onto the stack by `isr_common` (order = reverse of the pushes).
 #[repr(C)]
 pub struct ExceptionFrame {
     pub r15: u64,
@@ -40,7 +40,7 @@ pub struct ExceptionFrame {
     pub rax: u64,
     pub vector: u64,
     pub error_code: u64,
-    // Wkładane przez CPU:
+    // Pushed by the CPU:
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
@@ -84,11 +84,11 @@ const NAMES: [&str; EXCEPTION_VECTORS] = [
 ];
 
 // ------------------------------------------------------------
-// Stan współdzielony z testami
+// State shared with the tests
 // ------------------------------------------------------------
 
-/// M17b.c: #PF w trakcie obsługi #PF kernela na tym samym CPU (per CPU –
-/// różne CPU mogą obsługiwać #PF równocześnie).
+/// #PF while handling a kernel #PF on the same CPU (per CPU –
+/// different CPUs may handle #PF simultaneously).
 static IN_PAGE_FAULT: crate::arch::x86_64::percpu::PerCpu<AtomicBool> = crate::per_cpu!(AtomicBool::new(false));
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 
@@ -114,8 +114,8 @@ fn read_cr3() -> u64 {
     v
 }
 
-/// Jeśli test uzbroił recovery: zapisuje co się stało i przekierowuje
-/// wykonanie na adres wznowienia.
+/// If a test armed recovery: records what happened and redirects
+/// execution to the resume address.
 fn try_recover(frame: &mut ExceptionFrame, cr2: u64) -> bool {
     let resume = RESUME_RIP.swap(0, Ordering::SeqCst);
     if resume == 0 {
@@ -140,8 +140,8 @@ fn try_recover(frame: &mut ExceptionFrame, cr2: u64) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
-    // M17: "stop" od procesora, który wpadł w panic – bez BKL (trzyma go
-    // tamten), po prostu zatrzymujemy ten CPU.  NMI w trakcie panic tak samo.
+    // "Stop" from a processor that panicked – without the BKL (that one
+    // holds it), we simply halt this CPU.  NMI during a panic likewise.
     if frame.vector == super::lapic::HALT_VECTOR as u64
         || (frame.vector == 2 && super::smp::panicking())
     {
@@ -149,22 +149,22 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
             unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
         }
     }
-    // M17a.b: TLB shootdown – bez BKL (inicjator zwykle go trzyma i czeka
-    // na nasze potwierdzenie) i bez żadnych blokad.
+    // TLB shootdown – without the BKL (the initiator usually holds it and waits
+    // for our acknowledgement) and without any locks.
     if frame.vector == super::tlb::TLB_VECTOR as u64 {
         super::tlb::on_ipi();
         return;
     }
-    // M17: wejście do kernela – Big Kernel Lock (z ring 3 albo z `hlt`
-    // procesor go nie trzyma).  Bramki przerwań wyłączyły IF.
-    // M17a: watchdog zawieszeń – przed BKL (właśnie BKL może stać).
+    // Kernel entry – the Big Kernel Lock (coming from ring 3 or from `hlt`
+    // the processor does not hold it).  Interrupt gates have cleared IF.
+    // Hang watchdog – before the BKL (the BKL itself may be what is stuck).
     if frame.vector == 2 && super::smp::watchdog_nmi(frame.rip, frame.rflags) {
         return;
     }
-    // NMI nigdy nie bierze BKL: przychodzi także wtedy, gdy ten CPU sam czeka
-    // na BKL (z wyłączonymi przerwaniami) – drugi bilet = zakleszczenie.
-    // Niezamówione NMI przy wielu CPU (sprzęt: błąd pamięci, przycisk) –
-    // raport bez BKL i powrót.
+    // NMI never takes the BKL: it also arrives when this CPU itself is waiting
+    // for the BKL (with interrupts disabled) – a second ticket = deadlock.
+    // Unsolicited NMI with multiple CPUs (hardware: memory error, button) –
+    // report without the BKL and return.
     if frame.vector == 2 && super::smp::active() {
         crate::serial_println!("[NMI] unexpected NMI on CPU {} at {:#x}", super::cpu::id(), frame.rip);
         return;
@@ -175,12 +175,12 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
     if frame.vector == super::lapic::TIMER_VECTOR as u64 || frame.vector == IRQ_BASE as u64 {
         super::smp::watchdog_tick(frame.rip);
     }
-    // M17a: czy przerwany kontekst trzymał BKL (kod kernela bez BKL – ścieżki
-    // zdjęte spod BKL, bkl::unlocked – nie trzyma).
+    // Whether the interrupted context held the BKL (kernel code without the BKL –
+    // paths moved out from under the BKL, bkl::unlocked – does not hold it).
     let had_bkl = crate::sched::bkl::held();
     let from_kernel = frame.cs & 3 == 0;
-    // M17a.g: osobne miejsce w statystyce BKL dla rodzaju wejścia i tego,
-    // co zostało przerwane (proces / kernel) – `cpus`: "BKL by site".
+    // A separate slot in the BKL statistics for the entry kind and for what
+    // was interrupted (process / kernel) – `cpus`: "BKL by site".
     {
         use crate::sched::bkl::tag;
         let user = frame.cs & 3 == 3;
@@ -198,11 +198,11 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
         } else {
             &tag::EXC_KERNEL
         };
-        // M17a.g4: tick zegara (PIT, LAPIC) i IPI przełączenia bez BKL – ich
-        // praca to atomiki, blokada schedulera, watchdog i hook ticku
-        // (odpytywanie klawiatury bierze BKL tylko, gdy jest wolny – time.rs).
-        // Legion v0.17.12: ~38 s z 46 s czekania na BKL to te przerwania.
-        // M17b.d: #PF procesu (leniwe strony) – też bez BKL.
+        // Timer tick (PIT, LAPIC) and the switch IPI without the BKL – their
+        // work is atomics, the scheduler lock, the watchdog and the tick hook
+        // (keyboard polling takes the BKL only when it is free – time.rs).
+        // On real hardware most of the BKL waiting time came from these interrupts.
+        // Process #PF (lazy pages) – also without the BKL.
         let no_bkl = v == IRQ_BASE as u64
             || v == super::lapic::TIMER_VECTOR as u64
             || v == super::lapic::RESCHED_VECTOR as u64
@@ -211,8 +211,8 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
             crate::sched::bkl::acquire_if_needed_tagged(t);
         }
     }
-    // M17a: przerwanie sprzętowe (wektory >= 32) – do irq::after_interrupt
-    // ten CPU jest "w przerwaniu" (SpinLock tu zabroniony, IrqSpinLock tak).
+    // Hardware interrupt (vectors >= 32) – until irq::after_interrupt
+    // this CPU is "in an interrupt" (SpinLock forbidden here, IrqSpinLock allowed).
     let hw = frame.vector >= 32;
     if hw {
         super::cpu::set_in_interrupt(true);
@@ -222,22 +222,22 @@ pub extern "sysv64" fn exception_dispatch(frame: &mut ExceptionFrame) {
     if hw {
         super::cpu::set_in_interrupt(false);
     }
-    // Powrót do procesu (ring 3) = wyjście z kernela: oddajemy BKL.  Ramka
-    // mogła się zmienić (wyjątek procesu -> powrót do trampoliny w ring 0)
-    // albo należeć do innego zadania niż na wejściu (wywłaszczenie) – liczy
-    // się, dokąd wracamy teraz.  M17a: powrót do kodu kernela, który działał
-    // bez BKL – też oddajemy (stan BKL należy do przerwanego kontekstu; po
-    // wywłaszczeniu i powrocie, także na innym CPU, to nadal ten sam kontekst).
-    // Wyjątek z ring 3 przekierowany do kernela (koniec procesu) wraca do
-    // kodu, który BKL potrzebuje – dlatego `from_kernel`.
+    // Returning to a process (ring 3) = leaving the kernel: release the BKL.  The frame
+    // may have changed (process exception -> return to the ring 0 trampoline)
+    // or belong to a different task than on entry (preemption) – what matters
+    // is where we return now.  Returning to kernel code that ran
+    // without the BKL – release it too (BKL state belongs to the interrupted context; after
+    // preemption and return, even on another CPU, it is still the same context).
+    // An exception from ring 3 redirected to the kernel (process exit) returns to
+    // code that needs the BKL – hence `from_kernel`.
     if (frame.cs & 3 == 3 || (from_kernel && !had_bkl)) && crate::sched::bkl::held() {
         crate::sched::bkl::release();
     }
 }
 
 fn dispatch_inner(frame: &mut ExceptionFrame) {
-    // M13a: wyjątek procesu (ring 3) kończy tylko proces – poza NMI, #DF i
-    // #MC, które dotyczą całej maszyny.
+    // A process exception (ring 3) only kills the process – except NMI, #DF and
+    // #MC, which concern the whole machine.
     if frame.cs & 3 == 3
         && (frame.vector as usize) < EXCEPTION_VECTORS
         && !matches!(frame.vector, 2 | 8 | 18)
@@ -247,16 +247,16 @@ fn dispatch_inner(frame: &mut ExceptionFrame) {
         return;
     }
     match frame.vector {
-        // M5: przerwania sprzętowe z PIC-a.
+        // Hardware interrupts from the PIC.
         v if v >= IRQ_BASE as u64 && v < (IRQ_BASE + IRQ_VECTORS) as u64 => {
             super::irq::dispatch(frame);
         }
-        // M16b: MSI/MSI-X (EOI do LAPIC) i "spurious" LAPIC (bez EOI).
+        // MSI/MSI-X (EOI to the LAPIC) and LAPIC "spurious" (no EOI).
         v if v >= super::msi::MSI_BASE as u64 && v < (super::msi::MSI_BASE + super::msi::MSI_VECTORS) as u64 => {
             super::msi::dispatch(frame);
         }
         0xFF => {}
-        // M17: timer LAPIC procesora AP i IPI "przełącz zadanie".
+        // AP processor LAPIC timer and the "switch task" IPI.
         v if v == super::lapic::TIMER_VECTOR as u64 => {
             let t0 = crate::user::prof::start();
             super::lapic::eoi();
@@ -275,8 +275,8 @@ fn dispatch_inner(frame: &mut ExceptionFrame) {
             BREAKPOINTS.fetch_add(1, Ordering::SeqCst);
         }
         14 => page_fault(frame),
-        // M17b.c: #DF (IST) – zwykle przepełnienie stosu kernela: #PF bez IST nie
-        // zmieścił ramki na stosie.  CR2 = adres, którego #PF dotyczył.
+        // #DF (IST) – usually a kernel stack overflow: a #PF without IST could not
+        // fit its frame on the stack.  CR2 = the address the #PF was about.
         8 => {
             let cr2 = read_cr2();
             if !try_recover(frame, cr2) {
@@ -295,8 +295,8 @@ fn dispatch_inner(frame: &mut ExceptionFrame) {
 fn page_fault(frame: &mut ExceptionFrame) {
     let cr2 = read_cr2();
 
-    // #PF kernela w trakcie obsługi #PF kernela (ten sam CPU) to błąd kernela
-    // (M17b.c: bez IST ramki by się nie nadpisały, ale handler ma być prosty).
+    // A kernel #PF while handling a kernel #PF (same CPU) is a kernel bug
+    // (without IST the frames would not overwrite each other, but the handler is meant to be simple).
     let me = super::cpu::id();
     if IN_PAGE_FAULT[me].swap(true, Ordering::SeqCst) {
         fatal(frame, Some(cr2), "nested page fault inside the page fault handler");
@@ -317,7 +317,7 @@ fn page_fault(frame: &mut ExceptionFrame) {
 }
 
 // ------------------------------------------------------------
-// Raport błędu
+// Error report
 // ------------------------------------------------------------
 
 fn describe_page_fault(error: u64) {
@@ -405,7 +405,7 @@ fn fatal(frame: &ExceptionFrame, cr2: Option<u64>, note: &str) -> ! {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -459,8 +459,8 @@ fn trigger_de() {
     }
 }
 
-// `int 0x7f` przy nieobecnej bramce IDT daje #GP z kodem błędu 0x7f*8 + 2.
-// (0x21 od M5 jest zajęte przez IRQ1.)
+// `int 0x7f` with a non-present IDT gate gives #GP with error code 0x7f*8 + 2.
+// (0x21 is taken by IRQ1.)
 #[cfg(selftest)]
 const UNUSED_VECTOR: u64 = 0x7f;
 #[cfg(selftest)]
@@ -477,7 +477,7 @@ fn trigger_gp() {
     }
 }
 
-/// Wynik nieudanego odczytu z `probe_read`.
+/// Result of a failed read from `probe_read`.
 #[cfg(selftest)]
 #[allow(dead_code)]
 pub struct Fault {
@@ -486,9 +486,9 @@ pub struct Fault {
     pub cr2: u64,
 }
 
-/// Próbuje odczytać bajt spod `address`.  Jeśli CPU zgłosi wyjątek (i handler
-/// nie naprawi go np. przez mapowanie on-demand), zwraca jego opis zamiast
-/// zatrzymywać system.  `None` = odczyt się udał.
+/// Tries to read a byte from `address`.  If the CPU raises an exception (and the handler
+/// does not fix it, e.g. via on-demand mapping), returns its description instead of
+/// halting the system.  `None` = the read succeeded.
 #[cfg(selftest)]
 pub fn probe_read(address: u64) -> Option<Fault> {
     reset_last();
@@ -504,7 +504,7 @@ pub fn probe_read(address: u64) -> Option<Fault> {
             addr = in(reg) address,
         );
     }
-    // Odczyt się udał -> handler nie zdjął uzbrojenia.
+    // The read succeeded -> the handler did not disarm.
     RESUME_RIP.store(0, Ordering::SeqCst);
 
     let vector = LAST_VECTOR.load(Ordering::SeqCst);
@@ -519,9 +519,9 @@ pub fn probe_read(address: u64) -> Option<Fault> {
     }
 }
 
-/// M13a: próbuje WYKONAĆ kod pod `address` (`call`).  Z SMEP skok kernela
-/// na stronę użytkownika daje #PF – wtedy zwraca opis błędu.  `None` = kod
-/// się wykonał (musi kończyć się `ret`).
+/// Tries to EXECUTE code at `address` (`call`).  With SMEP a kernel jump
+/// to a user page gives #PF – then returns the error description.  `None` = the code
+/// ran (it must end with `ret`).
 #[cfg(selftest)]
 pub fn probe_exec(address: u64) -> Option<Fault> {
     reset_last();
@@ -553,9 +553,9 @@ pub fn probe_exec(address: u64) -> Option<Fault> {
     }
 }
 
-/// Ustawia RSP na niezamapowany adres i robi `int3`.  CPU nie może zapisać
-/// ramki wyjątku na takim stosie, więc dostajemy #PF; M17b.c: #PF nie ma IST,
-/// więc też nie zapisze ramki -> #DF, który działa na stosie IST.
+/// Sets RSP to an unmapped address and executes `int3`.  The CPU cannot write
+/// the exception frame on such a stack, so we get #PF; #PF has no IST,
+/// so it cannot write its frame either -> #DF, which runs on the IST stack.
 #[cfg(selftest)]
 fn trigger_bad_stack(bad_rsp: u64) {
     unsafe {
@@ -580,7 +580,7 @@ pub fn self_test() {
     serial_println!("[ARCH TEST] Starting exception tests...");
     crate::selftest::begin();
 
-    // 1. Tablice załadowane.
+    // 1. Tables loaded.
     let cs: u16;
     let ss: u16;
     let tr: u16;
@@ -605,7 +605,7 @@ pub fn self_test() {
     check!(idt_limit == 4095, "IDT limit = {}", idt_limit);
     serial_println!("[ARCH TEST] 1/8 GDT + TSS + IDT loaded PASS");
 
-    // 2. Bramki i IST.
+    // 2. Gates and IST.
     for v in 0..EXCEPTION_VECTORS {
         check!(gate_present(v), "gate {} not present", v);
     }
@@ -617,8 +617,8 @@ pub fn self_test() {
     check!(gate_ist(6) == IST_FATAL, "#UD IST = {}", gate_ist(6));
     check!(gate_ist(14) == 0, "#PF must not use IST (M17b.c), IST = {}", gate_ist(14));
     check!(gate_ist(3) == 0 && gate_ist(0) == 0, "#BP / #DE should not use IST");
-    // M16: niezmiennik irq::dispatch -> preempt() -> kill_from_interrupt –
-    // IRQ zawsze na stosie kernela przerwanego zadania (idt.rs).
+    // Invariant irq::dispatch -> preempt() -> kill_from_interrupt –
+    // an IRQ always runs on the kernel stack of the interrupted task (idt.rs).
     for v in super::idt::IRQ_BASE..super::idt::IRQ_BASE + super::pic::IRQ_COUNT {
         check!(gate_ist(v) == 0, "IRQ vector {:#x} uses IST {} (must be 0)", v, gate_ist(v));
     }
@@ -627,7 +627,7 @@ pub fn self_test() {
     }
     serial_println!("[ARCH TEST] 2/8 IDT gates + IST assignment (IRQ vectors without IST) PASS");
 
-    // 3. #BP wraca do kodu.
+    // 3. #BP returns to the code.
     let before = BREAKPOINTS.load(Ordering::SeqCst);
     unsafe {
         asm!("int3");
@@ -647,7 +647,7 @@ pub fn self_test() {
     check!(LAST_VECTOR.load(Ordering::SeqCst) == 0, "#DE vector = {}", LAST_VECTOR.load(Ordering::SeqCst));
     serial_println!("[ARCH TEST] 5/8 #DE (div by zero) caught PASS");
 
-    // 6. #GP z kodem błędu.
+    // 6. #GP with an error code.
     reset_last();
     trigger_gp();
     check!(LAST_VECTOR.load(Ordering::SeqCst) == 13, "#GP vector = {}", LAST_VECTOR.load(Ordering::SeqCst));
@@ -658,10 +658,10 @@ pub fn self_test() {
     );
     serial_println!("[ARCH TEST] 6/8 #GP (error code {:#x}) caught PASS", LAST_ERROR.load(Ordering::SeqCst));
 
-    // 7. #PF: odczyt z niezamapowanego adresu (poza obszarem on-demand).
-    //    Uwaga: na tym etapie działają jeszcze tablice UEFI, w których
-    //    adres 0 jest zamapowany – dlatego używamy adresu daleko poza RAM-em.
-    //    Pułapka na null (nasze tablice) jest sprawdzana w teście on-demand.
+    // 7. #PF: read from an unmapped address (outside the on-demand area).
+    //    Note: at this point the UEFI tables are still active, in which
+    //    address 0 is mapped – hence an address far beyond RAM.
+    //    The null trap (our tables) is checked in the on-demand test.
     let unmapped: u64 = 0x0000_7fff_fe00_0000;
     let fault = probe_read(unmapped);
     check!(fault.is_some(), "read of {:#x} did not fault", unmapped);
@@ -672,9 +672,9 @@ pub fn self_test() {
     check!(fault.error & 2 == 0, "W bit set for a read");
     serial_println!("[ARCH TEST] 7/8 #PF (unmapped read, CR2 exact) caught PASS");
 
-    // 8. Wyjątek na nieużywalnym stosie – działa tylko dzięki IST (#DF).
-    //    M10: "nieużywalny stos" = strona-strażnik pod stosem kernela, czyli
-    //    dokładnie to, co dzieje się przy przepełnieniu stosu.
+    // 8. Exception on an unusable stack – works only thanks to IST (#DF).
+    //    "Unusable stack" = the guard page below the kernel stack, i.e.
+    //    exactly what happens on a stack overflow.
     let layout = crate::memory::kernel_layout();
     let bad: u64 = layout.stack_bottom();
     reset_last();

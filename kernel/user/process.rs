@@ -1,10 +1,10 @@
-// M14: proces użytkownika – przestrzeń adresowa + deskryptory plików.
-// M16: rodzic (ppid) i dziedziczenie wejścia/wyjścia przez dzieci.
+// User process – address space + file descriptors.
+// Parent (ppid) and children inheriting input/output.
 //
-// Należy do zadania schedulera (Task.process).  Pola zwykłe zmienia tylko
-// to zadanie (syscalle), więc bez blokad.  `ppid` i `exiting` są atomowe –
-// zmienia je też kończący się rodzic (przekazanie dzieci do init) pod
-// blokadą tablicy zombie (procs.rs).
+// Belongs to a scheduler task (Task.process).  Plain fields are changed only by
+// that task (syscalls), so no locks.  `ppid` and `exiting` are atomic –
+// they are also changed by an exiting parent (handing children to init) under
+// the zombie table lock (procs.rs).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -18,19 +18,19 @@ use crate::console::SerialDecoder;
 use crate::sched::sync::Mutex;
 use crate::sched::TaskId;
 
-/// Testy: wejście procesu z bufora zamiast z klawiatury (wspólne z dziećmi,
-/// jak terminal).
+/// Tests: process input from a buffer instead of the keyboard (shared with children,
+/// like a terminal).
 pub type InBuf = Arc<Mutex<VecDeque<u8>>>;
-/// Testy: wyjście procesu do bufora zamiast na ekran (wspólne z dziećmi).
-/// M17a.d: SpinLock (nie usypiający Mutex) – `write` działa bez BKL.
+/// Tests: process output to a buffer instead of the screen (shared with children).
+/// SpinLock (not a sleeping Mutex) – `write` runs without the BKL.
 pub type OutBuf = Arc<crate::sched::spin::IrqSpinLock<Vec<u8>>>;
 
-/// M17b.a: otwarty plik – obiekt wspólny dla wszystkich deskryptorów, które
-/// na niego wskazują (dup, dup2, deskryptory dziecka przy spawn): jedna
-/// pozycja, jak w Uniksie (`echo a > f; echo b >> f` w jednym skrypcie,
-/// `(cmd1; cmd2) > f`).  Pozycja pod Mutexem (usypiającym) – trzymana przez
-/// cały odczyt / zapis, więc dwa procesy piszące przez wspólny obiekt nie
-/// nadpisują sobie danych.
+/// Open file – an object shared by all descriptors that
+/// point to it (dup, dup2, child descriptors on spawn): one
+/// position, as in Unix (`echo a > f; echo b >> f` in one script,
+/// `(cmd1; cmd2) > f`).  The position is under a (sleeping) Mutex – held for
+/// the whole read / write, so two processes writing through a shared object do not
+/// overwrite each other's data.
 pub struct OpenFile {
     pub path: String,
     pub read: bool,
@@ -39,9 +39,9 @@ pub struct OpenFile {
     pub offset: Mutex<u64>,
 }
 
-/// M18.b: prawa uchwytu (bity).  Prawa można tylko zmniejszyć (handle_dup);
-/// brak READ / WRITE przy read / write = EBADF (jak w POSIX), brak
-/// pozostałych = EACCES.  Projekt: ARCHITEKTURA.md, „IPC”.
+/// Handle rights (bits).  Rights can only be reduced (handle_dup);
+/// missing READ / WRITE on read / write = EBADF (as in POSIX), missing
+/// others = EACCES.  Design: ARCHITECTURE.md, "IPC".
 pub mod rights {
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;
@@ -54,27 +54,27 @@ pub mod rights {
     pub const ALL: u32 = 0xFF;
 }
 
-/// M18.b: rodzaj obiektu w `handle_info`.
+/// Object kind in `handle_info`.
 pub mod kind {
     pub const CONSOLE: u64 = 1;
     pub const FILE: u64 = 2;
     pub const PIPE: u64 = 3;
     pub const CHANNEL: u64 = 4;
     pub const SHM: u64 = 5;
-    /// M19.c: dostęp do sprzętu (tylko init) i przejęte urządzenie PCI.
+    /// Hardware access (init only) and a claimed PCI device.
     pub const HW_ROOT: u64 = 6;
     pub const DEVICE: u64 = 7;
-    /// M19.d: przerwanie urządzenia przypięte do usługi.
+    /// Device interrupt bound to a service.
     pub const IRQ: u64 = 8;
-    /// M19.i: akcje systemowe (reboot, halt, sync, stress) – syscall sysctl.
+    /// System actions (reboot, halt, sync, stress) – sysctl syscall.
     pub const SYSCTL: u64 = 9;
-    /// M20.e: wstrzykiwanie zdarzeń wejścia (klawiatura / mysz USB) – input_inject.
+    /// Input event injection (USB keyboard / mouse) – input_inject.
     pub const INPUT: u64 = 10;
-    /// M20.f: rejestracja dysku USB w jądrze (blk_attach) – tylko usbd.
+    /// Registering a USB disk in the kernel (blk_attach) – usbd only.
     pub const BLK: u64 = 11;
 }
 
-/// M18.b: wpis tablicy uchwytów procesu – obiekt + prawa.
+/// Process handle table entry – object + rights.
 #[derive(Clone)]
 pub struct Handle {
     pub obj: Fd,
@@ -82,7 +82,7 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Uchwyt z prawami wynikającymi z obiektu (zachowanie sprzed M18).
+    /// Handle with rights derived from the object (legacy default behavior).
     pub fn new(obj: Fd) -> Handle {
         use rights::*;
         let io = match &obj {
@@ -99,16 +99,16 @@ impl Handle {
             Fd::Shm(_) => MAP_READ | MAP_WRITE,
             Fd::Device(_) => MAP_READ | MAP_WRITE,
             Fd::Irq(_) => RECV,
-            // M19.c: bez DUP i TRANSFER – nie da się go skopiować, przekazać
-            // dziecku ani wysłać; zostaje tam, gdzie dało go jądro (init).
+            // No DUP and TRANSFER – it cannot be copied, passed
+            // to a child or sent; it stays where the kernel put it (init).
             Fd::HwRoot => return Handle { obj, rights: 0 },
-            // M19.i: tylko DUP – init daje kopię shellowi (spawn_ex), ale nie
-            // da się go wysłać w komunikacie.
+            // Only DUP – init gives a copy to the shell (spawn_ex), but it
+            // cannot be sent in a message.
             Fd::Sysctl => return Handle { obj, rights: DUP },
-            // M20.e: WRITE (input_inject) + DUP (init daje kopie usbd); bez
-            // TRANSFER – nie da się go wysłać w komunikacie.
+            // WRITE (input_inject) + DUP (init gives copies to usbd); no
+            // TRANSFER – it cannot be sent in a message.
             Fd::Input(_) => return Handle { obj, rights: WRITE | DUP },
-            // M20.f: jak INPUT – WRITE (blk_attach) + DUP (init daje kopie usbd).
+            // Like INPUT – WRITE (blk_attach) + DUP (init gives copies to usbd).
             Fd::Blk => return Handle { obj, rights: WRITE | DUP },
         };
         Handle { obj, rights: io | DUP | TRANSFER }
@@ -133,85 +133,85 @@ impl Handle {
 
 #[derive(Clone)]
 pub enum Fd {
-    /// Konsola (0 = wejście, 1/2 = wyjście).
+    /// Console (0 = input, 1/2 = output).
     Console,
-    /// Plik z VFS – obiekt wspólny dla kopii deskryptora (M17b.a).
+    /// File from the VFS – an object shared by descriptor copies.
     File(Arc<OpenFile>),
-    /// M17b.b: koniec potoku (do odczytu albo zapisu).
+    /// Pipe end (for reading or writing).
     Pipe(Arc<super::pipe::PipeEnd>),
-    /// M18.c: koniec kanału (komunikaty w obie strony).
+    /// Channel end (messages in both directions).
     Channel(Arc<super::channel::ChanEnd>),
-    /// M18.e: obiekt pamięci współdzielonej.
+    /// Shared memory object.
     Shm(Arc<super::shm::ShmObj>),
-    /// M19.c: dostęp do sprzętu – z niego dev_claim; ma go tylko init.
+    /// Hardware access – dev_claim goes through it; only init has it.
     HwRoot,
-    /// M19.c: urządzenie PCI przejęte przez usługę.
+    /// PCI device claimed by a service.
     Device(Arc<super::device::DevClaim>),
-    /// M19.d: przerwanie urządzenia (licznik + pobudka w wait_many).
+    /// Device interrupt (counter + wake-up in wait_many).
     Irq(Arc<super::device::IrqObj>),
-    /// M19.i: prawo do akcji systemowych (sysctl) – tworzy je tylko jądro dla init.
+    /// Right to system actions (sysctl) – created only by the kernel for init.
     Sysctl,
-    /// M20.e: źródło zdarzeń wejścia (input_inject) – tworzy je tylko jądro dla
-    /// init; każda kopia to osobne źródło (inputsrc.rs).
+    /// Input event source (input_inject) – created only by the kernel for
+    /// init; every copy is a separate source (inputsrc.rs).
     Input(alloc::boxed::Box<super::inputsrc::InputEnd>),
-    /// M20.f: prawo do rejestracji dysku (blk_attach) – tworzy je tylko jądro
-    /// dla init (slot 6), init daje kopię każdemu usbd.
+    /// Right to register a disk (blk_attach) – created only by the kernel
+    /// for init (slot 6), init gives a copy to every usbd.
     Blk,
 }
 
 pub struct Process {
-    /// v0.35.2: dziecko init (shell, usługi) – może sięgać do rezerwy procesów.
+    /// Child of init (shell, services) – may dip into the process reserve.
     pub(super) trusted: bool,
     pub space: AddressSpace,
-    /// M17b.d: obszary pamięci (sterta, mmap, stos) – leniwy przydział stron.
+    /// Memory areas (heap, mmap, stack) – lazy page allocation.
     pub mem: super::vm::ProcMem,
-    /// M18.b: tablica uchwytów (dawniej deskryptory) – numer = indeks.
+    /// Handle table (formerly descriptors) – number = index.
     pub(super) fds: Vec<Option<Handle>>,
     pub(super) stdin: Option<InBuf>,
     pub(super) stdout: Option<OutBuf>,
-    /// M17a.e: ten proces utworzył bufor stdout (dzieci go tylko dziedziczą) –
-    /// tylko on (albo ostatni właściciel) zapisuje wyjście do dziennika.
+    /// This process created the stdout buffer (children only inherit it) –
+    /// only it (or the last owner) writes the output to the log.
     pub(super) stdout_creator: bool,
     pub syscalls: u64,
-    /// M15: RSP na starcie (ELF: wskazuje argc) i katalog bieżący
-    /// (ścieżki względne w open).
+    /// RSP at startup (ELF: points at argc) and the current directory
+    /// (relative paths in open).
     pub initial_rsp: u64,
     pub cwd: String,
-    /// Proces na pierwszym planie: Ctrl+C go kończy; normalny koniec bez
-    /// komunikatu kernela.
+    /// Foreground process: Ctrl+C kills it; a normal exit prints no
+    /// kernel message.
     pub foreground: bool,
-    /// M16: rodzic (0 = kernel – shell kernela, testy, nadzorca init).
+    /// Parent (0 = kernel – kernel shell, tests, init supervisor).
     pub ppid: AtomicU64,
-    /// M16: proces się kończy (dzieci przekazane dalej) – nowe zombie już
-    /// nie trafiają do niego.
+    /// The process is exiting (children handed over) – new zombies no
+    /// longer go to it.
     pub exiting: AtomicBool,
-    /// M17a.g11: proces miał (albo dostał od kończącego się rodzica) dzieci –
-    /// bez tego koniec procesu pomija przegląd listy zadań (reparent).
+    /// The process had (or received from an exiting parent) children –
+    /// without this, process exit skips scanning the task list (reparent).
     pub has_children: AtomicBool,
-    /// M17a.g15: żywe dzieci (spawn +1, koniec dziecka −1, przejęte w
-    /// reparent +n).  Koniec dziecka zmienia go pod blokadą `zombies`
-    /// rodzica razem z wpisem zombie – `wait` czyta go pod tą blokadą.
+    /// Live children (spawn +1, child exit −1, adopted in
+    /// reparent +n).  A child's exit changes it under the parent's `zombies`
+    /// lock together with the zombie entry – `wait` reads it under that lock.
     pub live_children: core::sync::atomic::AtomicU32,
-    /// P1: zakończone dzieci czekające na `wait` (dawniej jedna globalna
-    /// tablica ZOMBIES pod usypiającą blokadą – na Legionie 168 s czekania w
-    /// minucie pełnego obciążenia).  Teraz każdy rodzic ma swoją listę
-    /// (procs::ChildList – lekka blokada, patrz asercja niżej).
+    /// Finished children waiting for `wait` (formerly one global
+    /// ZOMBIES table under a sleeping lock – minutes of waiting per
+    /// minute of full load on a 16-thread machine).  Now every parent has its own list
+    /// (procs::ChildList – a light lock, see the assertion below).
     pub(super) zombies: super::procs::ChildList,
-    /// P1: rośnie przy każdym nowym zombie dla tego procesu (warunek czekania
-    /// w `wait` bez blokady).
+    /// Incremented on every new zombie for this process (wait condition
+    /// in `wait` without the lock).
     pub child_gen: AtomicU64,
-    /// M16: dekoder klawiszy dla readkey z bufora stdin (testy).
+    /// Key decoder for readkey from the stdin buffer (tests).
     pub(super) key_decoder: SerialDecoder,
 }
 
-/// M18.e: mapowania pamięci współdzielonej zdejmowane, ZANIM pola się zwolnią
-/// – Drop przestrzeni adresowej oddaje każdą zamapowaną ramkę, a ramki
-/// obiektu należą do obiektu (inne procesy mogą jej jeszcze używać).
-/// v0.35.2: limit procesów.  Ponad MAX_PROCS − PROC_RESERVE spawn dostaje
-/// EAGAIN; ostatnie PROC_RESERVE miejsc tylko dla init i jego bezpośrednich
-/// dzieci (shell, usługi) – po bombie `spawn` shell nadal uruchomi `ps`/`kill`,
-/// a init zrestartuje usługę.  Stosów zadań jest 4096 – limit zostawia zapas na
-/// zadania jądra.
+/// Shared memory mappings are torn down BEFORE the fields are dropped
+/// – the address space's Drop frees every mapped frame, but the object's frames
+/// belong to the object (other processes may still be using it).
+/// Limit on the number of processes.  Above MAX_PROCS − PROC_RESERVE spawn gets
+/// EAGAIN; the last PROC_RESERVE slots are only for init and its direct
+/// children (shell, services) – after a `spawn` bomb the shell can still run `ps`/`kill`,
+/// and init can restart a service.  There are 4096 task stacks – the limit leaves room for
+/// kernel tasks.
 pub const MAX_PROCS: usize = 1024;
 pub const PROC_RESERVE: usize = 64;
 pub static LIVE_PROCS: AtomicUsize = AtomicUsize::new(0);
@@ -223,9 +223,9 @@ impl Drop for Process {
     }
 }
 
-// P1 (v0.20.2): Process idzie szybką ścieżką heapa (klasy do 2 KiB, wyrównanie
-// do 16 B) – pole z wyrównaniem 64 (np. IrqSpinLock) przeniosłoby każdy
-// proces na wolną, globalną listę bloków.
+// Process takes the heap fast path (classes up to 2 KiB, alignment
+// to 16 B) – a field with 64-byte alignment (e.g. IrqSpinLock) would move every
+// process onto the slow, global block list.
 const _: () = assert!(core::mem::align_of::<Process>() <= 16 && core::mem::size_of::<Process>() <= 2048);
 
 impl Process {
@@ -236,8 +236,8 @@ impl Process {
         fds.push(Some(Handle::new(Fd::Console))); // 2 stderr
         Process {
             space,
-            // Programy asm (testy): sterta za stroną danych; ELF – za obrazem
-            // (spawn ustawia `mem` na nowo).
+            // asm programs (tests): heap after the data page; ELF – after the image
+            // (spawn sets `mem` anew).
             mem: super::vm::ProcMem::new(super::USER_DATA + 4096),
             fds,
             stdin: None,
@@ -259,7 +259,7 @@ impl Process {
         .counted()
     }
 
-    /// v0.35.2: licznik procesów (żywe + jeszcze nie sprzątnięte).
+    /// Process counter (live + not yet reaped).
     fn counted(self) -> Self {
         LIVE_PROCS.fetch_add(1, Ordering::SeqCst);
         self
@@ -273,7 +273,7 @@ impl Process {
         self.handle(fd).map(|h| &h.obj)
     }
 
-    /// M18.b: uchwyt (obiekt + prawa).
+    /// Handle (object + rights).
     pub(super) fn handle(&self, fd: u64) -> Result<&Handle, i64> {
         self.fds.get(fd as usize).and_then(|f| f.as_ref()).ok_or(EBADF)
     }
@@ -282,7 +282,7 @@ impl Process {
         matches!(self.fds.get(fd as usize), Some(Some(Handle { obj: Fd::Console, .. })))
     }
 
-    /// Liczba otwartych plików (3+).
+    /// Number of open files (3+).
     #[allow(dead_code)]
     pub fn open_files(&self) -> usize {
         self.fds.iter().skip(3).filter(|f| f.is_some()).count()

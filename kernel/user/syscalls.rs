@@ -1,11 +1,11 @@
-// M14: wywołania systemowe.
+// System calls.
 //
-// Numery (RAX), argumenty RDI, RSI, RDX, R10, R8, R9, wynik w RAX;
-// błąd = ujemny kod (jak -errno w Linuksie).
+// Number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9, result in RAX;
+// error = negative code (like -errno in Linux).
 //
-//   0  exit(code)                       kończy proces
-//   1  write(fd, buf, len) -> n         fd 1/2 = konsola, 3+ = plik
-//   2  read(fd, buf, len) -> n          fd 0 = konsola (cała linia), 3+ = plik
+//   0  exit(code)                       terminates the process
+//   1  write(fd, buf, len) -> n         fd 1/2 = console, 3+ = file
+//   2  read(fd, buf, len) -> n          fd 0 = console (whole line), 3+ = file
 //   3  open(path, path_len, flags) -> fd
 //   4  close(fd)
 //   5  getpid() -> id
@@ -13,55 +13,55 @@
 //   7  yield()
 //   8  uptime() -> ms
 //
-// M16 (init + shell w user space):
+// Process management (init + shell in user space):
 //
 //   9  spawn(path, len, argv, argv_len, flags, fds) -> pid
-//        argv = argumenty oddzielone bajtem 0 (argv[0] = nazwa programu),
-//        flags: 1 FOREGROUND (Ctrl+C kończy dziecko),
-//        fds = in | out << 16 | err << 32 – deskryptory rodzica, które
-//        dziecko dostaje jako 0, 1, 2 (kopie)
+//        argv = arguments separated by a 0 byte (argv[0] = program name),
+//        flags: 1 FOREGROUND (Ctrl+C terminates the child),
+//        fds = in | out << 16 | err << 32 – parent descriptors that the
+//        child gets as 0, 1, 2 (copies)
 //  10  wait(pid, status_ptr, flags) -> pid
-//        pid = -1 (u64::MAX) dowolne dziecko; flags: 1 WNOHANG (0 = jeszcze
-//        nikt się nie skończył); status: kod 0..255 albo 0x100 | powód
-//        (9 = kill/Ctrl+C, inaczej numer wyjątku CPU)
+//        pid = -1 (u64::MAX) any child; flags: 1 WNOHANG (0 = nobody has
+//        finished yet); status: code 0..255 or 0x100 | reason
+//        (9 = kill/Ctrl+C, otherwise the CPU exception number)
 //  11  getppid() -> pid
-//  12  kill(pid)                         tylko procesy; init chroniony
+//  12  kill(pid)                         processes only; init is protected
 //  13  chdir(path, len)
 //  14  getcwd(buf, len) -> n
-//  15  readdir(path, len, buf, buflen) -> n   linie "d|f\t<rozmiar>\t<nazwa>\n"
-//  16  stat(path, len, out)              out = [typ (0 plik, 1 katalog), rozmiar]
+//  15  readdir(path, len, buf, buflen) -> n   lines "d|f\t<size>\t<name>\n"
+//  16  stat(path, len, out)              out = [type (0 file, 1 directory), size]
 //  17  mkdir(path, len)
-//  18  unlink(path, len)                 plik albo pusty katalog
-//  19  readkey(line, len) -> klawisz     surowe klawisze dla edytora linii;
-//        line = prompt + tekst do odrysowania, gdy w trakcie czekania coś
-//        wypisze proces w tle; 0 = koniec wejścia
-//  20  tasks(buf, len) -> n              linie "pid\tppid\tstan\tms\tprzełączenia\ttyp\tnazwa\n"
-//  21  (wolny – do M19.h kcmd, most do komend shella jądra; zastąpiony przez
-//        46 sysinfo i 47 sysctl)
+//  18  unlink(path, len)                 file or empty directory
+//  19  readkey(line, len) -> key         raw keys for the line editor;
+//        line = prompt + text to redraw when a background process prints
+//        something while waiting; 0 = end of input
+//  20  tasks(buf, len) -> n              lines "pid\tppid\tstate\tms\tswitches\ttype\tname\n"
+//  21  (free – formerly kcmd, a bridge to kernel shell commands; replaced by
+//        46 sysinfo and 47 sysctl)
 //
-// M17b (obiekty plików): deskryptor wskazuje wspólny obiekt (OpenFile:
-// ścieżka, prawa, pozycja) – kopie (dup, dup2, spawn) dzielą pozycję.
+// File objects: a descriptor points to a shared object (OpenFile:
+// path, rights, position) – copies (dup, dup2, spawn) share the position.
 //
-//  22  dup(fd) -> nowy fd                najniższy wolny
-//  23  dup2(old, new) -> new             new zamknięty i wskazuje obiekt old
-//  24  seek(fd, offset, whence) -> pozycja   whence 0 SET, 1 CUR, 2 END;
-//        konsola – ESPIPE
-//  25  pipe(out) -> 0                    out = [fd odczytu, fd zapisu]; read czeka
-//        na dane (0 = nikt już nie pisze), write – na miejsce (EPIPE, gdy nikt
-//        nie czyta); bufor 64 KiB
+//  22  dup(fd) -> new fd                 lowest free one
+//  23  dup2(old, new) -> new             new is closed and points to old's object
+//  24  seek(fd, offset, whence) -> pos   whence 0 SET, 1 CUR, 2 END;
+//        console – ESPIPE
+//  25  pipe(out) -> 0                    out = [read fd, write fd]; read waits
+//        for data (0 = nobody writes any more), write – for space (EPIPE when
+//        nobody reads); 64 KiB buffer
 //
-// M17b.d (pamięć procesu – strony przydzielane przy pierwszym dostępie):
+// Process memory (pages allocated on first access):
 //
-//  26  brk(addr) -> koniec sterty        0 = zapytanie; błąd – dotychczasowy koniec
-//  27  mmap(len, prot) -> adres          anonimowy, wyzerowany; prot 1 READ, 2 WRITE
-//  28  munmap(addr, len)                 tylko obszary z mmap (także części)
+//  26  brk(addr) -> heap end             0 = query; on error – the current end
+//  27  mmap(len, prot) -> addr           anonymous, zeroed; prot 1 READ, 2 WRITE
+//  28  munmap(addr, len)                 only mmap regions (parts too)
 //
-// Flagi open: 1 READ, 2 WRITE, 4 CREATE, 8 TRUNC, 16 APPEND.
+// open flags: 1 READ, 2 WRITE, 4 CREATE, 8 TRUNC, 16 APPEND.
 //
-// Pamięć procesu: wskaźnik + długość są sprawdzane (dolna połowa, strony
-// obecne z bitem USER, przy zapisie WRITABLE), a samo kopiowanie odbywa się
-// przez adresy procesu między `stac` i `clac` (SMAP: poza tym oknem kernel
-// nie ma dostępu do stron użytkownika).
+// Process memory: pointer + length are checked (lower half, pages present
+// with the USER bit, WRITABLE for writes), and the copying itself goes
+// through process addresses between `stac` and `clac` (SMAP: outside this
+// window the kernel has no access to user pages).
 
 use alloc::string::String;
 use alloc::vec;
@@ -107,40 +107,40 @@ pub const SYS_PIPE: u64 = 25;
 pub const SYS_BRK: u64 = 26;
 pub const SYS_MMAP: u64 = 27;
 pub const SYS_MUNMAP: u64 = 28;
-/// M18.b: kopia uchwytu z prawami `stare & maska` (wymaga DUP).
+/// Copy of a handle with rights `old & mask` (requires DUP).
 pub const SYS_HANDLE_DUP: u64 = 29;
-/// M18.b: (rodzaj << 32) | prawa.
+/// (kind << 32) | rights.
 pub const SYS_HANDLE_INFO: u64 = 30;
-/// M18.c: channel_create(out) – out = [koniec 0, koniec 1] (2 × u64).
+/// channel_create(out) – out = [end 0, end 1] (2 × u64).
 pub const SYS_CHANNEL_CREATE: u64 = 31;
-/// M18.c: chan_send(h, dane, len, uchwyty, n_uchwytów, flagi).
+/// chan_send(h, data, len, handles, n_handles, flags).
 pub const SYS_CHAN_SEND: u64 = 32;
-/// M18.c: chan_recv(h, bufor, cap, uchwyty, hcap | flagi << 32, info) -> len;
-/// info = [len, n_uchwytów, nadawca] (3 × u64).
+/// chan_recv(h, buffer, cap, handles, hcap | flags << 32, info) -> len;
+/// info = [len, n_handles, sender] (3 × u64).
 pub const SYS_CHAN_RECV: u64 = 33;
-/// M18.c: nie czekaj (pełna / pusta kolejka – EAGAIN).
+/// Do not wait (full / empty queue – EAGAIN).
 pub const CHAN_NONBLOCK: u64 = 1;
-/// M18.d: spawn_ex(ścieżka, len, argv, len, mapa, n | flagi << 32) – dziecko
-/// dostaje TYLKO uchwyty z mapy [(uchwyt rodzica, numer u dziecka)] (2 × u64).
+/// spawn_ex(path, len, argv, len, map, n | flags << 32) – the child
+/// gets ONLY the handles from the map [(parent handle, number in child)] (2 × u64).
 pub const SYS_SPAWN_EX: u64 = 36;
-/// M18.e: shm_create(rozmiar) -> uchwyt (MAP_READ|MAP_WRITE|DUP|TRANSFER).
+/// shm_create(size) -> handle (MAP_READ|MAP_WRITE|DUP|TRANSFER).
 pub const SYS_SHM_CREATE: u64 = 34;
-/// M18.e: shm_map(h, prot) -> adres; PROT_WRITE wymaga MAP_WRITE.  Odmapowanie
-/// – munmap całego obszaru.
+/// shm_map(h, prot) -> addr; PROT_WRITE requires MAP_WRITE.  Unmapping
+/// – munmap of the whole region.
 pub const SYS_SHM_MAP: u64 = 35;
-/// M18.e: shm_size(h) -> rozmiar obiektu w bajtach.
+/// shm_size(h) -> object size in bytes.
 pub const SYS_SHM_SIZE: u64 = 37;
-/// M19.b: wait_many(lista, n, timeout_ms) -> maska gotowych (bit i = wpis i),
-/// 0 = minął czas.  Lista = n × [uchwyt, sygnały] (2 × u64), n ≤ WAIT_MAX;
-/// timeout u64::MAX = bez limitu, 0 = tylko sprawdź.
+/// wait_many(list, n, timeout_ms) -> mask of ready entries (bit i = entry i),
+/// 0 = timed out.  List = n × [handle, signals] (2 × u64), n ≤ WAIT_MAX;
+/// timeout u64::MAX = no limit, 0 = just check.
 pub const SYS_WAIT_MANY: u64 = 38;
 pub const WAIT_MAX: u64 = 16;
-/// Sygnały wait_many.
+/// wait_many signals.
 pub const W_READABLE: u64 = 1;
 pub const W_WRITABLE: u64 = 2;
-/// M19.d: przerwanie (obiekt IRQ): licznik > 0.
+/// Interrupt (IRQ object): counter > 0.
 pub const W_IRQ: u64 = 4;
-/// M19.d: przerwanie spod uchwytu (prawo RECV).
+/// Interrupt from a handle (RECV right).
 fn irq_obj(p: &Process, h: u64) -> Result<Arc<super::device::IrqObj>, i64> {
     let hd = p.handle(h)?;
     let Fd::Irq(q) = &hd.obj else { return Err(EBADF) };
@@ -150,12 +150,12 @@ fn irq_obj(p: &Process, h: u64) -> Result<Arc<super::device::IrqObj>, i64> {
     Ok(q.clone())
 }
 
-/// M19.c: dev_claim(hw_root, bdf) -> uchwyt DEVICE; bdf = bus << 8 | urz. << 3 | fn.
+/// dev_claim(hw_root, bdf) -> DEVICE handle; bdf = bus << 8 | dev << 3 | fn.
 pub const SYS_DEV_CLAIM: u64 = 39;
-/// M20.b: dev_find(hw_root, klasa, nr) – init szuka urządzeń po klasie (np.
-/// kontrolerów xHCI 0C0330), nie po stałym adresie.  Tylko z HW_ROOT (EBADF);
-/// EINVAL – klasa > 24 bity; ENOENT – mniej niż nr + 1 pasujących.  Samo
-/// znalezienie niczego nie przejmuje – o dostępie decyduje dev_claim.
+/// dev_find(hw_root, class, nr) – init looks devices up by class (e.g.
+/// xHCI controllers 0C0330), not by a fixed address.  Only from HW_ROOT (EBADF);
+/// EINVAL – class > 24 bits; ENOENT – fewer than nr + 1 matches.  Finding a
+/// device claims nothing – access is decided by dev_claim.
 fn sys_dev_find(p: &mut Process, root: u64, class: u64, nr: u64) -> SysResult {
     if !matches!(p.fd(root)?, Fd::HwRoot) {
         return Err(EBADF);
@@ -172,12 +172,12 @@ fn sys_dev_find(p: &mut Process, root: u64, class: u64, nr: u64) -> SysResult {
     Ok((a.bus as u64) << 8 | (a.device as u64) << 3 | a.function as u64)
 }
 
-/// M20.f: blk_attach – usbd rejestruje pendrive jako dysk jądra (ublk.rs).
-/// EBADF – nie BLK / nie kanał / nie SHM; EACCES – BLK bez WRITE, kanał bez
-/// SEND + RECV + TRANSFER, bufor bez MAP_READ; EINVAL – zły rozmiar bloku,
-/// 0 bloków, sloty spoza 1..8, bufor mniejszy niż sloty × 64 KiB; ENOSPC –
-/// 8 dysków USB naraz; EFAULT.  Jądro bierze własne referencje do kanału i
-/// bufora (usbd może zamknąć swoje uchwyty).
+/// blk_attach – usbd registers a USB stick as a kernel disk (ublk.rs).
+/// EBADF – not BLK / not a channel / not SHM; EACCES – BLK without WRITE, channel without
+/// SEND + RECV + TRANSFER, buffer without MAP_READ; EINVAL – bad block size,
+/// 0 blocks, slots outside 1..8, buffer smaller than slots × 64 KiB; ENOSPC –
+/// 8 USB disks at once; EFAULT.  The kernel takes its own references to the channel and
+/// the buffer (usbd may close its handles).
 fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysResult {
     let hd = p.handle(h)?;
     if !matches!(hd.obj, Fd::Blk) {
@@ -214,10 +214,10 @@ fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysR
     super::ublk::attach(c, b, blocks, bs, slots, timeout, String::from(desc.trim()))
 }
 
-/// M20.e: input_inject – zdarzenia klawiatury / myszy z usługi (usbd) do
-/// podsystemu wejścia jądra (konsola, shell, readkey – bez zmian dla reszty).
-/// EBADF – nie INPUT; EACCES – bez WRITE; EINVAL – n = 0 / > 64 albo zły
-/// rodzaj (wtedy żadne zdarzenie nie przechodzi); EFAULT – zły wskaźnik.
+/// input_inject – keyboard / mouse events from a service (usbd) into the
+/// kernel input subsystem (console, shell, readkey – unchanged for everything else).
+/// EBADF – not INPUT; EACCES – no WRITE; EINVAL – n = 0 / > 64 or a bad
+/// kind (then no event goes through); EFAULT – bad pointer.
 fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
     {
         let hd = p.handle(h)?;
@@ -235,8 +235,8 @@ fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
     if data.chunks(8).any(|e| !matches!(e[0], 1 | 2)) {
         return Err(EINVAL);
     }
-    // M20.h: opóźnienie „przerwanie kontrolera -> znak w jądrze” – od
-    // ostatniego przerwania urządzeń tego procesu (usbd ma jedno: xHCI).
+    // Latency "controller interrupt -> character in the kernel" – measured from
+    // the last device interrupt of this process (usbd has one: xHCI).
     let irq_t = p.fds.iter().flatten().filter_map(|h| if let Fd::Irq(o) = &h.obj { Some(o.last_stamp()) } else { None }).max().unwrap_or(0);
     let hd = p.handle(h)?;
     let Fd::Input(src) = &hd.obj else { return Err(EBADF) };
@@ -245,9 +245,9 @@ fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
     for e in data.chunks(8) {
         match e[0] {
             1 => {
-                let usage = e[2]; // HID usage (strona 7 – klawiatura) mieści się w bajcie
+                let usage = e[2]; // HID usage (page 7 – keyboard) fits in a byte
                 let pressed = e[1] != 0;
-                // Puszczenie klawisza, którego to źródło nie wcisnęło – pomijamy.
+                // Release of a key this source did not press – ignore it.
                 if !pressed && !src.is_pressed(usage) {
                     continue;
                 }
@@ -265,39 +265,39 @@ fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
     Ok(crate::input::led_bits())
 }
 
-/// M19.c: dev_info(dev, out) – out = 10 × u64: [vendor | device << 16,
-/// klasa << 16 | podklasa << 8 | prog_if, rozmiary BAR 0..5, maska BAR-ów I/O,
-/// flagi (1 = MSI, 2 = MSI-X)].
+/// dev_info(dev, out) – out = 10 × u64: [vendor | device << 16,
+/// class << 16 | subclass << 8 | prog_if, BAR 0..5 sizes, I/O BAR mask,
+/// flags (1 = MSI, 2 = MSI-X)].
 pub const SYS_DEV_INFO: u64 = 40;
-/// M19.c: dev_map(dev, bar, prot) -> adres rejestrów (UC, NX); munmap w całości.
+/// dev_map(dev, bar, prot) -> register address (UC, NX); munmap as a whole.
 pub const SYS_DEV_MAP: u64 = 41;
-/// M19.d: irq_bind(dev) -> uchwyt IRQ (wektor MSI / MSI-X, bus mastering);
-/// wymaga MAP_WRITE na urządzeniu.  EBUSY – już przypięte / brak wektorów.
+/// irq_bind(dev) -> IRQ handle (MSI / MSI-X vector, bus mastering);
+/// requires MAP_WRITE on the device.  EBUSY – already bound / no vectors left.
 pub const SYS_IRQ_BIND: u64 = 42;
-/// M19.d: irq_read(irq) -> przerwania od ostatniego odczytu (zeruje).
+/// irq_read(irq) -> interrupts since the last read (resets the counter).
 pub const SYS_IRQ_READ: u64 = 43;
-/// M19.e: dma_alloc(dev, rozmiar, bity_adresu) -> uchwyt SHM (ciągłe ramki poniżej
-/// 2^bity, ≤ 2 MiB, ≤ 16 MiB na urządzenie; bus mastering); wymaga MAP_WRITE.
+/// dma_alloc(dev, size, addr_bits) -> SHM handle (contiguous frames below
+/// 2^bits, ≤ 2 MiB, ≤ 16 MiB per device; bus mastering); requires MAP_WRITE.
 pub const SYS_DMA_ALLOC: u64 = 44;
-/// M19.e: dma_phys(shm) -> adres fizyczny bufora DMA (EINVAL – zwykła pamięć).
+/// dma_phys(shm) -> physical address of a DMA buffer (EINVAL – ordinary memory).
 pub const SYS_DMA_PHYS: u64 = 45;
-/// M19.i: sysinfo(temat, len, bufor, cap) -> długość tekstu (tylko odczyt).
+/// sysinfo(topic, len, buffer, cap) -> text length (read-only).
 pub const SYS_SYSINFO: u64 = 46;
-/// M19.i: sysctl(uchwyt SYSCTL, akcja, arg, fd) – 1 reboot, 2 halt, 3 sync, 4 stress.
+/// sysctl(SYSCTL handle, action, arg, fd) – 1 reboot, 2 halt, 3 sync, 4 stress.
 pub const SYS_SYSCTL: u64 = 47;
-/// M20.b: dev_find(hw_root, klasa, nr) -> bdf `nr`-tego urządzenia PCI o klasie
-/// (24 bity: klasa << 16 | podklasa << 8 | prog_if); ENOENT – nie ma dalszych.
+/// dev_find(hw_root, class, nr) -> bdf of the `nr`-th PCI device with the class
+/// (24 bits: class << 16 | subclass << 8 | prog_if); ENOENT – no more devices.
 pub const SYS_DEV_FIND: u64 = 48;
-/// M20.e: input_inject(INPUT, zdarzenia, n) -> stan diod (bit 0 Num, 1 Caps,
-/// 2 Scroll); zdarzenie 8 B: rodzaj (1 klawisz, 2 mysz), wciśnięty / kółko,
-/// kod (HID usage / przyciski), dx, dy; n ≤ 64.
+/// input_inject(INPUT, events, n) -> LED state (bit 0 Num, 1 Caps,
+/// 2 Scroll); 8-byte event: kind (1 key, 2 mouse), pressed / wheel,
+/// code (HID usage / buttons), dx, dy; n ≤ 64.
 pub const SYS_INPUT_INJECT: u64 = 49;
-/// M20.f: blk_attach(BLK, kanał, bufor, info) -> numer dysku USB (0 = sda);
-/// info 64 B: bloki u64, rozmiar bloku u32 (512 / 4096), sloty u32 (1..8,
-/// po 64 KiB w buforze), timeout_ms u32 (0 = 5000, inaczej 100..30000), 4 B
-/// zero, opis 40 B (ASCII).  Dysk zawsze tylko do odczytu.
+/// blk_attach(BLK, channel, buffer, info) -> USB disk number (0 = sda);
+/// 64-byte info: blocks u64, block size u32 (512 / 4096), slots u32 (1..8,
+/// 64 KiB each in the buffer), timeout_ms u32 (0 = 5000, otherwise 100..30000), 4 bytes
+/// zero, 40-byte description (ASCII).  The disk is always read-only.
 pub const SYS_BLK_ATTACH: u64 = 50;
-/// M18.d: najwięcej wpisów w mapie spawn_ex.
+/// Maximum number of entries in the spawn_ex map.
 pub const SPAWN_EX_MAX: u64 = 16;
 
 pub const SPAWN_FOREGROUND: u64 = 1;
@@ -315,9 +315,9 @@ pub const EINTR: i64 = -4;
 pub const EIO: i64 = -5;
 pub const EBADF: i64 = -9;
 pub const EAGAIN: i64 = -11;
-/// M18.c: komunikat za duży / bufor odbiorcy za mały.
+/// Message too large / receiver buffer too small.
 pub const EMSGSIZE: i64 = -90;
-/// M19.c: urządzenie ma już właściciela / nie ma urządzenia pod adresem.
+/// Device already has an owner / no device at that address.
 pub const EBUSY: i64 = -16;
 pub const ENODEV: i64 = -19;
 pub const ECHILD: i64 = -10;
@@ -339,12 +339,12 @@ pub const EROFS: i64 = -30;
 pub const ERANGE: i64 = -34;
 pub const ENOTEMPTY: i64 = -39;
 pub const ENOSYS: i64 = -38;
-/// M20.f: brak odpowiedzi w terminie (ublk – usbd nie odpowiedział).
+/// No reply in time (ublk – usbd did not respond).
 pub const ETIMEDOUT: i64 = -110;
 
-/// Największy pojedynczy write/read (dłuższe – kilka wywołań).
+/// Largest single write/read (longer ones – several calls).
 const MAX_IO: u64 = 64 * 1024;
-/// M18.b: uchwytów na proces (było 16 deskryptorów).
+/// Handles per process.
 const MAX_FDS: usize = 64;
 
 type SysResult = Result<u64, i64>;
@@ -364,7 +364,7 @@ fn fs_error(e: FsError) -> i64 {
 }
 
 // ------------------------------------------------------------
-// Pamięć procesu
+// Process memory
 // ------------------------------------------------------------
 
 static SMAP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -373,9 +373,9 @@ pub fn set_smap(on: bool) {
     SMAP.store(on, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Czy [ptr, ptr+len) to pamięć procesu z odpowiednimi prawami.  M17b.d:
-/// nieobecne strony z obszarów procesu (sterta, mmap, stos) najpierw
-/// dociągane – kernel kopiuje do nich jak proces by do nich pisał.
+/// Whether [ptr, ptr+len) is process memory with the required rights.
+/// Absent pages of process regions (heap, mmap, stack) are faulted in
+/// first – the kernel copies into them as if the process wrote to them.
 fn user_range_ok(p: &mut Process, ptr: u64, len: u64, write: bool) -> bool {
     if len == 0 {
         return true;
@@ -398,8 +398,8 @@ fn user_range_ok(p: &mut Process, ptr: u64, len: u64, write: bool) -> bool {
     true
 }
 
-/// Dostęp do pamięci procesu: STAC/CLAC (gdy jest SMAP), bez przerwań w
-/// środku (flaga AC nie wycieka do handlerów).
+/// Access to process memory: STAC/CLAC (when SMAP is present), no interrupts
+/// in between (the AC flag does not leak into handlers).
 fn with_user_access<R>(f: impl FnOnce() -> R) -> R {
     without_interrupts(|| {
         let smap = SMAP.load(core::sync::atomic::Ordering::Relaxed);
@@ -436,7 +436,7 @@ pub fn copy_to_user(p: &mut Process, ptr: u64, data: &[u8]) -> Result<(), i64> {
 }
 
 // ------------------------------------------------------------
-// Wywołania
+// System calls
 // ------------------------------------------------------------
 
 fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
@@ -445,9 +445,9 @@ fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     write_fd(p, fd, &data)
 }
 
-/// Zapis gotowych danych na deskryptor procesu (write, kcmd).
+/// Writes ready data to a process descriptor (write, kcmd).
 fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
-    // M18.b: bez prawa WRITE – EBADF (jak deskryptor tylko do odczytu w POSIX).
+    // Without the WRITE right – EBADF (like a read-only descriptor in POSIX).
     if p.handle(fd)?.rights & rights::WRITE == 0 {
         return Err(EBADF);
     }
@@ -463,7 +463,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
         return Ok(data.len() as u64);
     }
     match p.fd(fd)? {
-        // Kanał nie ma READ / WRITE (komunikaty – chan_send / chan_recv).
+        // A channel has no READ / WRITE (messages – chan_send / chan_recv).
         Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => Err(EBADF),
         Fd::Pipe(e) => {
             if !e.write {
@@ -488,7 +488,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
 }
 
-/// Linia z konsoli (echo, Backspace, Enter kończy).  Ctrl+C / kill -> EINTR.
+/// A line from the console (echo, Backspace, Enter finishes).  Ctrl+C / kill -> EINTR.
 fn read_console_line(max: usize) -> Result<Vec<u8>, i64> {
     use crate::console::{self, Key};
     let mut line = String::new();
@@ -533,7 +533,7 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     if !user_range_ok(p, ptr, len, true) {
         return Err(EFAULT);
     }
-    // M18.b: bez prawa READ – EBADF.
+    // Without the READ right – EBADF.
     if p.handle(fd)?.rights & rights::READ == 0 {
         return Err(EBADF);
     }
@@ -588,7 +588,7 @@ fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
     let name = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
     let path = fs::normalize(&p.cwd, name);
     let write = flags & O_WRITE != 0;
-    // M20.f: zapis na systemie plików tylko do odczytu (pendrive USB, SSD) – od razu.
+    // Writes to a read-only file system (USB stick, SSD) fail immediately.
     if write && fs::is_read_only(&path) {
         return Err(EROFS);
     }
@@ -614,12 +614,12 @@ fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
     install_fd(p, 3, file)
 }
 
-/// Najniższy wolny deskryptor >= `from` dostaje `fd` (prawa wg obiektu).
+/// The lowest free descriptor >= `from` gets `fd` (rights per object).
 fn install_fd(p: &mut Process, from: usize, fd: Fd) -> SysResult {
     install_handle(p, from, Handle::new(fd))
 }
 
-/// M18.b: najniższy wolny numer >= `from` dostaje uchwyt `h` (z jego prawami).
+/// The lowest free number >= `from` gets handle `h` (with its rights).
 fn install_handle(p: &mut Process, from: usize, h: Handle) -> SysResult {
     let slot = (from..MAX_FDS).find(|&i| p.fds.get(i).map_or(true, |f| f.is_none())).ok_or(EMFILE)?;
     if p.fds.len() <= slot {
@@ -629,7 +629,7 @@ fn install_handle(p: &mut Process, from: usize, h: Handle) -> SysResult {
     Ok(slot as u64)
 }
 
-/// M18.b: uchwyt do skopiowania (dup, dup2, spawn, handle_dup) – wymaga DUP.
+/// Handle to copy (dup, dup2, spawn, handle_dup) – requires DUP.
 fn handle_for_copy(p: &Process, fd: u64) -> Result<Handle, i64> {
     let h = p.handle(fd)?;
     if h.rights & rights::DUP == 0 {
@@ -638,16 +638,16 @@ fn handle_for_copy(p: &Process, fd: u64) -> Result<Handle, i64> {
     Ok(h.clone())
 }
 
-/// M18.b: handle_dup(h, maska) – nowy uchwyt (najniższy wolny) na ten sam
-/// obiekt z prawami `stare & maska`.  Prawa nigdy nie rosną.
+/// handle_dup(h, mask) – a new handle (lowest free) to the same
+/// object with rights `old & mask`.  Rights never grow.
 fn sys_handle_dup(p: &mut Process, fd: u64, mask: u64) -> SysResult {
     let mut h = handle_for_copy(p, fd)?;
     h.rights &= mask as u32 & rights::ALL;
     install_handle(p, 0, h)
 }
 
-/// M18.c: koniec kanału spod uchwytu z prawem `right` (EACCES bez prawa,
-/// EBADF – to nie kanał).
+/// Channel end from a handle with right `right` (EACCES without the right,
+/// EBADF – not a channel).
 fn chan_end(p: &Process, h: u64, right: u32) -> Result<Arc<super::channel::ChanEnd>, i64> {
     let hd = p.handle(h)?;
     let Fd::Channel(e) = &hd.obj else { return Err(EBADF) };
@@ -657,8 +657,8 @@ fn chan_end(p: &Process, h: u64, right: u32) -> Result<Arc<super::channel::ChanE
     Ok(e.clone())
 }
 
-/// M19.b: obiekt, na który czeka wait_many (Arc trzymany przez całe czekanie –
-/// zamknięcie uchwytu w tym czasie nie zwalnia obiektu).
+/// Object waited on by wait_many (the Arc is held for the whole wait –
+/// closing the handle meanwhile does not free the object).
 enum Waitable {
     Chan(Arc<super::channel::ChanEnd>, bool),
     Pipe(Arc<super::pipe::PipeEnd>),
@@ -685,15 +685,15 @@ impl Waitable {
     }
 }
 
-/// M19.b: wait_many – czeka, aż któryś z uchwytów będzie gotowy.  Cała lista
-/// sprawdzana przed czekaniem (EBADF / EACCES / EINVAL dla pierwszego złego
-/// wpisu).  Wpis z READABLE | WRITABLE na kanale – dwa obiekty, jeden bit.
+/// wait_many – waits until one of the handles is ready.  The whole list is
+/// checked before waiting (EBADF / EACCES / EINVAL for the first bad
+/// entry).  A READABLE | WRITABLE entry on a channel – two objects, one bit.
 fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult {
     if n == 0 || n > WAIT_MAX {
         return Err(EINVAL);
     }
     let raw = copy_from_user(p, list, n * 16)?;
-    // (bit, obiekt) – do 2 obiektów na wpis.
+    // (bit, object) – up to 2 objects per entry.
     let mut objs: Vec<(u32, Waitable)> = Vec::with_capacity(n as usize * 2);
     for i in 0..n as usize {
         let h = u64::from_le_bytes(raw[i * 16..i * 16 + 8].try_into().unwrap());
@@ -721,7 +721,7 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
                 }
             }
             Fd::Pipe(e) => {
-                // Koniec potoku ma jeden kierunek: odczyt – READABLE, zapis – WRITABLE.
+                // A pipe end has one direction: read – READABLE, write – WRITABLE.
                 let want = if e.write { W_WRITABLE } else { W_READABLE };
                 if sig != want {
                     return Err(EINVAL);
@@ -749,14 +749,14 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
     if now != 0 || timeout == 0 {
         return Ok(now);
     }
-    // Własna kolejka na stosie – jej adres to kanał; zapis u obiektów PRZED
-    // sprawdzeniem warunku (pod blokadą schedulera w wait_until).
+    // Own queue on the stack – its address is the channel; registration with objects BEFORE
+    // checking the condition (under the scheduler lock in wait_until).
     let wq = crate::sched::sync::WaitQueue::new();
     let ch = &wq as *const _ as usize;
     for (_, o) in &objs {
         o.observers().add(ch);
     }
-    // Bardzo długi limit (> ~34 lata) = bez limitu – bez przepełnienia terminu.
+    // A very long limit (> ~34 years) = no limit – avoids deadline overflow.
     let limit = if timeout >= 1 << 40 { None } else { Some(timeout) };
     wq.wait_until(|| objs.iter().any(|(_, o)| o.ready()) || sched::should_exit(), limit);
     for (_, o) in &objs {
@@ -768,7 +768,7 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
     Ok(mask(&objs))
 }
 
-/// M18.c: channel_create(out) – dwa końce kanału (najniższe wolne numery).
+/// channel_create(out) – two channel ends (lowest free numbers).
 fn sys_channel_create(p: &mut Process, out: u64) -> SysResult {
     if !user_range_ok(p, out, 16, true) {
         return Err(EFAULT);
@@ -789,9 +789,9 @@ fn sys_channel_create(p: &mut Process, out: u64) -> SysResult {
     Ok(0)
 }
 
-/// M18.c: chan_send – dane kopiowane do jądra przed jakąkolwiek blokadą.
-/// M18.d: uchwyty z listy są PRZENOSZONE (znikają z tablicy nadawcy, wymagają
-/// TRANSFER); błąd wysyłki – wracają na swoje miejsca.
+/// chan_send – data is copied into the kernel before taking any lock.
+/// Handles from the list are MOVED (they disappear from the sender's table, require
+/// TRANSFER); if sending fails – they return to their slots.
 fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use super::channel::MSG_HANDLES;
     let (h, buf, len, hptr, nh, flags) = (f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
@@ -803,8 +803,8 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
     }
     let end = chan_end(p, h, rights::SEND)?;
     let data = copy_from_user(p, buf, len)?;
-    // Lista uchwytów: istnieją, mają TRANSFER, bez powtórzeń, żaden nie jest
-    // końcem tego kanału.  Sprawdzenie całej listy przed zdjęciem czegokolwiek.
+    // Handle list: they exist, have TRANSFER, no duplicates, none is
+    // an end of this channel.  The whole list is checked before removing anything.
     let mut nums: Vec<usize> = Vec::new();
     if nh > 0 {
         let raw = copy_from_user(p, hptr, nh * 8)?;
@@ -830,7 +830,7 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
     match end.send(msg, flags & CHAN_NONBLOCK != 0) {
         Ok(()) => Ok(0),
         Err((e, msg)) => {
-            // Proces jest jednowątkowy – miejsca są nadal wolne.
+            // The process is single-threaded – the slots are still free.
             for (n, hd) in nums.into_iter().zip(msg.handles) {
                 p.fds[n] = Some(hd);
             }
@@ -839,9 +839,9 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
     }
 }
 
-/// M18.c: chan_recv – komunikat zdejmowany pod blokadą kanału, kopiowany do
-/// procesu po jej zwolnieniu.  Za mały bufor: EMSGSIZE, info = wymagany
-/// rozmiar, komunikat zostaje.
+/// chan_recv – the message is taken under the channel lock and copied to
+/// the process after the lock is released.  Buffer too small: EMSGSIZE, info = required
+/// size, the message stays.
 fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use super::channel::RecvError;
     let (h, buf, cap, hptr, hcap_flags, info) = (f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
@@ -858,8 +858,8 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
     {
         return Err(EFAULT);
     }
-    // M18.d: wolne miejsca w tablicy – komunikat z większą liczbą uchwytów
-    // zostaje w kolejce (EMFILE), nic nie ginie.
+    // Free slots in the table – a message with more handles
+    // stays in the queue (EMFILE), nothing is lost.
     let room = (0..MAX_FDS).filter(|&i| p.fds.get(i).map_or(true, |x| x.is_none())).count();
     let end = chan_end(p, h, rights::RECV)?;
     let write_info = |p: &mut Process, len: u64, nh: u64, sender: u64| -> Result<(), i64> {
@@ -876,7 +876,7 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
         Ok(m) => {
             let (len, nh, sender) = (m.data.len() as u64, m.handles.len() as u64, m.sender);
             copy_to_user(p, buf, &m.data)?;
-            // Uchwyty – najniższe wolne numery (miejsce sprawdzone wyżej).
+            // Handles – lowest free numbers (space checked above).
             let mut nums = [0u8; 8 * super::channel::MSG_HANDLES];
             for (i, hd) in m.handles.into_iter().enumerate() {
                 let n = install_handle(p, 0, hd)?;
@@ -896,7 +896,7 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
     }
 }
 
-/// M18.e: obiekt pamięci współdzielonej spod uchwytu z prawem `right`.
+/// Shared memory object from a handle with right `right`.
 fn shm_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::shm::ShmObj>, i64> {
     let hd = p.handle(h)?;
     let Fd::Shm(o) = &hd.obj else { return Err(EBADF) };
@@ -906,15 +906,15 @@ fn shm_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::shm::ShmObj>, i
     Ok(o.clone())
 }
 
-/// M18.e: shm_create(rozmiar) – nowy obiekt (wyzerowany) pod najniższym
-/// wolnym numerem.
+/// shm_create(size) – a new (zeroed) object under the lowest
+/// free number.
 fn sys_shm_create(p: &mut Process, size: u64) -> SysResult {
     let obj = super::shm::ShmObj::new(size)?;
     install_fd(p, 0, Fd::Shm(obj))
 }
 
-/// M18.e: shm_map(h, prot) – cały obiekt w obszarze mmap procesu; zawsze NX,
-/// zapis tylko z MAP_WRITE.
+/// shm_map(h, prot) – the whole object in the process mmap region; always NX,
+/// writes only with MAP_WRITE.
 fn sys_shm_map(p: &mut Process, h: u64, prot: u64) -> SysResult {
     use super::vm::{PROT_READ, PROT_WRITE};
     if prot & !(PROT_READ | PROT_WRITE) != 0 {
@@ -927,7 +927,7 @@ fn sys_shm_map(p: &mut Process, h: u64, prot: u64) -> SysResult {
     p.mem.map_shared(&mut p.space, obj, write)
 }
 
-/// M19.c: przejęte urządzenie spod uchwytu (EBADF – to nie urządzenie).
+/// Claimed device from a handle (EBADF – not a device).
 fn dev_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::device::DevClaim>, i64> {
     let hd = p.handle(h)?;
     let Fd::Device(d) = &hd.obj else { return Err(EBADF) };
@@ -937,9 +937,9 @@ fn dev_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::device::DevClai
     Ok(d.clone())
 }
 
-/// M19.c: dev_claim(hw_root, bdf) – urządzenie PCI dla usługi.  EACCES:
-/// sterownik w jądrze, dysk, grafika, mostek, urządzenie systemowe; EBUSY:
-/// ma je inna usługa; ENODEV: nie ma urządzenia pod tym adresem.
+/// dev_claim(hw_root, bdf) – a PCI device for a service.  EACCES:
+/// in-kernel driver, disk, graphics, bridge, system device; EBUSY:
+/// another service owns it; ENODEV: no device at that address.
 fn sys_dev_claim(p: &mut Process, root: u64, bdf: u64) -> SysResult {
     if !matches!(p.fd(root)?, Fd::HwRoot) {
         return Err(EBADF);
@@ -953,7 +953,7 @@ fn sys_dev_claim(p: &mut Process, root: u64, bdf: u64) -> SysResult {
     install_fd(p, 0, Fd::Device(Arc::new(claim)))
 }
 
-/// M19.c: dev_info(dev, out) – opis urządzenia (10 × u64, patrz SYS_DEV_INFO).
+/// dev_info(dev, out) – device description (10 × u64, see SYS_DEV_INFO).
 fn sys_dev_info(p: &mut Process, h: u64, out: u64) -> SysResult {
     use crate::drivers::pci::{Bar, CAP_MSI, CAP_MSIX};
     let claim = dev_obj(p, h, 0)?;
@@ -980,9 +980,9 @@ fn sys_dev_info(p: &mut Process, h: u64, out: u64) -> SysResult {
     Ok(0)
 }
 
-/// M19.c: dev_map(dev, bar, prot) – rejestry BAR-u w procesie: bez cache,
-/// nigdy wykonywalne, bez stron MSI-X.  Mapowanie trzyma przejęcie (zamknięcie
-/// uchwytu go nie oddaje, dopóki obszar jest zamapowany).
+/// dev_map(dev, bar, prot) – BAR registers in the process: uncached,
+/// never executable, without MSI-X pages.  The mapping holds the claim (closing
+/// the handle does not release it while the region is mapped).
 fn sys_dev_map(p: &mut Process, h: u64, bar: u64, prot: u64) -> SysResult {
     use super::vm::{PROT_READ, PROT_WRITE};
     if prot & PROT_READ == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 || bar > 5 {
@@ -996,13 +996,13 @@ fn sys_dev_map(p: &mut Process, h: u64, bar: u64, prot: u64) -> SysResult {
     p.mem.map_mmio(&mut p.space, &pages, write, claim)
 }
 
-/// M18.b: handle_info(h) -> (rodzaj << 32) | prawa.
+/// handle_info(h) -> (kind << 32) | rights.
 fn sys_handle_info(p: &mut Process, fd: u64) -> SysResult {
     let h = p.handle(fd)?;
     Ok(h.kind() << 32 | h.rights as u64)
 }
 
-/// M17b.b: pipe(out) – out = [fd do odczytu, fd do zapisu] (2 × u64).
+/// pipe(out) – out = [read fd, write fd] (2 × u64).
 fn sys_pipe(p: &mut Process, out: u64) -> SysResult {
     if !user_range_ok(p, out, 16, true) {
         return Err(EFAULT);
@@ -1023,14 +1023,14 @@ fn sys_pipe(p: &mut Process, out: u64) -> SysResult {
     Ok(0)
 }
 
-/// M17b.a: dup(fd) – nowy deskryptor (najniższy wolny) na ten sam obiekt.
+/// dup(fd) – a new descriptor (lowest free) to the same object.
 fn sys_dup(p: &mut Process, fd: u64) -> SysResult {
     let h = handle_for_copy(p, fd)?;
     install_handle(p, 0, h)
 }
 
-/// M17b.a: dup2(old, new) – `new` wskazuje obiekt `old` (poprzedni obiekt
-/// `new` zamknięty).  old == new – nic (o ile old otwarty).
+/// dup2(old, new) – `new` points to the object of `old` (the previous object of
+/// `new` is closed).  old == new – nothing (as long as old is open).
 fn sys_dup2(p: &mut Process, old: u64, new: u64) -> SysResult {
     let f = handle_for_copy(p, old)?;
     let new = new as usize;
@@ -1050,7 +1050,7 @@ pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
-/// M17b.a: seek(fd, offset, whence) -> nowa pozycja.  Konsola – ESPIPE.
+/// seek(fd, offset, whence) -> new position.  Console – ESPIPE.
 fn sys_seek(p: &mut Process, fd: u64, offset: u64, whence: u64) -> SysResult {
     let Fd::File(f) = p.fd(fd)? else { return Err(ESPIPE) };
     let f = f.clone();
@@ -1080,11 +1080,11 @@ fn sys_close(p: &mut Process, fd: u64) -> SysResult {
 }
 
 // ------------------------------------------------------------
-// M16: procesy, katalogi, klawisze
+// Processes, directories, keys
 // ------------------------------------------------------------
 
-/// Ścieżka z pamięci procesu (1..=255 bajtów UTF-8), znormalizowana
-/// względem katalogu bieżącego.
+/// Path from process memory (1..=255 bytes of UTF-8), normalized
+/// relative to the current directory.
 fn user_path(p: &mut Process, ptr: u64, len: u64) -> Result<String, i64> {
     if len == 0 || len > 255 {
         return Err(EINVAL);
@@ -1111,15 +1111,15 @@ fn sys_spawn(p: &mut Process, f: &SyscallFrame) -> SysResult {
     if flags & !SPAWN_FOREGROUND != 0 {
         return Err(EINVAL);
     }
-    // M18.b: dziecko dostaje kopie uchwytów z ich prawami (wymaga DUP).
+    // The child gets copies of the handles with their rights (requires DUP).
     let child_fd = |shift: u32| -> Result<Option<Handle>, i64> { handle_for_copy(p, (fds >> shift) & 0xFFFF).map(Some) };
     let child_fds = alloc::vec![child_fd(0)?, child_fd(16)?, child_fd(32)?];
     spawn_common(p, f, flags, child_fds)
 }
 
-/// M18.d: spawn_ex – dziecko dostaje tylko uchwyty z mapy (kopie, wymagają
-/// DUP); numery u dziecka < 64, bez powtórzeń.  Brak stdio, jeśli rodzic go
-/// nie da.
+/// spawn_ex – the child gets only the handles from the map (copies, require
+/// DUP); numbers in the child < 64, no duplicates.  No stdio unless the parent
+/// provides it.
 fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let (map, n, flags) = (f.r8, f.r9 & 0xFFFF_FFFF, f.r9 >> 32);
     if flags & !SPAWN_FOREGROUND != 0 || n > SPAWN_EX_MAX {
@@ -1142,7 +1142,7 @@ fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
     spawn_common(p, f, flags, child_fds)
 }
 
-/// Wspólna część spawn / spawn_ex: ścieżka (rdi, rsi), argumenty (rdx, r10).
+/// Common part of spawn / spawn_ex: path (rdi, rsi), arguments (rdx, r10).
 fn spawn_common(p: &mut Process, f: &SyscallFrame, flags: u64, child_fds: Vec<Option<Handle>>) -> SysResult {
     let (path_ptr, path_len, argv_ptr, argv_len) = (f.rdi, f.rsi, f.rdx, f.r10);
     if argv_len > 4096 {
@@ -1185,7 +1185,7 @@ fn sys_wait(p: &mut Process, pid: u64, status_ptr: u64, flags: u64) -> SysResult
 
 pub(super) fn sys_kill(pid: u64) -> SysResult {
     if !sched::with_process(pid, |_| ()).is_some() {
-        return Err(ESRCH); // brak procesu (zadań kernela kill z procesu nie dotyka)
+        return Err(ESRCH); // no such process (kill from a process does not touch kernel tasks)
     }
     if pid == super::procs::init_pid() {
         return Err(EPERM);
@@ -1205,7 +1205,7 @@ fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     }
 }
 
-/// Tekst do bufora procesu: całość albo ERANGE (nic nie jest ucinane).
+/// Text into a process buffer: all of it or ERANGE (nothing is truncated).
 fn text_to_user(p: &mut Process, ptr: u64, len: u64, text: &str) -> SysResult {
     if text.len() as u64 > len.min(MAX_IO) {
         return Err(ERANGE);
@@ -1237,7 +1237,7 @@ fn sys_stat(p: &mut Process, ptr: u64, len: u64, out: u64) -> SysResult {
     Ok(0)
 }
 
-/// Klawisz -> liczba dla readkey (bez zera: 0 = koniec wejścia).
+/// Key -> number for readkey (never zero: 0 = end of input).
 pub fn encode_key(k: crate::console::Key) -> u64 {
     use crate::console::Key;
     const SPECIAL: u64 = 0x11_0000;
@@ -1261,12 +1261,12 @@ pub fn encode_key(k: crate::console::Key) -> u64 {
 
 fn sys_readkey(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     use crate::console;
-    // Klawiatura tylko dla procesu, którego uchwyt 0 to konsola z prawem READ
-    // (jak `read(0)`); np. proces z plikiem albo potokiem na 0 – EBADF.
+    // Keyboard only for a process whose handle 0 is the console with the READ right
+    // (like `read(0)`); e.g. a process with a file or pipe on 0 – EBADF.
     if !p.is_console(0) || p.handle(0)?.rights & rights::READ == 0 {
         return Err(EBADF);
     }
-    // Testy: klawisze z bufora (bajty jak z terminala).
+    // Tests: keys from the buffer (bytes as from a terminal).
     if let Some(input) = p.stdin.clone() {
         let mut input = input.lock();
         while let Some(b) = input.pop_front() {
@@ -1282,8 +1282,8 @@ fn sys_readkey(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     } else {
         None
     };
-    // Linia do odrysowania, gdyby w trakcie czekania przyszedł komunikat
-    // z innego zadania (np. koniec procesu w tle) – jak w shellu kernela.
+    // Line to redraw if a message from another task arrives while waiting
+    // (e.g. a background process finishing) – as in the kernel shell.
     loop {
         if sched::should_exit() {
             return Err(EINTR);
@@ -1311,7 +1311,7 @@ fn sys_tasks(p: &mut Process, ptr: u64, len: u64) -> SysResult {
             t.switches,
             if t.user { "user" } else { "kernel" },
             t.name,
-            // M17: CPU, na którym działa teraz (albo ostatnio, z '~').
+            // CPU it is running on now (or last ran on, marked with '~').
             match t.cpu {
                 Some(c) => alloc::format!("{}", c),
                 None => alloc::format!("~{}", t.last_cpu),
@@ -1321,9 +1321,9 @@ fn sys_tasks(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     text_to_user(p, ptr, len, &text)
 }
 
-/// M19.i: sysinfo(temat, len, bufor, cap) – tekst tylko do odczytu (mem, lspci,
-/// cpus, disk...; lista: shell::SYSINFO_TOPICS).  ENOENT: nieznany temat albo
-/// niedozwolone argumenty; ERANGE: bufor za mały (nic nie jest ucinane).
+/// sysinfo(topic, len, buffer, cap) – read-only text (mem, lspci,
+/// cpus, disk...; list: shell::SYSINFO_TOPICS).  ENOENT: unknown topic or
+/// disallowed arguments; ERANGE: buffer too small (nothing is truncated).
 fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysResult {
     if len == 0 || len > 64 {
         return Err(EINVAL);
@@ -1334,8 +1334,8 @@ fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysRe
     text_to_user(p, buf, cap, &text)
 }
 
-/// M19.i: sysctl(uchwyt SYSCTL, akcja, arg, fd) – reboot / halt / sync /
-/// stress; tekst wyniku na `fd`.  EBADF: to nie uchwyt SYSCTL; EINVAL: zła akcja.
+/// sysctl(SYSCTL handle, action, arg, fd) – reboot / halt / sync /
+/// stress; result text goes to `fd`.  EBADF: not a SYSCTL handle; EINVAL: bad action.
 fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult {
     if !matches!(p.fd(h)?, Fd::Sysctl) {
         return Err(EBADF);
@@ -1348,25 +1348,25 @@ fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult 
 }
 
 // ------------------------------------------------------------
-// M17a.d/e: syscalle bez Big Kernel Lock
+// Syscalls without the Big Kernel Lock
 // ------------------------------------------------------------
 //
-// Bez BKL działają: getpid, uptime (d), write (konsola, stdout, pliki) oraz
-// pliki i katalogi: open, close, read z pliku / bufora stdin, readkey z bufora,
-// stat, readdir, mkdir, unlink, chdir, getcwd (e).  Dotykają tylko: własnego procesu (jednowątkowy –
-// deskryptory, cwd i pamięć zmienia tylko on, sched::current_unlocked),
-// licznika ticków, heapa, konsoli, bufora stdout (SpinLock) i VFS / warstwy
-// block (własne blokady FS_LOCK / blokady dysków – KMutex z compare_exchange).
-// Czekanie na dysk (WaitQueue) – od f2 tylko blokada schedulera.
-// Procesy (e2): spawn, wait, kill, getppid – tablica zombie pod własną
-// blokadą.  Sleep i yield (f2) – tylko blokada schedulera.  Pod BKL
-// zostają: exit (koniec zadania), read / readkey z klawiatury, tasks, sysinfo, sysctl.
+// Without the BKL: getpid, uptime, write (console, stdout, files) and
+// files and directories: open, close, read from a file / stdin buffer, readkey from the buffer,
+// stat, readdir, mkdir, unlink, chdir, getcwd.  They touch only: their own process (single-threaded –
+// descriptors, cwd and memory are changed only by it, sched::current_unlocked),
+// the tick counter, the heap, the console, the stdout buffer (SpinLock) and the VFS / block
+// layer (own locks FS_LOCK / disk locks – KMutex with compare_exchange).
+// Waiting for the disk (WaitQueue) – only the scheduler lock.
+// Processes: spawn, wait, kill, getppid – the zombie table under its own
+// lock.  Sleep and yield – only the scheduler lock.  Under the BKL
+// remain: exit (task end), read / readkey from the keyboard, tasks, sysinfo, sysctl.
 
 static FAST: [crate::arch::x86_64::percpu::PerCpuCounter; 6] = [const { crate::arch::x86_64::percpu::PerCpuCounter::new() }; 6];
 static SLOW: crate::arch::x86_64::percpu::PerCpuCounter = crate::arch::x86_64::percpu::PerCpuCounter::new();
 
-/// (getpid, uptime, write, pliki/katalogi, procesy, sleep/yield – bez BKL;
-/// pozostałe pod BKL) – `cpus`, testy.
+/// (getpid, uptime, write, files/directories, processes, sleep/yield – without the BKL;
+/// the rest under the BKL) – `cpus`, tests.
 pub fn syscall_stats() -> ([u64; 6], u64) {
     let mut fast = [0u64; 6];
     for (i, f) in FAST.iter().enumerate() {
@@ -1375,7 +1375,7 @@ pub fn syscall_stats() -> ([u64; 6], u64) {
     (fast, SLOW.get())
 }
 
-/// Czy syscall może iść bez BKL; Some(licznik).  Z IF = 0 (przed BKL).
+/// Whether a syscall may run without the BKL; Some(counter).  With IF = 0 (before the BKL).
 fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
     if !sched::active() || frame.rip >= USER_SPACE_END {
         return None;
@@ -1385,40 +1385,40 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
         SYS_GETPID => Some(0),
         SYS_UPTIME => Some(1),
         SYS_WRITE => Some(2),
-        // Odczyt z pliku albo z bufora stdin (testy, stress) – bez BKL;
-        // z klawiatury (stan wspólny z przerwaniem, linia shella) – pod BKL.
+        // Reading from a file or the stdin buffer (tests, stress) – without the BKL;
+        // from the keyboard (state shared with the interrupt, shell line) – under the BKL.
         SYS_READ => (matches!(p.fds.get(frame.rdi as usize), Some(Some(Handle { obj: Fd::File(_) | Fd::Pipe(_), .. }))) || p.stdin.is_some())
             .then_some(3),
         SYS_READKEY => p.stdin.is_some().then_some(3),
         SYS_DUP | SYS_DUP2 | SYS_SEEK | SYS_PIPE | SYS_HANDLE_DUP | SYS_HANDLE_INFO => Some(3),
-        // M18.c: kanały – własne blokady, bez BKL.
+        // Channels – own locks, without the BKL.
         SYS_CHANNEL_CREATE | SYS_CHAN_SEND | SYS_CHAN_RECV | SYS_WAIT_MANY => Some(3),
-        // M19.d: licznik przerwań – atomik.
+        // Interrupt counter – atomic.
         SYS_IRQ_READ => Some(3),
-        // M18.e: pamięć współdzielona – jak brk / mmap (zmienia ją tylko proces).
+        // Shared memory – like brk / mmap (changed only by the process).
         SYS_SHM_CREATE | SYS_SHM_MAP | SYS_SHM_SIZE | SYS_DMA_PHYS => Some(4),
-        // M17b.d: pamięć procesu – zmienia ją tylko on sam, ramki bez BKL.
+        // Process memory – changed only by the process itself, frames without the BKL.
         SYS_BRK | SYS_MMAP | SYS_MUNMAP => Some(4),
         SYS_OPEN | SYS_CLOSE | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_GETCWD => Some(3),
-        // M17a.e2: procesy – tablica zombie pod własną blokadą
-        // (lista zadań: od f2 pod blokadą schedulera).
+        // Processes – zombie table under its own lock
+        // (task list: under the scheduler lock).
         SYS_SPAWN | SYS_SPAWN_EX | SYS_WAIT | SYS_KILL | SYS_GETPPID => Some(4),
-        // M17a.g3: koniec procesu bez BKL (exit_current – własne blokady).
+        // Process exit without the BKL (exit_current – own locks).
         SYS_EXIT => Some(4),
-        // M17a.f2: scheduler na własnej blokadzie – sleep i yield bez BKL.
+        // The scheduler has its own lock – sleep and yield without the BKL.
         SYS_SLEEP | SYS_YIELD => Some(5),
         _ => None,
     }
 }
 
-/// Wołane z syscall_entry (asembler) – na stosie kernela zadania.
+/// Called from syscall_entry (assembly) – on the task's kernel stack.
 #[unsafe(no_mangle)]
 extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
-    // M17b.f: profil (od wejścia, z czekaniem na BKL, do SYSRET).
+    // Profiling (from entry, including waiting for the BKL, until SYSRET).
     let t0 = super::prof::start();
     let nr = frame.rax as usize;
-    // M17a.d/e: część syscalli bez BKL; reszta – wejście do kernela pod
-    // Big Kernel Lock (przy IF = 0, jak w M17).
+    // Some syscalls run without the BKL; the rest enter the kernel under the
+    // Big Kernel Lock (with IF = 0).
     match bkl_free_slot(frame) {
         Some(slot) => {
             FAST[slot].add(1);
@@ -1428,7 +1428,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
             crate::sched::bkl::acquire_tagged(&crate::sched::bkl::tag::SYSCALL);
         }
     }
-    // Syscalle działają z włączonymi przerwaniami (SFMASK wyłączył IF).
+    // Syscalls run with interrupts enabled (SFMASK cleared IF).
     interrupts::enable();
     let Some(p) = sched::current_process() else {
         panic!("syscall from a task without a process");
@@ -1515,24 +1515,24 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
     };
     p.syscalls += 1;
 
-    // kill / Ctrl+C w trakcie syscalla (np. czekanie na klawiaturę).
+    // kill / Ctrl+C during a syscall (e.g. waiting for the keyboard).
     if sched::should_exit() {
         record_exit(ExitKind::Killed, frame.rip, frame.rax, frame.rbx);
         exit_current();
     }
-    // SYSRET z niekanonicznym RIP = #GP w ring 0 na stosie użytkownika.
+    // SYSRET with a non-canonical RIP = #GP in ring 0 on the user stack.
     if frame.rip >= USER_SPACE_END {
         record_exit(ExitKind::BadReturn, frame.rip, frame.rax, frame.rbx);
         exit_current();
     }
-    // Do procesu wracają tylko flagi arytmetyczne i DF; IF zawsze 1.
+    // Only arithmetic flags and DF go back to the process; IF is always 1.
     frame.rflags = (frame.rflags & 0xED5) | 0x202;
     interrupts::disable();
     if nr < super::prof::SYSCALLS {
         super::prof::stop(nr, t0);
     }
-    // M17: SYSRET do procesu – wyjście z kernela (bez BKL, jeśli był wzięty;
-    // ścieżki bez BKL go nie mają).
+    // SYSRET to the process – leaving the kernel (without the BKL if it was taken;
+    // paths without the BKL do not hold it).
     if crate::sched::bkl::held() {
         crate::sched::bkl::release();
     }

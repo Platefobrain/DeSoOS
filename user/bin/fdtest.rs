@@ -1,6 +1,6 @@
-// M17b.a: test obiektów plików – dup, dup2, seek, wspólna pozycja (też z
-// dzieckiem po spawn).  Wynik: "fdtest: N checks OK" i kod 0, albo opis
-// pierwszego błędu i kod 1.  Uruchamia go FILE TEST (samotesty).
+// File object test – dup, dup2, seek, shared position (also with a
+// child after spawn).  Result: "fdtest: N checks OK" and code 0, or a description of
+// the first error and code 1.  Started by FILE TEST (self-tests).
 #![no_std]
 #![no_main]
 
@@ -25,7 +25,7 @@ macro_rules! check {
     };
 }
 
-/// Cały plik od początku przez deskryptor (pozycja zostaje na końcu).
+/// The whole file from the start through a descriptor (the position stays at the end).
 fn read_all(fd: u64, buf: &mut [u8]) -> usize {
     seek(fd, 0, SEEK_SET);
     let mut n = 0;
@@ -43,7 +43,7 @@ fn main(_args: Args) -> i32 {
     let mut buf = [0u8; 256];
     unlink(PATH);
 
-    // 1. dup: wspólna pozycja.
+    // 1. dup: shared position.
     let fd = open(PATH, O_READ | O_WRITE | O_CREATE | O_TRUNC);
     check!(n, fd >= 3, "open: {}", strerror(fd));
     let fd = fd as u64;
@@ -56,7 +56,7 @@ fn main(_args: Args) -> i32 {
     let len = read_all(d, &mut buf);
     check!(n, &buf[..len] == b"hello world", "content {:?}", core::str::from_utf8(&buf[..len]));
 
-    // 2. seek: SET / CUR / END, błędy.
+    // 2. seek: SET / CUR / END, errors.
     check!(n, seek(fd, 0, SEEK_END) == 11, "seek end");
     check!(n, seek(fd, -5, SEEK_CUR) == 6, "seek cur -5");
     let r = read(d, &mut buf[..5]);
@@ -66,7 +66,7 @@ fn main(_args: Args) -> i32 {
     check!(n, seek(0, 0, SEEK_SET) == -29, "seek on console must be ESPIPE: {}", seek(0, 0, SEEK_SET));
     check!(n, dup(99) == -9 && seek(99, 0, SEEK_SET) == -9, "bad fd must be EBADF");
 
-    // 3. dup2: stdout do pliku i z powrotem.
+    // 3. dup2: stdout to a file and back.
     let saved = dup(1);
     check!(n, saved >= 0, "dup(1): {}", saved);
     let saved = saved as u64;
@@ -78,8 +78,8 @@ fn main(_args: Args) -> i32 {
     check!(n, &buf[..len] == b"hello world!via-stdout\n", "after dup2 {:?}", core::str::from_utf8(&buf[..len]));
     check!(n, dup2(fd, fd) == fd as i64, "dup2(fd, fd)");
 
-    // 4. Dziecko dostaje ten sam obiekt: pisze od naszej pozycji, a nasza
-    // pozycja przesuwa się o to, co napisało.
+    // 4. The child gets the same object: it writes from our position, and our
+    // position advances by what it wrote.
     let before = seek(fd, 0, SEEK_END);
     let pid = spawn("/bin/hello", &["hello"], 0, fds(0, fd, 2));
     check!(n, pid > 0, "spawn: {}", strerror(pid));
@@ -89,7 +89,7 @@ fn main(_args: Args) -> i32 {
     let size = stat(PATH).map(|s| s.size as i64).unwrap_or(-1);
     check!(n, after > before && after == size, "position after child {} (before {}, size {})", after, before, size);
 
-    // 5. close: zamknięty deskryptor nie działa, kopia działa dalej.
+    // 5. close: a closed descriptor no longer works, the copy keeps working.
     check!(n, close(fd) == 0 && write(fd, b"x") == -9, "closed fd must be EBADF");
     check!(n, write(d, b"!") == 1, "dup must survive close of the original");
     close(d);

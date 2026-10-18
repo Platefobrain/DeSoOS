@@ -1,23 +1,23 @@
-// M16: shell w user space (ring 3).  Uruchamia go init.
+// User-space shell (ring 3).  Started by init.
 //
 //   desoos:/disk$ ls /bin
 //   desoos:/$ primes 100 > /disk/p.txt &
 //
-// * Edycja linii: ←/→, Home/End, Backspace/Delete, historia ↑/↓, Tab =
-//   dopełnianie nazwy komendy, Ctrl+C = porzuć linię, Ctrl+U = wyczyść,
-//   Ctrl+L = wyczyść ekran, Ctrl+D na pustej linii = wyjście.
-// * Słowa jak w zwykłym shellu: spacje dzielą, "..." i '...' grupują.
-// * Przekierowania: > plik, >> plik, < plik; & na końcu = w tle.
-// * M17b: potoki `a | b | c` (programy z /bin; z wbudowanych echo, pwd,
+// * Line editing: ←/→, Home/End, Backspace/Delete, history ↑/↓, Tab =
+//   command name completion, Ctrl+C = drop the line, Ctrl+U = clear,
+//   Ctrl+L = clear the screen, Ctrl+D on an empty line = exit.
+// * Words as in a normal shell: spaces split, "..." and '...' group.
+// * Redirections: > file, >> file, < file; & at the end = background.
+// * Pipelines `a | b | c` (programs from /bin; of the built-ins echo, pwd,
 //   help, history).
-// * Komendy wbudowane: cd, pwd, echo, exit, help, history, clear, wait;
-//   M19.i: sync, reboot, halt, stress – syscall sysctl, tylko gdy shell ma od
-//   init uchwyt SYSCTL (slot 4; programom go nie przekazuje).
-// * Inne nazwy: program /bin/<nazwa> albo ścieżka (z '/'), a gdy go nie ma –
-//   informacja od jądra (M19.i syscall sysinfo, tylko odczyt: mem, lspci,
-//   cpus, disk...).  mkfs, zapis na dysk i run – tylko w awaryjnym shellu jądra.
-// * Ctrl+C w trakcie programu kończy program (nie shell) – kernel zna
-//   proces pierwszego planu (spawn z SPAWN_FOREGROUND).
+// * Built-in commands: cd, pwd, echo, exit, help, history, clear, wait;
+//   sync, reboot, halt, stress – the sysctl syscall, only when the shell got the
+//   SYSCTL handle from init (slot 4; it is not passed on to programs).
+// * Other names: the program /bin/<name> or a path (containing '/'), and if there is none –
+//   information from the kernel (sysinfo syscall, read-only: mem, lspci,
+//   cpus, disk...).  mkfs, writing to disk and run – only in the kernel's emergency shell.
+// * Ctrl+C while a program runs ends the program (not the shell) – the kernel knows
+//   the foreground process (spawn with SPAWN_FOREGROUND).
 #![no_std]
 #![no_main]
 
@@ -58,17 +58,17 @@ const BUILTINS: &[(&str, &str)] = &[
     ("stress", "stress [s]         SMP stress test in the kernel (1..600 s, default 10)"),
 ];
 
-/// M19.i: akcje systemowe (syscall sysctl) – tylko z uchwytem SYSCTL od init.
+/// System actions (sysctl syscall) – only with the SYSCTL handle from init.
 const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress"];
 
-/// M19.i: informacje od jądra (syscall sysinfo, tylko odczyt).
+/// Information from the kernel (sysinfo syscall, read-only).
 const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
 
-/// M19.i: komendy, które zostały tylko w awaryjnym shellu jądra.
+/// Commands that remain only in the kernel's emergency shell.
 const KERNEL_ONLY: &[&str] = &["mkfs", "run", "hexdump", "write", "spawn", "colors", "keys", "k"];
 
 // ------------------------------------------------------------
-// Wyjście
+// Output
 // ------------------------------------------------------------
 
 fn out(s: &str) {
@@ -76,7 +76,7 @@ fn out(s: &str) {
 }
 
 // ------------------------------------------------------------
-// Edytor linii
+// Line editor
 // ------------------------------------------------------------
 
 enum Edit {
@@ -113,7 +113,7 @@ impl LineEditor {
         }
     }
 
-    /// "desoos:/disk$ " – '$' odróżnia shell procesu od shella kernela ('>').
+    /// "desoos:/disk$ " – '$' distinguishes the process shell from the kernel shell ('>').
     fn set_prompt(&mut self, cwd: &str) {
         self.prompt = format!("\x1b[1;32mdesoos\x1b[0m:\x1b[1;34m{}\x1b[0m$ ", cwd);
         self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
@@ -239,7 +239,7 @@ impl LineEditor {
         }
     }
 
-    /// Dopełnianie pierwszego słowa: komendy wbudowane, /bin, kernel.
+    /// Completion of the first word: built-in commands, /bin, kernel.
     fn complete(&mut self) -> Edit {
         if self.cursor != self.buf.len() || self.buf.contains(&' ') {
             return Edit::Nothing;
@@ -272,12 +272,12 @@ impl LineEditor {
 }
 
 // ------------------------------------------------------------
-// Słowa i przekierowania
+// Words and redirections
 // ------------------------------------------------------------
 
 struct Word {
     text: String,
-    /// Słowo (albo jego część) w cudzysłowie – nie jest operatorem.
+    /// A word (or part of one) in quotes – it is not an operator.
     quoted: bool,
 }
 
@@ -296,7 +296,7 @@ fn split_words(line: &str) -> Result<Vec<Word>, &'static str> {
                 in_word = true;
                 quoted = true;
             }
-            // M17b: '|' poza cudzysłowem – osobne słowo (operator potoku).
+            // '|' outside quotes – a separate word (pipe operator).
             None if c == '|' => {
                 if in_word {
                     words.push(Word { text: core::mem::take(&mut cur), quoted });
@@ -330,11 +330,11 @@ fn split_words(line: &str) -> Result<Vec<Word>, &'static str> {
 struct Command {
     args: Vec<String>,
     stdin: Option<String>,
-    stdout: Option<(String, bool)>, // (plik, dopisywanie)
+    stdout: Option<(String, bool)>, // (file, append)
     background: bool,
 }
 
-/// Linia: jedna komenda albo potok `a | b | c` (& tylko na końcu).
+/// A line: a single command or a pipeline `a | b | c` (& only at the end).
 fn parse(line: &str) -> Result<Option<Vec<Command>>, &'static str> {
     let words = split_words(line)?;
     let segments: Vec<&[Word]> = words.split(|w| !w.quoted && w.text == "|").collect();
@@ -364,7 +364,7 @@ fn parse_words(words: &[Word]) -> Result<Option<Command>, &'static str> {
                 i += 1;
                 continue;
             }
-            // > plik, >> plik, < plik (także sklejone: >plik).
+            // > file, >> file, < file (also glued: >file).
             let op = if t.starts_with(">>") { Some((2, true)) } else if t.starts_with('>') { Some((1, false)) } else { None };
             if let Some((len, append)) = op {
                 let target = if t.len() > len { String::from(&t[len..]) } else {
@@ -404,10 +404,10 @@ fn parse_words(words: &[Word]) -> Result<Option<Command>, &'static str> {
 }
 
 // ------------------------------------------------------------
-// Pomocnicze
+// Helpers
 // ------------------------------------------------------------
 
-/// Nazwy plików w /bin.
+/// File names in /bin.
 fn bin_programs() -> Vec<String> {
     let mut buf = vec![0u8; 4096];
     loop {
@@ -463,8 +463,8 @@ fn suggest(name: &str) -> Option<String> {
         .map(|(_, n)| n)
 }
 
-/// Ścieżka programu: z '/' – jak podano (kernel liczy względem cwd),
-/// inaczej /bin/<nazwa>, o ile istnieje.
+/// Program path: with '/' – as given (the kernel resolves it relative to cwd),
+/// otherwise /bin/<name>, if it exists.
 fn find_program(name: &str) -> Option<String> {
     if name.contains('/') {
         return Some(String::from(name));
@@ -476,8 +476,8 @@ fn find_program(name: &str) -> Option<String> {
     }
 }
 
-/// Otwiera pliki przekierowań; zwraca (fd wejścia, fd wyjścia) – 0/1 bez
-/// przekierowania.  Pliki zamyka `close_redirects`.
+/// Opens the redirection files; returns (input fd, output fd) – 0/1 without
+/// redirection.  The files are closed by `close_redirects`.
 fn open_redirects(cmd: &Command) -> Result<(u64, u64), String> {
     let mut fin = 0u64;
     if let Some(path) = &cmd.stdin {
@@ -515,10 +515,10 @@ fn close_redirects(fin: u64, fout: u64) {
 // Shell
 // ------------------------------------------------------------
 
-/// M19.g: shell uruchomiony przez init ma w slocie 3 kanał do menedżera
-/// usług – programy dostają go też w slocie 3 (`services`, `svc_connect`).
+/// A shell started by init has a channel to the service manager in slot 3 –
+/// programs get it in slot 3 too (`services`, `svc_connect`).
 static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// M19.i: uchwyt SYSCTL w slocie 4 (od init) – tylko shell, dzieci go nie dostają.
+/// The SYSCTL handle in slot 4 (from init) – shell only, children do not get it.
 static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i64 {
@@ -542,7 +542,7 @@ impl Shell {
         self.cwd = String::from(desoos::getcwd(&mut buf));
     }
 
-    /// Zakończone programy z tła (przed promptem, jak w bash).
+    /// Finished background programs (reported before the prompt, as in bash).
     fn reap_background(&mut self) {
         loop {
             match wait(WAIT_ANY, WNOHANG) {
@@ -586,13 +586,13 @@ impl Shell {
             self.external(&path, &cmd);
             return;
         }
-        // M19.i: informacje od jądra (sysinfo) albo komenda już tylko w jądrze.
+        // Information from the kernel (sysinfo), or a command that now exists only in the kernel.
         if INFO_COMMANDS.contains(&name.as_str()) {
             self.info(&cmd);
             return;
         }
         if KERNEL_ONLY.contains(&name.as_str()) {
-            eprintln!("sh: {}: only in the kernel emergency shell (since M19.i)", name);
+            eprintln!("sh: {}: only in the kernel emergency shell", name);
             return;
         }
         match suggest(&name) {
@@ -626,7 +626,7 @@ impl Shell {
         match wait(pid, 0) {
             Ok((_, status)) => {
                 if status == desoos::STATUS_SIGNALED | 9 {
-                    // Ctrl+C (albo kill z innego miejsca) – jak w zwykłym shellu.
+                    // Ctrl+C (or kill from elsewhere) – as in a normal shell.
                     out("^C\n");
                 }
             }
@@ -634,14 +634,14 @@ impl Shell {
         }
     }
 
-    /// M17b: potok `a | b | c`.  Najpierw wszystkie potoki i programy (każdy
-    /// dostaje swój koniec jako 0 / 1; jawne < > mają pierwszeństwo), potem
-    /// shell zamyka swoje kopie końców – czytający dostaje koniec danych, gdy
-    /// skończy się piszący – a wbudowane (echo, pwd, help, history) pisze sam
-    /// do swojego potoku.  Na końcu czeka na wszystkie programy.
+    /// Pipeline `a | b | c`.  First all pipes and programs (each
+    /// gets its end as 0 / 1; explicit < > take precedence), then
+    /// the shell closes its copies of the ends – the reader sees end of data when
+    /// the writer finishes – and a built-in (echo, pwd, help, history) writes itself
+    /// into its pipe.  Finally it waits for all programs.
     fn pipeline(&mut self, cmds: &[Command]) {
         const PIPE_BUILTINS: &[&str] = &["echo", "pwd", "help", "history"];
-        // Sprawdzenie nazw przed utworzeniem czegokolwiek.
+        // Check the names before creating anything.
         let mut paths: Vec<Option<String>> = Vec::new();
         for c in cmds {
             let name = c.args[0].as_str();
@@ -708,7 +708,7 @@ impl Shell {
                 }
             }
         }
-        // Kopie końców w shellu – zamknięte (poza wyjściem wbudowanych).
+        // The shell's copies of the ends – closed (except the built-in's output).
         for (r, w) in &pipes {
             close(*r);
             if !builtins.iter().any(|(_, fout)| fout == w) {
@@ -746,7 +746,7 @@ impl Shell {
         }
     }
 
-    /// Wbudowane komendy, które tylko piszą (także w potoku).
+    /// Built-in commands that only write (also in a pipeline).
     fn print_builtin(&self, cmd: &Command, fout: u64) {
         let mut o = desoos::Out::new(fout);
         use core::fmt::Write;
@@ -780,7 +780,7 @@ impl Shell {
         }
     }
 
-    /// M19.i: informacja od jądra (sysinfo) – z przekierowaniem wyjścia.
+    /// Information from the kernel (sysinfo) – with output redirection.
     fn info(&mut self, cmd: &Command) {
         let line = cmd.args.join(" ");
         let (fin, fout) = match open_redirects(cmd) {
@@ -810,7 +810,7 @@ impl Shell {
         close_redirects(fin, fout);
     }
 
-    /// M19.i: sync / reboot / halt / stress przez sysctl (uchwyt SYSCTL od init).
+    /// sync / reboot / halt / stress via sysctl (SYSCTL handle from init).
     fn sysctl(&mut self, cmd: &Command, fout: u64) {
         let name = cmd.args[0].as_str();
         if !SYSCTL_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
@@ -942,7 +942,7 @@ impl Shell {
 }
 
 fn main(args: desoos::Args) -> i32 {
-    // Slot 3 sprawdzony na starcie – później mógłby go zająć plik przekierowania.
+    // Slot 3 is checked at startup – later a redirection file could take it.
     if desoos::handle_info(desoos::SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
         SVC_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -951,7 +951,7 @@ fn main(args: desoos::Args) -> i32 {
     }
     let mut sh = Shell { editor: LineEditor::new(), cwd: String::from("/"), background: Vec::new(), exit: None };
     sh.refresh_cwd();
-    // sh -c "komenda": jedna linia i koniec (skrypty, testy).
+    // sh -c "command": one line and exit (scripts, tests).
     if args.get(1) == Some("-c") {
         let line: Vec<&str> = args.iter().skip(2).collect();
         sh.run_line(&line.join(" "));

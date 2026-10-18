@@ -1,15 +1,15 @@
-// M4: IDT + wejścia (stuby) wyjątków 0..31.
-// M5: + stuby IRQ0..15 (wektory 0x20..0x2F), dispatch w irq.rs.
+// IDT + entry stubs for exceptions 0..31,
+// plus stubs for IRQ0..15 (vectors 0x20..0x2F); dispatch lives in irq.rs.
 //
-// Każdy stub uzupełnia ramkę do jednolitego układu (sztuczny kod błędu 0
-// tam, gdzie CPU żadnego nie wkłada), odkłada numer wektora i skacze do
-// `isr_common`, które zapisuje wszystkie rejestry ogólne i woła
-// `exception_dispatch` (exceptions.rs).  Układ ramki na stosie odpowiada
+// Each stub completes the frame to a uniform layout (a dummy error code 0
+// where the CPU does not push one), pushes the vector number and jumps to
+// `isr_common`, which saves all general-purpose registers and calls
+// `exception_dispatch` (exceptions.rs).  The frame layout on the stack matches
 // `ExceptionFrame`.
 //
-// Stos jest wyrównany do 16 B w chwili `call`: CPU wyrównuje RSP przed
-// zapisem ramki (5 qwordów + kod błędu), stub dokłada wektor, a
-// isr_common 15 rejestrów -> razem 22 qwordy = 176 B.
+// The stack is 16-byte aligned at the `call`: the CPU aligns RSP before
+// pushing the frame (5 qwords + error code), the stub adds the vector, and
+// isr_common 15 registers -> 22 qwords in total = 176 B.
 
 use core::arch::global_asm;
 use core::ptr::addr_of_mut;
@@ -22,7 +22,7 @@ use crate::serial_println;
 
 pub const EXCEPTION_VECTORS: usize = 32;
 
-// M5: pierwszy wektor IRQ i ich liczba (PIC: IRQ0..15 -> 0x20..0x2F).
+// First IRQ vector and their count (PIC: IRQ0..15 -> 0x20..0x2F).
 pub const IRQ_BASE: usize = 0x20;
 pub const IRQ_VECTORS: usize = 16;
 
@@ -62,9 +62,9 @@ impl Gate {
     }
 }
 
-// present, DPL 0, 64-bit interrupt gate (IF czyszczone przy wejściu).
+// present, DPL 0, 64-bit interrupt gate (IF cleared on entry).
 const GATE_INTERRUPT: u8 = 0x8E;
-// M13a: present, DPL 3 – `int3` z ring 3 trafia do #BP zamiast do #GP.
+// present, DPL 3 – `int3` from ring 3 goes to #BP instead of #GP.
 const GATE_INTERRUPT_USER: u8 = 0xEE;
 
 #[repr(C, packed)]
@@ -299,7 +299,7 @@ isr_31:
     jmp isr_common
 
 
-// M5: IRQ0..15 z PIC-a (wektory 0x20..0x2F); ta sama ramka co wyjątki.
+// IRQ0..15 from the PIC (vectors 0x20..0x2F); same frame as exceptions.
 
 .global irq_0
 irq_0:
@@ -461,7 +461,7 @@ unsafe extern "C" {
     static irq_stub_table: [u64; IRQ_VECTORS];
 }
 
-// M16b: stuby wektorów MSI (0x30..0x3F) i "spurious" LAPIC (0xFF).
+// Stubs for the MSI vectors (0x30..0x3F) and the LAPIC "spurious" vector (0xFF).
 global_asm!(r#"
 .section .text.isr, "ax"
 .global msi_0
@@ -622,23 +622,23 @@ unsafe extern "C" {
     fn apic_tlb();
 }
 
-/// Stos IST dla wyjątku.  Tylko wyjątki, które nie przełączają zadań.
+/// IST stack for an exception.  Only exceptions that do not switch tasks.
 ///
-/// NIEZMIENNIK (M16): wektory IRQ (0x20–0x2F) NIE mogą mieć IST.  Na tym
-/// opiera się `irq::dispatch -> sched::preempt_irq() -> user::kill_from_interrupt`:
-/// ramka przerwania leży na stosie kernela przerwanego zadania (z ring 3:
-/// TSS.RSP0 = jego stos), więc gdy `preempt()` przełączy zadanie i kiedyś
-/// wróci, `current` znowu jest właścicielem `frame`.  Ze wspólnym stosem IST
-/// ramki różnych zadań nadpisywałyby się.  Pilnuje tego samotest
-/// (exceptions.rs) i asercja w sched::schedule().
+/// INVARIANT: IRQ vectors (0x20–0x2F) MUST NOT use IST.  This is what
+/// `irq::dispatch -> sched::preempt_irq() -> user::kill_from_interrupt` relies on:
+/// the interrupt frame lives on the kernel stack of the interrupted task (from ring 3:
+/// TSS.RSP0 = its stack), so when `preempt()` switches tasks and eventually
+/// comes back, `current` again owns `frame`.  With a shared IST stack,
+/// frames of different tasks would overwrite each other.  Enforced by a self-test
+/// (exceptions.rs) and an assertion in sched::schedule().
 fn ist_for_vector(vector: usize) -> u8 {
     match vector {
         8 => IST_DOUBLE_FAULT,
         2 => IST_NMI,
         18 => IST_MACHINE_CHECK,
-        // M17b.c: #PF bez IST – z ring 3 na stosie kernela zadania (TSS.RSP0),
-        // więc obsługa może blokować (leniwy przydział stron procesu, M17b.d).
-        // Przepełnienie stosu kernela: #PF nie zmieści ramki -> #DF (IST).
+        // #PF without IST – from ring 3 it lands on the task's kernel stack (TSS.RSP0),
+        // so the handler may block (lazy allocation of process pages).
+        // Kernel stack overflow: #PF cannot push its frame -> #DF (IST).
         6 | 10 | 11 | 12 | 13 => IST_FATAL,
         _ => 0,
     }
@@ -656,23 +656,23 @@ pub fn init() {
             (*idt)[vector] = Gate::new(handler, ist_for_vector(vector), attr);
         }
 
-        // IRQ: bramki przerwań (IF=0 w handlerze), zwykły stos kernela –
-        // bez IST (patrz niezmiennik przy ist_for_vector).
+        // IRQ: interrupt gates (IF=0 in the handler), ordinary kernel stack –
+        // no IST (see the invariant at ist_for_vector).
         for irq in 0..IRQ_VECTORS {
             let handler = irq_stub_table[irq];
             (*idt)[IRQ_BASE + irq] = Gate::new(handler, 0, GATE_INTERRUPT);
         }
-        // M16b: MSI/MSI-X – tak samo bez IST (ten sam niezmiennik).
+        // MSI/MSI-X – likewise no IST (same invariant).
         for i in 0..super::msi::MSI_VECTORS {
             (*idt)[super::msi::MSI_BASE + i] = Gate::new(msi_stub_table[i], 0, GATE_INTERRUPT);
         }
         (*idt)[super::lapic::SPURIOUS_VECTOR as usize] =
             Gate::new(apic_spurious as *const () as u64, 0, GATE_INTERRUPT);
-        // M17: timer LAPIC (AP) i IPI – bez IST (ten sam niezmiennik co IRQ).
+        // LAPIC timer (APs) and IPIs – no IST (same invariant as IRQs).
         (*idt)[super::lapic::TIMER_VECTOR as usize] = Gate::new(apic_timer as *const () as u64, 0, GATE_INTERRUPT);
         (*idt)[super::lapic::RESCHED_VECTOR as usize] = Gate::new(apic_resched as *const () as u64, 0, GATE_INTERRUPT);
         (*idt)[super::lapic::HALT_VECTOR as usize] = Gate::new(apic_halt as *const () as u64, 0, GATE_INTERRUPT);
-        // M17a.b: TLB shootdown – bez IST i bez BKL (exceptions.rs).
+        // TLB shootdown – no IST and no BKL (exceptions.rs).
         (*idt)[super::tlb::TLB_VECTOR as usize] = Gate::new(apic_tlb as *const () as u64, 0, GATE_INTERRUPT);
     }
     load();
@@ -685,7 +685,7 @@ pub fn init() {
     );
 }
 
-/// lidt – wspólna IDT (M17: wołają też AP przy starcie).
+/// lidt – shared IDT (also called by APs at startup).
 pub fn load() {
     unsafe {
         let pointer = IdtPointer {
@@ -700,19 +700,19 @@ pub fn load() {
     }
 }
 
-/// Numer IST ustawiony w bramce danego wektora (do testów).
+/// IST number set in the gate of a given vector (for tests).
 #[cfg(selftest)]
 pub fn gate_ist(vector: usize) -> u8 {
     unsafe { (*addr_of_mut!(IDT))[vector].ist }
 }
 
-/// DPL bramki (do testów: #BP musi mieć 3).
+/// Gate DPL (for tests: #BP must have 3).
 #[cfg(selftest)]
 pub fn gate_dpl(vector: usize) -> u8 {
     unsafe { ((*addr_of_mut!(IDT))[vector].type_attr >> 5) & 3 }
 }
 
-/// Czy bramka wektora jest present (do testów).
+/// Whether the vector's gate is present (for tests).
 #[cfg(selftest)]
 pub fn gate_present(vector: usize) -> bool {
     unsafe { (*addr_of_mut!(IDT))[vector].type_attr & 0x80 != 0 }

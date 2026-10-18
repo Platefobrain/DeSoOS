@@ -1,9 +1,9 @@
-// M9: zegar czasu rzeczywistego (CMOS RTC) – data i godzina.
+// Real-time clock (CMOS RTC) – date and time.
 //
-// Używane do znaczników czasu plików (FAT) i komendy `date`.
-// Rejestry: 0x00 s, 0x02 min, 0x04 h, 0x07 dzień, 0x08 miesiąc, 0x09 rok
-// (2 cyfry), 0x0B status B (bit 2 = binarnie zamiast BCD, bit 1 = 24 h).
-// Czas w RTC to zwykle UTC (QEMU domyślnie tak ustawia).
+// Used for file timestamps (FAT) and the `date` command.
+// Registers: 0x00 s, 0x02 min, 0x04 h, 0x07 day, 0x08 month, 0x09 year
+// (2 digits), 0x0B status B (bit 2 = binary instead of BCD, bit 1 = 24 h).
+// RTC time is usually UTC (QEMU sets it that way by default).
 
 use crate::arch::x86_64::interrupts::without_interrupts;
 use crate::arch::x86_64::port::{inb, outb};
@@ -30,7 +30,7 @@ impl core::fmt::Display for DateTime {
 
 fn cmos(reg: u8) -> u8 {
     without_interrupts(|| unsafe {
-        outb(0x70, reg | 0x80); // bit 7: NMI wyłączone na czas odczytu
+        outb(0x70, reg | 0x80); // bit 7: NMI disabled during the read
         let v = inb(0x71);
         outb(0x70, 0);
         v
@@ -45,18 +45,18 @@ fn raw() -> [u8; 6] {
     [cmos(0x00), cmos(0x02), cmos(0x04), cmos(0x07), cmos(0x08), cmos(0x09)]
 }
 
-// M17a.g14: odczyt RTC to ~45 operacji na portach (dwa odczyty sześciu
-// rejestrów + flaga aktualizacji; w KVM każda to wyjście do QEMU, na sprzęcie
-// ~1 µs), a woła go każda zmiana pliku – także pod blokadą drzewa ramfs.
-// RTC czytamy raz (przy starcie); dalej czas = odczyt startowy + uptime.
+// Reading the RTC takes ~45 port operations (two reads of six
+// registers + the update flag; under KVM each one is an exit to QEMU, on hardware
+// ~1 µs), and every file change calls it – also under the ramfs tree lock.
+// We read the RTC once (at boot); afterwards time = boot reading + uptime.
 use core::sync::atomic::{AtomicU64, Ordering};
 
-/// Sekundy od 1970-01-01 w chwili odczytu RTC (0 = jeszcze nie czytany).
+/// Seconds since 1970-01-01 at the time of the RTC read (0 = not read yet).
 static BASE_SECS: AtomicU64 = AtomicU64::new(0);
-/// Uptime (ms) w tej chwili.
+/// Uptime (ms) at that moment.
 static BASE_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Dni od 1970-01-01 (algorytm "days from civil", H. Hinnant).
+/// Days since 1970-01-01 ("days from civil" algorithm, H. Hinnant).
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -67,7 +67,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// Odwrotność `days_from_civil`: (rok, miesiąc, dzień).
+/// Inverse of `days_from_civil`: (year, month, day).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = z.div_euclid(146097);
@@ -81,7 +81,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 impl DateTime {
-    /// Sekundy od 1970-01-01.
+    /// Seconds since 1970-01-01.
     pub fn to_unix(&self) -> u64 {
         let days = days_from_civil(self.year as i64, self.month.max(1) as u32, self.day.max(1) as u32);
         (days * 86400 + self.hour as i64 * 3600 + self.minute as i64 * 60 + self.second as i64).max(0) as u64
@@ -101,15 +101,15 @@ impl DateTime {
     }
 }
 
-/// Odczyt RTC i zapamiętanie punktu odniesienia (start, jeden CPU).
+/// Reads the RTC and stores the reference point (boot, single CPU).
 pub fn init() {
     let hw = read_hw();
     BASE_MS.store(crate::time::uptime_ms(), Ordering::Relaxed);
     BASE_SECS.store(hw.to_unix().max(1), Ordering::Release);
 }
 
-/// Aktualna data i godzina: odczyt RTC przy starcie + czas od tamtej chwili
-/// (bez dostępu do portów).  Przed `init` – prosto z RTC.
+/// Current date and time: RTC reading at boot + time since that moment
+/// (no port access).  Before `init` – straight from the RTC.
 pub fn now() -> DateTime {
     let base = BASE_SECS.load(Ordering::Acquire);
     if base == 0 {
@@ -119,9 +119,9 @@ pub fn now() -> DateTime {
     DateTime::from_unix(base + ms / 1000)
 }
 
-/// Data i godzina prosto z RTC (porty CMOS – wolne; zwykle `now`).
+/// Date and time straight from the RTC (CMOS ports – slow; usually use `now`).
 pub fn read_hw() -> DateTime {
-    // Czytamy dwa razy, aż wyjdą takie same (RTC mogło się właśnie aktualizować).
+    // Read twice until both readings match (the RTC may have been updating).
     let mut last = [0xFFu8; 6];
     let mut r;
     let mut tries = 0;
@@ -146,7 +146,7 @@ pub fn read_hw() -> DateTime {
     let pm = hour & 0x80 != 0;
     hour = conv(hour & 0x7F);
     if status_b & 0x02 == 0 {
-        // tryb 12-godzinny
+        // 12-hour mode
         if pm && hour != 12 {
             hour += 12;
         } else if !pm && hour == 12 {

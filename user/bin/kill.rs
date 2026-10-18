@@ -1,4 +1,4 @@
-// M16: kill <pid>... – kończy procesy (init jest chroniony).
+// kill <pid>... – terminates processes (init is protected).
 #![no_std]
 #![no_main]
 

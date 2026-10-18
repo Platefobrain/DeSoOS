@@ -1,29 +1,29 @@
-// M1: alokator ramek fizycznych (4 KiB).
+// Physical frame allocator (4 KiB).
 //
-// M11: bitmapa zamiast listy wolnych ramek w samych ramkach.
-//   * 1 bit na ramkę od adresu 0 do końca najwyższego RAM-u (1 = wolna);
-//     512 MiB RAM -> 16 KiB bitmapy, 64 GiB -> 2 MiB.  Bitmapa leży w RAM-ie
-//     (pierwszy pasujący kawałek conventional memory, zarezerwowany) i jest
-//     czytana przez direct map.
-//   * free_frame: sprawdzenie double-free to jeden bit – O(1) (wcześniej
-//     przejście po całej liście).
-//   * alloc_frame: szukanie od podpowiedzi słowami po 64 bity.
-//   * alloc_frames(n, align): n CIĄGŁYCH ramek (bufory DMA).
-//   * Wolne ramki nie są już zapisywane – ich zawartość nie jest dotykana.
+// A bitmap instead of a free list stored in the frames themselves.
+//   * 1 bit per frame from address 0 to the end of the highest RAM (1 = free);
+//     512 MiB RAM -> 16 KiB bitmap, 64 GiB -> 2 MiB.  The bitmap lives in RAM
+//     (the first suitable chunk of conventional memory, reserved) and is
+//     accessed through the direct map.
+//   * free_frame: the double-free check is one bit – O(1) (instead of
+//     walking the whole list).
+//   * alloc_frame: searches from a hint, one 64-bit word at a time.
+//   * alloc_frames(n, align): n CONTIGUOUS frames (DMA buffers).
+//   * Free frames are not written to – their contents are never touched.
 //
-// P3 (v0.22.0): zapas wolnych ramek na każdym CPU (jak listy w heapie).
-// Legion v0.21.0: blokada `frames` – 48–60 mln czekań w minucie stressu,
-// 4–6% CPU (każdy proces bierze dziesiątki ramek: obraz, stos, tablice stron).
-//   * alloc_frame / free_frame: zdjęcie / dołożenie na tablicę ramek tego CPU
-//     przy IF = 0, bez blokady; pusto = paczka FCACHE_BATCH ramek spod
-//     blokady, pełno = paczka wraca.  Ramki w zapasach liczą się jako wolne
-//     (free_frame_count), ale w bitmapie są zajęte.
-//   * Ochrona przed double-free i oddaniem cudzej / zarezerwowanej ramki bez
-//     blokady: druga bitmapa „wydana” (atomowa, 1 = ramka u właściciela).
-//     free_frame najpierw zdejmuje ten bit (fetch_and) – gdy go nie było,
-//     odmowa.  Ustawia go każda ścieżka wydania ramki.
-//   * Ciągłe przedziały (DMA, alloc_frames*, alloc_frame_below) – jak dotąd
-//     spod blokady.
+// A per-CPU reserve of free frames (like the heap's per-CPU lists).
+// Under SMP stress the `frames` lock saw tens of millions of waits per minute,
+// 4–6% CPU (every process takes dozens of frames: image, stack, page tables).
+//   * alloc_frame / free_frame: pop from / push onto this CPU's frame array
+//     with IF = 0, without the lock; empty = a batch of FCACHE_BATCH frames from under
+//     the lock, full = a batch goes back.  Frames in the reserves count as free
+//     (free_frame_count), but are marked used in the bitmap.
+//   * Protection against double-free and freeing someone else's / a reserved frame
+//     without the lock: a second "issued" bitmap (atomic, 1 = frame is with its owner).
+//     free_frame clears this bit first (fetch_and) – if it was not set, the
+//     free is refused.  Every path that hands out a frame sets it.
+//   * Contiguous ranges (DMA, alloc_frames*, alloc_frame_below) – still
+//     taken under the lock.
 
 use crate::bootinfo::BootInfo;
 use crate::serial_println;
@@ -34,7 +34,7 @@ use super::layout::{kernel_layout, phys_to_virt, DIRECT_MAP_BASE};
 const PAGE_SIZE: u64 = 4096;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 
-// Strona 0 nigdy nie jest wydawana (adres 0 = "brak ramki").
+// Page 0 is never handed out (address 0 = "no frame").
 const NULL_PAGE_END: u64 = PAGE_SIZE;
 const LOW_MEMORY_END: u64 = 0x10_0000;
 
@@ -49,13 +49,13 @@ struct Range {
 }
 
 struct FrameAllocator {
-    /// Bitmapa (1 = wolna) w direct mapie, `words` słów po 64 bity.
+    /// Bitmap (1 = free) in the direct map, `words` 64-bit words.
     bitmap: *mut u64,
     words: usize,
-    /// Liczba ramek opisanych bitmapą (ramki 0..frames).
+    /// Number of frames described by the bitmap (frames 0..frames).
     frames: u64,
     bitmap_phys: u64,
-    /// Słowo, od którego alloc_frame zaczyna szukanie.
+    /// Word at which alloc_frame starts searching.
     hint: usize,
     free_frames: u64,
 
@@ -70,9 +70,9 @@ struct FrameAllocator {
     reservations_len: usize,
 }
 
-// M17a.c: własna blokada (poziom FRAMES) zamiast samego without_interrupts +
-// Big Kernel Lock – ramki można brać i oddawać na wielu CPU naraz, także
-// z kodu bez BKL i z handlerów przerwań.
+// Its own lock (FRAMES level) instead of just without_interrupts +
+// the Big Kernel Lock – frames can be taken and freed on many CPUs at once, also
+// from code without the BKL and from interrupt handlers.
 static ALLOCATOR: crate::sched::spin::IrqSpinLock<Option<FrameAllocator>> =
     crate::sched::spin::IrqSpinLock::new("frames", crate::sched::spin::level::FRAMES, None);
 
@@ -138,7 +138,7 @@ fn in_ranges(ranges: &[Range], len: usize, frame: u64) -> bool {
 }
 
 // UEFI memory descriptor: type u32 @0, physical_start u64 @8, page_count u64 @24
-// `base` to adres wirtualny mapy (direct map).
+// `base` is the virtual address of the map (direct map).
 unsafe fn descriptor(base: usize, index: usize, desc_size: usize) -> (u32, u64, u64) {
     let d = (base + index * desc_size) as *const u8;
     unsafe {
@@ -157,8 +157,8 @@ fn build_reservations(boot: &BootInfo) -> ([Range; MAX_RESERVATIONS], usize) {
     // sentinel. This also avoids ever handing out the first physical page.
     push_reservation(&mut list, &mut len, 0, NULL_PAGE_END);
 
-    // Obraz kernela i stos startowy (M10: DSB alokuje je jako LOADER_DATA,
-    // więc i tak nie są "conventional" – rezerwacja to druga linia obrony).
+// Kernel image and boot stack (the bootloader allocates them as LOADER_DATA,
+// so they are not "conventional" anyway – the reservation is a second line of defense).
     let layout = kernel_layout();
     push_reservation(
         &mut list,
@@ -238,8 +238,8 @@ fn collect_conventional_ranges(
     (ranges, len, conventional_bytes)
 }
 
-/// Miejsce na bitmapę: pierwszy fragment conventional memory, który nie
-/// nachodzi na rezerwacje.
+/// Place for the bitmap: the first piece of conventional memory that does not
+/// overlap the reservations.
 fn find_bitmap_place(
     conventional: &[Range],
     conventional_len: usize,
@@ -250,7 +250,7 @@ fn find_bitmap_place(
     let size = align_up(bytes);
     for i in 0..conventional_len {
         let r = conventional[i];
-        // Powyżej 1 MiB – niska pamięć przyda się na trampolinę SMP (M17).
+        // Above 1 MiB – low memory is needed for the SMP trampoline.
         let mut start = align_up(r.start.max(LOW_MEMORY_END));
         while start.saturating_add(size) <= r.end {
             let end = start + size;
@@ -271,7 +271,7 @@ fn find_bitmap_place(
     None
 }
 
-// Bitmapa w direct mapie (surowy wskaźnik) – chroniona blokadą ALLOCATOR.
+// Bitmap in the direct map (raw pointer) – protected by the ALLOCATOR lock.
 unsafe impl Send for FrameAllocator {}
 
 impl FrameAllocator {
@@ -294,7 +294,7 @@ impl FrameAllocator {
         }
     }
 
-    /// Czy ramkę wolno oddać do alokatora (RAM, nie rezerwacja, w bitmapie).
+    /// Whether the frame may be returned to the allocator (RAM, not reserved, in the bitmap).
     fn valid_frame(&self, frame: u64) -> bool {
         frame != 0
             && frame % PAGE_SIZE == 0
@@ -322,7 +322,7 @@ impl FrameAllocator {
         None
     }
 
-    /// M17: najniższa wolna ramka poniżej adresu `limit`.
+    /// Lowest free frame below address `limit`.
     fn alloc_below(&mut self, limit: u64) -> Option<u64> {
         let last = (limit / PAGE_SIZE).min(self.frames);
         let mut f = 1;
@@ -341,13 +341,13 @@ impl FrameAllocator {
         None
     }
 
-    /// `count` ciągłych wolnych ramek, pierwsza wyrównana do `align` ramek.
+    /// `count` contiguous free frames, the first one aligned to `align` frames.
     fn alloc_run(&mut self, count: u64, align: u64) -> Option<u64> {
         self.alloc_run_below(count, align, self.frames)
     }
 
-    /// M19.e: jak alloc_run, ale cały przedział poniżej ramki `end` (bufory DMA
-    /// urządzeń z węższą szyną adresów – np. `edu`: 28 bitów).
+    /// Like alloc_run, but the whole range below frame `end` (DMA buffers of
+    /// devices with a narrower address bus – e.g. `edu`: 28 bits).
     fn alloc_run_below(&mut self, count: u64, align: u64, end: u64) -> Option<u64> {
         if count == 0 || count > self.free_frames || align == 0 || !align.is_power_of_two() {
             return None;
@@ -355,7 +355,7 @@ impl FrameAllocator {
         let end = end.min(self.frames);
         let mut start = align;
         while start + count <= end {
-            // Szybki przeskok przez całkowicie zajęte słowa.
+            // Fast skip over completely used words.
             if *self.word((start / BITS) as usize) == 0 {
                 start = ((start / BITS + 1) * BITS).next_multiple_of(align);
                 continue;
@@ -375,7 +375,7 @@ impl FrameAllocator {
     }
 }
 
-/// Fizyczny adres BootInfo/// Fizyczny adres BootInfo (DSB podaje wskaźnik z direct mapy).
+/// Physical address of BootInfo (the bootloader passes a pointer from the direct map).
 fn bootinfo_phys(boot: &BootInfo) -> u64 {
     (boot as *const BootInfo as u64).wrapping_sub(DIRECT_MAP_BASE)
 }
@@ -419,14 +419,14 @@ pub fn init(boot: &BootInfo) {
     let (conventional, conventional_len, conventional_bytes) =
         collect_conventional_ranges(boot);
 
-    // Bitmapa: ramki 0..koniec najwyższego zakresu RAM.
+    // Bitmap: frames 0..end of the highest RAM range.
     let mut ram_end = 0;
     for i in 0..conventional_len {
         ram_end = ram_end.max(conventional[i].end);
     }
     let frames = ram_end / PAGE_SIZE;
     let words = frames.div_ceil(BITS) as usize;
-    // P3: dwie bitmapy jedna za drugą – wolne (pula) i wydane (atomowa).
+    // Two bitmaps back to back – free (pool) and issued (atomic).
     let bitmap_bytes = (words * 8 * 2) as u64;
 
     let mut reservations = reservations;
@@ -486,9 +486,9 @@ pub fn init(boot: &BootInfo) {
         frames
     );
 
-    // M17: ramka poniżej 1 MiB na trampolinę startu AP (procesor po SIPI
-    // zaczyna w trybie rzeczywistym) – zarezerwowana od razu, zanim zwykłe
-    // alokacje zajmą niską pamięć.
+    // A frame below 1 MiB for the AP startup trampoline (after SIPI the processor
+    // starts in real mode) – reserved right away, before regular
+    // allocations take the low memory.
     let tramp = alloc.alloc_below(0x10_0000);
     if let Some(t) = tramp {
         mark_issued(t);
@@ -505,7 +505,7 @@ pub fn init(boot: &BootInfo) {
 
 static TRAMPOLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// M17: zarezerwowana ramka trampoliny AP (< 1 MiB); None – brak.
+/// Reserved AP trampoline frame (< 1 MiB); None – none.
 pub fn trampoline_frame() -> Option<u64> {
     match TRAMPOLINE.load(core::sync::atomic::Ordering::Relaxed) {
         0 => None,
@@ -513,15 +513,15 @@ pub fn trampoline_frame() -> Option<u64> {
     }
 }
 
-/// M17: ramka poniżej `limit` (np. tablice stron dla trybu 32-bit CR3).
+/// A frame below `limit` (e.g. page tables for 32-bit CR3 mode).
 pub fn alloc_frame_below(limit: u64) -> Option<u64> {
     let f = unsafe { with_allocator(|alloc| alloc.alloc_below(limit))? }?;
     mark_issued(f);
     Some(f)
 }
 
-// M5: przerwania wyłączone na czas operacji – handler IRQ nie może trafić
-// na bitmapę w połowie modyfikacji.  M17a.c: IrqSpinLock (też inne CPU).
+// Interrupts are disabled for the duration of the operation – an IRQ handler must not
+// see the bitmap half-modified.  IrqSpinLock also covers other CPUs.
 unsafe fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator) -> R) -> Option<R> {
     let mut slot = ALLOCATOR.lock();
     let alloc = slot.as_mut()?;
@@ -531,30 +531,30 @@ unsafe fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator) -> R) -> Option<
 }
 
 // ------------------------------------------------------------
-// v0.35.2: zapas pamięci tylko dla jądra
+// Kernel-only memory reserve
 // ------------------------------------------------------------
 
-/// Kopia `free_frames` z bitmapy czytana bez blokady (przybliżona – do
-/// sprawdzania zapasu przy każdym #PF procesu bez dotykania blokady).
+/// Copy of `free_frames` from the bitmap, read without the lock (approximate – for
+/// checking the reserve on every process #PF without touching the lock).
 static FREE_MIRROR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// Ile razy procesowi odmówiono ramki (zapas jądra).
+/// How many times a process was refused a frame (kernel reserve).
 static USER_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Wolne ramki bez blokady (bitmapa + zapasy CPU), przybliżenie.
+/// Free frames without the lock (bitmap + CPU reserves), approximate.
 pub fn free_frames_approx() -> u64 {
     use core::sync::atomic::Ordering::Relaxed;
     FREE_MIRROR.load(Relaxed) + FCACHED.iter().map(|c| c.load(Relaxed)).sum::<u64>()
 }
 
-/// Zapas ramek, których procesy nie dostaną: 1/16 pamięci, 16..256 MiB.
-/// Z niego żyje jądro (heap, stosy zadań, tablice) – proces zjadający pamięć
-/// dostaje błąd albo ginie, a jądro dalej działa.
+/// Reserve of frames that processes will not get: 1/16 of memory, 16..256 MiB.
+/// The kernel lives off it (heap, task stacks, tables) – a process eating memory
+/// gets an error or dies, while the kernel keeps running.
 pub fn user_reserve_frames() -> u64 {
     (NFRAMES.load(core::sync::atomic::Ordering::Relaxed) / 16).clamp(4096, 65536)
 }
 
-/// Ramka dla procesu (strony, tablice stron, pamięć współdzielona) – tylko
-/// ponad zapasem jądra.
+/// A frame for a process (pages, page tables, shared memory) – only
+/// above the kernel reserve.
 pub fn alloc_frame_user() -> Option<u64> {
     if free_frames_approx() < user_reserve_frames() {
         USER_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -563,7 +563,7 @@ pub fn alloc_frame_user() -> Option<u64> {
     alloc_frame()
 }
 
-/// (zapas w ramkach, odmowy).
+/// (reserve in frames, refusals).
 pub fn user_reserve_stats() -> (u64, u64) {
     (user_reserve_frames(), USER_DENIED.load(core::sync::atomic::Ordering::Relaxed))
 }
@@ -578,8 +578,8 @@ pub fn alloc_frame() -> Option<u64> {
     Some(f)
 }
 
-/// M11: `count` ciągłych ramek (np. bufor DMA), pierwsza wyrównana do
-/// `align` ramek (potęga dwójki; 1 = bez wymagań).  Zwraca adres pierwszej.
+/// `count` contiguous frames (e.g. a DMA buffer), the first aligned to
+/// `align` frames (power of two; 1 = no requirement).  Returns the address of the first.
 #[allow(dead_code)]
 pub fn alloc_frames(count: usize, align: usize) -> Option<u64> {
     let f = unsafe { with_allocator(|alloc| alloc.alloc_run(count as u64, align as u64))? }?;
@@ -590,8 +590,8 @@ pub fn alloc_frames(count: usize, align: usize) -> Option<u64> {
 // Returns true only when `frame` was a valid, currently allocated frame.
 // Invalid addresses and double-frees are rejected (one bit test - O(1)).
 pub fn free_frame(frame: u64) -> bool {
-    // P3: tylko ramka wydana przez alokator (bit „wydana”) – inaczej odmowa:
-    // double-free, adres spoza RAM-u, rezerwacja, ramka w czyimś zapasie.
+    // Only a frame issued by the allocator ("issued" bit) – otherwise refused:
+    // double-free, address outside RAM, reservation, frame in someone's reserve.
     if !take_issued(frame) {
         return false;
     }
@@ -611,20 +611,20 @@ pub fn free_frame(frame: u64) -> bool {
         .unwrap_or(false)
     };
     if !ok {
-        mark_issued(frame); // niespójność – nie zgub stanu
+        mark_issued(frame); // inconsistency – do not lose the state
     }
     ok
 }
 
-/// M19.e: `count` ciągłych ramek leżących całe poniżej adresu `limit`.
+/// `count` contiguous frames lying entirely below address `limit`.
 pub fn alloc_frames_below(count: usize, align: usize, limit: u64) -> Option<u64> {
     let f = unsafe { with_allocator(|alloc| alloc.alloc_run_below(count as u64, align as u64, limit / PAGE_SIZE))? }?;
     mark_issued_run(f, count as u64);
     Some(f)
 }
 
-/// Oddaje `count` ciągłych ramek od `first`.  Wszystko albo nic: gdy
-/// któraś ramka jest nieprawidłowa albo już wolna, nic się nie zmienia.
+/// Frees `count` contiguous frames starting at `first`.  All or nothing: if
+/// any frame is invalid or already free, nothing changes.
 #[allow(dead_code)]
 pub fn free_frames(first: u64, count: usize) -> bool {
     unsafe {
@@ -650,7 +650,7 @@ pub fn free_frames(first: u64, count: usize) -> bool {
     }
 }
 
-/// Adres fizyczny i rozmiar bitmapy (diagnostyka / testy).
+/// Physical address and size of the bitmap (diagnostics / tests).
 #[allow(dead_code)]
 pub fn bitmap_info() -> (u64, u64) {
     unsafe { with_allocator(|alloc| (alloc.bitmap_phys, alloc.frames)).unwrap_or((0, 0)) }
@@ -663,14 +663,14 @@ pub fn free_frame_count() -> u64 {
 }
 
 // ------------------------------------------------------------
-// P3: bitmapa „wydana” i zapasy ramek per CPU
+// "Issued" bitmap and per-CPU frame reserves
 // ------------------------------------------------------------
 
 static ISSUED: core::sync::atomic::AtomicPtr<core::sync::atomic::AtomicU64> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 static NFRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Słowo bitmapy „wydana” i maska bitu ramki; None – adres spoza bitmapy.
+/// Word of the "issued" bitmap and the frame's bit mask; None – address outside the bitmap.
 fn issued_bit(frame: u64) -> Option<(&'static core::sync::atomic::AtomicU64, u64)> {
     use core::sync::atomic::Ordering::Relaxed;
     let base = ISSUED.load(Relaxed);
@@ -697,7 +697,7 @@ fn is_issued(frame: u64) -> bool {
     issued_bit(frame).is_some_and(|(w, m)| w.load(core::sync::atomic::Ordering::Acquire) & m != 0)
 }
 
-/// Zdejmuje bit „wydana”; false – ramka nie była wydana (odmowa oddania).
+/// Clears the "issued" bit; false – the frame was not issued (free refused).
 fn take_issued(frame: u64) -> bool {
     issued_bit(frame).is_some_and(|(w, m)| w.fetch_and(!m, core::sync::atomic::Ordering::AcqRel) & m != 0)
 }
@@ -711,15 +711,15 @@ struct FCache {
 }
 
 struct FCacheCell(core::cell::UnsafeCell<FCache>);
-// Dostęp tylko z własnego CPU przy IF = 0.
+// Accessed only from the owning CPU with IF = 0.
 unsafe impl Sync for FCacheCell {}
 
 static FCACHES: crate::arch::x86_64::percpu::PerCpu<FCacheCell> =
     crate::per_cpu!(FCacheCell(core::cell::UnsafeCell::new(FCache { frames: [0; FCACHE_MAX], n: 0 })));
-/// Ile ramek leży w zapasie CPU (free_frame_count sumuje bez dotykania zapasów).
+/// How many frames are in the CPU reserve (free_frame_count sums them without touching the reserves).
 static FCACHED: crate::arch::x86_64::percpu::PerCpu<core::sync::atomic::AtomicU64> =
     crate::per_cpu!(core::sync::atomic::AtomicU64::new(0));
-/// Włączane po samotestach alokatora (sprawdzają dokładne liczniki bitmapy).
+/// Enabled after the allocator self-tests (they check exact bitmap counters).
 static FCACHE_ON: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn enable_frame_caches() {
@@ -733,7 +733,7 @@ fn cached_alloc() -> Option<u64> {
     let me = crate::arch::x86_64::cpu::id();
     let c = unsafe { &mut *FCACHES[me].0.get() };
     if c.n == 0 {
-        // Pusto: paczka spod blokady.
+        // Empty: a batch from under the lock.
         let mut slot = ALLOCATOR.lock();
         if let Some(alloc) = slot.as_mut() {
             while c.n < FCACHE_BATCH {
@@ -768,7 +768,7 @@ fn cached_free(frame: u64) {
     let me = crate::arch::x86_64::cpu::id();
     let c = unsafe { &mut *FCACHES[me].0.get() };
     if c.n == FCACHE_MAX {
-        // Pełno: paczka wraca do bitmapy jedną wizytą pod blokadą.
+        // Full: a batch goes back to the bitmap in a single visit under the lock.
         let mut slot = ALLOCATOR.lock();
         if let Some(alloc) = slot.as_mut() {
             while c.n > FCACHE_MAX - FCACHE_BATCH {
@@ -788,8 +788,8 @@ fn cached_free(frame: u64) {
     }
 }
 
-/// Czy zakres fizyczny [start, end) nachodzi na zwykły RAM (conventional
-/// memory z mapy UEFI).  Używane, żeby nie ustawić write-combining na RAM-ie.
+/// Whether the physical range [start, end) overlaps regular RAM (conventional
+/// memory from the UEFI map).  Used to avoid setting write-combining on RAM.
 pub fn overlaps_conventional(start: u64, end: u64) -> bool {
     unsafe {
         with_allocator(|alloc| {
@@ -805,10 +805,10 @@ pub fn overlaps_conventional(start: u64, end: u64) -> bool {
     }
 }
 
-/// Czy zakres fizyczny nachodzi na RAM albo rezerwację (kernel, stos,
-/// BootInfo, mapa pamięci, framebuffer).  M10: tylko takie strony 2 MiB
-/// trafiają do direct mapy – dziury (np. okno PCI pod 4 GiB) zostają
-/// puste, więc `map_mmio` może zmapować tam rejestry bez cache.
+/// Whether the physical range overlaps RAM or a reservation (kernel, stack,
+/// BootInfo, memory map, framebuffer).  Only such 2 MiB pages
+/// go into the direct map – holes (e.g. the PCI window below 4 GiB) stay
+/// empty, so `map_mmio` can map uncached registers there.
 pub fn overlaps_known_memory(start: u64, end: u64) -> bool {
     unsafe {
         with_allocator(|alloc| {
@@ -841,7 +841,7 @@ pub fn highest_physical_address() -> u64 {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -861,7 +861,7 @@ pub fn self_test() {
 
     let before = free_frame_count();
 
-    // 1. Alokacja trzech ramek.
+    // 1. Allocate three frames.
     let (f1, f2, f3) = match (alloc_frame(), alloc_frame(), alloc_frame()) {
         (Some(a), Some(b), Some(c)) => (a, b, c),
         _ => {
@@ -881,7 +881,7 @@ pub fn self_test() {
         f3
     );
 
-    // 2. Wyrównanie i unikalność.
+    // 2. Alignment and uniqueness.
     let mask = PAGE_SIZE - 1;
     check!(
         f1 & mask == 0 && f2 & mask == 0 && f3 & mask == 0,
@@ -890,16 +890,16 @@ pub fn self_test() {
     check!(f1 != f2 && f1 != f3 && f2 != f3, "duplicate allocation");
     serial_println!("[MM TEST] 2/8 alignment + uniqueness PASS");
 
-    // 3. Zwalnianie.
+    // 3. Freeing.
     let (ok1, ok2, ok3) = (free_frame(f1), free_frame(f2), free_frame(f3));
     check!(ok1 && ok2 && ok3, "free ({}, {}, {})", ok1, ok2, ok3);
     serial_println!("[MM TEST] 3/8 free PASS");
 
-    // 4. Ochrona przed double-free.
+    // 4. Double-free protection.
     check!(!free_frame(f1), "double-free was accepted");
     serial_println!("[MM TEST] 4/8 double-free protection PASS");
 
-    // 5. Pamięć zarezerwowana / poza zakresem.
+    // 5. Reserved / out-of-range memory.
     check!(!free_frame(0x0000), "null page accepted");
     let layout = kernel_layout();
     check!(!free_frame(layout.kernel_phys), "kernel memory accepted");
@@ -908,7 +908,7 @@ pub fn self_test() {
     check!(!free_frame(0x1234), "unaligned address accepted");
     serial_println!("[MM TEST] 5/8 reserved memory protection PASS");
 
-    // 6. Licznik wolnych ramek wraca do stanu początkowego.
+    // 6. The free frame counter returns to its initial value.
     let after = free_frame_count();
     check!(
         after == before,
@@ -918,7 +918,7 @@ pub fn self_test() {
     );
     serial_println!("[MM TEST] 6/8 free frame counter PASS ({} free)", after);
 
-    // 7. Ciągłe ramki (bufory DMA): 16 ramek = 64 KiB, wyrównane do 64 KiB.
+    // 7. Contiguous frames (DMA buffers): 16 frames = 64 KiB, aligned to 64 KiB.
     let base = match alloc_frames(16, 16) {
         Some(b) => b,
         None => {
@@ -929,7 +929,7 @@ pub fn self_test() {
     check!(base % (16 * PAGE_SIZE) == 0, "run {:#x} not 64 KiB aligned", base);
     check!(free_frame_count() == before - 16, "counter after alloc_frames");
     unsafe {
-        // Cały blok jest zwykłym RAM-em widocznym przez direct map.
+        // The whole block is regular RAM visible through the direct map.
         ptr::write_bytes(phys_to_virt(base) as *mut u8, 0x5A, 16 * PAGE_SIZE as usize);
         check!(
             *(phys_to_virt(base + 15 * PAGE_SIZE + 4095) as *const u8) == 0x5A,
@@ -950,8 +950,8 @@ pub fn self_test() {
     check!(free_frame_count() == before, "counter after free_frames");
     serial_println!("[MM TEST] 7/8 contiguous frames (16 x 4 KiB at {:#x}) PASS", base);
 
-    // 8. Błędy: zero ramek, za dużo, zła wielokrotność wyrównania,
-    //    częściowo wolny zakres (nic się nie zmienia), double-free w O(1).
+    // 8. Errors: zero frames, too many, bad alignment multiple,
+    //    partially free range (nothing changes), double-free in O(1).
     check!(alloc_frames(0, 1).is_none(), "alloc_frames(0) succeeded");
     check!(alloc_frames(usize::MAX / 2, 1).is_none(), "huge alloc_frames succeeded");
     check!(alloc_frames(2, 3).is_none(), "non-power-of-two align accepted");

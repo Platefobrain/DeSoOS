@@ -17,10 +17,10 @@ pub mod tlb;
 pub mod port;
 pub mod percpu;
 
-/// Ładuje GDT + TSS oraz IDT (wyjątki 0..31 + bramki IRQ 0x20..0x2F).
-/// Wołać jak najwcześniej (zaraz po serialu), żeby każdy późniejszy błąd
-/// kończył się czytelnym raportem zamiast cichego triple faulta.
-/// Przerwania sprzętowe pozostają wyłączone do M5 (`irq::init` + `sti`).
+/// Loads the GDT + TSS and the IDT (exceptions 0..31 + IRQ gates 0x20..0x2F).
+/// Call as early as possible (right after the serial port) so that any later fault
+/// ends with a readable report instead of a silent triple fault.
+/// Hardware interrupts stay disabled until `irq::init` + `sti`.
 pub fn init() {
     gdt::init();
     idt::init();

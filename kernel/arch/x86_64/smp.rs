@@ -1,29 +1,29 @@
-// M17: SMP – uruchamianie pozostałych rdzeni (AP, "application processors").
+// SMP – starting the remaining cores (APs, "application processors").
 //
-// Po starcie działa tylko procesor startowy (BSP).  Resztę budzi sekwencja
-// INIT – SIPI – SIPI wysłana przez Local APIC.  SIPI podaje stronę pamięci
-// (adres < 1 MiB), od której AP zaczyna – w 16-bitowym trybie rzeczywistym,
-// jak procesor z 1978 roku.  Dlatego potrzebna jest trampolina:
+// After boot only the bootstrap processor (BSP) runs.  The rest are woken by the
+// INIT – SIPI – SIPI sequence sent through the Local APIC.  SIPI gives a memory page
+// (address < 1 MiB) where the AP starts – in 16-bit real mode,
+// like a processor from 1978.  That is why a trampoline is needed:
 //
-//   1. tryb rzeczywisty (CS = strona trampoliny): GDT trampoliny, CR4.PAE,
-//      CR3 = tymczasowa PML4 (< 4 GiB, bo ładowana 32-bitowym rejestrem),
-//      EFER.LME (+ NXE), CR0.PG|PE naraz – od razu tryb 64-bit (bez
-//      przystanku w trybie chronionym), daleki skok do kodu 64-bit,
-//   2. 64 bity, wciąż na stronie trampoliny (mapa 1:1 pierwszych 2 MiB
-//      w tymczasowej PML4): stos AP i skok do `ap_entry` w kernelu
-//      (górna połowa – tymczasowa PML4 ma skopiowane wpisy kernela),
-//   3. `ap_entry` (Rust): CR3 kernela, numer CPU (TSC_AUX), Big Kernel
-//      Lock, własna GDT/TSS (IST), IDT, FPU/SMEP/SMAP/SYSCALL, PAT, LAPIC
-//      + timer LAPIC (100 Hz), "online" – i pętla idle.
+//   1. real mode (CS = trampoline page): trampoline GDT, CR4.PAE,
+//      CR3 = temporary PML4 (< 4 GiB, since it is loaded from a 32-bit register),
+//      EFER.LME (+ NXE), CR0.PG|PE at once – straight into 64-bit mode (no
+//      stop in protected mode), far jump to 64-bit code,
+//   2. 64-bit, still on the trampoline page (1:1 map of the first 2 MiB
+//      in the temporary PML4): AP stack and jump to `ap_entry` in the kernel
+//      (upper half – the temporary PML4 has the kernel entries copied),
+//   3. `ap_entry` (Rust): kernel CR3, CPU number (TSC_AUX), Big Kernel
+//      Lock, own GDT/TSS (IST), IDT, FPU/SMEP/SMAP/SYSCALL, PAT, LAPIC
+//      + LAPIC timer (100 Hz), "online" – and the idle loop.
 //
-// Stan kernela (scheduler, heap, VFS) chroni Big Kernel Lock (sched/bkl.rs):
-// kod kernela wykonuje jeden CPU naraz, procesy w ring 3 działają naprawdę
-// równolegle.  TLB: bez IPI "shootdown" – przy wielu CPU każde przełączenie
-// zadania przeładowuje CR3 (pełny flush), a heap nie oddaje stron (heap.rs).
-// Procesy są jednowątkowe, więc ich mapowania żyją w TLB tylko jednego CPU.
+// Kernel state (scheduler, heap, VFS) is protected by the Big Kernel Lock (sched/bkl.rs):
+// kernel code runs on one CPU at a time, ring-3 processes run truly
+// in parallel.  TLB: no "shootdown" IPI – with multiple CPUs every task
+// switch reloads CR3 (full flush), and the heap never returns pages (heap.rs).
+// Processes are single-threaded, so their mappings live in the TLB of only one CPU.
 //
-// Przerwania urządzeń (I/O APIC, MSI) idą do BSP; tick PIT (BSP) budzi
-// śpiące zadania; bezczynny AP budzi IPI RESCHED_VECTOR (sched::kick).
+// Device interrupts (I/O APIC, MSI) go to the BSP; the PIT tick (BSP) wakes
+// sleeping tasks; an idle AP is woken by the RESCHED_VECTOR IPI (sched::kick).
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -40,17 +40,17 @@ static COUNT: AtomicUsize = AtomicUsize::new(1);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
-/// Czy CPU `c` działa.
+/// Whether CPU `c` is running.
 pub fn online(c: usize) -> bool {
     c < MAX_CPUS && ONLINE[c].load(Ordering::Acquire)
 }
 
-/// Liczba działających procesorów.
+/// Number of running processors.
 pub fn online_count() -> usize {
     COUNT.load(Ordering::Relaxed)
 }
 
-/// Czy działa więcej niż jeden CPU.
+/// Whether more than one CPU is running.
 pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
@@ -59,81 +59,81 @@ pub fn panicking() -> bool {
     PANICKING.load(Ordering::Relaxed)
 }
 
-/// APIC ID procesora `c`.
+/// APIC ID of processor `c`.
 pub fn apic_id(c: usize) -> u32 {
     APIC_IDS[c % MAX_CPUS].load(Ordering::Relaxed)
 }
 
-/// (ticki timera LAPIC, odebrane IPI "resched") procesora `c` – `cpus`, testy.
+/// (LAPIC timer ticks, received "resched" IPIs) of processor `c` – `cpus`, tests.
 pub fn counters(c: usize) -> (u64, u64) {
     (TIMER_TICKS[c % MAX_CPUS].load(Ordering::Relaxed), RESCHED_IPIS[c % MAX_CPUS].load(Ordering::Relaxed))
 }
 
-/// Budzi CPU `c` (IPI) – sched::kick ustawił mu NEED_RESCHED.
+/// Wakes CPU `c` (IPI) – sched::kick has set NEED_RESCHED for it.
 pub fn send_resched(c: usize) {
     if online(c) && c != cpu::id() {
         lapic::send_ipi(apic_id(c), lapic::RESCHED_VECTOR);
     }
 }
 
-/// Z wektora TIMER_VECTOR (AP, co AP_TICK_MS).
+/// From TIMER_VECTOR (AP, every AP_TICK_MS).
 pub fn on_ap_timer() {
     TIMER_TICKS[cpu::id()].fetch_add(1, Ordering::Relaxed);
     crate::sched::ap_tick(lapic::AP_TICK_MS);
 }
 
-/// Z wektora RESCHED_VECTOR (przełączenie zrobi irq::after_interrupt).
+/// From RESCHED_VECTOR (the switch is done by irq::after_interrupt).
 pub fn on_resched_ipi() {
     RESCHED_IPIS[cpu::id()].fetch_add(1, Ordering::Relaxed);
 }
 
 // ------------------------------------------------------------
-// M17a: watchdog zawieszeń (jak "NMI watchdog" w Linuksie)
+// Hang watchdog (like the "NMI watchdog" in Linux)
 // ------------------------------------------------------------
 //
-// Zawieszenie = zegar PIT (przerwanie na CPU 0) przestaje iść przez
-// WATCHDOG_MS.  Tick liczony jest przed BKL (time::pit_tick_early), więc to
-// znaczy: CPU 0 nie dostaje przerwań zegara (wyłączone przerwania, zawieszony
-// CPU) – a nie tylko "przerwanie czeka w kolejce do BKL".  Sprawdza to każdy CPU, który długo czeka – na Big Kernel
-// Lock albo na spinlock (`watchdog_poll` w ich pętlach; przy zawieszeniu to
-// właśnie tam stoją pozostałe CPU) – oraz tick timera LAPIC (przed BKL).
-// Pierwszy, który zauważy, wysyła NMI do wszystkich (dochodzi także przy
-// wyłączonych przerwaniach): każdy CPU zapisuje swój RIP, a zgłaszający
-// wypisuje stan BKL, bilety i adresy (addr2line -e build/kernel.elf <adres>).
-// Raport raz na zawieszenie (na dany numer ticku); pełne – pierwsze 3.
+// A hang = the PIT clock (interrupt on CPU 0) stops advancing for
+// WATCHDOG_MS.  The tick is counted before the BKL (time::pit_tick_early), so this
+// means: CPU 0 receives no timer interrupts (interrupts disabled, CPU
+// hung) – not just "the interrupt is queued for the BKL".  It is checked by every CPU that waits long – for the Big Kernel
+// Lock or for a spinlock (`watchdog_poll` in their loops; during a hang that is
+// exactly where the other CPUs are stuck) – and by the LAPIC timer tick (before the BKL).
+// The first one to notice sends an NMI to everyone (delivered even with
+// interrupts disabled): each CPU records its RIP, and the reporting CPU
+// prints the BKL state, tickets and addresses (addr2line -e build/kernel.elf <address>).
+// One report per hang (per tick number); full reports only for the first 3.
 
 
-/// Próg zawieszenia (jak „soft lockup” w Linuksie: ~10–20 s).  Czas mierzy
-/// clock.rs (HPET – wspólny dla CPU; TSC tylko bez HPET).
+/// Hang threshold (like the "soft lockup" in Linux: ~10–20 s).  Time is measured by
+/// clock.rs (HPET – shared by all CPUs; TSC only without HPET).
 const WATCHDOG_MS: u64 = 10_000;
 static LAST_RIP: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static NMI_RIP: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static NMI_FLAGS: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
-/// NMI zamówione przez watchdog dla danego CPU (kasuje je ten CPU w handlerze).
-/// Per CPU, a nie jedna flaga z oknem czasowym: NMI, które dojdzie po
-/// raporcie, też musi zostać rozpoznane (inaczej poszłoby zwykłą ścieżką
-/// i chciało BKL, na który ten CPU już czeka – zakleszczenie z samym sobą).
+/// NMI requested by the watchdog for a given CPU (cleared by that CPU in the handler).
+/// Per CPU rather than a single flag with a time window: an NMI arriving after
+/// the report must also be recognized (otherwise it would take the normal path
+/// and want the BKL this CPU is already waiting for – a deadlock with itself).
 static NMI_EXPECTED: crate::arch::x86_64::percpu::PerCpu<AtomicBool> = crate::per_cpu!(AtomicBool::new(false));
-/// Per CPU: ostatnio widziany tick PIT i znacznik czasu (clock.rs) chwili,
-/// gdy go zobaczył.  Tylko dane własnego CPU – wspólna para (tick, czas)
-/// pisana przez wiele CPU rozjeżdżała się i dawała fałszywe "zegar stoi".
+/// Per CPU: the last seen PIT tick and the timestamp (clock.rs) of the moment
+/// it was seen.  Only the CPU's own data – a shared (tick, time) pair
+/// written by many CPUs drifted apart and gave false "clock stopped" reports.
 static WD_TICK: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(u64::MAX));
 static WD_STAMP: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static WD_REPORTED_TICK: AtomicU64 = AtomicU64::new(u64::MAX);
 static WD_REPORTS: AtomicU64 = AtomicU64::new(0);
-/// Raporty już wypisane (testy czekają na wypisanie, nie na początek raportu).
+/// Reports already printed (tests wait for the printing to finish, not for the report to start).
 static WD_DONE: AtomicU64 = AtomicU64::new(0);
 static NMI_STAMP: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
-/// Pełnych raportów najwyżej tyle na uruchomienie (potem jedna linia).
+/// At most this many full reports per boot (then one line).
 const WD_FULL_REPORTS: u64 = 3;
 
-/// Z exception_dispatch, przed BKL: tick zegara (PIT na BSP, LAPIC na AP).
+/// From exception_dispatch, before the BKL: timer tick (PIT on the BSP, LAPIC on APs).
 pub fn watchdog_tick(rip: u64) {
     LAST_RIP[cpu::id()].store(rip, Ordering::Relaxed);
     watchdog_poll();
 }
 
-/// Sprawdza, czy zegar stoi (woła się z pętli czekania; tanie).
+/// Checks whether the clock has stopped (called from wait loops; cheap).
 pub fn watchdog_poll() {
     if !active() {
         return;
@@ -148,7 +148,7 @@ pub fn watchdog_poll() {
     if clock::elapsed_us(WD_STAMP[me].load(Ordering::Relaxed)) < WATCHDOG_MS * 1000 {
         return;
     }
-    // Jeden raport na zawieszenie (pierwszy CPU, który to zobaczy).
+    // One report per hang (the first CPU that notices it).
     let prev = WD_REPORTED_TICK.load(Ordering::Relaxed);
     if prev == t || WD_REPORTED_TICK.compare_exchange(prev, t, Ordering::AcqRel, Ordering::Relaxed).is_err() {
         return;
@@ -156,8 +156,8 @@ pub fn watchdog_poll() {
     watchdog_report(t);
 }
 
-/// Z exception_dispatch: NMI wysłane przez watchdog (bez BKL).  `true` =
-/// obsłużone.
+/// From exception_dispatch: an NMI sent by the watchdog (without the BKL).  `true` =
+/// handled.
 pub fn watchdog_nmi(rip: u64, rflags: u64) -> bool {
     if !NMI_EXPECTED[cpu::id()].swap(false, Ordering::AcqRel) {
         return false;
@@ -168,7 +168,7 @@ pub fn watchdog_nmi(rip: u64, rflags: u64) -> bool {
     true
 }
 
-/// Ile raportów zawieszenia było (testy).
+/// How many hang reports there were (tests).
 #[allow(dead_code)]
 pub fn watchdog_reports() -> u64 {
     WD_DONE.load(Ordering::Acquire)
@@ -180,10 +180,10 @@ fn watchdog_report(tick: u64) {
     lockup_dump(format_args!("PIT clock stuck at tick {} for {} ms (seen by CPU {})", tick, WATCHDOG_MS, me));
 }
 
-/// M17a: CPU czeka na Big Kernel Lock dłużej niż BKL_WAIT_REPORT_MS (z
-/// bkl::acquire, zegar clock.rs).  Zegar może przy tym iść (tick liczony
-/// przed BKL), więc samo "zegar stoi" tego nie złapie: zagłodzenie albo
-/// bardzo wolne przekazywanie BKL.
+/// A CPU waits for the Big Kernel Lock longer than BKL_WAIT_REPORT_MS (from
+/// bkl::acquire, clock.rs time).  The clock may keep running meanwhile (the tick is counted
+/// before the BKL), so "clock stopped" alone will not catch it: starvation or
+/// very slow BKL hand-over.
 pub const BKL_WAIT_REPORT_MS: u64 = 10_000;
 
 #[cold]
@@ -194,8 +194,8 @@ pub fn bkl_wait_report(ticket: u32, waited_ms: u64) {
     lockup_dump(format_args!("CPU {} waits {} ms for the Big Kernel Lock (ticket {})", cpu::id(), waited_ms, ticket));
 }
 
-/// Pełny raport: nagłówek, stan BKL, NMI do pozostałych CPU (RIP, IF,
-/// czas odpowiedzi), licznik wywłaszczania i spinlocki każdego CPU.
+/// Full report: header, BKL state, NMI to the other CPUs (RIP, IF,
+/// response time), preemption counter and spinlocks of each CPU.
 #[cold]
 fn lockup_dump(what: core::fmt::Arguments) {
     let n = WD_REPORTS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -220,7 +220,7 @@ fn lockup_dump(what: core::fmt::Arguments) {
         core::hint::spin_loop();
     }
     let (next, serving, owner) = crate::sched::bkl::state();
-    // Bez blokad konsoli – stan i tak jest zepsuty.
+    // No console locks – the state is broken anyway.
     crate::serial_println!(
         "[WATCHDOG] {}; BKL: next {} serving {} owner CPU {}",
         what,
@@ -247,8 +247,8 @@ fn lockup_dump(what: core::fmt::Arguments) {
                 crate::sched::current_id_on(c)
             );
             let rip = NMI_RIP[c].load(Ordering::Relaxed);
-            // Po ilu us CPU obsłużył NMI (wspólny zegar clock.rs): na
-            // sprzęcie mikrosekundy; dużo więcej = CPU się nie wykonywał.
+            // After how many us the CPU handled the NMI (shared clock.rs time): on
+            // hardware microseconds; much more = the CPU was not executing.
             let lat = if rip == 0 { 0 } else { clock::diff_us(sent, NMI_STAMP[c].load(Ordering::Relaxed)) };
             crate::serial_println!(
                 "[WATCHDOG]   CPU {}: NMI answered after {} us{}",
@@ -270,8 +270,8 @@ fn lockup_dump(what: core::fmt::Arguments) {
     WD_DONE.fetch_add(1, Ordering::Release);
 }
 
-/// Panic: zatrzymuje pozostałe procesory (żeby nie pisały po ekranie ani
-/// nie psuły stanu, który właśnie raportujemy).
+/// Panic: stops the other processors (so they do not write over the screen or
+/// corrupt the state we are reporting).
 pub fn halt_others() {
     if !PANICKING.swap(true, Ordering::SeqCst) && active() {
         lapic::send_ipi_others(lapic::HALT_VECTOR);
@@ -279,7 +279,7 @@ pub fn halt_others() {
 }
 
 // ------------------------------------------------------------
-// Trampolina (kopiowana pod adres < 1 MiB)
+// Trampoline (copied to an address < 1 MiB)
 // ------------------------------------------------------------
 
 global_asm!(r#"
@@ -359,7 +359,7 @@ unsafe extern "C" {
     static ap_tramp_end: u8;
 }
 
-/// Dane trampoliny (układ = blok `ap_tramp_data` wyżej).
+/// Trampoline data (layout = the `ap_tramp_data` block above).
 #[repr(C, packed)]
 struct TrampData {
     gdt: [u64; 3],
@@ -383,9 +383,9 @@ const PTE_PRESENT: u64 = 1;
 const PTE_WRITABLE: u64 = 2;
 const PTE_HUGE: u64 = 1 << 7;
 
-/// Tymczasowa PML4 (< 4 GiB): wpisy kernela (256..511) z PML4 kernela +
-/// mapa 1:1 pierwszych 2 MiB (strona 2 MiB) dla trampoliny.
-/// Zwraca (pml4, pdpt, pd) – fizyczne, do zwolnienia po starcie AP.
+/// Temporary PML4 (< 4 GiB): kernel entries (256..511) from the kernel PML4 +
+/// a 1:1 map of the first 2 MiB (one 2 MiB page) for the trampoline.
+/// Returns (pml4, pdpt, pd) – physical, to be freed after the AP has started.
 fn build_temp_tables() -> Option<(u64, u64, u64)> {
     use crate::memory::{alloc_frame_below, free_frame, kernel_cr3, phys_to_virt};
     let pml4 = alloc_frame_below(0x1_0000_0000)?;
@@ -416,8 +416,8 @@ fn build_temp_tables() -> Option<(u64, u64, u64)> {
     Some((pml4, pdpt, pd))
 }
 
-/// Uruchamia wszystkie rdzenie z MADT.  BSP, po starcie schedulera (czeka
-/// przez sleep_ms – na ten czas oddaje BKL, który AP musi wziąć).
+/// Starts all cores from the MADT.  On the BSP, after the scheduler starts (waits
+/// with sleep_ms – meanwhile it releases the BKL, which the AP must take).
 pub fn init() {
     ONLINE[0].store(true, Ordering::SeqCst);
     APIC_IDS[0].store(lapic::bsp_id() as u32, Ordering::SeqCst);
@@ -452,7 +452,7 @@ pub fn init() {
         return;
     };
 
-    // Kod trampoliny pod `tramp`.
+    // Trampoline code at `tramp`.
     let start = core::ptr::addr_of!(ap_tramp_start) as u64;
     let end = core::ptr::addr_of!(ap_tramp_end) as u64;
     let data_off = core::ptr::addr_of!(ap_tramp_data) as u64 - start;
@@ -483,8 +483,8 @@ pub fn init() {
             break;
         }
         let c = next;
-        // GDT/TSS + stos idle (raz na numer – po nieudanym starcie numer
-        // przechodzi na następny rdzeń).
+        // GDT/TSS + idle stack (once per number – after a failed start the number
+        // moves on to the next core).
         if !idle_ready {
             if !super::gdt::prepare_cpu(c) {
                 serial_println!("[SMP] no memory for CPU {} stacks", c);
@@ -520,7 +520,7 @@ pub fn init() {
             idle_ready = false;
         } else {
             serial_println!("[SMP] CPU with APIC id {} did not start - left halted", id);
-            lapic::send_init(id); // na wypadek, gdyby był w połowie trampoliny
+            lapic::send_init(id); // in case it was halfway through the trampoline
             crate::time::sleep_ms(10);
         }
     }
@@ -534,8 +534,8 @@ pub fn init() {
 
     let n = online_count();
     if n > 1 {
-        // M17a.b: bez wymuszonego przeładowania CR3 przy każdym przełączeniu –
-        // zmiany górnej połowy unieważnia TLB shootdown (tlb.rs).
+        // No forced CR3 reload on every switch –
+        // changes to the upper half are invalidated by TLB shootdown (tlb.rs).
         ACTIVE.store(true, Ordering::SeqCst);
     }
     serial_println!(
@@ -545,7 +545,7 @@ pub fn init() {
     );
 }
 
-/// Pierwszy kod AP w Rust (z trampoliny; przerwania wyłączone, stos idle).
+/// First AP code in Rust (from the trampoline; interrupts disabled, idle stack).
 extern "sysv64" fn ap_entry(c: u64) -> ! {
     let c = c as usize;
     unsafe {
@@ -553,11 +553,11 @@ extern "sysv64" fn ap_entry(c: u64) -> ! {
     }
     cpu::set_id(c);
     crate::sched::bkl::acquire_tagged(&crate::sched::bkl::tag::AP_START);
-    // M17a.b: czekając na BKL ten CPU mógł zapamiętać w TLB wpisy, które BSP
-    // w tym czasie zdjął (nie był jeszcze online – shootdown go pominął).
-    // Zmiany górnej połowy są dziś pod BKL, więc od tej chwili do ONLINE nikt
-    // ich nie robi.  (Gdy paging dostanie własną blokadę – M17a.c – ONLINE
-    // trzeba ustawić przed tym flushem.)
+    // While waiting for the BKL this CPU may have cached TLB entries that the BSP
+    // removed in the meantime (it was not online yet – the shootdown skipped it).
+    // Upper-half changes are currently made under the BKL, so nobody makes them
+    // from now until ONLINE.  (Once paging gets its own lock, ONLINE
+    // must be set before this flush.)
     super::tlb::flush_all_local();
 
     super::gdt::load_cpu(c);

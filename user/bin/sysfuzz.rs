@@ -1,18 +1,18 @@
-// Fuzzer wywołań systemowych: dzieci wołają losowe syscalle z losowymi i
-// skrajnymi argumentami (0, -1, 2^64-1, adresy jądra, prawie-przepełnienia,
-// prawdziwy bufor procesu z złą długością, losowe numery uchwytów...).
-// Program może dostać dowolny błąd albo zginąć (#PF we własnej pamięci),
-// ale JĄDRO NIE MOŻE PAŚĆ ani się zawiesić.
+// System call fuzzer: children invoke random syscalls with random and
+// extreme arguments (0, -1, 2^64-1, kernel addresses, near-overflows,
+// a real process buffer with a wrong length, random handle numbers...).
+// The program may get any error or die (#PF in its own memory),
+// but the KERNEL MUST NOT CRASH or hang.
 //
-// Dzieci startują bez żadnych uchwytów (spawn_ex z pustą mapą): bez konsoli,
-// HW_ROOT, SYSCTL, INPUT, BLK – nie mogą nic zepsuć poza sobą.  Pomijane:
-// exit, spawn / spawn_ex (bomba procesów – limity w kolejnym kroku), kill
-// (mogłoby zabić rodzica albo init).  Dziecko, które utknie w czekającym
-// wywołaniu (sleep, wait_many, recv), rodzic zabija po terminie – to też
-// sprawdza sprzątanie po procesie w trakcie syscalla.
+// Children start without any handles (spawn_ex with an empty map): no console,
+// HW_ROOT, SYSCTL, INPUT, BLK – they cannot break anything but themselves.  Skipped:
+// exit, spawn / spawn_ex (fork bomb – limits are handled separately), kill
+// (could kill the parent or init).  A child stuck in a blocking
+// call (sleep, wait_many, recv) is killed by the parent after a deadline – this also
+// exercises cleanup of a process in the middle of a syscall.
 //
-// `sysfuzz [dzieci] [wywołań]` – wynik: "sysfuzz: N children, M calls, ..."
-// i kod 0.  Tryb dziecka: `sysfuzz child <ziarno> <wywołań>`.
+// `sysfuzz [children] [calls]` – result: "sysfuzz: N children, M calls, ..."
+// and exit code 0.  Child mode: `sysfuzz child <seed> <calls>`.
 #![no_std]
 #![no_main]
 
@@ -24,11 +24,11 @@ use desoos::*;
 
 entry!(main);
 
-/// Najwyższy numer wywołania + kilka nieistniejących (ENOSYS).
+/// Highest syscall number + a few nonexistent ones (ENOSYS).
 const MAX_SYS: u64 = 56;
-/// Ile dzieci naraz (SMP: kilka CPU w jądrze jednocześnie).
+/// How many children at once (SMP: several CPUs in the kernel at the same time).
 const PARALLEL: usize = 8;
-/// Termin jednego dziecka – potem kill.
+/// Deadline for one child – then kill.
 const CHILD_MS: u64 = 4000;
 
 struct Rng(u64);
@@ -54,7 +54,7 @@ fn buf_ptr() -> u64 {
     core::ptr::addr_of!(BUF) as u64
 }
 
-/// Jeden argument: częściej wartości „na granicy” niż całkiem losowe.
+/// One argument: "boundary" values more often than fully random ones.
 fn arg(r: &mut Rng) -> u64 {
     let b = buf_ptr();
     match r.below(20) {
@@ -69,12 +69,12 @@ fn arg(r: &mut Rng) -> u64 {
         8 => b,
         9 => b + r.below(16384),
         10 => b + 16384 - r.below(64),
-        11 => r.below(70),        // numery uchwytów
-        12 => r.below(8),         // istniejące uchwyty (obiekty z początku)
+        11 => r.below(70),        // handle numbers
+        12 => r.below(8),         // existing handles (objects created at the start)
         13 => 4096,
         14 => 1 << 32,
         15 => r.below(1 << 20),
-        16 => 0x0000_1000_0000_0000 + (r.below(1 << 16) << 12), // obszar mmap
+        16 => 0x0000_1000_0000_0000 + (r.below(1 << 16) << 12), // mmap area
         17 => (u32::MAX as u64) + r.below(16),
         _ => r.next(),
     }
@@ -82,7 +82,7 @@ fn arg(r: &mut Rng) -> u64 {
 
 fn child(seed: u64, calls: u64) -> i32 {
     let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    // Bufor: losowe bajty, czasem krótki napis ASCII (ścieżki, nazwy w sysinfo).
+    // Buffer: random bytes, sometimes a short ASCII string (paths, sysinfo names).
     unsafe {
         let p = core::ptr::addr_of_mut!(BUF) as *mut u8;
         for i in 0..16384 {
@@ -93,16 +93,16 @@ fn child(seed: u64, calls: u64) -> i32 {
             };
         }
     }
-    // Prawdziwe obiekty pod małymi numerami uchwytów – żeby wywołania
-    // przechodziły dalej niż „zły uchwyt” (potoki, kanały, pamięć wspólna, plik).
+    // Real objects under small handle numbers – so that calls
+    // get further than "bad handle" (pipes, channels, shared memory, a file).
     let _ = pipe();
     let _ = channel_create();
     let _ = channel_create();
     let _ = shm_create(8192);
     let _ = open("f", O_READ | O_WRITE | O_CREATE);
     let start = uptime_ms();
-    // Które wywołania choć raz się udały (>= 0) – miara, że fuzzer dociera
-    // dalej niż do pierwszego sprawdzenia argumentów.
+    // Which calls succeeded at least once (>= 0) – a measure of the fuzzer getting
+    // further than the first argument check.
     let mut hit = [false; MAX_SYS as usize + 1];
     for _ in 0..calls {
         let n = r.below(MAX_SYS + 1);
@@ -113,7 +113,7 @@ fn child(seed: u64, calls: u64) -> i32 {
         for x in a.iter_mut() {
             *x = arg(&mut r);
         }
-        // Nie przespać całego terminu na jednym sleep.
+        // Do not sleep through the whole deadline in one sleep.
         if n == SYS_SLEEP && r.below(1000) != 0 {
             a[0] %= 20;
         }
@@ -124,7 +124,7 @@ fn child(seed: u64, calls: u64) -> i32 {
             break;
         }
     }
-    // Kod wyjścia = liczba różnych udanych wywołań (rodzic sumuje).
+    // Exit code = number of distinct successful calls (the parent sums them up).
     hit.iter().filter(|&&h| h).count() as i32
 }
 
@@ -133,11 +133,11 @@ const ELF_PATH: &str = "/fuzz-elf";
 static mut ELF: [u8; 65536] = [0; 65536];
 static mut MUT: [u8; 65536] = [0; 65536];
 
-/// Faza 2: zepsute pliki ELF.  Proces może zapisać dowolny plik i go
-/// uruchomić, więc parser i loader ELF to też wejście od programu.  Kopie
-/// /bin/hello z losowo zmienionymi bajtami (głównie w nagłówkach) –
-/// spawn ma je odrzucić albo uruchomić; jądro nie może paść.
-/// (odrzucone, uruchomione, zabite po terminie)
+/// Phase 2: corrupted ELF files.  A process can write any file and
+/// run it, so the ELF parser and loader are also program input.  Copies of
+/// /bin/hello with randomly changed bytes (mostly in the headers) –
+/// spawn must reject or run them; the kernel must not crash.
+/// (rejected, started, killed after the deadline)
 fn elf_phase(rounds: u64, seed: u64) -> Result<(u64, u64, u64), &'static str> {
     let fd = open("/bin/hello", O_READ);
     if fd < 0 {
@@ -163,7 +163,7 @@ fn elf_phase(rounds: u64, seed: u64) -> Result<(u64, u64, u64), &'static str> {
         m[..len].copy_from_slice(&elf[..len]);
         let mut mlen = len;
         for _ in 0..1 + r.below(8) {
-            // 3/4 zmian w pierwszych 256 bajtach (nagłówek ELF + nagłówki programu).
+            // 3/4 of the changes in the first 256 bytes (ELF header + program headers).
             let at = if r.below(4) != 0 { r.below(256) } else { r.below(len as u64) } as usize;
             m[at] = match r.below(4) {
                 0 => 0,
@@ -172,9 +172,9 @@ fn elf_phase(rounds: u64, seed: u64) -> Result<(u64, u64, u64), &'static str> {
             };
         }
         if r.below(10) == 0 {
-            mlen = r.below(len as u64) as usize; // ucięty plik
+            mlen = r.below(len as u64) as usize; // truncated file
         }
-        // Własna ścieżka (w /fuzz dzieci mogły zostawić katalog o tej nazwie).
+        // Own path (children may have left a directory with this name in /fuzz).
         let fd = open(ELF_PATH, O_WRITE | O_CREATE | O_TRUNC);
         if fd < 0 {
             return Err("cannot create /fuzz-elf");
@@ -242,13 +242,13 @@ fn main(args: Args) -> i32 {
         let n = cstr(calls, &mut b);
         (b, n)
     };
-    // (pid, start) aktywnych dzieci
+    // (pid, start) of active children
     let mut live: [(i64, u64); PARALLEL] = [(0, 0); PARALLEL];
     let (mut started, mut done, mut killed, mut faulted, mut ok) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut kinds_max = 0u64;
     let t0 = uptime_ms();
     while done < children {
-        // Uzupełnij wolne miejsca.
+        // Fill the free slots.
         for slot in live.iter_mut() {
             if slot.0 == 0 && started < children {
                 let n = cstr(started + 1, &mut cbuf);
@@ -263,7 +263,7 @@ fn main(args: Args) -> i32 {
                 started += 1;
             }
         }
-        // Zakończone dzieci; za długie – kill.
+        // Finished children; too long-running ones – kill.
         for slot in live.iter_mut() {
             if slot.0 == 0 {
                 continue;
@@ -279,8 +279,8 @@ fn main(args: Args) -> i32 {
                     }
                 }
                 Ok((_, st)) => {
-                    // Sygnał (kill przez jądro, #PF we własnej pamięci) albo
-                    // zwykły koniec z liczbą udanych rodzajów wywołań.
+                    // Signal (kill by the kernel, #PF in its own memory) or
+                    // a normal exit with the number of successful call kinds.
                     if st & STATUS_SIGNALED != 0 {
                         faulted += 1
                     } else {
@@ -298,7 +298,7 @@ fn main(args: Args) -> i32 {
         }
         sleep_ms(5);
     }
-    // Pliki o losowych nazwach w /fuzz sprząta wywołujący (test w jądrze).
+    // Randomly named files in /fuzz are cleaned up by the caller (the in-kernel test).
     let elf_rounds = num(&args, 3, 300);
     let (rej, ran, ek) = match elf_phase(elf_rounds, 0x5eed + children) {
         Ok(v) => v,

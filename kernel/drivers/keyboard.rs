@@ -1,19 +1,19 @@
-// M6: klawiatura PS/2 – IRQ1, dekoder kodów zestawu 1, diody.
+// PS/2 keyboard – IRQ1, scan code set 1 decoder, LEDs.
 //
-// Handler IRQ1 czyta bajt z kontrolera, dekoduje go na `KeyCode`
-// (+ wciśnięty/puszczony) i przekazuje do `input::handle_key`.  Układ
-// klawiatury, modyfikatory i kolejka zdarzeń są w `input.rs` – wspólne
-// z przyszłą klawiaturą USB (M19).
+// The IRQ1 handler reads a byte from the controller, decodes it into a `KeyCode`
+// (+ pressed/released) and passes it to `input::handle_key`.  The keyboard
+// layout, modifiers and the event queue live in `input.rs` – shared
+// with the USB keyboard.
 //
-// Zestaw 1 (po translacji w 8042):
-//   * zwykły klawisz: 1 bajt, bit 7 = puszczenie (make | 0x80),
-//   * 0xE0 xx: klawisze rozszerzone (strzałki, prawy Ctrl/Alt, Delete...),
-//   * 0xE0 0x2A / 0xE0 0xAA...: "sztuczne" Shifty przy PrintScreen – ignorowane,
-//   * 0xE1 1D 45 E1 9D C5: Pause (tylko wciśnięcie, bez puszczenia).
+// Set 1 (after translation in the 8042):
+//   * ordinary key: 1 byte, bit 7 = release (make | 0x80),
+//   * 0xE0 xx: extended keys (arrows, right Ctrl/Alt, Delete...),
+//   * 0xE0 0x2A / 0xE0 0xAA...: "fake" Shifts around PrintScreen – ignored,
+//   * 0xE1 1D 45 E1 9D C5: Pause (press only, no release).
 //
-// Diody (Caps/Num/Scroll Lock): komenda 0xED + bajt stanu.  Każdy bajt
-// klawiatura potwierdza ACK (0xFA), który przychodzi jako zwykłe IRQ1 –
-// dlatego wysyłanie jest małą maszyną stanów w handlerze.
+// LEDs (Caps/Num/Scroll Lock): command 0xED + state byte.  The keyboard
+// acknowledges every byte with ACK (0xFA), which arrives as an ordinary IRQ1 –
+// that is why sending is a small state machine in the handler.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,11 +32,11 @@ enum Led {
 }
 
 struct Decoder {
-    extended: bool,    // był prefiks 0xE0
-    pause_left: u8,    // ile bajtów sekwencji Pause (0xE1 ...) jeszcze zostało
+    extended: bool,    // a 0xE0 prefix was seen
+    pause_left: u8,    // how many bytes of the Pause sequence (0xE1 ...) are left
     led: Led,
-    led_dirty: bool,   // stan blokad zmienił się w trakcie wysyłania
-    last_sent: u8,     // do ponowienia po RESEND
+    led_dirty: bool,   // lock state changed while sending
+    last_sent: u8,     // for retrying after RESEND
 }
 
 static mut DECODER: Decoder = Decoder {
@@ -51,7 +51,7 @@ static BYTES: AtomicU64 = AtomicU64::new(0);
 static SCANCODES: AtomicU64 = AtomicU64::new(0);
 static UNKNOWN: AtomicU64 = AtomicU64::new(0);
 
-/// Zestaw 1, bez prefiksu.
+/// Set 1, no prefix.
 fn base_key(code: u8) -> Option<KeyCode> {
     use KeyCode::*;
     Some(match code {
@@ -80,7 +80,7 @@ fn base_key(code: u8) -> Option<KeyCode> {
     })
 }
 
-/// Zestaw 1, po prefiksie 0xE0.
+/// Set 1, after the 0xE0 prefix.
 fn extended_key(code: u8) -> Option<KeyCode> {
     use KeyCode::*;
     Some(match code {
@@ -108,11 +108,11 @@ fn extended_key(code: u8) -> Option<KeyCode> {
 }
 
 fn decoder() -> &'static mut Decoder {
-    // Dostęp tylko z handlera IRQ1 (IF=0) i z init przy zamaskowanym IRQ1.
+    // Accessed only from the IRQ1 handler (IF=0) and from init with IRQ1 masked.
     unsafe { &mut *core::ptr::addr_of_mut!(DECODER) }
 }
 
-/// Dekoduje jeden bajt; `Some` = pełny kod klawisza.
+/// Decodes one byte; `Some` = a complete key code.
 fn decode(d: &mut Decoder, byte: u8) -> Option<(KeyCode, bool)> {
     if d.pause_left > 0 {
         d.pause_left -= 1;
@@ -136,7 +136,7 @@ fn decode(d: &mut Decoder, byte: u8) -> Option<(KeyCode, bool)> {
     let pressed = byte & 0x80 == 0;
 
     let key = if extended {
-        // Sztuczne Shifty dookoła PrintScreen / klawiszy nawigacji.
+        // Fake Shifts around PrintScreen / navigation keys.
         if code == 0x2A || code == 0x36 {
             return None;
         }
@@ -174,7 +174,7 @@ fn start_led_update(d: &mut Decoder) {
     }
 }
 
-/// Obsługa ACK/RESEND od klawiatury.  `true` = bajt był odpowiedzią.
+/// Handles ACK/RESEND from the keyboard.  `true` = the byte was a response.
 fn handle_reply(d: &mut Decoder, byte: u8) -> bool {
     match byte {
         ps2::KBD_ACK => {
@@ -200,7 +200,7 @@ fn handle_reply(d: &mut Decoder, byte: u8) -> bool {
             }
             true
         }
-        // Echo, błędy / przepełnienie bufora klawiatury.
+        // Echo, errors / keyboard buffer overflow.
         0xEE | 0x00 | 0xFF => true,
         _ => false,
     }
@@ -211,17 +211,17 @@ fn on_irq(_irq: u8) {
     take_byte();
 }
 
-/// M16b: na części laptopów (EC udający 8042, przerwania przez IOAPIC)
-/// IRQ1 nie dochodzi przez PIC, choć dane w porcie 0x60 są.  Dlatego tick
-/// zegara co POLL_TICKS ms sprawdza też port sam (w przerwaniu zegara –
-/// bez wyścigu z handlerem IRQ1).  Gdy IRQ1 działa, port jest już pusty.
+/// On some laptops (an EC emulating the 8042, interrupts via the IOAPIC)
+/// IRQ1 does not arrive through the PIC even though data is present in port 0x60.  So the
+/// timer tick also checks the port itself every POLL_TICKS ms (in the timer interrupt –
+/// no race with the IRQ1 handler).  When IRQ1 works, the port is already empty.
 static READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static IRQ_HITS: AtomicU64 = AtomicU64::new(0);
 static POLLED: AtomicU64 = AtomicU64::new(0);
 const POLL_TICKS: u64 = 5;
 
-/// Z time::on_tick (IRQ0, przerwania wyłączone).
-/// M17a.g4: czy w tym ticku przypada odpytywanie (bez BKL).
+/// From time::on_tick (IRQ0, interrupts disabled).
+/// Whether polling is due in this tick (without the BKL).
 pub fn poll_due(now: u64) -> bool {
     now % POLL_TICKS == 0 && READY.load(Ordering::Relaxed)
 }
@@ -238,15 +238,15 @@ pub fn poll_tick(now: u64) {
     }
 }
 
-/// (bajty przez IRQ1, bajty złapane odpytywaniem) – komenda `irq`, diagnostyka.
+/// (bytes via IRQ1, bytes caught by polling) – the `irq` command, diagnostics.
 #[allow(dead_code)]
 pub fn delivery_stats() -> (u64, u64) {
     (IRQ_HITS.load(Ordering::Relaxed), POLLED.load(Ordering::Relaxed))
 }
 
-/// M16b: pasek stanu (komputery bez portu szeregowego): czas od startu,
-/// bajty z klawiatury (IRQ / odpytywanie) i rejestr stanu 8042 – widać, czy
-/// system żyje i czy klawiatura cokolwiek wysyła.
+/// Status bar (for computers without a serial port): time since boot,
+/// keyboard bytes (IRQ / polling) and the 8042 status register – shows whether
+/// the system is alive and whether the keyboard sends anything.
 fn status_bar(_: usize) {
     loop {
         let (irq, poll) = delivery_stats();
@@ -264,18 +264,18 @@ fn status_bar(_: usize) {
     }
 }
 
-/// Uruchamia pasek stanu (zadanie kernela).
+/// Starts the status bar (a kernel task).
 pub fn start_status_bar() {
     let _ = crate::sched::spawn("statusbar", status_bar, 0);
 }
 
-/// Jeden bajt z kontrolera (jeśli jest); `false` = bufor pusty.
+/// One byte from the controller (if any); `false` = buffer empty.
 fn take_byte() -> bool {
     let Some((byte, aux)) = ps2::read_irq_byte() else {
         return false;
     };
     if aux {
-        // Bajt z portu 2 (mysz) odebrany przy IRQ1 – oddaj sterownikowi myszy.
+        // A byte from port 2 (mouse) received on IRQ1 – hand it to the mouse driver.
         super::mouse::handle_byte(byte);
         return true;
     }
@@ -283,7 +283,7 @@ fn take_byte() -> bool {
     true
 }
 
-/// Jeden bajt od klawiatury (z IRQ1, albo z IRQ12, jeśli kontroler tak podał).
+/// One byte from the keyboard (from IRQ1, or from IRQ12 if the controller delivered it that way).
 pub fn handle_byte(byte: u8) {
     BYTES.fetch_add(1, Ordering::Relaxed);
 
@@ -301,8 +301,8 @@ pub fn handle_byte(byte: u8) {
     }
 }
 
-/// Inicjalizuje kontroler PS/2 i klawiaturę, rejestruje IRQ1.
-/// Wymaga działającego timera (M5) i włączonych przerwań.
+/// Initializes the PS/2 controller and the keyboard, registers IRQ1.
+/// Requires a working timer and enabled interrupts.
 pub fn init() -> bool {
     serial_println!("[KBD] Initializing PS/2 controller + keyboard...");
     if let Err(e) = ps2::init() {
@@ -319,14 +319,14 @@ pub fn init() -> bool {
     true
 }
 
-/// Liczba bajtów-kodów (bez ACK/RESEND) przekazanych do dekodera.
+/// Number of scan code bytes (excluding ACK/RESEND) passed to the decoder.
 #[allow(dead_code)]
 pub fn scancodes_received() -> u64 {
     SCANCODES.load(Ordering::Relaxed)
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (selftest build only, --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -339,19 +339,19 @@ macro_rules! check {
     };
 }
 
-/// Wstrzykuje bajty przez kontroler (IRQ1 jak od prawdziwej klawiatury)
-/// i czeka, aż handler je przetworzy.
+/// Injects bytes through the controller (IRQ1 as from a real keyboard)
+/// and waits until the handler has processed them.
 #[cfg(selftest)]
 fn inject(bytes: &[u8]) -> bool {
     use crate::arch::x86_64::interrupts;
     for &b in bytes {
-        // Nie wchodzimy w paradę trwającej wymianie z klawiaturą (diody).
+        // Do not interfere with an ongoing exchange with the keyboard (LEDs).
         if !led_idle() {
             return false;
         }
         let before = SCANCODES.load(Ordering::Relaxed);
-        // 0xD2 + bajt muszą iść razem – handler IRQ nie może wpisać
-        // niczego do portu danych pomiędzy nimi.
+        // 0xD2 + byte must go together – the IRQ handler must not write
+        // anything to the data port in between.
         if !interrupts::without_interrupts(|| ps2::inject_keyboard_byte(b)) {
             return false;
         }
@@ -380,7 +380,7 @@ fn led_idle() -> bool {
     }
 }
 
-/// Zbiera znaki ze wszystkich zdarzeń w kolejce.
+/// Collects characters from all events in the queue.
 #[cfg(selftest)]
 fn drain_chars(out: &mut [char]) -> usize {
     let mut n = 0;
@@ -404,13 +404,13 @@ pub fn self_test() {
     crate::selftest::begin();
     input::reset();
 
-    // 1. Kontroler skonfigurowany, IRQ1 odmaskowane.
+    // 1. Controller configured, IRQ1 unmasked.
     let cfg = ps2::config();
     check!(cfg.is_some(), "cannot read controller config");
     let cfg = cfg.unwrap();
     check!(cfg & CONFIG_PORT1_IRQ != 0, "port 1 IRQ disabled (config {:#x})", cfg);
     check!(cfg & CONFIG_TRANSLATION != 0, "translation disabled (config {:#x})", cfg);
-    // Port 2 włączony dokładnie wtedy, gdy jest mysz (M11b).
+    // Port 2 enabled exactly when a mouse is present.
     check!(
         (cfg & CONFIG_PORT2_CLOCK_OFF == 0) == ps2::mouse_id().is_some(),
         "port 2 state does not match the mouse (config {:#x})",
@@ -419,7 +419,7 @@ pub fn self_test() {
     check!(!irq::is_masked(KEYBOARD_IRQ), "IRQ1 masked");
     serial_println!("[KBD TEST] 1/9 controller config {:#04x}, IRQ1 unmasked PASS", cfg);
 
-    // 2. 'a': wciśnięcie + puszczenie przez prawdziwą ścieżkę IRQ1.
+    // 2. 'a': press + release through the real IRQ1 path.
     check!(inject(&[0x1E, 0x9E]), "inject 'a' timed out");
     let e1 = input::read_event();
     let e2 = input::read_event();
@@ -434,7 +434,7 @@ pub fn self_test() {
     check!(input::read_event().is_none(), "extra events");
     serial_println!("[KBD TEST] 2/9 'a' press/release via IRQ1 PASS");
 
-    // 3. Shift: "A!" i po puszczeniu Shift znów małe.
+    // 3. Shift: "A!" and lowercase again after Shift is released.
     check!(inject(&[0x2A, 0x1E, 0x9E, 0x02, 0x82, 0xAA, 0x1E, 0x9E]), "inject shift");
     let mut buf = ['\0'; 8];
     let n = drain_chars(&mut buf);
@@ -442,7 +442,7 @@ pub fn self_test() {
     check!(!input::modifiers().shift(), "shift stuck");
     serial_println!("[KBD TEST] 3/9 Shift ('A', '!', release) PASS");
 
-    // 4. Caps Lock: przełącza litery, nie cyfry; Shift odwraca; dioda.
+    // 4. Caps Lock: toggles letters, not digits; Shift inverts; LED.
     check!(inject(&[0x3A, 0xBA]), "inject caps");
     check!(input::modifiers().caps_lock(), "caps lock not on");
     check!(led_idle(), "LED update (0xED) not acknowledged");
@@ -454,7 +454,7 @@ pub fn self_test() {
     check!(n == 3 && buf[..3] == ['A', '1', 'a'], "got {:?}", &buf[..n.min(8)]);
     serial_println!("[KBD TEST] 4/9 Caps Lock (+Shift, autorepeat, LED ACK) PASS");
 
-    // 5. Klawisze rozszerzone i sztuczny Shift.
+    // 5. Extended keys and a fake Shift.
     check!(inject(&[0xE0, 0x48, 0xE0, 0xC8, 0xE0, 0x2A, 0xE0, 0x53, 0xE0, 0x1C]), "inject extended");
     let up = input::read_event();
     let up_rel = input::read_event();
@@ -467,7 +467,7 @@ pub fn self_test() {
     check!(!input::modifiers().shift(), "fake shift changed modifiers");
     serial_println!("[KBD TEST] 5/9 extended keys (E0), fake shift ignored PASS");
 
-    // 6. AltGr (prawy Alt) – polskie znaki.
+    // 6. AltGr (right Alt) – Polish characters.
     check!(inject(&[0xE0, 0x38, 0x1E, 0x9E, 0x2A, 0x1F, 0x9F, 0xAA, 0x16, 0x96, 0x2E, 0xE0, 0xB8]), "inject altgr");
     let n = drain_chars(&mut buf);
     check!(n == 4 && buf[..4] == ['ą', 'Ś', '€', 'ć'], "got {:?}", &buf[..n.min(8)]);
@@ -476,7 +476,7 @@ pub fn self_test() {
     input::read_event();
     serial_println!("[KBD TEST] 6/9 AltGr: 'ą', 'Ś', '€', 'ć' PASS");
 
-    // 7. Ctrl+C i znaki sterujące.
+    // 7. Ctrl+C and control characters.
     check!(inject(&[0x1D, 0x2E, 0xAE, 0x9D, 0x1C, 0x0F, 0x0E, 0x01]), "inject ctrl");
     let n = drain_chars(&mut buf);
     check!(
@@ -485,7 +485,7 @@ pub fn self_test() {
     );
     serial_println!("[KBD TEST] 7/9 Ctrl+C, Enter, Tab, Backspace, Esc PASS");
 
-    // 8. Pause (E1 1D 45 E1 9D C5) = jedno zdarzenie, dekoder wraca do normy.
+    // 8. Pause (E1 1D 45 E1 9D C5) = a single event, the decoder returns to normal.
     check!(inject(&[0xE1, 0x1D, 0x45, 0xE1, 0x9D, 0xC5, 0x1E]), "inject pause");
     let p = input::read_event();
     let a = input::read_event();
@@ -496,7 +496,7 @@ pub fn self_test() {
     input::read_event();
     serial_println!("[KBD TEST] 8/9 Pause sequence PASS");
 
-    // 9. Kolejka: kolejność FIFO i przepełnienie (bez IRQ – wprost do input).
+    // 9. Queue: FIFO order and overflow (no IRQ – directly into input).
     input::reset();
     let keys = [KeyCode::A, KeyCode::B, KeyCode::C];
     for i in 0..300 {

@@ -1,14 +1,14 @@
-// M19.c: urządzenie PCI przejęte przez usługę w user space.
-// Projekt: ARCHITEKTURA.md, „Usługi w user space”.
+// PCI device claimed by a user-space service.
+// Design: ARCHITECTURE.md, "User-space services".
 //
-// * `HW_ROOT` (uchwyt bez praw DUP / TRANSFER) dostaje tylko /bin/init – z
-//   niego `dev_claim` wyjmuje pojedyncze urządzenie.
-// * `DevClaim` – przejęcie: liczone przez Arc (uchwyty DEVICE i mapowania
-//   rejestrów w procesach).  Gdy znika ostatnie – Drop oddaje urządzenie
-//   (pci::release_user); od 19.d / 19.e najpierw wyłącza przerwania i bus
-//   mastering, potem zwalnia wektor i bufory DMA.
-// * Mapowanie BAR-u: strony rejestrów bez cache (UC), nigdy wykonywalne;
-//   strony z tablicą MSI-X / PBA pominięte.
+// * `HW_ROOT` (a handle without DUP / TRANSFER rights) is given only to /bin/init –
+//   `dev_claim` takes individual devices out of it.
+// * `DevClaim` – a claim: reference-counted with Arc (DEVICE handles and register
+//   mappings in processes).  When the last one goes away, Drop returns the device
+//   (pci::release_user); it first disables interrupts and bus
+//   mastering, then frees the vector and the DMA buffers.
+// * BAR mapping: register pages uncached (UC), never executable;
+//   pages with the MSI-X table / PBA are skipped.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -21,13 +21,13 @@ use crate::sched::spin::{level, SpinLock};
 
 pub struct DevClaim {
     index: usize,
-    /// M19.e: bufory DMA urządzenia (i ich łączny rozmiar) – żyją tak długo jak
-    /// przejęcie: urządzenie mogłoby pisać do bufora, który usługa już zamknęła.
+    /// The device's DMA buffers (and their total size) – they live as long as the
+    /// claim: the device could write to a buffer the service has already closed.
     dma: SpinLock<(Vec<Arc<super::shm::ShmObj>>, u64)>,
-    /// M19.d: przerwanie przypięte (jedno na urządzenie).
+    /// Bound interrupt (one per device).
     irq: AtomicBool,
-    /// M19.d: urządzenie dostało bus mastering (MSI, później DMA) – przy
-    /// oddaniu wyłączany, ZANIM cokolwiek innego wróci do jądra.
+    /// The device was granted bus mastering (MSI, later DMA) – on
+    /// release it is disabled BEFORE anything else returns to the kernel.
     bus_master: AtomicBool,
 }
 
@@ -45,10 +45,10 @@ impl DevClaim {
         &pci::devices()[self.index]
     }
 
-    /// Strony BAR-u `bar` do zmapowania: Some(fizyczny adres strony) albo None
-    /// (dziura – MSI-X).  Błąd: brak BAR-u pamięci, BAR mniejszy niż strona
-    /// albo nie wyrównany (na tej samej stronie mogłyby leżeć rejestry innego
-    /// urządzenia), większy niż MAX_BAR.
+    /// Pages of BAR `bar` to map: Some(physical page address) or None
+    /// (a hole – MSI-X).  Error: no memory BAR, a BAR smaller than a page
+    /// or not aligned (registers of another device could lie on the same
+    /// page), larger than MAX_BAR.
     pub fn bar_pages(&self, bar: usize) -> Result<Vec<Option<u64>>, i64> {
         use super::syscalls::EINVAL;
         const PAGE: u64 = 4096;
@@ -70,14 +70,14 @@ impl DevClaim {
     }
 }
 
-/// M19.e: największy bufor DMA i łącznie na urządzenie.
+/// Largest DMA buffer, and the total per device.
 pub const DMA_BUF_MAX: u64 = 2 * 1024 * 1024;
 pub const DMA_DEV_MAX: u64 = 16 * 1024 * 1024;
 
 impl DevClaim {
-    /// dma_alloc: bufor z ciągłych ramek poniżej `2^bits` (24..=64), włącza
-    /// urządzeniu bus mastering.  EINVAL: rozmiar 0 / > 2 MiB, złe `bits`;
-    /// ENOMEM: limit 16 MiB na urządzenie albo brak ciągłej pamięci.
+    /// dma_alloc: a buffer of contiguous frames below `2^bits` (24..=64), enables
+    /// bus mastering for the device.  EINVAL: size 0 / > 2 MiB, bad `bits`;
+    /// ENOMEM: the 16 MiB per-device limit or no contiguous memory.
     pub fn dma_alloc(&self, size: u64, bits: u64) -> Result<Arc<super::shm::ShmObj>, i64> {
         use super::syscalls::{EINVAL, ENOMEM};
         if size == 0 || size > DMA_BUF_MAX || !(24..=64).contains(&bits) {
@@ -102,18 +102,18 @@ impl DevClaim {
 
 impl Drop for DevClaim {
     fn drop(&mut self) {
-        // M19.d: urządzenie milknie (bez DMA i MSI), dopiero potem wraca.
+        // The device goes quiet (no DMA and MSI), only then is it returned.
         if self.bus_master.load(Ordering::SeqCst) {
             self.dev().disable_msi();
             self.dev().set_bus_master(false);
         }
-        // Dopiero teraz bufory DMA (pole `dma` zwalnia się po tym Drop – ramki
-        // wracają, gdy zniknie też ostatnie mapowanie w procesach).
+        // Only now the DMA buffers (the `dma` field is freed after this Drop – the frames
+        // come back once the last mapping in processes is gone too).
         pci::release_user(self.index);
     }
 }
 
-/// Adres PCI z numeru usługi: bus << 8 | urządzenie << 3 | funkcja.
+/// PCI address from the service number: bus << 8 | device << 3 | function.
 pub fn address(bdf: u64) -> Option<pci::Address> {
     if bdf > 0xFFFF {
         return None;
@@ -122,19 +122,19 @@ pub fn address(bdf: u64) -> Option<pci::Address> {
 }
 
 // ------------------------------------------------------------
-// M19.d: przerwania urządzeń dla usług.
+// Device interrupts for services.
 //
-// Wektor MSI 0x30 + i ↔ slot i (statyczny – handler przerwania nie dotyka
-// pamięci, która mogłaby zostać zwolniona).  Handler: licznik + pobudka
-// obserwatorów (`wait_many` z W_IRQ) – nic więcej.  MSI jest zboczowe, więc
-// linii nie trzeba maskować; kilka przerwań przed obsługą = jedna pobudka
-// z licznikiem.
+// MSI vector 0x30 + i ↔ slot i (static – the interrupt handler does not touch
+// memory that could be freed).  Handler: counter + waking
+// observers (`wait_many` with W_IRQ) – nothing more.  MSI is edge-triggered, so
+// the line does not need masking; several interrupts before handling = one wakeup
+// with a counter.
 // ------------------------------------------------------------
 
 pub struct IrqSlot {
     count: AtomicU64,
-    /// M20.h: znacznik czasu (`clock::stamp`) ostatniego przerwania – do
-    /// pomiaru „przerwanie klawiatury USB -> znak w jądrze”.
+    /// Timestamp (`clock::stamp`) of the last interrupt – for
+    /// measuring "USB keyboard interrupt -> character in the kernel".
     last: AtomicU64,
     obs: Observers,
 }
@@ -151,17 +151,17 @@ fn user_irq(vector: u8) {
     }
 }
 
-/// Przerwanie urządzenia przypięte do usługi (uchwyt IRQ).  Trzyma
-/// przejęcie urządzenia; Drop wyłącza MSI i zwalnia wektor.
+/// A device interrupt bound to a service (IRQ handle).  Holds the
+/// device claim; Drop disables MSI and frees the vector.
 pub struct IrqObj {
     vector: u8,
     claim: Arc<DevClaim>,
 }
 
 impl IrqObj {
-    /// irq_bind: wektor MSI (albo MSI-X wpis 0), bus mastering (MSI to zapis
-    /// urządzenia do pamięci).  EBUSY – przerwanie już przypięte albo brak
-    /// wolnych wektorów; ENODEV – urządzenie bez MSI / MSI-X.
+    /// irq_bind: MSI vector (or MSI-X entry 0), bus mastering (MSI is the device
+    /// writing to memory).  EBUSY – interrupt already bound or no
+    /// free vectors; ENODEV – device without MSI / MSI-X.
     pub fn bind(claim: Arc<DevClaim>) -> Result<IrqObj, i64> {
         use super::syscalls::{EBUSY, ENODEV};
         use crate::drivers::pci::{CAP_MSI, CAP_MSIX};
@@ -196,12 +196,12 @@ impl IrqObj {
         &SLOTS[self.vector as usize - msi::MSI_BASE]
     }
 
-    /// Przerwania od ostatniego odczytu (zeruje licznik).
+    /// Interrupts since the last read (resets the counter).
     pub fn take(&self) -> u64 {
         self.slot().count.swap(0, Ordering::SeqCst)
     }
 
-    /// M20.h: znacznik ostatniego przerwania (0 – jeszcze nie było).
+    /// Timestamp of the last interrupt (0 – none yet).
     pub fn last_stamp(&self) -> u64 {
         self.slot().last.load(Ordering::Relaxed)
     }
@@ -217,8 +217,8 @@ impl IrqObj {
 
 impl Drop for IrqObj {
     fn drop(&mut self) {
-        // Urządzenie przestaje wysyłać (odczyt rejestru – zapis dotarł), potem
-        // wektor wraca; spóźnione przerwanie trafi już w pusty handler.
+        // The device stops sending (register read – the write has landed), then
+        // the vector is returned; a late interrupt will hit an empty handler.
         let d = self.claim.dev();
         d.disable_msi();
         let _ = d.command();

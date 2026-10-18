@@ -1,4 +1,4 @@
-// M17a: samotesty spinlocków i stress test SMP (tylko build z --cfg selftest).
+// Spinlock self-tests and SMP stress test (only in builds with --cfg selftest).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -41,7 +41,7 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-/// Zadanie: ROUNDS nieatomowych zwiększeń pod spinlockiem, bez BKL.
+/// Task: ROUNDS non-atomic increments under a spinlock, without the BKL.
 fn incrementer(_: usize) {
     bkl::unlocked(|| {
         for _ in 0..ROUNDS {
@@ -55,7 +55,7 @@ fn incrementer(_: usize) {
     DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Zadanie: trzyma OUTER ~150 ms (bez BKL), żeby test zobaczył raport.
+/// Task: holds OUTER for ~150 ms (without the BKL) so the test sees the report.
 fn holder(_: usize) {
     bkl::unlocked(|| {
         let _g = OUTER.lock();
@@ -75,7 +75,7 @@ pub fn self_test() {
     crate::selftest::begin();
     STOP.store(false, Ordering::SeqCst);
 
-    // 1. Podstawy: guard, licznik trzymanych blokad, wywłaszczanie, IF.
+    // 1. Basics: guard, held-lock counter, preemption, IF.
     check!(spin::held_count() == 0 && cpu::preempt_count() == 0, "start: held {} preempt {}", spin::held_count(), cpu::preempt_count());
     {
         let mut g = OUTER.lock();
@@ -101,7 +101,7 @@ pub fn self_test() {
     check!(still_off, "IrqSpinLock turned interrupts on (they were off)");
     serial_println!("[LOCK TEST] 1/6 SpinLock/IrqSpinLock: guard, preemption off, IF restored PASS");
 
-    // 2. Wykrywanie złamania zasad (bez panic – RawSpin::check).
+    // 2. Detecting rule violations (no panic – RawSpin::check).
     {
         let _i = INNER.lock();
         let r = OUTER.raw().check();
@@ -116,9 +116,9 @@ pub fn self_test() {
         let _o = OUTER.lock();
         check!(INNER.raw().check() == Ok(()), "valid order rejected");
     }
-    // v0.25.1: w handlerze przerwania kolejność tylko względem blokad wziętych w
-    // przerwaniu – blokada przerwanego kodu nie jest złamaniem kolejności
-    // (fałszywy PANIC przy przerwaniu MSI w trakcie stressu); rekurencja nadal.
+    // In an interrupt handler, ordering is checked only against locks taken inside
+    // the interrupt – a lock held by the interrupted code is not an ordering violation
+    // (otherwise a false PANIC on an MSI interrupt during the stress test); recursion still is.
     {
         let _i = INNER.lock();
         interrupts::disable();
@@ -133,7 +133,7 @@ pub fn self_test() {
     }
     serial_println!("[LOCK TEST] 2/6 lock order and recursion detected (lockdep-lite; in an interrupt only against interrupt locks) PASS");
 
-    // 3. Wzajemne wykluczanie na wielu CPU, bez BKL.
+    // 3. Mutual exclusion across multiple CPUs, without the BKL.
     let n = smp::online_count();
     let k = n.clamp(2, 4);
     *COUNTER.lock() = 0;
@@ -158,7 +158,7 @@ pub fn self_test() {
         cont1 - cont0
     );
 
-    // 4. Wykrywacz zakleszczeń: inny CPU trzyma blokadę -> raport, potem wejście.
+    // 4. Deadlock detector: another CPU holds the lock -> report, then acquire.
     if n > 1 {
         DONE.store(0, Ordering::SeqCst);
         check!(crate::sched::spawn("t-hold", holder, 0).is_ok(), "spawn holder");
@@ -166,7 +166,7 @@ pub fn self_test() {
         let r = OUTER.raw().try_lock_for(1_000);
         check!(matches!(r, Err((c, f, _)) if c as u64 == HOLD_CPU.load(Ordering::SeqCst) && f.contains("test_lock")), "try_lock_for: {:?}", r);
         let (_, _, dl0) = spin::stats();
-        // Raport po 1 ms; holder puszcza po 150 ms -> wchodzimy.
+        // Report after 1 ms; the holder releases after 150 ms -> we get in.
         bkl::unlocked(|| drop(OUTER.lock_reporting_after(1_000)));
         let (_, _, dl1) = spin::stats();
         check!(dl1 == dl0 + 1, "deadlock report count {} -> {}", dl0, dl1);
@@ -176,14 +176,14 @@ pub fn self_test() {
         serial_println!("[LOCK TEST] 4/6 deadlock detector skipped (1 CPU) PASS");
     }
 
-    // 5. BKL: kontekst bez BKL zostaje bez BKL po przerwaniu; statystyka działa.
+    // 5. BKL: a context without the BKL stays without it after an interrupt; stats work.
     let (a0, _, _) = bkl::stats();
     let ok = bkl::unlocked(|| {
         let t = ticks() + 20;
         let mut ok = true;
         while ticks() < t {
             if bkl::held() {
-                ok = false; // przerwanie zostawiło nam BKL
+                ok = false; // the interrupt left us holding the BKL
             }
             core::hint::spin_loop();
         }
@@ -195,9 +195,9 @@ pub fn self_test() {
     check!(a1 > a0, "BKL statistics not counting");
     serial_println!("[LOCK TEST] 5/6 BKL-free section stays BKL-free across interrupts, {} BKL takes counted PASS", a1 - a0);
 
-    // 6. Watchdog zawieszeń: zegar PIT staje (IRQ0 zamaskowane na ponad
-    //    10 s) – któryś CPU musi to zgłosić (NMI zbiera RIP-y).  Ten CPU
-    //    czeka z włączonymi przerwaniami, oddając BKL (inne CPU działają).
+    // 6. Hang watchdog: the PIT clock stops (IRQ0 masked for more than
+    //    10 s) – some CPU must report it (NMI collects the RIPs).  This CPU
+    //    waits with interrupts enabled, giving up the BKL (other CPUs keep running).
     if n > 1 {
         let before = smp::watchdog_reports();
         let start = crate::arch::x86_64::clock::stamp();
@@ -218,7 +218,7 @@ pub fn self_test() {
 }
 
 
-/// Stress test SMP (krótki – w samotestach).
+/// SMP stress test (short – part of the self-tests).
 pub fn stress_self_test() {
     serial_println!("[STRESS TEST] Starting SMP stress test (3 s)...");
     crate::selftest::begin();

@@ -1,19 +1,19 @@
-// M15: mała biblioteka dla programów użytkownika DeSoOS (odpowiednik libc).
+// Small library for DeSoOS user programs (the libc counterpart).
 //
-// Program dołącza ją przez:
+// A program pulls it in with:
 //     #[path = "../lib/desoos.rs"]
 //     #[macro_use]
 //     mod desoos;
 //     desoos::entry!(main);
 //     fn main(args: desoos::Args) -> i32 { println!("..."); 0 }
 //
-// _start (kernel skacze tu z RSP wskazującym na argc, argv[], NULL, envp
-// NULL, auxv AT_NULL – układ SysV) -> main(args) -> exit(kod).
-// Syscalle: numery z kernel/user/syscalls.rs (tabela w ARCHITEKTURA.md).
+// _start (the kernel jumps here with RSP pointing at argc, argv[], NULL, envp
+// NULL, auxv AT_NULL – the SysV layout) -> main(args) -> exit(code).
+// Syscalls: numbers from kernel/user/syscalls.rs (table in ARCHITECTURE.md).
 //
-// M16: procesy (spawn/wait/kill), katalogi, klawisze dla edytora linii
-// i sterta: program, który chce Vec/String, pisze w korzeniu
-// `extern crate alloc;` – alokator (niżej) bierze pamięć przez brk / mmap (M17b).
+// Processes (spawn/wait/kill), directories, keys for the line editor
+// and a heap: a program that wants Vec/String writes at its crate root
+// `extern crate alloc;` – the allocator (below) gets memory via brk / mmap.
 
 #![allow(dead_code)]
 
@@ -66,31 +66,31 @@ pub const SYS_DMA_ALLOC: u64 = 44;
 pub const SYS_DMA_PHYS: u64 = 45;
 pub const SYS_SYSINFO: u64 = 46;
 pub const SYS_SYSCTL: u64 = 47;
-/// M20.b: dev_find(hw_root, klasa, nr) – urządzenie PCI po klasie.
+/// dev_find(hw_root, class, nr) – a PCI device by class.
 pub const SYS_DEV_FIND: u64 = 48;
-/// M20.e: input_inject(INPUT, zdarzenia, n) – klawiatura / mysz z usbd.
+/// input_inject(INPUT, events, n) – keyboard / mouse from usbd.
 pub const SYS_INPUT_INJECT: u64 = 49;
-/// M20.f: blk_attach(BLK, kanał, bufor, info) – usbd rejestruje pendrive.
+/// blk_attach(BLK, channel, buffer, info) – usbd registers a USB stick.
 pub const SYS_BLK_ATTACH: u64 = 50;
 
-/// M19.b: sygnały wait_many.
+/// wait_many signals.
 pub const W_READABLE: u64 = 1;
 pub const W_WRITABLE: u64 = 2;
 pub const W_IRQ: u64 = 4;
-/// M19.b: najwięcej wpisów w wait_many; bez limitu czasu.
+/// Maximum number of entries in wait_many; no timeout.
 pub const WAIT_MAX: usize = 16;
 pub const FOREVER: u64 = u64::MAX;
-/// M18: najwięcej uchwytów w komunikacie.
+/// Maximum number of handles in a message.
 pub const MSG_HANDLES: usize = 8;
-/// M18: nie czekaj na miejsce / komunikat (EAGAIN).
+/// Do not wait for space / a message (EAGAIN).
 pub const CHAN_NONBLOCK: u64 = 1;
-/// M18: największy komunikat (bajty).
+/// Largest message (bytes).
 pub const MSG_MAX: usize = 4096;
 pub const EAGAIN: i64 = -11;
 pub const EPIPE: i64 = -32;
 pub const EMSGSIZE: i64 = -90;
 
-/// M18: prawa uchwytu (bity) – prawa można tylko zmniejszyć (`handle_dup`).
+/// Handle rights (bits) – rights can only be reduced (`handle_dup`).
 pub const R_READ: u64 = 1;
 pub const R_WRITE: u64 = 2;
 pub const R_SEND: u64 = 4;
@@ -101,23 +101,23 @@ pub const R_DUP: u64 = 64;
 pub const R_TRANSFER: u64 = 128;
 pub const R_ALL: u64 = 0xFF;
 
-/// M18: rodzaj obiektu z `handle_info`.
+/// Object kind returned by `handle_info`.
 pub const KIND_CONSOLE: u64 = 1;
 pub const KIND_FILE: u64 = 2;
 pub const KIND_PIPE: u64 = 3;
 pub const KIND_CHANNEL: u64 = 4;
 pub const KIND_SHM: u64 = 5;
-/// M19.c: dostęp do sprzętu (tylko init, slot 3) i przejęte urządzenie PCI.
+/// Hardware access (init only, slot 3) and a claimed PCI device.
 pub const KIND_HW_ROOT: u64 = 6;
 pub const KIND_DEVICE: u64 = 7;
 pub const KIND_IRQ: u64 = 8;
-/// M19.i: prawo do akcji systemowych (reboot, halt, sync, stress) – init slot 4,
-/// shell od init też slot 4 (programom go nie przekazuje).
+/// Right to perform system actions (reboot, halt, sync, stress) – init slot 4,
+/// the shell started by init also gets slot 4 (it does not pass it on to programs).
 pub const KIND_SYSCTL: u64 = 9;
-/// M20.e: uchwyt INPUT (jądro -> init slot 5 -> usbd slot 5).
+/// INPUT handle (kernel -> init slot 5 -> usbd slot 5).
 pub const KIND_INPUT: u64 = 10;
 pub const INPUT: u64 = 5;
-/// M20.f: uchwyt BLK (rejestracja dysku USB) – u init i usbd w slocie 6.
+/// BLK handle (USB disk registration) – held by init and usbd in slot 6.
 pub const KIND_BLK: u64 = 11;
 pub const BLK: u64 = 6;
 pub const ETIMEDOUT: i64 = -110;
@@ -127,27 +127,27 @@ pub const SYSCTL_REBOOT: u64 = 1;
 pub const SYSCTL_HALT: u64 = 2;
 pub const SYSCTL_SYNC: u64 = 3;
 pub const SYSCTL_STRESS: u64 = 4;
-/// M19.c: błędy dev_claim.
+/// dev_claim errors.
 pub const EBUSY: i64 = -16;
 pub const ENODEV: i64 = -19;
 
-/// mmap: prawa obszaru.
+/// mmap: region protection.
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
 
-/// seek: od początku / od bieżącej pozycji / od końca.
+/// seek: from the start / from the current position / from the end.
 pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
-/// spawn: Ctrl+C kończy dziecko (proces na pierwszym planie).
+/// spawn: Ctrl+C terminates the child (foreground process).
 pub const SPAWN_FOREGROUND: u64 = 1;
-/// spawn: dziecko dostaje 0, 1, 2 rodzica.
+/// spawn: the child gets the parent's 0, 1, 2.
 pub const STDIO: u64 = fds(0, 1, 2);
-/// wait: dowolne dziecko / nie czekaj.
+/// wait: any child / do not wait.
 pub const WAIT_ANY: u64 = u64::MAX;
 pub const WNOHANG: u64 = 1;
-/// Status z wait: zakończony przez kernel (kill, wyjątek) + powód w bitach 0..7.
+/// Status from wait: terminated by the kernel (kill, exception) + reason in bits 0..7.
 pub const STATUS_SIGNALED: u64 = 0x100;
 
 pub const ENOENT: i64 = -2;
@@ -157,7 +157,7 @@ pub const ERANGE: i64 = -34;
 pub const ENOMEM: i64 = -12;
 pub const ENOSPC: i64 = -28;
 
-/// Deskryptory rodzica, które dziecko dostanie jako 0, 1, 2.
+/// Parent descriptors the child will get as 0, 1, 2.
 pub const fn fds(stdin: u64, stdout: u64, stderr: u64) -> u64 {
     stdin | (stdout << 16) | (stderr << 32)
 }
@@ -228,41 +228,41 @@ pub fn close(fd: u64) -> i64 {
     syscall3(SYS_CLOSE, fd, 0, 0)
 }
 
-/// M17b: nowy deskryptor na ten sam obiekt (wspólna pozycja).
+/// New descriptor for the same object (shared position).
 pub fn dup(fd: u64) -> i64 {
     syscall3(SYS_DUP, fd, 0, 0)
 }
 
-/// M18: nowy uchwyt na ten sam obiekt z prawami `stare & mask` (wymaga R_DUP).
+/// New handle for the same object with rights `old & mask` (requires R_DUP).
 pub fn handle_dup(h: u64, mask: u64) -> i64 {
     syscall3(SYS_HANDLE_DUP, h, mask, 0)
 }
 
-/// M18: (rodzaj, prawa) uchwytu.
+/// (kind, rights) of a handle.
 pub fn handle_info(h: u64) -> Result<(u64, u64), i64> {
     let r = syscall3(SYS_HANDLE_INFO, h, 0, 0);
     if r < 0 { Err(r) } else { Ok(((r as u64) >> 32, (r as u64) & 0xFFFF_FFFF)) }
 }
 
-/// M18: kanał – (koniec 0, koniec 1); komunikaty w obie strony.
+/// Channel – (end 0, end 1); messages flow both ways.
 pub fn channel_create() -> Result<(u64, u64), i64> {
     let mut out = [0u64; 2];
     let r = syscall3(SYS_CHANNEL_CREATE, out.as_mut_ptr() as u64, 0, 0);
     if r < 0 { Err(r) } else { Ok((out[0], out[1])) }
 }
 
-/// M18: wysyła komunikat (do MSG_MAX bajtów); flags: 0 albo CHAN_NONBLOCK.
+/// Sends a message (up to MSG_MAX bytes); flags: 0 or CHAN_NONBLOCK.
 pub fn chan_send(h: u64, data: &[u8], flags: u64) -> i64 {
     syscall6(SYS_CHAN_SEND, h, data.as_ptr() as u64, data.len() as u64, 0, 0, flags)
 }
 
-/// M18: wysyła komunikat z uchwytami – uchwyty są PRZENOSZONE (znikają u
-/// nadawcy, wymagają R_TRANSFER); przy błędzie zostają u nadawcy.
+/// Sends a message with handles – the handles are MOVED (they disappear from
+/// the sender, require R_TRANSFER); on error they stay with the sender.
 pub fn chan_send_h(h: u64, data: &[u8], handles: &[u64], flags: u64) -> i64 {
     syscall6(SYS_CHAN_SEND, h, data.as_ptr() as u64, data.len() as u64, handles.as_ptr() as u64, handles.len() as u64, flags)
 }
 
-/// M18: wynik odbioru – długość, liczba uchwytów, nadawca (pid wpisany przez jądro).
+/// Receive result – length, number of handles, sender (pid filled in by the kernel).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct RecvInfo {
     pub len: u64,
@@ -270,8 +270,8 @@ pub struct RecvInfo {
     pub sender: u64,
 }
 
-/// M18: odbiera komunikat do `buf`.  Err(EMSGSIZE) – bufor za mały, w `info`
-/// wymagany rozmiar, komunikat zostaje w kolejce.
+/// Receives a message into `buf`.  Err(EMSGSIZE) – buffer too small, `info` holds
+/// the required size, the message stays in the queue.
 pub fn chan_recv(h: u64, buf: &mut [u8], flags: u64, info: &mut RecvInfo) -> i64 {
     let mut raw = [0u64; 3];
     let r = syscall6(SYS_CHAN_RECV, h, buf.as_mut_ptr() as u64, buf.len() as u64, 0, flags << 32, raw.as_mut_ptr() as u64);
@@ -279,9 +279,9 @@ pub fn chan_recv(h: u64, buf: &mut [u8], flags: u64, info: &mut RecvInfo) -> i64
     r
 }
 
-/// M18: odbiera komunikat z uchwytami – numery nowych uchwytów w `handles`
-/// (info.handles sztuk).  EMSGSIZE – za mały bufor albo `handles`; EMFILE –
-/// brak miejsca w tablicy uchwytów; w obu przypadkach komunikat zostaje.
+/// Receives a message with handles – numbers of the new handles go to `handles`
+/// (info.handles of them).  EMSGSIZE – `buf` or `handles` too small; EMFILE –
+/// no room in the handle table; in both cases the message stays queued.
 pub fn chan_recv_h(h: u64, buf: &mut [u8], handles: &mut [u64], flags: u64, info: &mut RecvInfo) -> i64 {
     let mut raw = [0u64; 3];
     let hcap = handles.len().min(MSG_HANDLES) as u64;
@@ -290,8 +290,8 @@ pub fn chan_recv_h(h: u64, buf: &mut [u8], handles: &mut [u64], flags: u64, info
     r
 }
 
-/// M18: uruchamia program; dziecko dostaje TYLKO uchwyty z `map`
-/// [(uchwyt rodzica, numer u dziecka)] – kopie z tymi samymi prawami (R_DUP).
+/// Starts a program; the child gets ONLY the handles from `map`
+/// [(parent handle, number in child)] – copies with the same rights (R_DUP).
 pub fn spawn_ex(path: &str, args: &[&str], map: &[(u64, u64)], flags: u64) -> i64 {
     let mut buf = [0u8; 4096];
     let mut n = 0;
@@ -314,28 +314,28 @@ pub fn spawn_ex(path: &str, args: &[&str], map: &[(u64, u64)], flags: u64) -> i6
     syscall6(SYS_SPAWN_EX, path.as_ptr() as u64, path.len() as u64, buf.as_ptr() as u64, n as u64, flat.as_ptr() as u64, map.len() as u64 | flags << 32)
 }
 
-/// M18: obiekt pamięci współdzielonej (`size` bajtów, zaokrąglone do 4 KiB,
-/// wyzerowany) – uchwyt albo -errno.
+/// Shared memory object (`size` bytes, rounded up to 4 KiB,
+/// zeroed) – a handle or -errno.
 pub fn shm_create(size: u64) -> i64 {
     syscall3(SYS_SHM_CREATE, size, 0, 0)
 }
 
-/// M18: mapuje cały obiekt (PROT_READ, PROT_READ | PROT_WRITE) – adres.
-/// Odmapowanie: munmap(adres, shm_size(h)).  Pamięć nigdy nie jest wykonywalna.
+/// Maps the whole object (PROT_READ, PROT_READ | PROT_WRITE) – returns the address.
+/// Unmap with munmap(address, shm_size(h)).  The memory is never executable.
 pub fn shm_map(h: u64, prot: u64) -> Result<u64, i64> {
     let r = syscall3(SYS_SHM_MAP, h, prot, 0);
     if r < 0 { Err(r) } else { Ok(r as u64) }
 }
 
-/// M18: rozmiar obiektu pamięci współdzielonej w bajtach.
+/// Size of a shared memory object in bytes.
 pub fn shm_size(h: u64) -> i64 {
     syscall3(SYS_SHM_SIZE, h, 0, 0)
 }
 
-/// M19.b: czeka, aż któryś uchwyt z listy [(uchwyt, sygnały)] będzie gotowy
-/// (W_READABLE: recv / read nie będzie czekać; W_WRITABLE: send / write).
-/// Ok(maska) – bit i = wpis i gotowy; Ok(0) – minęło `timeout_ms`
-/// (FOREVER = bez limitu, 0 = tylko sprawdź).
+/// Waits until one of the handles in the list [(handle, signals)] is ready
+/// (W_READABLE: recv / read will not block; W_WRITABLE: send / write).
+/// Ok(mask) – bit i = entry i is ready; Ok(0) – `timeout_ms` elapsed
+/// (FOREVER = no limit, 0 = just check).
 pub fn wait_many(list: &[(u64, u64)], timeout_ms: u64) -> Result<u64, i64> {
     let mut flat = [0u64; 2 * WAIT_MAX];
     if list.len() > WAIT_MAX {
@@ -349,30 +349,30 @@ pub fn wait_many(list: &[(u64, u64)], timeout_ms: u64) -> Result<u64, i64> {
     if r < 0 { Err(r) } else { Ok(r as u64) }
 }
 
-/// M19.c: adres PCI urządzenia (bus, urządzenie, funkcja) dla dev_claim.
+/// PCI address of a device (bus, device, function) for dev_claim.
 pub const fn bdf(bus: u64, dev: u64, func: u64) -> u64 {
     bus << 8 | dev << 3 | func
 }
 
-/// M19.c: przejmuje urządzenie PCI (z uchwytu HW_ROOT) – uchwyt DEVICE albo
-/// -errno (EACCES: sterownik w jądrze / dysk / grafika / mostek; EBUSY: ma je
-/// inna usługa; ENODEV: brak urządzenia).
+/// Claims a PCI device (via the HW_ROOT handle) – a DEVICE handle or
+/// -errno (EACCES: in-kernel driver / disk / graphics / bridge; EBUSY: owned by
+/// another service; ENODEV: no such device).
 pub fn dev_claim(root: u64, bdf: u64) -> i64 {
     syscall3(SYS_DEV_CLAIM, root, bdf, 0)
 }
 
-/// M20.b: klasa PCI kontrolera xHCI (USB 3): 0C (szyna szeregowa), 03 (USB), 30 (xHCI).
+/// PCI class of an xHCI controller (USB 3): 0C (serial bus), 03 (USB), 30 (xHCI).
 pub const CLASS_XHCI: u64 = 0x0C_03_30;
 
-/// M20.b: adres (bdf) `nr`-tego urządzenia PCI o klasie `class` (24 bity:
-/// klasa << 16 | podklasa << 8 | prog_if) – tylko z HW_ROOT.  ENOENT: nie ma
-/// dalszych; EBADF: uchwyt nie jest HW_ROOT.  Nie przejmuje urządzenia.
+/// Address (bdf) of the `nr`-th PCI device of class `class` (24 bits:
+/// class << 16 | subclass << 8 | prog_if) – HW_ROOT only.  ENOENT: no
+/// more devices; EBADF: the handle is not HW_ROOT.  Does not claim the device.
 pub fn dev_find(root: u64, class: u64, nr: u64) -> i64 {
     syscall3(SYS_DEV_FIND, root, class, nr)
 }
 
-/// M20.e: zdarzenie dla input_inject (8 B): rodzaj 1 = klawisz (wciśnięty,
-/// HID usage), 2 = mysz (kółko, przyciski).
+/// Event for input_inject (8 B): kind 1 = key (pressed,
+/// HID usage), 2 = mouse (wheel, buttons).
 pub fn key_event(usage: u8, pressed: bool) -> [u8; 8] {
     [1, pressed as u8, usage, 0, 0, 0, 0, 0]
 }
@@ -381,26 +381,26 @@ pub fn mouse_event(buttons: u8, wheel: i8) -> [u8; 8] {
     [2, wheel as u8, buttons, 0, 0, 0, 0, 0]
 }
 
-/// M20.e: zdarzenia do podsystemu wejścia jądra (≤ 64) – stan diod (bit 0
-/// Num, 1 Caps, 2 Scroll) albo -errno (EBADF / EACCES / EINVAL).
+/// Events for the kernel input subsystem (≤ 64) – LED state (bit 0
+/// Num, 1 Caps, 2 Scroll) or -errno (EBADF / EACCES / EINVAL).
 pub fn input_inject(h: u64, events: &[[u8; 8]]) -> i64 {
     syscall3(SYS_INPUT_INJECT, h, events.as_ptr() as u64, events.len() as u64)
 }
 
-/// M20.f: opis dysku dla blk_attach (64 B).
+/// Disk description for blk_attach (64 B).
 pub struct BlkInfo {
     pub blocks: u64,
     pub block_size: u32,
-    /// Sloty po 64 KiB w buforze (1..8).
+    /// Number of 64 KiB slots in the buffer (1..8).
     pub slots: u32,
-    /// 0 = domyślny (5 s).
+    /// 0 = default (5 s).
     pub timeout_ms: u32,
     pub desc: [u8; 40],
 }
 
-/// M20.f: rejestracja dysku USB (tylko odczyt) – numer (0 = sda) albo -errno.
-/// Jądro wysyła kanałem żądania 32 B (id, op 1 = READ, lba u64, bloki u32,
-/// slot u32), odpowiedź ≥ 12 B (id, status, bloki); dane – w slocie bufora.
+/// Registers a USB disk (read-only) – number (0 = sda) or -errno.
+/// The kernel sends 32 B requests over the channel (id, op 1 = READ, lba u64, blocks u32,
+/// slot u32), reply ≥ 12 B (id, status, blocks); data goes into the buffer slot.
 pub fn blk_attach(h: u64, chan: u64, buf: u64, info: &BlkInfo) -> i64 {
     let mut raw = [0u8; 64];
     raw[0..8].copy_from_slice(&info.blocks.to_le_bytes());
@@ -411,7 +411,7 @@ pub fn blk_attach(h: u64, chan: u64, buf: u64, info: &BlkInfo) -> i64 {
     syscall6(SYS_BLK_ATTACH, h, chan, buf, raw.as_ptr() as u64, 0, 0)
 }
 
-/// Nazwa dysku USB w jądrze: 0 -> sda, 26 -> sdaa.
+/// Kernel name of a USB disk: 0 -> sda, 26 -> sdaa.
 pub fn disk_name(mut n: u64, out: &mut [u8; 8]) -> &str {
     let mut tmp = [0u8; 6];
     let mut k = 0;
@@ -431,7 +431,7 @@ pub fn disk_name(mut n: u64, out: &mut [u8; 8]) -> &str {
     core::str::from_utf8(&out[..2 + k]).unwrap_or("sd?")
 }
 
-/// M19.c: opis przejętego urządzenia.
+/// Description of a claimed device.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DevInfo {
     pub vendor: u16,
@@ -439,7 +439,7 @@ pub struct DevInfo {
     pub class: u8,
     pub subclass: u8,
     pub prog_if: u8,
-    /// Rozmiary BAR-ów (0 = brak); BAR-y I/O w `io_mask`.
+    /// BAR sizes (0 = none); I/O BARs are flagged in `io_mask`.
     pub bars: [u64; 6],
     pub io_mask: u8,
     pub msi: bool,
@@ -467,44 +467,44 @@ pub fn dev_info(h: u64) -> Result<DevInfo, i64> {
     })
 }
 
-/// M19.c: mapuje rejestry BAR-u (PROT_READ albo PROT_READ | PROT_WRITE) – bez
-/// cache, nigdy wykonywalne.  Odmapowanie: munmap(adres, rozmiar BAR-u).
+/// Maps a BAR's registers (PROT_READ or PROT_READ | PROT_WRITE) – uncached,
+/// never executable.  Unmap with munmap(address, BAR size).
 pub fn dev_map(h: u64, bar: u64, prot: u64) -> Result<u64, i64> {
     let r = syscall3(SYS_DEV_MAP, h, bar, prot);
     if r < 0 { Err(r) } else { Ok(r as u64) }
 }
 
-/// M19.d: przypina przerwanie urządzenia (wymaga R_MAP_WRITE) – uchwyt IRQ.
-/// Czekanie: wait_many z W_IRQ; odczyt licznika: irq_read.
+/// Binds the device interrupt (requires R_MAP_WRITE) – an IRQ handle.
+/// Wait with wait_many and W_IRQ; read the counter with irq_read.
 pub fn irq_bind(dev: u64) -> i64 {
     syscall3(SYS_IRQ_BIND, dev, 0, 0)
 }
 
-/// M19.d: przerwania od ostatniego odczytu (zeruje licznik).
+/// Interrupts since the last read (resets the counter).
 pub fn irq_read(irq: u64) -> i64 {
     syscall3(SYS_IRQ_READ, irq, 0, 0)
 }
 
-/// M19.e: bufor DMA urządzenia – uchwyt pamięci współdzielonej (mapowanie:
-/// shm_map) z ciągłych ramek poniżej 2^bits (szyna adresów urządzenia).  Bufor
-/// żyje tak długo jak przejęcie urządzenia (zamknięcie uchwytu go nie zwalnia).
+/// DMA buffer for a device – a shared memory handle (map it with
+/// shm_map) made of contiguous frames below 2^bits (the device's address bus).  The buffer
+/// lives as long as the device claim (closing the handle does not free it).
 pub fn dma_alloc(dev: u64, size: u64, bits: u64) -> i64 {
     syscall3(SYS_DMA_ALLOC, dev, size, bits)
 }
 
-/// M19.e: adres fizyczny bufora DMA (do wpisania w urządzenie).
+/// Physical address of a DMA buffer (to program into the device).
 pub fn dma_phys(buf: u64) -> Result<u64, i64> {
     let r = syscall3(SYS_DMA_PHYS, buf, 0, 0);
     if r < 0 { Err(r) } else { Ok(r as u64) }
 }
 
-/// M19.g: kanał do menedżera usług (init) – programy uruchomione z shella mają
-/// go w slocie 3 (tylko wysyłanie).  Init ma w slocie 3 HW_ROOT.
+/// Channel to the service manager (init) – programs started from the shell have
+/// it in slot 3 (send only).  Init has HW_ROOT in slot 3.
 pub const SVC: u64 = 3;
 
-/// M19.g: połączenie z usługą po nazwie (np. "edu") – zwraca koniec kanału do
-/// rozmowy z usługą.  Usługa nieznana / niedziałająca: kanał zamknięty przez
-/// init, pierwsza operacja na nim da EPIPE.
+/// Connects to a service by name (e.g. "edu") – returns a channel end for
+/// talking to the service.  Unknown / not running service: the channel is closed by
+/// init, the first operation on it gives EPIPE.
 pub fn svc_connect(name: &str) -> Result<u64, i64> {
     let mut msg = [0u8; 64];
     let p = b"connect ";
@@ -523,8 +523,8 @@ pub fn svc_connect(name: &str) -> Result<u64, i64> {
     Ok(mine)
 }
 
-/// M19.g: lista usług od init (wiersze "nazwa stan pid N restarts N (program)")
-/// do `buf`; zwraca długość.
+/// Service list from init (lines "name state pid N restarts N (program)")
+/// into `buf`; returns the length.
 pub fn svc_list(buf: &mut [u8]) -> Result<usize, i64> {
     let (mine, theirs) = channel_create()?;
     let r = chan_send_h(SVC, b"list", &[theirs], 0);
@@ -545,24 +545,24 @@ pub fn svc_list(buf: &mut [u8]) -> Result<usize, i64> {
     Ok(n)
 }
 
-/// M17b: `new` wskazuje obiekt `old` (poprzedni `new` zamknięty).
+/// `new` refers to the object of `old` (the previous `new` is closed).
 pub fn dup2(old: u64, new: u64) -> i64 {
     syscall3(SYS_DUP2, old, new, 0)
 }
 
-/// M17b: potok – (fd do odczytu, fd do zapisu).
+/// Pipe – (read fd, write fd).
 pub fn pipe() -> Result<(u64, u64), i64> {
     let mut out = [0u64; 2];
     let r = syscall3(SYS_PIPE, out.as_mut_ptr() as u64, 0, 0);
     if r < 0 { Err(r) } else { Ok((out[0], out[1])) }
 }
 
-/// M17b: koniec sterty (0 = zapytanie); przy błędzie – dotychczasowy.
+/// End of the heap (0 = query); on error – the current one.
 pub fn brk(addr: u64) -> u64 {
     syscall3(SYS_BRK, addr, 0, 0) as u64
 }
 
-/// M17b: anonimowy obszar pamięci (wyzerowany, strony przy pierwszym dostępie).
+/// Anonymous memory region (zeroed, pages allocated on first access).
 pub fn mmap(len: u64, prot: u64) -> Result<u64, i64> {
     let r = syscall3(SYS_MMAP, len, prot, 0);
     if r < 0 { Err(r) } else { Ok(r as u64) }
@@ -572,7 +572,7 @@ pub fn munmap(addr: u64, len: u64) -> i64 {
     syscall3(SYS_MUNMAP, addr, len, 0)
 }
 
-/// M17b: nowa pozycja (SEEK_SET / SEEK_CUR / SEEK_END); wynik – pozycja.
+/// New position (SEEK_SET / SEEK_CUR / SEEK_END); result – the position.
 pub fn seek(fd: u64, offset: i64, whence: u64) -> i64 {
     syscall3(SYS_SEEK, fd, offset as u64, whence)
 }
@@ -590,11 +590,11 @@ pub fn uptime_ms() -> u64 {
 }
 
 // ------------------------------------------------------------
-// M16: procesy
+// Processes
 // ------------------------------------------------------------
 
-/// Uruchamia program `path` (względem katalogu bieżącego) z argumentami
-/// `args` (args[0] = nazwa).  Zwraca pid albo -errno.
+/// Starts program `path` (relative to the current directory) with arguments
+/// `args` (args[0] = name).  Returns the pid or -errno.
 pub fn spawn(path: &str, args: &[&str], flags: u64, fds: u64) -> i64 {
     let mut buf = [0u8; 4096];
     let mut n = 0;
@@ -604,13 +604,13 @@ pub fn spawn(path: &str, args: &[&str], flags: u64, fds: u64) -> i64 {
             return -7; // E2BIG
         }
         buf[n..n + b.len()].copy_from_slice(b);
-        n += b.len() + 1; // bajt 0 już jest
+        n += b.len() + 1; // byte 0 is already there
     }
     syscall6(SYS_SPAWN, path.as_ptr() as u64, path.len() as u64, buf.as_ptr() as u64, n as u64, flags, fds)
 }
 
-/// Czeka na dziecko `pid` (WAIT_ANY = dowolne).  Ok((pid, status)); przy
-/// WNOHANG Ok((0, 0)), gdy nikt się jeszcze nie skończył.
+/// Waits for child `pid` (WAIT_ANY = any).  Ok((pid, status)); with
+/// WNOHANG Ok((0, 0)) when nothing has finished yet.
 pub fn wait(pid: u64, flags: u64) -> Result<(u64, u64), i64> {
     let mut status: u64 = 0;
     let r = syscall3(SYS_WAIT, pid, &mut status as *mut u64 as u64, flags);
@@ -629,7 +629,7 @@ pub fn chdir(path: &str) -> i64 {
     syscall3(SYS_CHDIR, path.as_ptr() as u64, path.len() as u64, 0)
 }
 
-/// Katalog bieżący do `buf`; zwraca go jako &str.
+/// Current directory into `buf`; returns it as &str.
 pub fn getcwd(buf: &mut [u8]) -> &str {
     let n = syscall3(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0);
     if n <= 0 {
@@ -638,7 +638,7 @@ pub fn getcwd(buf: &mut [u8]) -> &str {
     core::str::from_utf8(&buf[..n as usize]).unwrap_or("/")
 }
 
-/// Zawartość katalogu: linie "d|f\t<rozmiar>\t<nazwa>\n".  ERANGE = za mały bufor.
+/// Directory contents: lines "d|f\t<size>\t<name>\n".  ERANGE = buffer too small.
 pub fn readdir(path: &str, buf: &mut [u8]) -> i64 {
     syscall6(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0)
 }
@@ -663,24 +663,24 @@ pub fn unlink(path: &str) -> i64 {
     syscall3(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64, 0)
 }
 
-/// Lista zadań: linie "pid\tppid\tstan\tms\tprzełączenia\ttyp\tnazwa\n".
+/// Task list: lines "pid\tppid\tstate\tms\tswitches\ttype\tname\n".
 pub fn tasks(buf: &mut [u8]) -> i64 {
     syscall3(SYS_TASKS, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
 
-/// M19.i: tekst tylko do odczytu od jądra ("mem", "lspci -v", "cpus", "disk"...)
-/// do `buf`.  Err(ENOENT) – nieznany temat; Err(ERANGE) – bufor za mały.
+/// Read-only text from the kernel ("mem", "lspci -v", "cpus", "disk"...)
+/// into `buf`.  Err(ENOENT) – unknown topic; Err(ERANGE) – buffer too small.
 pub fn sysinfo(topic: &str, buf: &mut [u8]) -> Result<usize, i64> {
     let r = syscall6(SYS_SYSINFO, topic.as_ptr() as u64, topic.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
     if r < 0 { Err(r) } else { Ok(r as usize) }
 }
 
-/// M19.i: akcja systemowa z uchwytem SYSCTL (`h`); wynik tekstem na `fd`.
+/// System action via the SYSCTL handle (`h`); the result is written as text to `fd`.
 pub fn sysctl(h: u64, op: u64, arg: u64, fd: u64) -> i64 {
     syscall6(SYS_SYSCTL, h, op, arg, fd, 0, 0)
 }
 
-/// Opis statusu z wait.
+/// Description of a wait status.
 pub fn describe_status(status: u64) -> &'static str {
     if status & STATUS_SIGNALED == 0 {
         return if status == 0 { "done" } else { "exited with an error" };
@@ -697,13 +697,13 @@ pub fn describe_status(status: u64) -> &'static str {
 }
 
 // ------------------------------------------------------------
-// M16: klawisze (readkey) – dla edytora linii
+// Keys (readkey) – for the line editor
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Char(char),
-    /// Ctrl + litera (mała).
+    /// Ctrl + letter (lowercase).
     Ctrl(char),
     Enter,
     Backspace,
@@ -716,12 +716,12 @@ pub enum Key {
     Down,
     Home,
     End,
-    /// Koniec wejścia (bufor testowy wyczerpany).
+    /// End of input (test buffer exhausted).
     Eof,
 }
 
-/// Czeka na klawisz.  `line` = to, co kernel narysuje ponownie, jeśli
-/// w trakcie czekania coś wypisze proces w tle (prompt + wpisany tekst).
+/// Waits for a key.  `line` = what the kernel redraws if a background
+/// process prints something while we wait (prompt + typed text).
 pub fn readkey(line: &str) -> Result<Key, i64> {
     let r = syscall3(SYS_READKEY, line.as_ptr() as u64, line.len() as u64, 0);
     if r < 0 {
@@ -751,14 +751,14 @@ pub fn readkey(line: &str) -> Result<Key, i64> {
 }
 
 // ------------------------------------------------------------
-// Sterta procesu – M17b: na brk / mmap (wcześniej tablica 256 KiB w .bss)
+// Process heap – on top of brk / mmap
 // ------------------------------------------------------------
 //
-// Klasy rozmiarów 16 B .. 64 KiB (potęgi dwójki), każda z własną listą
-// wolnych bloków; nowe bloki z kawałka sterty [next, end), który rośnie przez
-// brk o co najmniej 64 KiB.  Większe bloki – własny obszar mmap (zwalniany
-// przez munmap).  Strony przydziela kernel przy pierwszym dostępie, więc
-// rezerwa nic nie kosztuje.  Proces jest jednowątkowy – bez blokad.
+// Size classes 16 B .. 64 KiB (powers of two), each with its own free
+// list; new blocks come from the heap chunk [next, end), which grows via
+// brk by at least 64 KiB.  Larger blocks get their own mmap region (freed
+// by munmap).  The kernel allocates pages on first access, so the
+// reservation costs nothing.  The process is single-threaded – no locks.
 
 const CLASSES: usize = 13; // 16 << 12 = 64 KiB
 const GROW: usize = 64 * 1024;
@@ -786,7 +786,7 @@ fn page_up(x: usize) -> usize {
     (x + 4095) & !4095
 }
 
-/// Blok `size` (wyrównany do `size`) z kawałka sterty; brak – sterta rośnie.
+/// Block of `size` (aligned to `size`) from the heap chunk; if none, the heap grows.
 fn carve(size: usize) -> *mut u8 {
     if HEAP.end.get() == 0 {
         let b = brk(0) as usize;
@@ -811,7 +811,7 @@ pub struct ArenaAlloc;
 unsafe impl core::alloc::GlobalAlloc for ArenaAlloc {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let Some((class, size)) = class_of(layout) else {
-            // Duże bloki: własny obszar (wyrównanie do strony wystarcza).
+            // Large blocks: their own region (page alignment is enough).
             if layout.align() > 4096 {
                 return core::ptr::null_mut();
             }
@@ -844,7 +844,7 @@ unsafe impl core::alloc::GlobalAlloc for ArenaAlloc {
 #[global_allocator]
 static ALLOCATOR: ArenaAlloc = ArenaAlloc;
 
-/// Opis kodu błędu (-errno).
+/// Description of an error code (-errno).
 pub fn strerror(e: i64) -> &'static str {
     match e {
         -1 => "operation not permitted",
@@ -879,9 +879,9 @@ pub fn strerror(e: i64) -> &'static str {
     }
 }
 
-/// Bufor wyjścia dla print!/println!: cały tekst jednego wywołania idzie
-/// jednym `write` (linia z procesu w tle nie miesza się z promptem shella).
-/// Opróżniany, gdy się zapełni, i na końcu (drop).
+/// Output buffer for print!/println!: the whole text of one call goes out in
+/// a single `write` (a line from a background process does not mix with the shell prompt).
+/// Flushed when full and at the end (drop).
 pub struct Out {
     fd: u64,
     len: usize,
@@ -945,7 +945,7 @@ macro_rules! eprintln {
     }};
 }
 
-/// Argumenty programu (argv) – wskaźniki na stos procesu.
+/// Program arguments (argv) – pointers into the process stack.
 #[derive(Clone, Copy)]
 pub struct Args {
     argc: usize,
@@ -963,8 +963,8 @@ impl Args {
         }
         unsafe {
             let p = *self.argv.add(i);
-            // read_volatile: kompilator nie zamieni pętli na wywołanie strlen
-            // (programy nie mają libc).
+            // read_volatile: the compiler will not turn the loop into a strlen call
+            // (programs have no libc).
             let mut n = 0;
             while core::ptr::read_volatile(p.add(n)) != 0 {
                 n += 1;
@@ -1000,7 +1000,7 @@ extern "sysv64" fn desoos_start(sp: *const u64) -> ! {
     exit(code)
 }
 
-/// Łączy `fn main(args: Args) -> i32` programu z _start.
+/// Connects the program's `fn main(args: Args) -> i32` to _start.
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {

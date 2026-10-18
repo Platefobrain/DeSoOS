@@ -1,16 +1,16 @@
-// M2: 4-level paging.  M10: kernel w górnej połowie.
+// 4-level paging, kernel in the higher half.
 //
-// Layout po `init()` (szczegóły w layout.rs):
-//   * PML4[0..256)   -> PUSTE – dolna połowa zostaje dla procesów (M13);
-//                       przy okazji każdy null pointer to #PF
-//   * PML4[256..)    -> direct map: fizyczny X pod DIRECT_MAP_BASE + X,
-//                       strony 2 MiB (RAM + framebuffer)
-//   * PML4[510]      -> recursive mapping (PML4 wskazuje na siebie)
-//   * PML4[511]      -> obraz kernela + stos, przejęte z tablic DSB
+// Layout after `init()` (details in layout.rs):
+//   * PML4[0..256)   -> EMPTY – the lower half is left for processes;
+//                       as a side effect every null pointer is a #PF
+//   * PML4[256..)    -> direct map: physical X at DIRECT_MAP_BASE + X,
+//                       2 MiB pages (RAM + framebuffer)
+//   * PML4[510]      -> recursive mapping (PML4 points to itself)
+//   * PML4[511]      -> kernel image + stack, taken over from the DSB tables
 //
-// Direct map jest potrzebny, bo alokator ramek (M1) trzyma listę wolnych
-// ramek *w samych ramkach*, tablice stron są zerowane, a DMA (virtio) i
-// framebuffer są widziane przez CPU – wszystko po adresie fizycznym.
+// The direct map is needed because the frame allocator keeps its free list
+// *inside the frames themselves*, page tables get zeroed, and DMA (virtio) and
+// the framebuffer are seen by the CPU – all of it by physical address.
 
 use crate::serial_println;
 
@@ -23,12 +23,12 @@ const ENTRIES: usize = 512;
 
 pub const PRESENT: u64 = 1 << 0;
 pub const WRITABLE: u64 = 1 << 1;
-/// M13a: strona dostępna z ring 3 (musi być na każdym poziomie tablic).
+/// Page accessible from ring 3 (must be set at every table level).
 pub const USER: u64 = 1 << 2;
-/// M13a: zakaz wykonywania (działa tylko z EFER.NXE – patrz `nx_flag`).
+/// No-execute (works only with EFER.NXE – see `nx_flag`).
 pub const NO_EXECUTE: u64 = 1 << 63;
 const HUGE: u64 = 1 << 7;
-// Bity typu pamięci: PWT/PCD wybierają wpis PAT (razem z bitem PAT).
+// Memory type bits: PWT/PCD select a PAT entry (together with the PAT bit).
 pub const WRITE_THROUGH: u64 = 1 << 3; // PWT
 pub const CACHE_DISABLE: u64 = 1 << 4; // PCD
 
@@ -46,8 +46,8 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    /// Tablica o adresie fizycznym `physical`, widziana przez direct map
-    /// (z tablic DSB przed `init`, z własnych po nim).
+    /// Table at physical address `physical`, seen through the direct map
+    /// (the DSB tables before `init`, our own after it).
     unsafe fn from_physical(physical: u64) -> &'static mut Self {
         unsafe { &mut *(phys_to_virt(physical) as *mut PageTable) }
     }
@@ -96,7 +96,7 @@ fn flush_tlb(virtual_address: u64) {
 }
 
 // ------------------------------------------------------------
-// BOOTSTRAP (przed CR3 – nowe tablice dostępne przez direct map DSB)
+// BOOTSTRAP (before CR3 – new tables reachable through the DSB direct map)
 // ------------------------------------------------------------
 
 fn bootstrap_next_table(
@@ -134,7 +134,7 @@ fn bootstrap_map_huge(pml4: &mut PageTable, va: u64, pa: u64, flags: u64) {
 //   PD(i,j)     = [R][R][i][j]
 //   PT(i,j,k)   = [R][i][j][k]
 //
-// Każdy indeks to 9 bitów; poziomy siedzą na bitach 39, 30, 21, 12.
+// Each index is 9 bits; the levels sit at bits 39, 30, 21, 12.
 // ------------------------------------------------------------
 
 const R: u64 = RECURSIVE_INDEX as u64;
@@ -173,8 +173,8 @@ fn recursive_pt(
     ))
 }
 
-/// Dopina świeżo zaalokowaną tabelę do `entry` i unieważnia TLB dla jej
-/// adresu rekurencyjnego (`table_va`).
+/// Attaches a freshly allocated table to `entry` and invalidates the TLB for its
+/// recursive address (`table_va`).
 fn link_new_table(entry: &mut u64, table_va: u64, extra: u64) -> bool {
     let Some((frame, _)) = PageTable::try_allocate() else {
         return false;
@@ -193,12 +193,12 @@ fn table_is_empty(table: &PageTable) -> bool {
 // PUBLIC API
 // ------------------------------------------------------------
 
-/// Mapuje stronę 4 KiB.  `false`, gdy: adres niewyrównany / niekanoniczny,
-/// strona już zamapowana, adres leży w dużej stronie (2 MiB / 1 GiB)
-/// albo zabrakło ramek na tablice pośrednie.
+/// Maps a 4 KiB page.  `false` when: the address is unaligned / non-canonical,
+/// the page is already mapped, the address lies inside a large page (2 MiB / 1 GiB)
+/// or we ran out of frames for intermediate tables.
 pub fn map_page(virtual_address: u64, physical_address: u64, flags: u64) -> bool {
-    // M12: zadania mogą być wywłaszczone w dowolnym miejscu – zmiany tablic
-    // stron robimy przy wyłączonych przerwaniach (jeden rdzeń).
+    // Tasks can be preempted anywhere – page table changes are made
+    // with interrupts disabled (single core).
     crate::arch::x86_64::interrupts::without_interrupts(|| {
         map_page_locked(virtual_address, physical_address, flags)
     })
@@ -219,13 +219,13 @@ fn map_page_locked(virtual_address: u64, physical_address: u64, flags: u64) -> b
         index(virtual_address, 1),
     );
 
-    // Slot rekurencyjny należy do kernela – nie wolno tam mapować stron.
+    // The recursive slot belongs to the kernel – pages must not be mapped there.
     if i4 == RECURSIVE_INDEX {
         return false;
     }
 
-    // M13a: w dolnej połowie (przestrzeń procesu) tablice pośrednie mają
-    // USER – o prawach decyduje i tak wpis końcowy.
+    // In the lower half (process address space) intermediate tables have
+    // USER – the final entry decides the permissions anyway.
     let table_flags = if i4 < KERNEL_PML4_FIRST { USER } else { 0 };
 
     let pml4 = recursive_pml4();
@@ -273,21 +273,21 @@ fn map_page_locked(virtual_address: u64, physical_address: u64, flags: u64) -> b
     true
 }
 
-/// Zdejmuje mapowanie strony 4 KiB i zwraca adres fizyczny ramki
-/// (zwolnienie samej ramki to sprawa wołającego).  Puste tablice pośrednie
-/// (PT, PD, PDPT) są zwalniane i wracają do alokatora ramek.
+/// Removes the mapping of a 4 KiB page and returns the physical address of the frame
+/// (freeing the frame itself is the caller's business).  Empty intermediate tables
+/// (PT, PD, PDPT) are freed and returned to the frame allocator.
 ///
-/// M17a.b: w górnej połowie (kernel) po powrocie ŻADEN CPU nie ma już
-/// starego wpisu TLB (shootdown), więc ramkę wolno od razu oddać.
+/// In the higher half (kernel), after return NO CPU still holds
+/// the stale TLB entry (shootdown), so the frame may be released right away.
 pub fn unmap_page(virtual_address: u64) -> Option<u64> {
     let mut frame = None;
     unmap_range_with(virtual_address, virtual_address.saturating_add(PAGE_SIZE), |f| frame = Some(f));
     frame
 }
 
-/// Zdejmuje mapowania stron 4 KiB z [start, end) i oddaje ich ramki do
-/// alokatora (stosy zadań, heap).  Jeden shootdown na paczkę do 32 stron
-/// zamiast jednego na stronę.  Zwraca liczbę zdjętych stron.
+/// Removes 4 KiB page mappings in [start, end) and returns their frames to
+/// the allocator (task stacks, heap).  One shootdown per batch of up to 32 pages
+/// instead of one per page.  Returns the number of pages unmapped.
 pub fn unmap_range_free(start: u64, end: u64) -> usize {
     let mut n = 0;
     unmap_range_with(start, end, |f| {
@@ -299,12 +299,12 @@ pub fn unmap_range_free(start: u64, end: u64) -> usize {
     n
 }
 
-/// Paczka stron na jeden shootdown.
+/// Batch of pages per shootdown.
 const UNMAP_CHUNK: usize = 32;
 
-/// Wspólna pętla: czyści PTE paczki, unieważnia TLB (lokalnie albo na
-/// wszystkich CPU), dopiero potem oddaje tablice i woła `done` z ramkami.
-/// Bez alokacji (woła ją także heap w trakcie zmniejszania).
+/// Common loop: clears the batch's PTEs, invalidates the TLB (locally or on
+/// all CPUs), only then releases the tables and calls `done` with the frames.
+/// Allocation-free (the heap also calls it while shrinking).
 fn unmap_range_with(start: u64, end: u64, mut done: impl FnMut(u64)) {
     if start % PAGE_SIZE != 0 || end <= start {
         return;
@@ -327,10 +327,10 @@ fn unmap_range_with(start: u64, end: u64, mut done: impl FnMut(u64)) {
             if nf == 0 && nt == 0 {
                 continue;
             }
-            // Dolna połowa = przestrzeń procesu załadowana TYLKO na tym CPU
-            // (procesy jednowątkowe) – lokalny invlpg już był.  Górna połowa
-            // jest wspólna: shootdown, a przy zwolnionych tablicach pełny
-            // (wpisy rekurencyjne i cache struktur stronicowania).
+            // Lower half = process address space loaded ONLY on this CPU
+            // (single-threaded processes) – the local invlpg already happened.  The higher half
+            // is shared: shootdown, and a full one when tables were freed
+            // (recursive entries and the paging-structure caches).
             if index(chunk_start, 4) >= KERNEL_PML4_FIRST {
                 if nt > 0 {
                     crate::arch::x86_64::tlb::flush_kernel_all();
@@ -350,8 +350,8 @@ fn unmap_range_with(start: u64, end: u64, mut done: impl FnMut(u64)) {
     })
 }
 
-/// Czyści wpis i unieważnia go lokalnie; ramkę tabeli dopisuje do `tables`
-/// (oddanie dopiero po shootdownie).
+/// Clears the entry and invalidates it locally; appends the table frame to `tables`
+/// (released only after the shootdown).
 fn release_table_deferred(entry: &mut u64, table_va: u64, tables: &mut [u64], nt: &mut usize) {
     let frame = *entry & ADDRESS_MASK;
     *entry = 0;
@@ -393,11 +393,11 @@ fn unmap_page_locked(virtual_address: u64, tables: &mut [u64], nt: &mut usize) -
     pt.entries[i1] = 0;
     flush_tlb(virtual_address);
 
-    // Sprzątanie od dołu: po zwolnieniu tabeli jej adres rekurencyjny
-    // przestaje być ważny, więc `pt` / `pd` / `pdpt` nie są już używane
-    // po odpowiednim release_table_deferred().  M17a.b: także w górnej
-    // połowie przy wielu CPU (do M17a.a tablice kernela zostawały na zawsze
-    // – bez shootdownu inny CPU mógł mieć wpis rekurencyjny starej tablicy).
+    // Bottom-up cleanup: after a table is freed its recursive address
+    // stops being valid, so `pt` / `pd` / `pdpt` are no longer used
+    // after the corresponding release_table_deferred().  This also applies to the higher
+    // half with multiple CPUs (kernel tables used to be kept forever, because
+    // without a shootdown another CPU could hold a recursive entry of the old table).
     if table_is_empty(pt) {
         let pd = recursive_pd(i4, i3);
         release_table_deferred(
@@ -416,9 +416,9 @@ fn unmap_page_locked(virtual_address: u64, tables: &mut [u64], nt: &mut usize) -
                 nt,
             );
 
-            // Wpisów PML4 górnej połowy nie zwalniamy nigdy: są wspólne dla
-            // wszystkich przestrzeni procesów (M13a) – kopia w PML4 procesu
-            // musi wskazywać na żywą tablicę.
+            // Higher-half PML4 entries are never freed: they are shared by
+            // all process address spaces – the copy in a process PML4
+            // must point to a live table.
             if i4 < KERNEL_PML4_FIRST && table_is_empty(pdpt) {
                 let pml4 = recursive_pml4();
                 release_table_deferred(
@@ -430,15 +430,15 @@ fn unmap_page_locked(virtual_address: u64, tables: &mut [u64], nt: &mut usize) -
             }
         }
 
-        // Unieważnij też ewentualne cache'owane wpisy stronicowania
-        // dla samego adresu.
+        // Also invalidate any cached paging-structure entries
+        // for the address itself.
         flush_tlb(virtual_address);
     }
 
     Some(entry & ADDRESS_MASK)
 }
 
-/// Wirtualny -> fizyczny (obsługuje strony 4 KiB, 2 MiB i 1 GiB).
+/// Virtual -> physical (handles 4 KiB, 2 MiB and 1 GiB pages).
 #[allow(dead_code)]
 pub fn translate(virtual_address: u64) -> Option<u64> {
     if !is_canonical(virtual_address) {
@@ -486,18 +486,18 @@ pub fn translate(virtual_address: u64) -> Option<u64> {
 static KERNEL_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static NX_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// CR3 kernela (PML4 z `init`) – używają go zadania kernela.
+/// Kernel CR3 (the PML4 from `init`) – used by kernel tasks.
 pub fn kernel_cr3() -> u64 {
     KERNEL_CR3.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// NO_EXECUTE, jeśli NX jest włączone, inaczej 0 (bit 63 bez EFER.NXE to
-/// zarezerwowany bit -> #PF).
+/// NO_EXECUTE if NX is enabled, otherwise 0 (bit 63 without EFER.NXE is a
+/// reserved bit -> #PF).
 pub fn nx_flag() -> u64 {
     if NX_ENABLED.load(core::sync::atomic::Ordering::Relaxed) { NO_EXECUTE } else { 0 }
 }
 
-/// Flagi zwykłych danych kernela (heap, stosy): zapis + NX.
+/// Flags for ordinary kernel data (heap, stacks): write + NX.
 pub fn kernel_data_flags() -> u64 {
     WRITABLE | nx_flag()
 }
@@ -505,7 +505,7 @@ pub fn kernel_data_flags() -> u64 {
 const IA32_EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
 
-/// Włącza EFER.NXE, jeśli CPU ma NX (CPUID 8000_0001h:EDX[20]).
+/// Enables EFER.NXE if the CPU has NX (CPUID 8000_0001h:EDX[20]).
 fn enable_nx() -> u64 {
     #[allow(unused_unsafe)]
     let max = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }.eax;
@@ -532,8 +532,8 @@ fn read_cr3() -> u64 {
     value
 }
 
-/// CR0.WP: kernel też nie może pisać do stron tylko-do-odczytu (kod i
-/// rodata kernela).  Bez tego bit R/W chroni tylko przed ring 3.
+/// CR0.WP: the kernel cannot write to read-only pages either (kernel code and
+/// rodata).  Without it the R/W bit only protects against ring 3.
 fn enable_write_protect() {
     unsafe {
         core::arch::asm!(
@@ -559,13 +559,13 @@ pub fn init() {
     let (pml4_frame, pml4) = PageTable::allocate();
     serial_println!("[MM] PML4 frame = {:#x}", pml4_frame);
 
-    // M13a: NX (EFER.NXE) – dane kernela i direct map niewykonywalne.
+    // NX (EFER.NXE) – kernel data and the direct map are non-executable.
     let nx = enable_nx();
     let data_flags = WRITABLE | nx;
 
-    // Direct map: RAM i rezerwacje (framebuffer, ...) stronami 2 MiB.
-    // Dziury bez pamięci (okno PCI) zostają puste – tam map_mmio dokłada
-    // rejestry urządzeń stronami 4 KiB bez cache.
+    // Direct map: RAM and reservations (framebuffer, ...) in 2 MiB pages.
+    // Holes without memory (the PCI window) stay empty – map_mmio adds
+    // device registers there as uncached 4 KiB pages.
     let mut address = 0;
     let mut huge_pages = 0;
     while address < limit {
@@ -582,8 +582,8 @@ pub fn init() {
         huge_pages
     );
 
-    // Obraz kernela i stos: DSB zmapował je w PML4[511] – przejmujemy ten
-    // wpis (tablice niższych poziomów zostają te same).
+    // Kernel image and stack: DSB mapped them in PML4[511] – we take over that
+    // entry (the lower-level tables stay the same).
     let dsb_pml4 = unsafe { PageTable::from_physical(read_cr3() & ADDRESS_MASK) };
     let kernel_entry = dsb_pml4.entries[KERNEL_PML4_INDEX];
     if kernel_entry & PRESENT == 0 {
@@ -603,10 +603,10 @@ pub fn init() {
     pml4.entries[RECURSIVE_INDEX] = pml4_frame | PRESENT | WRITABLE;
     serial_println!("[MM] Recursive slot = {}", RECURSIVE_INDEX);
 
-    // M13a: wszystkie wpisy górnej połowy dostają tablicę PDPT od razu.
-    // Przestrzenie procesów kopiują PML4[256..512) – gdyby kernel dodał
-    // później nowy wpis (np. pierwszy stos zadania), procesy by go nie
-    // widziały.  Koszt: ok. 1 MiB na puste PDPT.
+    // All higher-half entries get a PDPT table right away.
+    // Process address spaces copy PML4[256..512) – if the kernel added
+    // a new entry later (e.g. the first task stack), processes would not
+    // see it.  Cost: about 1 MiB for empty PDPTs.
     let mut added = 0;
     for i in KERNEL_PML4_FIRST..512 {
         if pml4.entries[i] & PRESENT == 0 {
@@ -632,17 +632,17 @@ pub fn init() {
 }
 
 // ------------------------------------------------------------
-// M7: typ pamięci – write-combining dla framebuffera (PAT)
+// Memory type – write-combining for the framebuffer (PAT)
 // ------------------------------------------------------------
 //
-// PAT (MSR 0x277) ma 8 wpisów; strona wybiera wpis bitami PAT|PCD|PWT.
-// Domyślnie: PA0=WB, PA1=WT, PA2=UC-, PA3=UC (i powtórzone w PA4..7).
-// Zmieniamy PA1 z WT na WC – strony z samym PWT=1 stają się
-// write-combining.  Nikt inny w kernelu nie używa PWT, więc to bezpieczne.
+// PAT (MSR 0x277) has 8 entries; a page selects an entry with the PAT|PCD|PWT bits.
+// Default: PA0=WB, PA1=WT, PA2=UC-, PA3=UC (repeated in PA4..7).
+// We change PA1 from WT to WC – pages with only PWT=1 become
+// write-combining.  Nothing else in the kernel uses PWT, so this is safe.
 //
-// WC: zapisy do framebuffera są łączone w paczki i nie zaśmiecają cache.
-// Zwykła (WB) pamięć dla framebuffera działa w QEMU, ale na prawdziwym
-// sprzęcie potrafi dawać artefakty i jest wolna.
+// WC: writes to the framebuffer are combined into bursts and do not pollute the cache.
+// Ordinary (WB) memory for the framebuffer works in QEMU, but on real
+// hardware it can produce artifacts and is slow.
 
 const IA32_PAT: u32 = 0x277;
 pub const PAT_WC: u64 = 0x01;
@@ -668,8 +668,8 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 pub fn pat_supported() -> bool {
-    // CPUID.01h:EDX[16].  `__cpuid` jest bezpieczne od nowszych wersji Rusta,
-    // w starszych wymaga unsafe – allow, żeby działało na obu.
+    // CPUID.01h:EDX[16].  `__cpuid` is safe in newer Rust versions,
+    // older ones require unsafe – allow, so that it works on both.
     #[allow(unused_unsafe)]
     let r = unsafe { core::arch::x86_64::__cpuid(1) };
     r.edx & (1 << 16) != 0
@@ -687,9 +687,9 @@ fn reload_cr3() {
 
 static PAT_PROGRAMMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// M17: ustawienia stronicowania per CPU na procesorze AP – PAT (PA1 = WC,
-/// jak na BSP; inaczej framebuffer miałby na AP inny typ pamięci) i CR0.WP.
-/// EFER.NXE ustawia już trampolina.
+/// Per-CPU paging setup on an AP – PAT (PA1 = WC,
+/// as on the BSP; otherwise the framebuffer would have a different memory type on the AP) and CR0.WP.
+/// EFER.NXE is already set by the trampoline.
 pub fn init_ap_cpu() {
     if PAT_PROGRAMMED.load(core::sync::atomic::Ordering::Relaxed) {
         program_pat();
@@ -697,7 +697,7 @@ pub fn init_ap_cpu() {
     enable_write_protect();
 }
 
-/// Ustawia PA1 = WC (procedura z Intel SDM: wbinvd przed i po, flush TLB).
+/// Sets PA1 = WC (procedure from the Intel SDM: wbinvd before and after, TLB flush).
 fn program_pat() {
     PAT_PROGRAMMED.store(true, core::sync::atomic::Ordering::Relaxed);
     crate::arch::x86_64::interrupts::without_interrupts(|| unsafe {
@@ -709,7 +709,7 @@ fn program_pat() {
     });
 }
 
-/// Wpis PD strony 2 MiB z direct mapy, w której leży fizyczny `address`.
+/// PD entry of the direct-map 2 MiB page that contains the physical `address`.
 fn direct_map_entry(address: u64) -> Option<&'static mut u64> {
     let va = phys_to_virt(address);
     let (i4, i3) = (index(va, 4), index(va, 3));
@@ -727,8 +727,8 @@ fn direct_map_entry(address: u64) -> Option<&'static mut u64> {
     Some(entry)
 }
 
-/// Flagi wpisu, który mapuje `virtual_address` (strona 4 KiB, 2 MiB albo
-/// 1 GiB; dla dużych stron z bitem HUGE).  Do testów / diagnostyki.
+/// Flags of the entry that maps `virtual_address` (4 KiB, 2 MiB or
+/// 1 GiB page; HUGE bit set for large pages).  For tests / diagnostics.
 #[allow(dead_code)]
 pub fn page_flags(virtual_address: u64) -> Option<u64> {
     if !is_canonical(virtual_address) {
@@ -765,9 +765,9 @@ pub fn page_flags(virtual_address: u64) -> Option<u64> {
     Some(pte & !ADDRESS_MASK)
 }
 
-/// Ustawia write-combining dla fizycznego zakresu w direct mapie
-/// (framebuffer).  Pomija strony 2 MiB, które zachodzą na zwykły RAM.
-/// Zwraca liczbę przestawionych stron.
+/// Sets write-combining for a physical range in the direct map
+/// (framebuffer).  Skips 2 MiB pages that overlap ordinary RAM.
+/// Returns the number of pages changed.
 pub fn map_write_combining(start: u64, size: u64) -> usize {
     if size == 0 || !pat_supported() {
         return 0;
@@ -791,44 +791,44 @@ pub fn map_write_combining(start: u64, size: u64) -> usize {
         page += HUGE_PAGE_SIZE;
     }
     if changed > 0 {
-        crate::arch::x86_64::tlb::flush_kernel_all(); // M17a.b: inne CPU też
+        crate::arch::x86_64::tlb::flush_kernel_all(); // other CPUs too
     }
     changed
 }
 
 // ------------------------------------------------------------
-// M8: rejestry urządzeń (MMIO) – bez cache.  M10: w direct mapie.
+// Device registers (MMIO) – uncached, in the direct map.
 // ------------------------------------------------------------
 
-/// M16: dzieli stronę 2 MiB direct mapy (tę, w której leży fizyczny
-/// `address`) na 512 stron 4 KiB z tymi samymi flagami.  Mapowanie się nie
-/// zmienia – można potem ustawić inny typ pamięci pojedynczej stronie.
-/// `true`, gdy adres jest już mapowany stronami 4 KiB albo podział się udał.
+/// Splits a direct-map 2 MiB page (the one containing the physical
+/// `address`) into 512 4 KiB pages with the same flags.  The mapping does not
+/// change – afterwards a single page can be given a different memory type.
+/// `true` when the address is already mapped with 4 KiB pages or the split succeeded.
 pub fn split_direct_map_huge(address: u64) -> bool {
     crate::arch::x86_64::interrupts::without_interrupts(|| {
         let base = address & !(HUGE_PAGE_SIZE - 1);
         let Some(entry) = direct_map_entry(base) else {
-            // Brak dużej strony: albo już 4 KiB, albo nic tu nie ma.
+            // No large page: either already 4 KiB, or nothing is here.
             return translate(phys_to_virt(base)).is_some() || translate(phys_to_virt(address)).is_some();
         };
         let Some((frame, table)) = PageTable::try_allocate() else {
             return false;
         };
-        // Flagi dużej strony bez HUGE (bit 12 = PAT dużej strony – nie używamy).
+        // Large-page flags without HUGE (bit 12 = PAT of a large page – unused).
         let flags = *entry & !HUGE_2M_MASK & !HUGE & !(1 << 12);
         for (i, e) in table.entries.iter_mut().enumerate() {
             *e = (base + i as u64 * PAGE_SIZE) | flags;
         }
-        // Tablica PT dziedziczy prawa pośrednie (górna połowa: bez USER).
+        // The PT inherits the intermediate permissions (higher half: no USER).
         *entry = frame | PRESENT | WRITABLE;
         reload_cr3();
-        // M17a.b: inne CPU mogą mieć wpis dużej strony – pełny shootdown.
+        // Other CPUs may hold the large-page entry – full shootdown.
         crate::arch::x86_64::tlb::flush_kernel_all();
         true
     })
 }
 
-/// Wpis PT strony 4 KiB pod `virtual_address` (None: brak albo duża strona).
+/// PT entry of the 4 KiB page at `virtual_address` (None: missing or a large page).
 fn pte_mut(virtual_address: u64) -> Option<&'static mut u64> {
     let (i4, i3, i2, i1) = (
         index(virtual_address, 4),
@@ -854,9 +854,9 @@ fn pte_mut(virtual_address: u64) -> Option<&'static mut u64> {
     Some(pte)
 }
 
-/// M17a.b, tylko samotest TLB: przestawia istniejącą stronę 4 KiB na inną
-/// ramkę i unieważnia wpis TYLKO na tym CPU (shootdown robi test sam albo
-/// celowo nie).  Zwraca poprzednią ramkę.
+/// TLB self-test only: remaps an existing 4 KiB page to another
+/// frame and invalidates the entry ONLY on this CPU (the test does the shootdown itself or
+/// deliberately skips it).  Returns the previous frame.
 #[cfg(selftest)]
 pub fn retarget_page_local(virtual_address: u64, new_physical: u64) -> Option<u64> {
     crate::arch::x86_64::interrupts::without_interrupts(|| {
@@ -868,15 +868,15 @@ pub fn retarget_page_local(virtual_address: u64, new_physical: u64) -> Option<u6
     })
 }
 
-/// Mapuje fizyczny zakres rejestrów urządzenia w direct mapie
-/// (DIRECT_MAP_BASE + phys), stronami 4 KiB z PCD|PWT = UC (bez cache).
-/// Zwraca adres wirtualny pierwszego bajtu.
+/// Maps a physical range of device registers in the direct map
+/// (DIRECT_MAP_BASE + phys), using 4 KiB pages with PCD|PWT = UC (uncached).
+/// Returns the virtual address of the first byte.
 ///
-/// M16: zakres w dziurze bez RAM-u dostaje nowe strony 4 KiB; zakres, który
-/// leży w stronie 2 MiB direct mapy (np. razem z RAM-em albo inną
-/// rezerwacją), tę stronę najpierw dzieli na strony 4 KiB – bez cache są
-/// wtedy TYLKO strony rejestrów, reszta zostaje jak była.  Same rejestry
-/// nie mogą nachodzić na zwykły RAM.
+/// A range in a hole without RAM gets new 4 KiB pages; a range that
+/// lies inside a direct-map 2 MiB page (e.g. together with RAM or another
+/// reservation) first has that page split into 4 KiB pages – then ONLY the
+/// register pages are uncached, the rest stays as it was.  The registers themselves
+/// must not overlap ordinary RAM.
 pub fn map_mmio(physical: u64, size: u64) -> Option<u64> {
     if size == 0 {
         return None;
@@ -900,16 +900,16 @@ pub fn map_mmio(physical: u64, size: u64) -> Option<u64> {
             }
             match translate(va) {
                 Some(p) if p == page => {
-                    // Strona 4 KiB już jest (po podziale albo z wcześniej) –
-                    // tylko typ pamięci na UC.
+                    // A 4 KiB page already exists (after the split or from before) –
+                    // only switch the memory type to UC.
                     let Some(pte) = pte_mut(va) else { return false };
                     if *pte & UC != UC {
                         *pte |= UC;
                         flush_tlb(va);
-                        crate::arch::x86_64::tlb::flush_kernel(va, 1); // M17a.b
+                        crate::arch::x86_64::tlb::flush_kernel(va, 1);
                     }
                 }
-                Some(_) => return false, // coś innego pod tym adresem
+                Some(_) => return false, // something else at this address
                 None => {
                     if !map_page_locked(va, page, WRITABLE | UC | nx_flag()) {
                         return false;
@@ -926,10 +926,10 @@ pub fn map_mmio(physical: u64, size: u64) -> Option<u64> {
     Some(phys_to_virt(physical))
 }
 
-/// M16b: tablice firmware (ACPI) w direct mapie – tylko do odczytu, z cache.
-/// Strony już zmapowane (RAM, rezerwacje, wcześniejsze wywołania) zostają
-/// bez zmian; brakujące dostają strony 4 KiB bez prawa zapisu i wykonania.
-/// Zwraca adres wirtualny `physical`.
+/// Firmware tables (ACPI) in the direct map – read-only, cached.
+/// Pages already mapped (RAM, reservations, earlier calls) stay
+/// unchanged; missing ones get 4 KiB pages with no write or execute permission.
+/// Returns the virtual address of `physical`.
 pub fn map_firmware(physical: u64, size: u64) -> Option<u64> {
     if size == 0 {
         return None;
@@ -960,7 +960,7 @@ pub fn map_firmware(physical: u64, size: u64) -> Option<u64> {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only in builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -980,7 +980,7 @@ pub fn self_test() {
     serial_println!("[MM TEST] Starting paging tests...");
     crate::selftest::begin();
 
-    // 1. Direct map + pusta dolna połowa.
+    // 1. Direct map + empty lower half.
     for address in [0u64, 0x1000, 0x20_0000, 0x20_1000, 0x40_0000, 0x1234_5678] {
         check!(
             translate(phys_to_virt(address)) == Some(address),
@@ -999,8 +999,8 @@ pub fn self_test() {
     check!(translate(0x0001_0000_0000_0000).is_none(), "non-canonical VA translated");
     serial_println!("[MM TEST] 1/7 direct map + empty lower half PASS");
 
-    // 2. map / write / read / translate w zupełnie nowym PML4/PDPT/PD.
-    //    (pml4=1, pdpt=1, pd=1, pt=1 - łapie błąd w obliczaniu adresu PD)
+    // 2. map / write / read / translate in a brand-new PML4/PDPT/PD.
+    //    (pml4=1, pdpt=1, pd=1, pt=1 - catches bugs in computing the PD address)
     let va: u64 = 0x0000_0080_4020_1000;
     let free_start = free_frame_count();
     let frame = match alloc_frame() {
@@ -1039,7 +1039,7 @@ pub fn self_test() {
     check!(!map_page(va, frame, WRITABLE), "double map accepted");
     serial_println!("[MM TEST] 2/7 map + read/write + translate PASS");
 
-    // 3. Druga strona w tym samym PT nie potrzebuje nowych tablic.
+    // 3. A second page in the same PT needs no new tables.
     let frame2 = match alloc_frame() {
         Some(f) => f,
         None => {
@@ -1053,7 +1053,7 @@ pub fn self_test() {
     check!(translate(va + PAGE_SIZE) == Some(frame2), "translate neighbour");
     serial_println!("[MM TEST] 3/7 second page in same PT PASS");
 
-    // 4. Mapowanie w obrębie dużej strony musi być odrzucone.
+    // 4. Mapping inside a large page must be rejected.
     let huge = phys_to_virt(0x20_0000);
     check!(!map_page(huge, frame, WRITABLE), "map inside 2 MiB page accepted");
     check!(unmap_page(huge).is_none(), "unmap inside 2 MiB page succeeded");
@@ -1075,8 +1075,8 @@ pub fn self_test() {
     check!(recursive_pml4().entries[1] == 0, "PML4[1] not cleared");
     serial_println!("[MM TEST] 5/7 unmap + free + tables released PASS");
 
-    // 6. Selektywne zwalnianie tablic + ponowne użycie po zwolnieniu.
-    //    a i b: ten sam PD, różne PT (różnica 2 MiB).
+    // 6. Selective table freeing + reuse after freeing.
+    //    a and b: same PD, different PTs (2 MiB apart).
     let va_a: u64 = 0x0000_0100_8000_0000; // pml4=2 pdpt=2 pd=0
     let va_b: u64 = va_a + HUGE_PAGE_SIZE; // pml4=2 pdpt=2 pd=1
     let (fa, fb) = match (alloc_frame(), alloc_frame()) {
@@ -1103,7 +1103,7 @@ pub fn self_test() {
     check!(free_frame_count() == f0, "PT/PD/PDPT of b not released");
     check!(recursive_pml4().entries[2] == 0, "PML4[2] not cleared");
 
-    // Tablice odbudowują się poprawnie po zwolnieniu (brak zapomnianego TLB).
+    // Tables are rebuilt correctly after freeing (no forgotten TLB entries).
     check!(map_page(va_a, fa, WRITABLE), "re-map a");
     unsafe {
         core::ptr::write_volatile(va_a as *mut u64, 0xABCD_EF01_2345_6789);
@@ -1118,8 +1118,8 @@ pub fn self_test() {
     check!(translate(phys_to_virt(0x20_0000)) == Some(0x20_0000), "direct map damaged");
     serial_println!("[MM TEST] 6/7 selective table release + re-map PASS");
 
-    // 7. Kernel w górnej połowie: kod tylko do odczytu, dane do zapisu,
-    //    stos ze stroną-strażnikiem.
+    // 7. Kernel in the higher half: code read-only, data writable,
+    //    stack with a guard page.
     let layout = super::kernel_layout();
     let code = self_test as fn() as usize as u64;
     check!(code >= super::KERNEL_BASE, "kernel code at {:#x} (not higher half)", code);

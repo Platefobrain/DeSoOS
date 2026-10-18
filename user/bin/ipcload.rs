@@ -1,11 +1,11 @@
-// M18.f: zadanie IPC do stressu – rodzic i dziecko (spawn_ex: kanał + pamięć
-// współdzielona tylko do odczytu) wymieniają dane: rodzic pisze 4 KiB wzoru
-// do wspólnej pamięci i dzwoni przez kanał, dziecko liczy sumę i odpowiada.
-// Na koniec dziecko czeka na komunikat, a rodzic je zabija (kill w trakcie
-// czekania, z zamapowaną pamięcią współdzieloną) – koniec dziecka znika (EPIPE).
-// Wynik: "ipcload: OK <n> round trips" i kod 0; błąd – opis i kod 1.
+// IPC stress task – a parent and a child (spawn_ex: channel + read-only shared
+// memory) exchange data: the parent writes a 4 KiB pattern
+// into the shared memory and signals over the channel, the child sums it and replies.
+// Finally the child waits for a message and the parent kills it (kill while
+// waiting, with shared memory mapped) – the child's end disappears (EPIPE).
+// Result: "ipcload: OK <n> round trips" and exit code 0; on error – a description and code 1.
 //
-// `ipcload child` – 0 = kanał, 1 = pamięć (tylko do odczytu).
+// `ipcload child` – 0 = channel, 1 = memory (read-only).
 #![no_std]
 #![no_main]
 
@@ -87,7 +87,7 @@ fn main(args: Args) -> i32 {
             return fail("child saw different shared memory");
         }
     }
-    // Dziecko czeka w chan_recv – kill.
+    // The child waits in chan_recv – kill it.
     sleep_ms(1);
     if kill(pid as u64) != 0 {
         return fail("kill");

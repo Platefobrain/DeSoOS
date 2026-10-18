@@ -1,8 +1,8 @@
-// M20: samotesty USB – kontroler xHCI i usługa /bin/usbd w user space (tylko
-// build z --cfg selftest).  Test biegnie w programie /bin/usbtest (prawdziwe
-// syscalle z ring 3); jądro sprawdza wynik, a po każdym teście – że nic nie
-// wyciekło (przejęcie, bus mastering, wektory MSI, ramki DMA).  QEMU:
-// `-device qemu-xhci` z pendrive'em startowym (usb-storage), usb-kbd i
+// USB self-tests – the xHCI controller and the /bin/usbd user-space service (only
+// in builds with --cfg selftest).  The test runs in the /bin/usbtest program (real
+// syscalls from ring 3); the kernel checks the result and, after each test, that nothing
+// leaked (claim, bus mastering, MSI vectors, DMA frames).  QEMU:
+// `-device qemu-xhci` with a boot USB stick (usb-storage), usb-kbd and
 // usb-mouse – test.sh.
 
 use alloc::string::String;
@@ -35,8 +35,8 @@ fn run(path: &str, args: &[&str], ms: u64, hw_root: bool, sysctl: bool) -> Optio
     run_in(path, args, ms, hw_root, sysctl, false, false)
 }
 
-/// Jak `run`; `input` – także uchwyt INPUT (jak prawdziwy init: slot za
-/// SYSCTL), `blk` – uchwyt BLK (M20.f, za INPUT).
+/// Like `run`; `input` – also an INPUT handle (like the real init: the slot after
+/// SYSCTL), `blk` – a BLK handle (after INPUT).
 fn run_in(path: &str, args: &[&str], ms: u64, hw_root: bool, sysctl: bool, input: bool, blk: bool) -> Option<(ExitKind, String)> {
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, hw_root, sysctl, input, blk, ..SpawnOptions::default() };
     let id = exec(path, args, "/", &opts).ok()?;
@@ -48,7 +48,7 @@ fn run_in(path: &str, args: &[&str], ms: u64, hw_root: bool, sysctl: bool, input
     Some((kind, String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned()))
 }
 
-/// Wzór danych /bin/blktest (sektor, bajt).
+/// Data pattern of /bin/blktest (sector, byte).
 fn pat(sector: u64, i: usize) -> u8 {
     ((sector.wrapping_mul(13) as usize + i) ^ (sector >> 3) as usize) as u8
 }
@@ -57,7 +57,7 @@ fn pat_ok(lba: u64, buf: &[u8]) -> bool {
     buf.iter().enumerate().all(|(k, &b)| b == pat(lba + (k / 512) as u64, k % 512))
 }
 
-/// Czas odczytu innego dysku (virtio, numer 0) w trakcie czekania na USB.
+/// Time to read another disk (virtio, number 0) while waiting for USB.
 static OTHER_DISK_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn other_disk(_: usize) {
@@ -66,12 +66,12 @@ fn other_disk(_: usize) {
     let mut b = [0u8; 512];
     let t0 = ticks();
     let ok = crate::block::read(0, 0, &mut b).is_ok();
-    // +1: 0 znaczy „jeszcze nie skończone”.
+    // +1: 0 means "not finished yet".
     OTHER_DISK_MS.store(if ok { ticks() - t0 + 1 } else { u64::MAX }, Ordering::SeqCst);
 }
 
-/// USB TEST 3/7: protokół ublk (blk_attach, odczyty, błędy, timeouty,
-/// kwarantanna, spóźniona odpowiedź, znikanie dysku, blokada per dysk).
+/// USB TEST 3/7: the ublk protocol (blk_attach, reads, errors, timeouts,
+/// quarantine, late reply, disk removal, per-disk lock).
 fn ublk_protocol_test() -> bool {
     use crate::block::{self, BlockError};
     use core::sync::atomic::Ordering;
@@ -95,7 +95,7 @@ fn ublk_protocol_test() -> bool {
     ck!(block::is_read_only(idx) && block::with_device(idx, |d| d.sector_count()) == Ok(1024), "disk {}: not read-only or wrong size", idx);
     ck!(sh.mounts().is_empty(), "pattern disk must not be mounted");
 
-    // Odczyty: mały, większy niż slot (dwa żądania), błędne odpowiedzi odrzucone.
+    // Reads: small, larger than a slot (two requests), bad replies rejected.
     let mut b = alloc::vec![0u8; 4096];
     ck!(block::read(idx, 0, &mut b).is_ok() && pat_ok(0, &b), "read lba 0");
     let mut big = alloc::vec![0u8; 140 * 512];
@@ -105,7 +105,7 @@ fn ublk_protocol_test() -> bool {
     ck!(block::read(idx, 100, &mut s1).is_ok() && pat_ok(100, &s1), "read lba 100 after a foreign id and a wrong count");
     ck!(sh.proto_errors.load(Ordering::SeqCst) == proto0 + 2, "protocol errors: {} -> {} (want +2)", proto0, sh.proto_errors.load(Ordering::SeqCst));
 
-    // Timeout (1 s) – a w tym czasie inny dysk (virtio) czyta bez czekania.
+    // Timeout (1 s) – and meanwhile another disk (virtio) reads without waiting.
     OTHER_DISK_MS.store(0, Ordering::SeqCst);
     let other = crate::sched::spawn("ublk-other-disk", other_disk, 0).is_ok();
     let t0 = ticks();
@@ -115,23 +115,23 @@ fn ublk_protocol_test() -> bool {
     ck!(other && wait_for(3000, || OTHER_DISK_MS.load(Ordering::SeqCst) != 0), "other-disk task did not finish (spawned {}, {})", other, OTHER_DISK_MS.load(Ordering::SeqCst));
     let om = OTHER_DISK_MS.load(Ordering::SeqCst).saturating_sub(1);
     ck!(om < 300, "virtio read waited {} ms while the USB disk was waiting (per-disk lock)", om);
-    // Spóźniona odpowiedź zwalnia slot z kwarantanny.
+    // A late reply releases the slot from quarantine.
     ck!(block::read(idx, 201, &mut s1).is_ok() && pat_ok(201, &s1), "read lba 201 (after the late answer)");
     ck!(sh.late.load(Ordering::SeqCst) == 1 && sh.timeouts.load(Ordering::SeqCst) == 1, "late {} timeouts {}", sh.late.load(Ordering::SeqCst), sh.timeouts.load(Ordering::SeqCst));
     ck!(block::read(idx, 300, &mut s1) == Err(BlockError::Io), "status EIO must give Io");
-    // Zapis: warstwa block i sam sterownik odmawiają.
+    // Write: both the block layer and the driver itself refuse.
     ck!(block::write(idx, 0, &s1) == Err(BlockError::ReadOnly), "block write must be ReadOnly");
     ck!(block::with_device(idx, |d| d.write(0, &s1)) == Ok(Err(BlockError::ReadOnly)), "ublk write must be ReadOnly");
-    // 3 timeouty pod rząd = dysk znika.
+    // 3 timeouts in a row = the disk disappears.
     for lba in 400..403 {
         ck!(block::read(idx, lba, &mut s1) == Err(BlockError::Timeout), "lba {}: want Timeout", lba);
     }
     ck!(sh.gone(), "disk not gone after 3 timeouts in a row");
     let r = block::read(idx, 0, &mut s1);
     ck!(matches!(r, Err(BlockError::NoDevice)), "read after gone: {:?}", r);
-    // Monitor usuwa dysk, kanał się zamyka, blktest kończy się sam.
+    // The monitor removes the disk, the channel closes, blktest exits by itself.
     ck!(wait_for(5_000, || super::ublk::count() == 0), "gone disk not removed by usb-disks");
-    drop(sh); // ostatnia referencja do kanału po stronie jądra
+    drop(sh); // the last kernel-side reference to the channel
     ck!(wait_for(5_000, || sched::task_info(id).is_none()), "blktest did not exit after the kernel closed the channel");
     let kind = exit_info(id).map(|e| e.kind);
     let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
@@ -155,10 +155,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 static READER_DONE: AtomicU64 = AtomicU64::new(0);
 static READER_BYTES: AtomicU64 = AtomicU64::new(0);
 static READER_PATH: crate::sched::spin::SpinLock<String> = crate::sched::spin::SpinLock::new("test reader path", crate::sched::spin::level::TEST_OUTER, String::new());
-/// M20.h: pomiary z USB TEST 7/7 do linii [RESULT-USB] ("k=v ...").
+/// Measurements from USB TEST 7/7 for the [RESULT-USB] line ("k=v ...").
 static MEASURED: crate::sched::spin::SpinLock<String> = crate::sched::spin::SpinLock::new("test usb measured", crate::sched::spin::level::TEST_OUTER, String::new());
 
-/// Suma kontrolna (jak `ublk::read_bench`) 4 MiB wzoru z DATA.BIN (mkfat32.py).
+/// Checksum (like `ublk::read_bench`) of the 4 MiB pattern from DATA.BIN (mkfat32.py).
 fn data_bin_sum() -> u64 {
     let mut sum = 0u64;
     for k in 0..(4u64 << 20) / 4 {
@@ -174,7 +174,7 @@ fn test_disk_path() -> Option<String> {
     crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST")).map(|m| alloc::format!("{}/DATA.BIN", m.0))
 }
 
-/// Zadanie: czyta plik w kółko po 64 KiB, aż odczyt się nie uda (czas błędu w READER_DONE).
+/// Task: reads the file over and over in 64 KiB chunks until a read fails (error time in READER_DONE).
 fn usb_reader(_: usize) {
     let path = READER_PATH.lock().clone();
     let mut buf = alloc::vec![0u8; 65536];
@@ -192,8 +192,8 @@ fn usb_reader(_: usize) {
     READER_DONE.store(ticks().max(1), Ordering::SeqCst);
 }
 
-// M20.g: dysk, który na żądanie przestaje odpowiadać (odczyt czeka) – test,
-// że zawieszony dysk USB nie zatrzymuje reszty VFS.
+// A disk that stops responding on demand (reads wait) – tests
+// that a hung USB disk does not stall the rest of the VFS.
 static HOLD: AtomicBool = AtomicBool::new(false);
 static HELD: AtomicU64 = AtomicU64::new(0);
 static SLOW_READ: AtomicU64 = AtomicU64::new(0);
@@ -236,12 +236,12 @@ fn slow_reader(_: usize) {
 }
 
 fn release_hold(_: usize) {
-    crate::time::sleep_ms(3000); // bezpiecznik: regresja nie zawiesza testów na zawsze
+    crate::time::sleep_ms(3000); // safety net: a regression does not hang the tests forever
     HOLD.store(false, Ordering::SeqCst);
 }
 
-/// FAT32 na dysku, który „zawisł” (jak pendrive czekający 5 s na usbd): inne
-/// systemy plików (ramfs, /bin) działają dalej.  Wynik: ms odczytu /bin/sh.
+/// FAT32 on a disk that has "hung" (like a USB stick waiting 5 s for usbd): other
+/// file systems (ramfs, /bin) keep working.  Result: ms to read /bin/sh.
 fn hung_disk_test() -> Result<u64, String> {
     use alloc::boxed::Box;
     use crate::block;
@@ -288,7 +288,7 @@ fn hung_disk_test() -> Result<u64, String> {
     r
 }
 
-/// USB TEST 6/7: odporność.
+/// USB TEST 6/7: robustness.
 fn robust_test() -> bool {
     macro_rules! ck {
         ($cond:expr, $($msg:tt)*) => {
@@ -324,12 +324,12 @@ fn robust_test() -> bool {
     true
 }
 
-/// Testowy pendrive (etykieta DESOOSTEST) zamontowany w /usbN.
+/// Test USB stick (label DESOOSTEST) mounted at /usbN.
 fn test_disk_mounted() -> bool {
     crate::fs::mount_list().iter().any(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST"))
 }
 
-/// USB TEST 7/7: dysk za hubem wyjęty i włożony, potem cały hub wyjęty.
+/// USB TEST 7/7: a disk behind a hub unplugged and replugged, then the whole hub unplugged.
 fn hotplug_test() -> bool {
     macro_rules! ck {
         ($cond:expr, $($msg:tt)*) => {
@@ -348,9 +348,9 @@ fn hotplug_test() -> bool {
     let t0 = ticks();
     ck!(wait_for(20_000, test_disk_mounted), "test disk behind the hub not mounted");
     let t_mount = ticks() - t0;
-    // M20.h: odczyt DATA.BIN (4 MiB wzoru, klaster 512 B) buforem 256 KiB
-    // (ciągłe klastry, żądania potokiem) i 4 KiB (jak `cat` – cache klastrów);
-    // oba muszą dać dokładnie wzór.
+    // Reading DATA.BIN (4 MiB pattern, 512 B clusters) with a 256 KiB buffer
+    // (contiguous clusters, pipelined requests) and with 4 KiB (like `cat` – cluster cache);
+    // both must yield exactly the pattern.
     let path = test_disk_path().unwrap_or_default();
     let want = data_bin_sum();
     let big = super::ublk::read_bench(&path, 256 * 1024, u64::MAX);
@@ -361,8 +361,8 @@ fn hotplug_test() -> bool {
         big.map(|(b, us, _)| b * 1_000_000 / 1024 / us).unwrap_or(0),
         small.map(|(b, us, _)| b * 1_000_000 / 1024 / us).unwrap_or(0),
     );
-    // M20.h: `df` – główny FSInfo obrazu jest nieaktualny (mkfat32.py), jądro
-    // liczy wolne klastry z FAT; prawdziwa liczba w kopii FSInfo (sektor 7).
+    // `df` – the image's primary FSInfo is stale (mkfat32.py), the kernel
+    // counts free clusters from the FAT; the real number is in the FSInfo copy (sector 7).
     let m = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST"));
     ck!(m.is_some(), "test disk not mounted for df");
     let m = m.unwrap();
@@ -372,9 +372,9 @@ fn hotplug_test() -> bool {
     let exact = u32::from_le_bytes([fi[488], fi[489], fi[490], fi[491]]) as u64 * 512;
     let st = crate::fs::mount_stats(&m.0);
     ck!(st.as_ref().map_or(false, |s| s.free_bytes == exact), "df on {}: free {:?} bytes, FAT says {} (stale FSInfo trusted?)", m.0, st.map(|s| s.free_bytes), exact);
-    // M20.h: opóźnienie klawiatury USB – klawisze z monitora QEMU (sendkey
-    // trafia do usb-kbd: ostatnio aktywowana klawiatura), jądro mierzy od
-    // przerwania xHCI do znaku w kolejce wejścia.
+    // USB keyboard latency – keys come from the QEMU monitor (sendkey
+    // goes to usb-kbd: the most recently activated keyboard), the kernel measures from
+    // the xHCI interrupt to the character in the input queue.
     crate::input::hid_latency_reset();
     for _ in 0..5 {
         serial_println!("[HOTPLUG] sendkey x");
@@ -394,7 +394,7 @@ fn hotplug_test() -> bool {
         big_kbs, small_kbs, hid_avg, hid_min, hid_max, hid_n
     );
     *MEASURED.lock() = alloc::format!("kread_kbs={} kcat_kbs={} hid_n={} hid_avg_us={} hid_max_us={}", big_kbs, small_kbs, hid_n, hid_avg, hid_max);
-    // M20.g: w trakcie wyjęcia ktoś czyta plik z tego dysku – ma dostać błąd, nie wisieć.
+    // Someone reads a file from this disk during removal – it must get an error, not hang.
     READER_DONE.store(0, Ordering::SeqCst);
     READER_BYTES.store(0, Ordering::SeqCst);
     *READER_PATH.lock() = path.clone();
@@ -441,7 +441,7 @@ pub fn self_test() {
     serial_println!("[USB TEST] Starting USB tests (descriptor parser, xHCI controller + enumeration in the usbd service)...");
     crate::selftest::begin();
     let frames0 = crate::selftest::settled_free_frames();
-    // v0.35.2: heap oddaje strony z opóźnieniem (jak w stressie) – jego wzrost to nie wyciek.
+    // The heap returns pages lazily (as in the stress test) – its growth is not a leak.
     let heap0 = crate::memory::heap::mapped_bytes() as u64;
 
     let xhci = pci::devices().iter().position(|d| (d.class, d.subclass, d.prog_if) == (0x0C, 0x03, 0x30));
@@ -450,8 +450,8 @@ pub fn self_test() {
     let dev = &pci::devices()[xhci];
     check!(pci::owner(xhci) == pci::OWNER_FREE, "xHCI {} must not be owned by a kernel driver", dev.address);
 
-    // 1. M20.c: parser deskryptorów bez sprzętu – poprawne próbki, złośliwe
-    // przypadki, 10 000 mutacji; panika = koniec procesu = FAIL.
+    // 1. Descriptor parser without hardware – valid samples, malicious
+    // cases, 10 000 mutations; panic = process exit = FAIL.
     let r = run("/bin/usbparse", &["usbparse"], 60_000, false, false);
     check!(r.is_some(), "usbparse did not finish");
     let (kind, out) = r.unwrap();
@@ -459,9 +459,9 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "usbparse: {:?} {:?}", kind, out.trim());
     serial_println!("[USB TEST] 1/7 descriptor parser on hostile data (no hardware): {} PASS", line);
 
-    // 2. dev_find + usbd: reset, pierścień komend i zdarzeń, przerwanie,
-    // No-Op, porty; kill w trakcie serii komend i pełny reset nowej instancji;
-    // samodzielny koniec usbd.
+    // 2. dev_find + usbd: reset, command and event rings, interrupt,
+    // No-Op, ports; kill during a command series and a full reset of a new instance;
+    // usbd exiting on its own.
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let free0 = crate::selftest::settled_free_frames();
     let r = run_in("/bin/usbtest", &["usbtest"], 90_000, true, false, true, true);
@@ -472,8 +472,8 @@ pub fn self_test() {
     check!(pci::owner(xhci) == pci::OWNER_FREE, "xHCI still claimed after usbtest");
     check!(dev.command() & pci::CMD_BUS_MASTER == 0, "xHCI bus mastering still on after usbd ended");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by usbd");
-    // M20.f: dyski USB znikają po końcu usbd (monitor usb-disks: odmontowanie,
-    // usunięcie) – dopiero wtedy bufory DMA wracają.
+    // USB disks disappear after usbd exits (usb-disks monitor: unmount,
+    // removal) – only then do the DMA buffers come back.
     check!(wait_for(5_000, || super::ublk::count() == 0), "USB disks still present after usbd ended: {}", super::ublk::count());
     check!(crate::fs::mount_list().iter().all(|m| !m.0.starts_with("/usb")), "/usbN still mounted after usbd ended");
     let free1 = crate::selftest::settled_free_frames();
@@ -481,14 +481,14 @@ pub fn self_test() {
     let res = out.lines().find(|l| l.starts_with("usbtest-result ")).unwrap_or("").trim();
     serial_println!("[USB TEST] 2/7 xHCI in user space: dev_find by class, BIOS handoff + reset, rings, MSI, No-Op, enumeration of 2 storage + keyboard + hub with mouse and disk behind it, HID configured (interrupt endpoints, reports), USB disks attached + test disk mounted, kill mid-command and mid-enumeration + full reset (disks gone and back), clean exit, nothing leaked: {} PASS", line);
 
-    // 3. M20.f: protokół ublk bez sprzętu – /bin/blktest udaje usbd i psuje
-    // protokół; jądro czyta i sprawdza dane, timeouty, kwarantannę, znikanie.
+    // 3. The ublk protocol without hardware – /bin/blktest pretends to be usbd and breaks
+    // the protocol; the kernel reads and checks data, timeouts, quarantine, removal.
     if !ublk_protocol_test() {
         return;
     }
 
-    // 3. M20.e: input_inject bez sprzętu – błędy, znaki, autorepeat jądra, dioda
-    // Caps Lock, puszczenie klawiszy zabitego źródła.  Jądro czyta kolejkę wejścia.
+    // 3. input_inject without hardware – errors, characters, kernel autorepeat, the
+    // Caps Lock LED, releasing keys of a killed source.  The kernel reads the input queue.
     crate::input::reset();
     let (ev0, rep0) = crate::input::usb_stats();
     let r = run_in("/bin/inputtest", &["inputtest"], 30_000, false, false, true, false);
@@ -513,9 +513,9 @@ pub fn self_test() {
     serial_println!("[USB TEST] 4/7 input_inject: rights, EINVAL, \"hiA\", autorepeat ({} x b), Caps Lock LED, keys of a killed source released ({} events): {} PASS", bs, ev1 - ev0, line);
     crate::input::reset();
 
-    // 4. Prawdziwy init (`init test /bin/usbtest`): init znajduje kontroler po
-    // klasie, uruchamia usb0, klient rozmawia z nim przez svc; po teście init
-    // zamyka usługi – kontroler wolny, wektory i ramki wróciły.
+    // 4. The real init (`init test /bin/usbtest`): init finds the controller by
+    // class, starts usb0, the client talks to it via svc; after the test init
+    // shuts down the services – controller free, vectors and frames returned.
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let free0 = crate::selftest::settled_free_frames();
     let r = run_in("/bin/init", &["init", "test", "/bin/usbtest"], 90_000, true, true, true, true);
@@ -533,11 +533,11 @@ pub fn self_test() {
     let res2 = out.lines().find(|l| l.starts_with("usbtest-disk ")).unwrap_or("").trim();
     serial_println!("[USB TEST] 5/7 init finds xHCI by class and starts usb0 (INPUT + BLK), lsusb via svc, pendrive mounted by the kernel: files identical to /bin, 4 MiB pattern, writes refused (3 locks), service stopped cleanly: {} PASS", line);
 
-    // 6. M20.d: podłączanie w locie za hubem.  Linie „[HOTPLUG] …” czyta
-    // qemu-hotplug.py (test.sh) i wysyła je do monitora QEMU; jądro patrzy na
-    // dyski USB, /bin/usbtest (przez init) – na urządzenia w usb0.
-    // 6. M20.g: odporność – zawieszony dysk nie blokuje VFS, kill usbd w trakcie
-    // odczytu, restart, 5 awarii → broken.
+    // 6. Hot-plugging behind a hub.  The „[HOTPLUG] …” lines are read by
+    // qemu-hotplug.py (test.sh) and sent to the QEMU monitor; the kernel watches
+    // USB disks, /bin/usbtest (via init) – the devices in usb0.
+    // 6. Robustness – a hung disk does not block the VFS, kill usbd during
+    // a read, restart, 5 failures → broken.
     if !robust_test() {
         return;
     }

@@ -1,11 +1,11 @@
-// Parser ELF64 (x86_64) wspólny dla DSB (ładowanie kernela, M10) i kernela
-// (ładowanie programów użytkownika, M15).  Bez alokacji i bez zależności –
-// tylko sprawdza nagłówki i zwraca segmenty PT_LOAD.  O tym, GDZIE segmenty
-// mogą leżeć (kernel w górnej połowie, program w dolnej), decyduje wołający.
+// ELF64 (x86_64) parser shared by DSB (loading the kernel) and the kernel
+// (loading user programs).  No allocation and no dependencies –
+// it only validates headers and returns the PT_LOAD segments.  WHERE the segments
+// may live (kernel in the upper half, program in the lower half) is up to the caller.
 //
-// Sprawdzane: magia, 64-bit, little-endian, x86_64, typ ET_EXEC (statyczny
-// plik wykonywalny, bez relokacji), tablica nagłówków programu w pliku,
-// filesz <= memsz, dane segmentu w pliku, brak przepełnień adresów.
+// Checked: magic, 64-bit, little-endian, x86_64, type ET_EXEC (static
+// executable, no relocations), program header table inside the file,
+// filesz <= memsz, segment data inside the file, no address overflows.
 
 #![allow(dead_code)]
 
@@ -50,13 +50,13 @@ impl Elf {
     pub fn segments(&self) -> &[Segment] {
         &self.segments[..self.count]
     }
-    /// Najniższy i najwyższy adres (bez wyrównania).
+    /// Lowest and highest address (unaligned).
     pub fn span(&self) -> (u64, u64) {
         let start = self.segments().iter().map(|s| s.vaddr).min().unwrap_or(0);
         let end = self.segments().iter().map(|s| s.end()).max().unwrap_or(0);
         (start, end)
     }
-    /// Czy punkt wejścia leży w segmencie wykonywalnym.
+    /// Whether the entry point lies in an executable segment.
     pub fn entry_in_code(&self) -> bool {
         self.segments().iter().any(|s| s.executable() && self.entry >= s.vaddr && self.entry < s.end())
     }

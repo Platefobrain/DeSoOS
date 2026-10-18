@@ -1,4 +1,4 @@
-// M15: save <plik> <słowa...> – zapisuje słowa (jedna linia) do pliku.
+// save <file> <words...> – writes the words (one line) to a file.
 #![no_std]
 #![no_main]
 

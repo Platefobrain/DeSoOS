@@ -1,26 +1,26 @@
-// M18.c: kanały – `channel_create()` daje parę końców; każdy koniec ma swoją
-// kolejkę przychodzących komunikatów (kanał jest dwukierunkowy).
-// Projekt: ARCHITEKTURA.md, „IPC”.
+// Channels – `channel_create()` returns a pair of ends; each end has its own
+// queue of incoming messages (the channel is bidirectional).
+// Design: ARCHITECTURE.md, „IPC”.
 //
-// * Komunikat: do MSG_MAX bajtów danych + do MSG_HANDLES uchwytów (M18.d)
-//   + nadawca (pid) wpisany przez jądro.  Kolejka: do QUEUE_MAX komunikatów.
-// * Blokada per kolejka (SpinLock, poziom PROCESS – jak potok); pod nią tylko
-//   operacje na kolejce.  Kopiowanie z / do procesu – w syscallu, poza blokadą.
-// * Czekanie jak w potokach: warunek na atomikach (`len`, `closed`), pobudka
-//   po zmianie – bez gubienia pobudek; przerywa kill / Ctrl+C (EINTR).
-// * Koniec liczony przez Arc (uchwyty w tablicach i w komunikatach w drodze);
-//   gdy znika ostatni – Drop: koniec zamknięty, jego kolejka opróżniona
-//   (uchwyty w komunikatach zwolnione), druga strona budzona (EPIPE).
-// * M19.b: każda kolejka ma też listę obserwatorów `wait_many` – budzonych
-//   przy każdej zmianie (komunikat, miejsce, zamknięcie).
-// * v0.35.1: bez cykli.  Koniec kanału, w którego kolejce leży komunikat z
-//   innym końcem kanału, nie może sam podróżować w komunikacie (EBUSY).
-//   Bez tej zasady: koniec A w kolejce B, koniec B w kolejce A, proces zamyka
-//   resztę – kanały trzymają się nawzajem i pamięć nigdy nie wraca.  Dowód,
-//   że cykl jest niemożliwy: ostatnie włożenie domykające cykl wkładałoby
-//   koniec, w którego kolejce już leży poprzedni element cyklu – odmowa.
-//   Sprawdzenie i włożenie razem pod globalną blokadą XFER (tylko komunikaty
-//   z końcami kanałów – zwykłe komunikaty jej nie biorą).
+// * Message: up to MSG_MAX bytes of data + up to MSG_HANDLES handles
+//   + the sender (pid) filled in by the kernel.  Queue: up to QUEUE_MAX messages.
+// * One lock per queue (SpinLock, level PROCESS – like a pipe); only queue
+//   operations happen under it.  Copying from / to the process – in the syscall, outside the lock.
+// * Waiting as in pipes: the condition is on atomics (`len`, `closed`), wakeup
+//   after a change – no lost wakeups; interrupted by kill / Ctrl+C (EINTR).
+// * An end is reference-counted by Arc (handles in tables and in messages in flight);
+//   when the last one goes away – Drop: the end is closed, its queue drained
+//   (handles in messages released), the other side woken (EPIPE).
+// * Each queue also has a list of `wait_many` watchers – woken
+//   on every change (message, free space, close).
+// * No cycles.  A channel end whose queue holds a message carrying
+//   another channel end cannot itself travel in a message (EBUSY).
+//   Without this rule: end A in queue B, end B in queue A, the process closes
+//   the rest – the channels keep each other alive and the memory never comes back.  Proof
+//   that a cycle is impossible: the last insertion closing the cycle would insert
+//   an end whose queue already holds the previous element of the cycle – refused.
+//   The check and the insertion happen together under the global XFER lock (only messages
+//   carrying channel ends – ordinary messages do not take it).
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -33,38 +33,38 @@ use super::syscalls::{EAGAIN, EBUSY, EINTR, ENOMEM, EPIPE};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
-/// Największy komunikat (bajty danych).
+/// Largest message (data bytes).
 pub const MSG_MAX: usize = 4096;
-/// Najwięcej uchwytów w komunikacie (M18.d).
+/// Maximum number of handles in a message.
 pub const MSG_HANDLES: usize = 8;
-/// Najwięcej komunikatów w kolejce jednego końca.
+/// Maximum number of messages in the queue of one end.
 pub const QUEUE_MAX: usize = 64;
 
 pub struct Message {
     pub data: Vec<u8>,
     pub handles: Vec<Handle>,
-    /// Nadawca (pid) – wpisuje jądro, proces nie może go podać.
+    /// Sender (pid) – filled in by the kernel, the process cannot supply it.
     pub sender: u64,
 }
 
 impl Message {
-    /// Końce kanałów niesione w komunikacie.
+    /// Channel ends carried in the message.
     fn channel_ends(&self) -> impl Iterator<Item = &Arc<ChanEnd>> {
         self.handles.iter().filter_map(|h| if let super::process::Fd::Channel(e) = &h.obj { Some(e) } else { None })
     }
     fn carries_channel(&self) -> bool {
         self.channel_ends().next().is_some()
     }
-    /// v0.35.2: koszt w budżecie buforów jądra (kbuf).
+    /// Cost against the kernel buffer budget (kbuf).
     fn cost(&self) -> u64 {
         self.data.len() as u64 + super::kbuf::MSG_OVERHEAD
     }
 }
 
-/// v0.35.1: sprawdzenie „bez cykli” + włożenie komunikatu z końcami kanałów.
+/// The "no cycles" check + insertion of a message carrying channel ends.
 static XFER: SpinLock<()> = SpinLock::new("chan-xfer", level::CHAN_XFER, ());
 
-/// Ile kanałów żyje (test wycieków: po teście wraca do stanu sprzed).
+/// How many channels are alive (leak test: returns to the previous value after the test).
 pub static LIVE_CHANNELS: AtomicUsize = AtomicUsize::new(0);
 
 impl Drop for Channel {
@@ -73,19 +73,19 @@ impl Drop for Channel {
     }
 }
 
-/// Kolejka przychodzących jednego końca.
+/// Incoming queue of one end.
 struct Inbox {
     q: SpinLock<VecDeque<Message>>,
     len: AtomicUsize,
-    /// v0.35.1: komunikaty w kolejce niosące końce kanałów.
+    /// Messages in the queue that carry channel ends.
     chans: AtomicUsize,
-    /// Koniec-właściciel tej kolejki zamknięty (zniknął ostatni uchwyt).
+    /// The end owning this queue is closed (its last handle went away).
     closed: AtomicBool,
-    /// Odbiorcy czekają na komunikat / zamknięcie drugiej strony.
+    /// Receivers wait for a message / the other side closing.
     readable: WaitQueue,
-    /// Nadawcy (druga strona) czekają na miejsce / zamknięcie tego końca.
+    /// Senders (the other side) wait for space / this end closing.
     writable: WaitQueue,
-    /// M19.b: `wait_many` na tej kolejce (odbiorca – READABLE, nadawcy –
+    /// `wait_many` on this queue (receiver – READABLE, senders –
     /// WRITABLE).
     obs: Observers,
 }
@@ -103,7 +103,7 @@ impl Inbox {
         }
     }
 
-    /// Po zmianie stanu: czekający w recv / send i w `wait_many`.
+    /// After a state change: waiters in recv / send and in `wait_many`.
     fn wake_readers(&self) {
         self.readable.wake_all();
         self.obs.notify();
@@ -119,20 +119,20 @@ pub struct Channel {
     inbox: [Inbox; 2],
 }
 
-/// Koniec kanału: odbiera z `inbox[side]`, wysyła do `inbox[1 - side]`.
+/// Channel end: receives from `inbox[side]`, sends to `inbox[1 - side]`.
 pub struct ChanEnd {
     ch: Arc<Channel>,
     side: usize,
 }
 
-/// Błąd odbioru: kod albo „za mały bufor” z wymaganym rozmiarem.
+/// Receive error: a code or "buffer too small" with the required size.
 pub enum RecvError {
     Code(i64),
-    /// (bajty, uchwyty) pierwszego komunikatu – zostaje w kolejce.
+    /// (bytes, handles) of the first message – it stays in the queue.
     TooSmall(usize, usize),
 }
 
-/// Nowy kanał: dwa końce.
+/// New channel: two ends.
 pub fn new() -> (Arc<ChanEnd>, Arc<ChanEnd>) {
     let ch = Arc::new(Channel { inbox: [Inbox::new(), Inbox::new()] });
     LIVE_CHANNELS.fetch_add(1, Ordering::Relaxed);
@@ -148,15 +148,15 @@ impl ChanEnd {
         &self.ch.inbox[1 - self.side]
     }
 
-    /// M18.d: ten sam kanał (którykolwiek koniec).  Żaden koniec kanału nie
-    /// może podróżować przez ten kanał: koniec trafiłby do własnej kolejki
-    /// (albo kolejki, którą sam trzyma) i nigdy by się nie zwolnił.
+    /// The same channel (either end).  No end of a channel may
+    /// travel through that channel: the end would land in its own queue
+    /// (or a queue it holds itself) and would never be released.
     pub fn same_channel(&self, other: &ChanEnd) -> bool {
         Arc::ptr_eq(&self.ch, &other.ch)
     }
 
-    /// Wysyła komunikat drugiej stronie.  Błąd – komunikat wraca (uchwyty
-    /// w nim wracają do nadawcy – M18.d).
+    /// Sends a message to the other side.  On error the message comes back (the handles
+    /// in it return to the sender).
     pub fn send(&self, msg: Message, nonblock: bool) -> Result<(), (i64, Message)> {
         let peer = self.peer();
         let mut msg = Some(msg);
@@ -165,24 +165,24 @@ impl ChanEnd {
                 return Err((EPIPE, msg.take().unwrap()));
             }
             {
-                // v0.35.1: komunikat z końcami kanałów – żaden z nich nie może mieć
-                // w swojej kolejce komunikatu z kanałem (inaczej możliwy cykl).
+                // A message with channel ends – none of them may have a message
+                // with a channel in its own queue (otherwise a cycle is possible).
                 let carries = msg.as_ref().unwrap().carries_channel();
                 let _x = if carries { Some(XFER.lock()) } else { None };
                 if carries && msg.as_ref().unwrap().channel_ends().any(|e| e.mine().chans.load(Ordering::SeqCst) > 0) {
                     return Err((EBUSY, msg.take().unwrap()));
                 }
                 let mut q = peer.q.lock();
-                // Ponownie pod blokadą kolejki: odbiorca mógł się zamknąć po
-                // sprawdzeniu wyżej.  Drop ustawia `closed` przed wzięciem tej
-                // blokady i opróżnia kolejkę pod nią – więc albo widzimy
-                // `closed`, albo nasz komunikat zabierze jego opróżnianie.
+                // Again under the queue lock: the receiver may have closed after
+                // the check above.  Drop sets `closed` before taking this
+                // lock and drains the queue under it – so either we see
+                // `closed`, or its draining will take our message.
                 if peer.closed.load(Ordering::SeqCst) {
                     drop(q);
                     return Err((EPIPE, msg.take().unwrap()));
                 }
                 if q.len() < QUEUE_MAX {
-                    // v0.35.2: budżet buforów jądra – ponad nim ENOMEM, komunikat wraca.
+                    // Kernel buffer budget – above it ENOMEM, the message comes back.
                     if !super::kbuf::try_take(msg.as_ref().unwrap().cost()) {
                         drop(q);
                         return Err((ENOMEM, msg.take().unwrap()));
@@ -214,10 +214,10 @@ impl ChanEnd {
         }
     }
 
-    /// Zdejmuje pierwszy komunikat, jeśli mieści się w `cap` bajtach i `hcap`
-    /// uchwytach.  Pusta kolejka i druga strona zamknięta – EPIPE.
-    /// `room` – wolne miejsca w tablicy uchwytów odbiorcy: więcej uchwytów w
-    /// komunikacie = EMFILE, komunikat zostaje.
+    /// Removes the first message if it fits in `cap` bytes and `hcap`
+    /// handles.  Empty queue and the other side closed – EPIPE.
+    /// `room` – free slots in the receiver's handle table: more handles in the
+    /// message = EMFILE, the message stays.
     pub fn recv(&self, cap: usize, hcap: usize, room: usize, nonblock: bool) -> Result<Message, RecvError> {
         let mine = self.mine();
         loop {
@@ -242,7 +242,7 @@ impl ChanEnd {
                 }
             }
             if self.peer().closed.load(Ordering::SeqCst) {
-                // Druga strona mogła wysłać tuż przed zamknięciem.
+                // The other side may have sent just before closing.
                 if mine.len.load(Ordering::SeqCst) == 0 {
                     return Err(RecvError::Code(EPIPE));
                 }
@@ -263,12 +263,12 @@ impl ChanEnd {
     }
 }
 
-/// M20.f: strona jądra (ublk) – odbiór z terminem.
+/// Kernel side (ublk) – receive with a deadline.
 impl ChanEnd {
-    /// Zdejmuje pierwszy komunikat (dowolny rozmiar; uchwyty w nim jądro
-    /// zwalnia – wołający tylko czyta dane).  Czeka najwyżej `timeout_ms`.
-    /// Błędy: ETIMEDOUT, EPIPE (druga strona zamknięta, kolejka pusta),
-    /// EINTR (kill zadania, w którym czekamy).
+    /// Removes the first message (any size; the kernel releases the handles in
+    /// it – the caller only reads the data).  Waits at most `timeout_ms`.
+    /// Errors: ETIMEDOUT, EPIPE (other side closed, queue empty),
+    /// EINTR (the task we wait in was killed).
     pub fn recv_timeout(&self, timeout_ms: u64) -> Result<Message, i64> {
         let mine = self.mine();
         let deadline = crate::time::ticks() + crate::time::ms_to_ticks(timeout_ms);
@@ -307,26 +307,26 @@ impl ChanEnd {
         }
     }
 
-    /// Druga strona zamknięta (np. proces usbd się skończył).
+    /// The other side is closed (e.g. the usbd process has exited).
     pub fn peer_closed(&self) -> bool {
         self.peer().closed.load(Ordering::SeqCst)
     }
 }
 
-/// M19.b: stan dla `wait_many`.
+/// State for `wait_many`.
 impl ChanEnd {
-    /// Jest komunikat albo druga strona zamknięta (recv nie będzie czekać).
+    /// There is a message or the other side is closed (recv will not block).
     pub fn readable(&self) -> bool {
         self.mine().len.load(Ordering::SeqCst) > 0 || self.peer().closed.load(Ordering::SeqCst)
     }
 
-    /// Jest miejsce u drugiej strony albo jest zamknięta (send nie będzie czekać).
+    /// There is room on the other side or it is closed (send will not block).
     pub fn writable(&self) -> bool {
         self.peer().len.load(Ordering::SeqCst) < QUEUE_MAX || self.peer().closed.load(Ordering::SeqCst)
     }
 
-    /// Obserwatorzy: READABLE – własna kolejka, WRITABLE – kolejka drugiej
-    /// strony (zamknięcie drugiej strony budzi obie).
+    /// Watchers: READABLE – own queue, WRITABLE – the other side's queue
+    /// (closing the other side wakes both).
     pub fn observers(&self, write: bool) -> &Observers {
         if write { &self.peer().obs } else { &self.mine().obs }
     }
@@ -336,9 +336,9 @@ impl Drop for ChanEnd {
     fn drop(&mut self) {
         let mine = self.mine();
         mine.closed.store(true, Ordering::SeqCst);
-        // Komunikaty do zamkniętego końca nikt już nie odbierze – zwalniamy je
-        // (z uchwytami w środku) poza blokadą: Drop uchwytu może zamknąć inny
-        // kanał i wziąć jego blokadę.
+        // Nobody will ever receive messages sent to a closed end – free them
+        // (with the handles inside) outside the lock: dropping a handle may close another
+        // channel and take its lock.
         let left: Vec<Message> = {
             let mut q = mine.q.lock();
             let v: Vec<Message> = q.drain(..).collect();
@@ -348,8 +348,8 @@ impl Drop for ChanEnd {
             v
         };
         drop(left);
-        // Nadawcy do tego końca – EPIPE; odbiorca po drugiej stronie – EPIPE,
-        // gdy jego kolejka pusta.
+        // Senders to this end get EPIPE; the receiver on the other side gets EPIPE
+        // when its queue is empty.
         mine.wake_writers();
         self.peer().wake_readers();
     }

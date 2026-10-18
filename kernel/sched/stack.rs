@@ -1,7 +1,7 @@
-// M12: stosy zadań kernela – każdy we własnym "slocie" 1 MiB w obszarze
-// TASK_STACKS_BASE (PML4[448]).  Zamapowane jest tylko górne STACK_SIZE
-// slotu; cała reszta pod spodem jest pusta, więc przepełnienie stosu kończy
-// się #PF (strona-strażnik), a nie nadpisaniem cudzej pamięci.
+// Kernel task stacks – each in its own 1 MiB "slot" in the
+// TASK_STACKS_BASE region (PML4[448]).  Only the top STACK_SIZE of the
+// slot is mapped; everything below is empty, so a stack overflow ends
+// in a #PF (guard page) rather than overwriting someone else's memory.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -13,27 +13,27 @@ const MAX_SLOTS: usize = 4096;
 pub const STACK_SIZE: u64 = 64 * 1024;
 const PAGE: u64 = 4096;
 
-// 1 bit na slot (1 = zajęty).
+// 1 bit per slot (1 = taken).
 static SLOTS: [AtomicU64; MAX_SLOTS / 64] = [const { AtomicU64::new(0) }; MAX_SLOTS / 64];
 
-// M17b.g: pamięć zwolnionych stosów.  Zakończone zadanie zostawia swój stos
-// zamapowany (bit w MAPPED, slot wolny w SLOTS) – następny spawn bierze go bez
-// alokacji i zerowania 16 ramek, a reap bez odmapowania i TLB shootdown na
-// wszystkie CPU – wszystko to wcześniej pod globalną blokadą `stack-pages`
-// (QEMU 8 CPU: 38% czasu CPU na czekaniu na nią).
-// Niezmiennik: wolny slot z bitem MAPPED jest w całości zamapowany (bit
-// ustawiany po mapowaniu, kasowany przed odmapowaniem – oba przy zajętym slocie).
+// Cache of freed stacks.  A finished task leaves its stack
+// mapped (bit in MAPPED, slot free in SLOTS) – the next spawn takes it without
+// allocating and zeroing 16 frames, and reap skips the unmapping and the TLB shootdown to
+// all CPUs – all of which used to happen under the global `stack-pages` lock
+// (QEMU with 8 CPUs: 38% of CPU time spent waiting for it).
+// Invariant: a free slot with the MAPPED bit is fully mapped (the bit is
+// set after mapping, cleared before unmapping – both while the slot is taken).
 static MAPPED: [AtomicU64; MAX_SLOTS / 64] = [const { AtomicU64::new(0) }; MAX_SLOTS / 64];
-/// Ile stosów czeka zamapowanych na ponowne użycie.
+/// How many mapped stacks are waiting for reuse.
 static CACHED: AtomicUsize = AtomicUsize::new(0);
-/// Najwyżej tyle stosów w pamięci (x 64 KiB = 16 MiB).
+/// At most this many stacks are cached (x 64 KiB = 16 MiB).
 const CACHE_MAX: usize = 256;
 
-/// Najniższy wolny slot (jak przed M17b.g – te same tablice stron) i czy ma
-/// jeszcze zamapowany stos z pamięci stosów.
+/// The lowest free slot (as without the cache – the same page tables) and whether it
+/// still has a mapped stack from the stack cache.
 fn take_slot() -> Option<(usize, bool)> {
-    // M17a.f2: compare_exchange – spawn działa bez BKL na wielu CPU naraz
-    // (wcześniej load + store pod BKL).
+    // compare_exchange – spawn runs without the BKL on many CPUs at once
+    // (a plain load + store is only safe under the BKL).
     for (w, word) in SLOTS.iter().enumerate() {
         let mut v = word.load(Ordering::Relaxed);
         while v != u64::MAX {
@@ -47,8 +47,8 @@ fn take_slot() -> Option<(usize, bool)> {
     None
 }
 
-/// Odmapowuje wszystkie stosy z pamięci stosów (jak przed M17b.g) – testy
-/// wycieku ramek liczą wolne ramki bez nich.
+/// Unmaps all stacks from the stack cache (as without the cache) – frame
+/// leak tests count free frames without them.
 pub fn flush_cache() {
     for (w, word) in SLOTS.iter().enumerate() {
         let mut m = MAPPED[w].load(Ordering::Acquire) & !word.load(Ordering::Relaxed);
@@ -56,7 +56,7 @@ pub fn flush_cache() {
             let bit = m.trailing_zeros() as usize;
             m &= m - 1;
             let b = 1u64 << bit;
-            // Zajęcie slotu: tylko wolny i nadal zamapowany.
+            // Taking a slot: only if free and still mapped.
             if word.fetch_or(b, Ordering::AcqRel) & b != 0 {
                 continue;
             }
@@ -73,9 +73,9 @@ pub fn flush_cache() {
     }
 }
 
-/// M17a.f2: mapowanie i zdejmowanie stron stosów – tablice stron obszaru
-/// stosów (PML4[448]) są wspólne dla sąsiednich slotów, a spawn i sprzątanie
-/// działają już bez BKL na wielu CPU naraz.
+/// Mapping and unmapping of stack pages – the page tables of the stack
+/// region (PML4[448]) are shared by neighbouring slots, and spawn and cleanup
+/// run without the BKL on many CPUs at once.
 static STACK_PAGES: crate::sched::spin::IrqSpinLock<()> =
     crate::sched::spin::IrqSpinLock::new("stack-pages", crate::sched::spin::level::PAGING, ());
 
@@ -83,7 +83,7 @@ fn release_slot(slot: usize) {
     SLOTS[slot / 64].fetch_and(!(1 << (slot % 64)), Ordering::Relaxed);
 }
 
-/// Ile slotów stosów jest zajętych (diagnostyka: `mem`).
+/// How many stack slots are taken (diagnostics: `mem`).
 pub fn used_slots() -> (usize, usize) {
     (SLOTS.iter().map(|w| w.load(Ordering::Relaxed).count_ones() as usize).sum(), MAX_SLOTS)
 }
@@ -93,7 +93,7 @@ pub struct TaskStack {
 }
 
 impl TaskStack {
-    /// Alokuje i mapuje stos (wyzerowany).
+    /// Allocates and maps a stack (zeroed).
     pub fn new() -> Option<Self> {
         let (slot, mapped) = take_slot()?;
         if mapped {
@@ -134,7 +134,7 @@ impl TaskStack {
     }
 
     fn unmap_from(&self, from: u64, to: u64) {
-        // M17a.b: jeden shootdown na paczkę stron, ramki oddane po nim.
+        // One shootdown per batch of pages, frames returned after it.
         crate::memory::unmap_range_free(from, to);
     }
 
@@ -147,7 +147,7 @@ impl TaskStack {
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
-        // Miejsce w pamięci stosów – slot wolny, ale zamapowany.
+        // Room in the stack cache – the slot is free but stays mapped.
         if CACHED.fetch_add(1, Ordering::Relaxed) < CACHE_MAX {
             release_slot(self.slot);
             return;
@@ -158,14 +158,14 @@ impl Drop for TaskStack {
     }
 }
 
-/// Czy adres leży w niezamapowanej części slotu stosu zadania (pod stosem).
+/// Whether the address lies in the unmapped part of a task's stack slot (below the stack).
 pub fn is_guard(address: u64) -> bool {
     let end = TASK_STACKS_BASE + MAX_SLOTS as u64 * SLOT_SIZE;
     (TASK_STACKS_BASE..end).contains(&address)
         && (address - TASK_STACKS_BASE) % SLOT_SIZE < SLOT_SIZE - STACK_SIZE
 }
 
-/// Wolne ramki po `flush_cache` (testy wycieku, stress).
+/// Free frames after `flush_cache` (leak tests, stress).
 pub fn free_frames_flushed() -> u64 {
     flush_cache();
     crate::memory::free_frame_count()

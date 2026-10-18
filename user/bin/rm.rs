@@ -1,4 +1,4 @@
-// M16: rm <ścieżka>... – usuwa pliki i puste katalogi.
+// rm <path>... – removes files and empty directories.
 #![no_std]
 #![no_main]
 

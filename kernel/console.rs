@@ -1,12 +1,12 @@
-// M7: konsola kernela.
+// Kernel console.
 //
-// Wyjście: każdy tekst idzie na serial (terminal) i – po `init()` – na
-// konsolę framebuffera.  Wszystkie logi (`serial_println!`) przechodzą tędy,
-// więc widać je też na ekranie QEMU.
+// Output: all text goes to the serial port (terminal) and – after `init()` – to
+// the framebuffer console.  All logs (`serial_println!`) pass through here,
+// so they are also visible on the QEMU screen.
 //
-// Wejście: klawiatura PS/2 (zdarzenia z `input`) oraz bajty z seriala
-// (pisanie w terminalu).  Oba źródła zamieniane są na wspólne `Key`.
-// Z seriala rozumiemy UTF-8 i sekwencje ESC[A/B/C/D/H/F/3~ (strzałki,
+// Input: PS/2 keyboard (events from `input`) and bytes from the serial port
+// (typing in a terminal).  Both sources are converted into a common `Key`.
+// From serial we understand UTF-8 and the sequences ESC[A/B/C/D/H/F/3~ (arrows,
 // Home, End, Delete), 0x7F/0x08 = Backspace, CR = Enter.
 
 use core::fmt::Write;
@@ -22,13 +22,13 @@ use crate::serial_println;
 
 static mut FB: Option<FbConsole> = None;
 static FB_ADDRESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-// Konsola framebuffera jest w trakcie rysowania (np. wyjątek w środku) –
-// wtedy piszemy już tylko na serial.
+// The framebuffer console is in the middle of drawing (e.g. an exception mid-way) –
+// then we write to serial only.
 static FB_BUSY: AtomicBool = AtomicBool::new(false);
 
-/// M17a.d: który CPU rysuje (numer + 1) – ten sam CPU w środku rysowania
-/// (wyjątek) dostaje None, inny CPU chwilę czeka (wcześniej BKL gwarantował,
-/// że rysuje jeden CPU; teraz `write` procesu działa bez BKL).
+/// Which CPU is drawing (number + 1) – the same CPU in the middle of drawing
+/// (exception) gets None, another CPU waits briefly (the BKL used to guarantee
+/// that only one CPU draws; now a process `write` runs without the BKL).
 static FB_OWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn with_fb<R>(f: impl FnOnce(&mut FbConsole) -> R) -> Option<R> {
@@ -46,7 +46,7 @@ fn with_fb<R>(f: impl FnOnce(&mut FbConsole) -> R) -> Option<R> {
                 crate::arch::x86_64::tlb::poll_from_wait();
             }
             if n % 1024 == 0 && crate::arch::x86_64::clock::elapsed_us(start) > 50_000 {
-                return None; // ktoś stoi w środku rysowania – tylko serial
+                return None; // someone is in the middle of drawing – serial only
             }
         }
         FB_OWNER.store(me, Ordering::Relaxed);
@@ -57,7 +57,7 @@ fn with_fb<R>(f: impl FnOnce(&mut FbConsole) -> R) -> Option<R> {
     })
 }
 
-/// Uruchamia konsolę framebuffera (wymaga heapa i pagingu).
+/// Starts the framebuffer console (requires the heap and paging).
 pub fn init(boot: &BootInfo) -> bool {
     if boot.framebuffer_addr == 0 || boot.width == 0 || boot.height == 0 {
         serial_println!("[CON] No framebuffer – console on serial only");
@@ -66,7 +66,7 @@ pub fn init(boot: &BootInfo) -> bool {
 
     let wc_pages = crate::memory::map_write_combining(boot.framebuffer_addr, boot.framebuffer_size);
 
-    // M10: CPU widzi framebuffer przez direct map (WC ustawione wyżej).
+    // The CPU sees the framebuffer through the direct map (WC set above).
     let Some(fb) = FbConsole::new(
         crate::memory::phys_to_virt(boot.framebuffer_addr),
         boot.width as usize,
@@ -99,19 +99,19 @@ pub fn init(boot: &BootInfo) -> bool {
     true
 }
 
-/// Fizyczny adres framebuffera (0 = brak konsoli ekranowej).
+/// Physical address of the framebuffer (0 = no screen console).
 #[allow(dead_code)]
 pub fn fb_address() -> u64 {
     FB_ADDRESS.load(Ordering::Relaxed)
 }
 
-/// Rozmiar konsoli ekranowej w znakach (jeśli jest).
+/// Size of the screen console in characters (if present).
 #[allow(dead_code)]
 pub fn fb_size() -> Option<(usize, usize)> {
     with_fb(|fb| (fb.cols, fb.rows))
 }
 
-/// Dostęp do konsoli framebuffera (testy / diagnostyka).
+/// Access to the framebuffer console (tests / diagnostics).
 #[allow(dead_code)]
 pub fn with_framebuffer<R>(f: impl FnOnce(&mut FbConsole) -> R) -> Option<R> {
     with_fb(f)
@@ -119,8 +119,8 @@ pub fn with_framebuffer<R>(f: impl FnOnce(&mut FbConsole) -> R) -> Option<R> {
 
 struct ConsoleWriter;
 
-/// Czy ostatni wypisany znak to '\n' (komunikat z tła zaczyna wtedy od
-/// razu, inaczej od nowej linii).
+/// Whether the last printed character was '\n' (a background message then starts
+/// right away, otherwise on a new line).
 static AT_LINE_START: AtomicBool = AtomicBool::new(true);
 
 impl Write for ConsoleWriter {
@@ -134,18 +134,18 @@ impl Write for ConsoleWriter {
     }
 }
 
-// M17a: blokada wyjścia – cała linia logu na raz.  Przy wielu CPU (BKL
-// oddawany w ticku, sekcje bez BKL) dwa komunikaty mieszały się w połowie
-// (stress: "...(int3 at 0x40019[USER] process 13 ...").  Własna blokada,
-// nie SpinLock: drukujemy także trzymając inne blokady (lockdep), w panic,
-// NMI i raportach watchdoga.  Ten sam CPU wchodzi ponownie (przerwanie /
-// panic w trakcie wypisywania), a obcy CPU czeka najwyżej ~20 ms i pisze
-// mimo to – log nigdy nie może zawiesić systemu.  Wywłaszczanie wstrzymane
-// na czas linii (tick nie przełączy zadania ani nie odda BKL w środku).
+// Output lock – a whole log line at once.  With multiple CPUs (BKL
+// released on tick, sections without the BKL) two messages got interleaved mid-line
+// (stress: "...(int3 at 0x40019[USER] process 13 ...").  A custom lock,
+// not SpinLock: we also print while holding other locks (lockdep), in panic,
+// NMI and watchdog reports.  The same CPU re-enters (interrupt /
+// panic while printing), and a foreign CPU waits at most ~20 ms and writes
+// anyway – logging must never hang the system.  Preemption is disabled
+// for the duration of the line (the tick won't switch tasks or release the BKL mid-line).
 static OUT_OWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 const OUT_WAIT_US: u64 = 20_000;
 
-/// `true` = wzięta (do oddania w `out_unlock`), `false` = już nasza / przejęta.
+/// `true` = acquired (release in `out_unlock`), `false` = already ours / taken over.
 fn out_lock() -> bool {
     use crate::arch::x86_64::{clock, cpu};
     cpu::preempt_disable();
@@ -165,7 +165,7 @@ fn out_lock() -> bool {
             crate::arch::x86_64::tlb::poll_from_wait();
         }
         if n % 1024 == 0 && (clock::elapsed_us(start) > OUT_WAIT_US || n > 100_000_000) {
-            // Właściciel stoi (np. czeka na BKL, który trzymamy) – piszemy.
+            // The owner is stuck (e.g. waiting for the BKL that we hold) – write anyway.
             OUT_OWNER.store(me, Ordering::Release);
             return true;
         }
@@ -186,7 +186,7 @@ pub fn print_fmt(args: core::fmt::Arguments<'_>) {
     out_unlock(t);
 }
 
-/// Linia logu (`serial_println!`): tekst + '\n' bez wtrąceń innych CPU.
+/// Log line (`serial_println!`): text + '\n' without interjections from other CPUs.
 pub fn print_line(args: core::fmt::Arguments<'_>) {
     let t = out_lock();
     let _ = ConsoleWriter.write_fmt(args);
@@ -202,22 +202,22 @@ pub fn write_str(s: &str) {
 }
 
 // ------------------------------------------------------------
-// Komunikaty z tła (np. koniec procesu) a edytowana linia shella
+// Background messages vs. the line being edited in the shell
 // ------------------------------------------------------------
 
-/// Linia, którą shell właśnie edytuje (gotowy tekst do narysowania: prompt +
-/// wpisany tekst + pozycja kursora).  None = shell nie czeka na klawisze.
-/// M17a.d: SpinLock (nie usypiający Mutex) – czyta ją `write` bez BKL.
+/// The line the shell is currently editing (ready text to draw: prompt +
+/// typed text + cursor position).  None = the shell is not waiting for keys.
+/// SpinLock (not a sleeping Mutex) – `write` reads it without the BKL.
 static INPUT_LINE: crate::sched::spin::IrqSpinLock<Option<alloc::string::String>> =
     crate::sched::spin::IrqSpinLock::new("input-line", crate::sched::spin::level::OUTPUT, None);
 
-/// Shell: ustawia / czyści edytowaną linię (przed i po czekaniu na klawisz).
+/// Shell: sets / clears the edited line (before and after waiting for a key).
 pub fn set_input_line(line: Option<alloc::string::String>) {
     *INPUT_LINE.lock() = line;
 }
 
-/// Tekst komunikatu z tła: jeśli shell edytuje linię – wyczyść ją, wypisz
-/// komunikat i narysuj prompt z wpisanym tekstem jeszcze raz (jak readline).
+/// Text of a background message: if the shell is editing a line – clear it, print
+/// the message and redraw the prompt with the typed text (like readline).
 pub fn compose_async(message: &str, line: Option<&str>) -> alloc::string::String {
     let mut s = alloc::string::String::new();
     if line.is_some() {
@@ -231,8 +231,8 @@ pub fn compose_async(message: &str, line: Option<&str>) -> alloc::string::String
     s
 }
 
-/// M14: wyjście procesu (write na fd 1/2).  Gdy shell akurat edytuje linię
-/// (proces działa w tle) – jak komunikat z tła: linia od nowa pod tekstem.
+/// Process output (write to fd 1/2).  When the shell happens to be editing a line
+/// (process running in the background) – like a background message: line redrawn below the text.
 pub fn write_from_process(text: &str) {
     let line = INPUT_LINE.lock().clone();
     match line {
@@ -250,12 +250,12 @@ pub fn write_from_process(text: &str) {
 }
 
 // ------------------------------------------------------------
-// M14: procesy na pierwszym planie (Ctrl+C)
+// Foreground processes (Ctrl+C)
 // ------------------------------------------------------------
 
 static FOREGROUND: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
-/// Shell: procesy na pierwszym planie (Ctrl+C je kończy).
+/// Shell: foreground processes (Ctrl+C terminates them).
 pub fn set_foreground(ids: &[u64]) {
     for (i, slot) in FOREGROUND.iter().enumerate() {
         slot.store(ids.get(i).copied().unwrap_or(0), Ordering::SeqCst);
@@ -266,18 +266,18 @@ pub fn clear_foreground() {
     set_foreground(&[]);
 }
 
-// M16: procesy pierwszego planu uruchamiane przez procesy (shell w user
-// space) – stos: shell w shellu kładzie swoje dziecko na wierzch, Ctrl+C
-// kończy tylko proces z wierzchu (a nie np. wewnętrzny shell).
+// Foreground processes started by processes (user-space
+// shell) – a stack: a shell inside a shell puts its child on top, Ctrl+C
+// terminates only the topmost process (not e.g. the inner shell).
 static FG_STACK: [core::sync::atomic::AtomicU64; 16] = [const { core::sync::atomic::AtomicU64::new(0) }; 16];
 
-/// Proces `id` na wierzch stosu pierwszego planu (spawn z flagą FOREGROUND).
+/// Pushes process `id` on top of the foreground stack (spawn with the FOREGROUND flag).
 pub fn push_foreground(id: u64) {
     crate::arch::x86_64::interrupts::without_interrupts(|| {
         if let Some(slot) = FG_STACK.iter().find(|s| s.load(Ordering::SeqCst) == 0) {
             slot.store(id, Ordering::SeqCst);
         } else {
-            // Pełny stos: zastępujemy najstarszy wpis (rzadkie – 16 poziomów).
+            // Stack full: replace the oldest entry (rare – 16 levels).
             for i in 0..FG_STACK.len() - 1 {
                 FG_STACK[i].store(FG_STACK[i + 1].load(Ordering::SeqCst), Ordering::SeqCst);
             }
@@ -286,7 +286,7 @@ pub fn push_foreground(id: u64) {
     });
 }
 
-/// Zdejmuje proces `id` z pierwszego planu (koniec procesu / wait).
+/// Removes process `id` from the foreground (process exit / wait).
 pub fn remove_foreground(id: u64) {
     if id == 0 {
         return;
@@ -307,16 +307,16 @@ pub fn remove_foreground(id: u64) {
     });
 }
 
-/// Proces z wierzchu stosu pierwszego planu (0 = brak).
+/// Process at the top of the foreground stack (0 = none).
 #[allow(dead_code)]
 pub fn top_foreground() -> u64 {
     FG_STACK.iter().map(|s| s.load(Ordering::SeqCst)).filter(|&v| v != 0).last().unwrap_or(0)
 }
 
-/// Z IRQ klawiatury / seriala przy Ctrl+C: jeśli są procesy na pierwszym
-/// planie – prośba o ich zakończenie i `true` (klawisz nie idzie dalej).
-/// M16: najpierw proces z wierzchu stosu procesów (shell w user space);
-/// gdy pusty – grupa ustawiona przez shell kernela (`run n` = n procesów).
+/// From the keyboard / serial IRQ on Ctrl+C: if there are foreground
+/// processes – request their termination and return `true` (the key goes no further).
+/// First the top of the process stack (user-space shell);
+/// when empty – the group set by the kernel shell (`run n` = n processes).
 pub fn interrupt_foreground() -> bool {
     let top = top_foreground();
     if top != 0 && crate::sched::request_exit(top) {
@@ -333,30 +333,30 @@ pub fn interrupt_foreground() -> bool {
     any
 }
 
-/// Wypisuje komunikat z innego zadania tak, żeby nie rozbić linii shella.
-/// Nie wołać z przerwań (blokada).
+/// Prints a message from another task without breaking the shell line.
+/// Do not call from interrupts (lock).
 pub fn print_async(args: core::fmt::Arguments<'_>) {
     let mut message = alloc::format!("{}", args);
     let line = INPUT_LINE.lock().clone();
     if line.is_none() && !AT_LINE_START.load(Ordering::Relaxed) {
-        message.insert(0, '\n'); // np. proces przerwany w połowie linii
+        message.insert(0, '\n'); // e.g. a process interrupted in the middle of a line
     }
     write_str(&compose_async(&message, line.as_deref()));
 }
 
-/// Konsola jako `fmt::Write` (dla shella).
+/// Console as `fmt::Write` (for the shell).
 pub fn writer() -> impl Write {
     ConsoleWriter
 }
 
 // ------------------------------------------------------------
-// Wejście
+// Input
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Char(char),
-    /// Ctrl + litera (mała), np. Ctrl('c').
+    /// Ctrl + letter (lowercase), e.g. Ctrl('c').
     Ctrl(char),
     Enter,
     Backspace,
@@ -371,7 +371,7 @@ pub enum Key {
     End,
 }
 
-/// Zdarzenie z klawiatury -> Key (tylko wciśnięcia).
+/// Keyboard event -> Key (key presses only).
 pub fn key_from_event(e: &input::KeyEvent) -> Option<Key> {
     if !e.pressed {
         return None;
@@ -388,7 +388,7 @@ pub fn key_from_event(e: &input::KeyEvent) -> Option<Key> {
         KeyCode::Down => Key::Down,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
-        // Klawiatura numeryczna bez Num Lock = nawigacja.
+        // Numeric keypad without Num Lock = navigation.
         KeyCode::Kp4 if !e.mods.num_lock() => Key::Left,
         KeyCode::Kp6 if !e.mods.num_lock() => Key::Right,
         KeyCode::Kp8 if !e.mods.num_lock() => Key::Up,
@@ -405,9 +405,9 @@ pub fn key_from_event(e: &input::KeyEvent) -> Option<Key> {
     Some(k)
 }
 
-/// Dekoder bajtów z terminala (serial) -> Key.
+/// Terminal (serial) byte decoder -> Key.
 pub struct SerialDecoder {
-    state: u8, // 0 = zwykły, 1 = po ESC, 2 = po ESC[
+    state: u8, // 0 = normal, 1 = after ESC, 2 = after ESC[
     param: u16,
     utf8: [u8; 4],
     utf8_len: usize,
@@ -429,7 +429,7 @@ impl SerialDecoder {
                     return None;
                 }
                 self.state = 0;
-                // ESC + coś innego: samo ESC, znak przepada (rzadkie)
+                // ESC + something else: plain ESC, the character is dropped (rare)
                 return Some(Key::Escape);
             }
             2 => {
@@ -489,7 +489,7 @@ impl SerialDecoder {
                 Some(Key::Enter)
             }
             b'\n' => {
-                // CR LF od terminala = jedno Enter
+                // CR LF from the terminal = a single Enter
                 if was_cr { None } else { Some(Key::Enter) }
             }
             0x7F | 0x08 => Some(Key::Backspace),
@@ -513,23 +513,23 @@ impl SerialDecoder {
 
 static mut SERIAL_DECODER: SerialDecoder = SerialDecoder::new();
 
-/// M11: przewija ekran konsoli (scrollback) o `lines` linii wstecz
-/// (ujemne = w przód).  Zwraca nowe przesunięcie (0 = na żywo).
+/// Scrolls the console screen (scrollback) by `lines` lines back
+/// (negative = forward).  Returns the new offset (0 = live).
 pub fn scroll_view(lines: isize) -> usize {
     with_fb(|fb| fb.scroll_view(lines)).unwrap_or(0)
 }
 
-/// Przewijanie ekranu klawiaturą (obsługuje konsola, shell tych klawiszy
-/// nie widzi):
-///   Shift+↑ / Shift+↓       – o 1 linię,
-///   Shift+PgUp / Shift+PgDn – o cały ekran (tyle linii, ile ma konsola).
+/// Scrolling the screen with the keyboard (handled by the console, the shell
+/// does not see these keys):
+///   Shift+↑ / Shift+↓       – by 1 line,
+///   Shift+PgUp / Shift+PgDn – by a whole screen (as many lines as the console has).
 fn scrollback_key(e: &input::KeyEvent) -> bool {
     if !e.mods.shift() {
         return false;
     }
     let page = || fb_size().map(|(_, rows)| rows.max(1) as isize).unwrap_or(0);
-    // Klawiatura numeryczna też (8/2/9/3 = ↑/↓/PgUp/PgDn) – na części
-    // laptopów i klawiatur PgUp jest tylko tam.
+    // The numeric keypad too (8/2/9/3 = ↑/↓/PgUp/PgDn) – on some
+    // laptops and keyboards PgUp exists only there.
     let lines = match e.key {
         KeyCode::Up | KeyCode::Kp8 => 1,
         KeyCode::Down | KeyCode::Kp2 => -1,
@@ -543,15 +543,15 @@ fn scrollback_key(e: &input::KeyEvent) -> bool {
     true
 }
 
-/// Linie przewijane jednym "ząbkiem" kółka myszy.
+/// Lines scrolled per mouse wheel "notch".
 const WHEEL_LINES: isize = 3;
 
-/// Następny klawisz z klawiatury lub seriala (bez czekania).  Po drodze
-/// obsługuje kółko myszy (przewijanie konsoli).
+/// Next key from the keyboard or serial (no waiting).  Along the way it
+/// handles the mouse wheel (console scrolling).
 pub fn poll_key() -> Option<Key> {
     let wheel = crate::drivers::mouse::take_wheel();
     if wheel != 0 {
-        // dz < 0 = kółko od siebie = w górę = wstecz.
+        // dz < 0 = wheel away from the user = up = back.
         scroll_view(-(wheel as isize) * WHEEL_LINES);
     }
     while let Some(e) = input::read_event() {
@@ -563,7 +563,7 @@ pub fn poll_key() -> Option<Key> {
         }
     }
     while let Some(b) = serial::read_byte() {
-        // Dekoder używany tylko z kodu kernela (nie z IRQ).
+        // Decoder used only from kernel code (not from IRQs).
         let d = unsafe { &mut *core::ptr::addr_of_mut!(SERIAL_DECODER) };
         if let Some(k) = d.feed(b) {
             return Some(k);
@@ -572,10 +572,10 @@ pub fn poll_key() -> Option<Key> {
     None
 }
 
-/// M12: zadania czekające na wejście (klawiatura, serial, kółko myszy).
+/// Tasks waiting for input (keyboard, serial, mouse wheel).
 pub static INPUT_WAIT: WaitQueue = WaitQueue::new();
 
-/// Z handlerów IRQ wejścia: jest coś nowego.
+/// From input IRQ handlers: something new arrived.
 pub fn wake_input() {
     INPUT_WAIT.wake_all();
 }
@@ -584,8 +584,8 @@ pub fn input_pending() -> bool {
     input::has_events() || serial::has_input() || crate::drivers::mouse::has_wheel()
 }
 
-/// Czeka na klawisz.  Zadanie śpi (inne zadania działają), budzi je
-/// przerwanie klawiatury / seriala / myszy.  Wymaga włączonych przerwań.
+/// Waits for a key.  The task sleeps (other tasks run), woken by a
+/// keyboard / serial / mouse interrupt.  Requires interrupts enabled.
 pub fn wait_key() -> Key {
     loop {
         if let Some(k) = poll_key() {

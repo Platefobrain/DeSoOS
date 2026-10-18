@@ -1,24 +1,24 @@
-// M9: ramfs – system plików w pamięci (heap).  Montowany jako "/".
+// ramfs – an in-memory file system (heap).  Mounted as "/".
 //
-// Drzewo węzłów: katalog = mapa nazwa -> węzeł, plik = Vec<u8>.
-// Wszystko znika po restarcie – trwałe dane są na /disk (FAT32).
+// Node tree: directory = name -> node map, file = Vec<u8>.
+// Everything disappears on reboot – persistent data lives on /disk (FAT32).
 //
-// M17a.g7: ramfs działa równolegle (VFS woła go pod FS_LOCK tylko do
-// odczytu – `ConcurrentFs`).  Własne blokady:
-//   * drzewo (katalogi) – `KRwLock`: wyszukiwanie do odczytu, zmiana
-//     struktury (create / mkdir / remove) do zapisu – krótko;
-//     M17a.g16: `RwSpinLock` (kręcąca się) – sekcje trwają µs, a uśpienie i
-//     pobudka kosztowały więcej (Legion v0.17.26: 438 tys. czekań, 505 s).
-//     Pod drzewem NIE wolno brać blokad plików (Mutex – usypia): read_dir i
-//     stats zbierają Arc plików i czytają je po zwolnieniu drzewa.  Bez
-//     zagnieżdżonego odczytu (pierwszeństwo pisarza = zakleszczenie).
-//   * zawartość pliku – osobny `Mutex` każdego pliku (Arc): kopiowanie
-//     danych (np. 70 KB programu przy exec) bez trzymania drzewa.
-// Kolejność: FS_LOCK -> drzewo -> plik.  Plik usunięty w trakcie odczytu
-// żyje, dopóki czytający trzyma Arc.
-// Legion v0.17.15: VFS czytelnicy–pisarz nie wystarczył – 405 tys. zapisów
-// (mkdir/echo/rm w /stN) zatrzymywało czytelników (exec z /bin): 668 s
-// czekania.  Teraz czytelnicy /bin i pisarze /stN nie wchodzą sobie w drogę.
+// ramfs runs concurrently (the VFS calls it holding FS_LOCK for
+// reading only – `ConcurrentFs`).  Its own locks:
+//   * the tree (directories) – `KRwLock`: lookups take it for reading, structural
+//     changes (create / mkdir / remove) for writing – briefly;
+//     it is a `RwSpinLock` (spinning) – the sections last µs, while sleeping and
+//     waking up cost more (hundreds of thousands of waits under stress).
+//     File locks must NOT be taken under the tree (Mutex – sleeps): read_dir and
+//     stats collect the files' Arcs and read them after releasing the tree.  No
+//     nested reads (writer preference = deadlock).
+//   * file contents – a separate `Mutex` per file (Arc): copying
+//     data (e.g. a 70 KB program on exec) without holding the tree.
+// Order: FS_LOCK -> tree -> file.  A file removed during a read
+// lives on as long as the reader holds the Arc.
+// A reader–writer VFS lock alone was not enough – hundreds of thousands of writes
+// (mkdir/echo/rm in /stN) stalled the readers (exec from /bin) for minutes.
+// Now readers of /bin and writers of /stN do not get in each other's way.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -36,21 +36,21 @@ struct FileInner {
     modified: DateTime,
 }
 
-/// v0.35.2: limit danych w ramfs.  Pliki leżą na heapie jądra (64 MiB) –
-/// bez limitu jeden program zapełniłby heap zapisem plików (albo `seek` daleko
-/// + zapis 1 bajtu) i jądro padłoby przy następnej alokacji.  Ponad limitem:
+/// Limit on ramfs data.  Files live on the kernel heap (64 MiB) –
+/// without a limit a single program could fill the heap by writing files (or by `seek` far
+/// + writing 1 byte) and the kernel would crash on the next allocation.  Above the limit:
 /// ENOSPC.
 pub const RAMFS_MAX: u64 = 24 * 1024 * 1024;
 static RAMFS_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Bajty danych w ramfs (wszystkie pliki).
+/// Data bytes in ramfs (all files).
 pub fn bytes_used() -> u64 {
     RAMFS_BYTES.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 impl FileInner {
-    /// Zmienia rozmiar danych na `new_len` – w limicie ramfs i bez paniki przy
-    /// braku pamięci (try_reserve).  Nowe bajty = 0.
+    /// Resizes the data to `new_len` – within the ramfs limit and without panicking when
+    /// out of memory (try_reserve).  New bytes = 0.
     fn set_len(&mut self, new_len: usize) -> Result<()> {
         use core::sync::atomic::Ordering::SeqCst;
         let old = self.data.len();
@@ -92,7 +92,7 @@ pub struct RamFs {
     root: UnsafeCell<Node>,
 }
 
-// Drzewo tylko pod `tree`; dane plików pod ich Mutexami.
+// The tree only under `tree`; file data under their Mutexes.
 unsafe impl Sync for RamFs {}
 unsafe impl Send for RamFs {}
 
@@ -112,12 +112,12 @@ impl RamFs {
         }
     }
 
-    /// Tylko pod `tree` (odczyt albo zapis).
+    /// Only under `tree` (read or write).
     fn root(&self) -> &Node {
         unsafe { &*self.root.get() }
     }
 
-    /// Tylko pod `tree` do zapisu.
+    /// Only under `tree` for writing.
     #[allow(clippy::mut_from_ref)]
     fn root_mut(&self) -> &mut Node {
         unsafe { &mut *self.root.get() }
@@ -145,7 +145,7 @@ impl RamFs {
         Ok(cur)
     }
 
-    /// Plik (Arc) – drzewo tylko na czas wyszukania.
+    /// The file (Arc) – the tree only for the duration of the lookup.
     fn file(&self, path: &str) -> Result<Arc<FileNode>> {
         let _t = self.tree.read();
         match Self::node(self.root(), path)? {
@@ -173,7 +173,7 @@ impl RamFs {
         }
     }
 
-    /// Wszystkie pliki poddrzewa (pod `tree` – bez blokad plików).
+    /// All files of the subtree (under `tree` – without file locks).
     fn collect_files(node: &Node, out: &mut Vec<Arc<FileNode>>) {
         match node {
             Node::File(f) => out.push(f.clone()),
@@ -181,7 +181,7 @@ impl RamFs {
         }
     }
 
-    /// Plik o tej ścieżce – istniejący albo nowo utworzony (pusty).
+    /// The file at this path – existing or newly created (empty).
     fn file_or_create(&self, path: &str) -> Result<Arc<FileNode>> {
         match self.file(path) {
             Ok(f) => return Ok(f),
@@ -211,8 +211,8 @@ impl ConcurrentFs for RamFs {
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
-        // Pod drzewem tylko kopie nazw i Arc plików – rozmiary po zwolnieniu
-        // (blokada pliku usypia).
+        // Under the tree only copies of names and file Arcs – sizes after releasing it
+        // (the file lock sleeps).
         let listed: Vec<(String, core::result::Result<Arc<FileNode>, DateTime>)> = {
             let _t = self.tree.read();
             let children = match Self::node(self.root(), path)? {
@@ -260,7 +260,7 @@ impl ConcurrentFs for RamFs {
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();
-        // v0.35.2: offset z `seek` może być ogromny – bez przepełnienia, w limicie.
+        // The offset from `seek` may be huge – no overflow, within the limit.
         let end = (offset as usize).checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
         if i.data.len() < end {
             i.set_len(end)?;
@@ -311,7 +311,7 @@ impl ConcurrentFs for RamFs {
         if name.is_empty() {
             return Err(FsError::Busy); // "/"
         }
-        // Usunięty węzeł zwalniamy po oddaniu drzewa (zwolnienie danych pliku).
+        // The removed node is dropped after releasing the tree (freeing the file's data).
         let _removed = {
             let _t = self.tree.write();
             let (children, modified) = match Self::node_mut(self.root_mut(), parent)? {

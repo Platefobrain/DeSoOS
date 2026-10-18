@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: OFL-1.1
 //
-// Czcionka bitmapowa 8x16 dla konsoli framebuffera (M7).
+// 8x16 bitmap font for the framebuffer console.
 //
-// Wygenerowane z Terminus Font (Uni2-Terminus16.psf) – podzbiór: ASCII,
-// Latin-1, polskie litery, €, ramki i strzałki.
+// Generated from Terminus Font (Uni2-Terminus16.psf) – subset: ASCII,
+// Latin-1, Polish letters, €, box drawing and arrows.
 // Terminus Font: Copyright (c) 2020 Dimitar Toshkov Zhekov,
 // with Reserved Font Name "Terminus Font".
 //
-// UWAGA – inna licencja niż reszta DeSoOS: dane glifów w tym pliku to
-// zmodyfikowana wersja (podzbiór, inny format) czcionki Terminus i podlegają
-// wyłącznie licencji SIL Open Font License 1.1 (pełny tekst: FONT-LICENSE.txt),
-// nie GPL.  Ta wersja nie jest nazywana "Terminus Font".  Rozpowszechniając
-// DeSoOS (także zbudowany BOOTX64.EFI), dołącz FONT-LICENSE.txt.
+// NOTE – a different license than the rest of DeSoOS: the glyph data in this file is
+// a modified version (subset, different format) of the Terminus font and is subject
+// solely to the SIL Open Font License 1.1 (full text: FONT-LICENSE.txt),
+// not the GPL.  This version is not called "Terminus Font".  When distributing
+// DeSoOS (including a built BOOTX64.EFI), include FONT-LICENSE.txt.
 //
-// Każdy glif: 16 wierszy po 8 pikseli, bit 7 = lewy piksel.
-// Tablica posortowana po znaku (wyszukiwanie binarne).
+// Each glyph: 16 rows of 8 pixels, bit 7 = leftmost pixel.
+// The table is sorted by character (binary search).
 
 pub const WIDTH: usize = 8;
 pub const HEIGHT: usize = 16;

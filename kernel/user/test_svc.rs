@@ -1,7 +1,7 @@
-// M19: samotesty usług w user space – czekanie na wiele uchwytów, urządzenia,
-// przerwania, DMA, menedżer usług (tylko build z --cfg selftest).  Testy
-// biegną w programach z /bin (prawdziwe syscalle z ring 3); kernel sprawdza
-// kod wyjścia i wyjście.
+// Self-tests of user-space services – waiting on many handles, devices,
+// interrupts, DMA, the service manager (only in builds with --cfg selftest).  The tests
+// run in programs from /bin (real syscalls from ring 3); the kernel checks
+// the exit code and the output.
 
 use alloc::string::String;
 
@@ -28,12 +28,12 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-/// Program z /bin z przechwyconym wyjściem; (sposób zakończenia, wyjście).
+/// A program from /bin with captured output; (how it terminated, output).
 fn run(path: &str, args: &[&str], ms: u64, hw_root: bool) -> Option<(ExitKind, String)> {
     run_ex(path, args, ms, hw_root, false)
 }
 
-/// Jak `run`; `sysctl` – także uchwyt SYSCTL (slot 4), jak prawdziwy init.
+/// Like `run`; `sysctl` – also the SYSCTL handle (slot 4), like the real init.
 fn run_ex(path: &str, args: &[&str], ms: u64, hw_root: bool, sysctl: bool) -> Option<(ExitKind, String)> {
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, hw_root, sysctl, ..SpawnOptions::default() };
     let id = exec(path, args, "/", &opts).ok()?;
@@ -50,19 +50,19 @@ pub fn self_test() {
     crate::selftest::begin();
     let frames0 = crate::selftest::settled_free_frames();
 
-    // 1. M19.b: wait_many – błędy listy, limit czasu, kanały i potoki (odczyt /
-    // zapis / zamknięcie), pobudka od dziecka, serwer 4 klientów, pełna
-    // kolejka, kill procesu czekającego w wait_many.
+    // 1. wait_many – list errors, timeout, channels and pipes (read /
+    // write / close), wakeup from a child, a server with 4 clients, full
+    // queue, kill of a process waiting in wait_many.
     let r = run("/bin/waittest", &["waittest"], 60_000, false);
     check!(r.is_some(), "waittest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "waittest: {:?} {:?}", kind, out.trim());
     serial_println!("[SVC TEST] 1/7 wait_many: errors, timeout, channels + pipes, wake-up, 4-client server, full queue, kill while waiting: {} PASS", out.trim());
 
-    // 2. M19.c: HW_ROOT (tylko z jądra, bez praw kopiowania), dev_claim –
-    // odmowa dla urządzeń jądra / dysków / grafiki / mostków, EBUSY; dev_map
-    // rejestrów `edu` (UC, NX), prawa, przejęcie trzymane przez mapowanie,
-    // kill procesu z zamapowanym urządzeniem.
+    // 2. HW_ROOT (kernel-only, no copy right), dev_claim –
+    // refused for kernel devices / disks / graphics / bridges, EBUSY; dev_map
+    // of the `edu` registers (UC, NX), rights, claim held by the mapping,
+    // kill of a process with a mapped device.
     use crate::drivers::pci;
     let edu = pci::index_of(pci::Address { bus: 0, device: 6, function: 0 });
     check!(edu.is_some(), "no edu device at 00:06.0 (QEMU needs -device edu,addr=06)");
@@ -75,10 +75,10 @@ pub fn self_test() {
     check!(pci::owner(edu.unwrap()) == pci::OWNER_FREE, "edu still claimed after devtest");
     serial_println!("[SVC TEST] 2/7 devices: HW_ROOT only from the kernel, dev_claim refuses kernel/disk/display/bridge devices, EBUSY, edu registers via dev_map (UC, NX), claim held by the mapping, released on kill: {} PASS", out.trim());
 
-    // 3. M19.d: przerwania – irq_bind (prawa, EBUSY), przerwanie edu budzi
-    // wait_many, licznik, 10 przerwań = jedna pobudka z licznikiem, silnia
-    // zakończona przerwaniem, lista z kanałem, wektor zwalniany (20 razy),
-    // kill procesu z przypiętym przerwaniem.
+    // 3. Interrupts – irq_bind (rights, EBUSY), an edu interrupt wakes
+    // wait_many, counter, 10 interrupts = one wakeup with a counter, factorial
+    // completed by an interrupt, a list with a channel, vector released (20 times),
+    // kill of a process with a bound interrupt.
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let r = run("/bin/irqtest", &["irqtest"], 30_000, true);
     check!(r.is_some(), "irqtest did not finish");
@@ -91,9 +91,9 @@ pub fn self_test() {
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after the service ended");
     serial_println!("[SVC TEST] 3/7 interrupts: irq_bind rights + EBUSY, edu MSI wakes wait_many, counter, coalescing, factorial by interrupt, mixed list, vectors freed ({} free), bus mastering off after kill: {} PASS", vectors1, out.trim());
 
-    // 4. M19.e: DMA – dma_alloc (prawa, rozmiary, szyna 28 bitów, limit 16 MiB
-    // na urządzenie), dma_phys, edu czyta i zapisuje bufor usługi, koniec
-    // transferu przerwaniem, kill procesu z buforem DMA.
+    // 4. DMA – dma_alloc (rights, sizes, 28-bit bus, 16 MiB limit
+    // per device), dma_phys, edu reads and writes the service buffer, end
+    // of transfer by interrupt, kill of a process with a DMA buffer.
     let free0 = crate::selftest::settled_free_frames();
     let r = run("/bin/dmatest", &["dmatest"], 30_000, true);
     check!(r.is_some(), "dmatest did not finish");
@@ -105,9 +105,9 @@ pub fn self_test() {
     check!(free1 >= free0, "DMA buffers not returned ({} free frames before, {} after)", free0, free1);
     serial_println!("[SVC TEST] 4/7 DMA: dma_alloc rights / sizes / 28-bit bus / 16 MiB per device, dma_phys, edu reads and writes the service buffer, interrupts, buffers and bus mastering released after kill: {} PASS", out.trim());
 
-    // 5. M19.f: usługa edud – sterownik edu w user space (rejestry, przerwania,
-    // DMA), klienci przez kanały, 4 klientów naraz, kill usługi i restart,
-    // samodzielny koniec, gdy nikt nie może jej już wywołać.
+    // 5. The edud service – a user-space edu driver (registers, interrupts,
+    // DMA), clients via channels, 4 clients at once, service kill and restart,
+    // exiting on its own once nobody can call it anymore.
     let free0 = crate::selftest::settled_free_frames();
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let r = run("/bin/edutest", &["edutest"], 60_000, true);
@@ -121,11 +121,11 @@ pub fn self_test() {
     check!(free1 >= free0, "frames leaked by edud ({} -> {})", free0, free1);
     serial_println!("[SVC TEST] 5/7 edud service: user-space edu driver (MMIO, IRQ, DMA) over channels, 4 clients, kill + restart, exits when unreachable, nothing leaked: {} PASS", out.trim());
 
-    // 6. M19.g: menedżer usług w init – prawdziwy /bin/init w trybie testowym
-    // (`init test /bin/svctest`): init sam uruchamia edud i echod, restartuje
-    // je po awarii / kill, łączy klientów po nazwie, `services` przez shell,
-    // 5 awarii -> broken; po teście init zamyka usługi i kończy się kodem
-    // svctest.  Potem: edu wolne, wektory i ramki wróciły.
+    // 6. Service manager in init – the real /bin/init in test mode
+    // (`init test /bin/svctest`): init itself starts edud and echod, restarts
+    // them after a crash / kill, connects clients by name, `services` via the shell,
+    // 5 crashes -> broken; after the test init shuts the services down and exits with
+    // svctest's code.  Then: edu is free, vectors and frames are back.
     let free0 = crate::selftest::settled_free_frames();
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let r = run_ex("/bin/init", &["init", "test", "/bin/svctest"], 60_000, true, true);
@@ -141,10 +141,10 @@ pub fn self_test() {
     check!(free1 >= free0, "frames leaked by init services ({} -> {})", free0, free1);
     serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL: {} PASS", line);
 
-    // 7. M19.h: pomiar – ta sama praca w jądrze i w user space na edu:
-    // przerwanie -> obudzony sterownik, silnia zakończona przerwaniem; w user
-    // space także przez usługę (klient -> edud -> urządzenie -> odpowiedź) i
-    // czas restartu usługi.  Wynik: linia [RESULT-SVC] (test.sh ją pokazuje).
+    // 7. Measurement – the same work in the kernel and in user space on edu:
+    // interrupt -> driver woken up, factorial completed by an interrupt; in user
+    // space also through the service (client -> edud -> device -> reply) and
+    // the service restart time.  Result: a [RESULT-SVC] line (test.sh shows it).
     let free0 = crate::selftest::settled_free_frames();
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let kb = kernel_edu_bench(pci::Address { bus: 0, device: 6, function: 0 });
@@ -192,9 +192,9 @@ pub fn self_test() {
 }
 
 // ------------------------------------------------------------
-// M19.h: edu obsługiwane przez jądro – punkt odniesienia dla pomiaru usługi.
-// Ten sam przebieg co w /bin/svcbench: zapis rejestru, sterownik (tu zadanie
-// jądra) śpi w kolejce, budzi go handler MSI, sprawdza status, potwierdza.
+// edu handled by the kernel – the baseline for the service measurement.
+// The same sequence as in /bin/svcbench: register write, the driver (here a kernel
+// task) sleeps on a queue, the MSI handler wakes it, it checks the status, acknowledges.
 // ------------------------------------------------------------
 
 static KEDU_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -205,7 +205,7 @@ fn kedu_irq(_vector: u8) {
     KEDU_WAIT.wake_all();
 }
 
-/// Powtarza `round` przez co najmniej 200 ms; ns na rundę.
+/// Repeats `round` for at least 200 ms; ns per round.
 fn timed_kernel(mut round: impl FnMut() -> bool) -> Result<u64, &'static str> {
     let t0 = ticks();
     let mut n = 0u64;
@@ -221,7 +221,7 @@ fn timed_kernel(mut round: impl FnMut() -> bool) -> Result<u64, &'static str> {
     }
 }
 
-/// (ns przerwanie -> obudzony sterownik, ns silnia przez przerwanie).
+/// (ns interrupt -> driver woken up, ns factorial via interrupt).
 fn kernel_edu_bench(addr: crate::drivers::pci::Address) -> Result<(u64, u64), &'static str> {
     use core::ptr::{read_volatile, write_volatile};
     use core::sync::atomic::Ordering::SeqCst;

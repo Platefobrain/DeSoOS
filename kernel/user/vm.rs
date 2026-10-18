@@ -1,22 +1,22 @@
-// M17b.d: pamięć procesu – obszary (VMA) z leniwym przydziałem stron.
+// Process memory – areas (VMAs) with lazy page allocation.
 //
-//   [obraz ELF][brk: sterta rośnie w górę ->]   ...   [mmap: od MMAP_BASE ->]
-//   ...   [stos: do STACK_MAX w dół od USER_STACK_TOP; strona-strażnik pod]
+//   [ELF image][brk: heap grows up ->]   ...   [mmap: from MMAP_BASE ->]
+//   ...   [stack: down to STACK_MAX below USER_STACK_TOP; guard page beneath]
 //
-// * Obszar to tylko zakres adresów z prawami – strony dostaje dopiero przy
-//   pierwszym dostępie: #PF z ring 3 (nieobecna strona w obszarze) albo
-//   kopiowanie przez kernel (copy_from_user / copy_to_user dociąga strony,
-//   zanim sprawdzi prawa).  Nowa strona jest wyzerowana.
-// * brk(addr) – koniec sterty (0 = zapytanie); mmap(len, prot) – anonimowy
-//   obszar (adresy rosną, bez ponownego użycia – przestrzeń 128 TiB);
-//   munmap(addr, len) – tylko obszary z mmap, także ich części.
-// * Proces jest jednowątkowy: obszary i tablice stron zmienia tylko on sam
-//   (syscall, #PF), więc bez blokad.  Zwolnione strony: invlpg na tym CPU
-//   wystarcza – przestrzeń jest aktywna tylko tu (inne CPU po przełączeniu
-//   zadania przeładowały CR3).
-// * Limit: obszary procesu razem (bez stosu) najwyżej MAX_MAPPED – chroni
-//   tablice stron; ramki i tak przydziela dopiero dostęp.  Brak ramki przy
-//   #PF = proces kończony (#PF), przy kopiowaniu – EFAULT.
+// * An area is just an address range with permissions – it gets pages only on
+//   first access: a #PF from ring 3 (non-present page in the area) or
+//   a kernel copy (copy_from_user / copy_to_user faults pages in
+//   before checking permissions).  A new page is zeroed.
+// * brk(addr) – end of the heap (0 = query); mmap(len, prot) – anonymous
+//   area (addresses grow, no reuse – the address space is 128 TiB);
+//   munmap(addr, len) – only mmap areas, parts of them too.
+// * A process is single-threaded: areas and page tables are changed only by itself
+//   (syscall, #PF), so no locks.  Freed pages: invlpg on this CPU
+//   is enough – the address space is active only here (other CPUs reloaded CR3
+//   on task switch).
+// * Limit: the process's areas together (excluding the stack) at most MAX_MAPPED – this protects
+//   the page tables; frames are only allocated on access anyway.  No frame on
+//   #PF = process terminated (#PF), during a copy – EFAULT.
 
 use alloc::vec::Vec;
 
@@ -25,24 +25,24 @@ use super::{USER_STACK_SIZE, USER_STACK_TOP};
 use crate::memory::{USER, WRITABLE};
 
 const PAGE: u64 = 4096;
-/// Początek obszarów mmap (16 TiB).
+/// Start of mmap areas (16 TiB).
 pub const MMAP_BASE: u64 = 0x0000_1000_0000_0000;
-/// Najdalej rosnący stos (8 MiB, w tym strona-strażnik na dole).
+/// Maximum stack growth (8 MiB, including the guard page at the bottom).
 pub const STACK_MAX: u64 = 8 * 1024 * 1024;
-/// Sterta (brk) najwyżej tyle.
+/// Heap (brk) at most this much.
 pub const BRK_MAX: u64 = 1 << 30;
-/// Wszystkie obszary sterty i mmap razem.
+/// All heap and mmap areas together.
 pub const MAX_MAPPED: u64 = 4 << 30;
 
-/// M17b.d2: ile stron dociągać naraz (fault-around): sterta i mmap – w górę od
-/// strony błędu, stos – w dół.  Pomiar (QEMU TCG, 1 CPU, stress 20 s, po 3
-/// przebiegi): 1 strona – 553 skrypty, 16 stron – 515 (zerowanie 64 KiB na
-/// każdy #PF, a procesy w stressie dotykają ich mało: ~0,5 #PF na proces),
-/// stara sterta 256 KiB w .bss – 541.  Zostaje 1 (pokrętło do pomiarów).
+/// How many pages to fault in at once (fault-around): heap and mmap – upwards from
+/// the faulting page, stack – downwards.  Measurement (QEMU TCG, 1 CPU, stress 20 s, 3
+/// runs each): 1 page – 553 scripts, 16 pages – 515 (zeroing 64 KiB on
+/// every #PF, while processes under stress touch few pages: ~0.5 #PF per process),
+/// the old 256 KiB heap in .bss – 541.  It stays at 1 (a knob for measurements).
 pub const FAULT_AROUND: u64 = 1;
 
-// Statystyka (per CPU, bez wspólnej linii cache): #PF obsłużone, strony
-// dociągnięte przez #PF i przez kopiowanie kernela, wywołania brk / mmap.
+// Statistics (per CPU, no shared cache line): #PFs handled, pages
+// faulted in by #PF and by kernel copies, brk / mmap calls.
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 static PF_TRAPS: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
 static PF_PAGES: crate::arch::x86_64::percpu::PerCpu<AtomicU64> = crate::per_cpu!(AtomicU64::new(0));
@@ -57,12 +57,12 @@ fn sum(a: &crate::arch::x86_64::percpu::PerCpu<AtomicU64>) -> u64 {
     a.iter().map(|x| x.load(Relaxed)).sum()
 }
 
-/// (#PF obsłużone, strony z #PF, strony z kopiowania, brk + mmap + munmap) – `cpus`.
+/// (#PFs handled, pages from #PF, pages from copies, brk + mmap + munmap) – `cpus`.
 pub fn stats() -> (u64, u64, u64, u64) {
     (sum(&PF_TRAPS), sum(&PF_PAGES), sum(&COPY_PAGES), sum(&MEM_CALLS))
 }
 
-/// Licznik wywołań brk / mmap / munmap (syscalls.rs).
+/// Counter of brk / mmap / munmap calls (syscalls.rs).
 pub fn count_call() {
     bump(&MEM_CALLS, 1);
 }
@@ -75,9 +75,9 @@ pub enum VmaKind {
     Heap,
     Mmap,
     Stack,
-    /// M18.e: pamięć współdzielona – strony zamapowane od razu, ramki należą
-    /// do obiektu (ProcMem.shared), nigdy nie są zwalniane przez proces.
-    /// M19.c: tak samo rejestry urządzenia (BAR) – strony fizyczne urządzenia.
+    /// Shared memory – pages mapped right away, the frames belong
+    /// to the object (ProcMem.shared) and are never freed by the process.
+    /// The same goes for device registers (BAR) – physical device pages.
     Shared,
 }
 
@@ -89,8 +89,8 @@ pub struct Vma {
     pub kind: VmaKind,
 }
 
-/// M19.c: właściciel stron obszaru wspólnego – trzymany, dopóki obszar jest
-/// zamapowany (obiekt pamięci współdzielonej albo przejęcie urządzenia).
+/// Owner of a shared area's pages – held as long as the area is
+/// mapped (a shared memory object or a device claim).
 #[allow(dead_code)]
 pub enum SharedRef {
     Shm(alloc::sync::Arc<super::shm::ShmObj>),
@@ -102,10 +102,10 @@ pub struct ProcMem {
     brk: u64,
     mmap_next: u64,
     vmas: Vec<Vma>,
-    /// M18.e: mapowania pamięci współdzielonej (początek obszaru, obiekt) –
-    /// trzymają obiekt przy życiu.
+    /// Shared memory mappings (area start, object) –
+    /// they keep the object alive.
     shared: Vec<(u64, SharedRef)>,
-    /// Strony dociągnięte leniwie (statystyka, testy).
+    /// Pages faulted in lazily (statistics, tests).
     pub faulted: u64,
 }
 
@@ -113,15 +113,15 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
-/// Długość z procesu zaokrąglona do strony – `None` przy przepełnieniu
-/// (jądro buduje z overflow-checks: `page_up(u64::MAX)` = panika).
+/// Length from a process rounded up to a page – `None` on overflow
+/// (the kernel is built with overflow-checks: `page_up(u64::MAX)` = panic).
 fn page_up_user(x: u64) -> Option<u64> {
     Some(x.checked_add(PAGE - 1)? & !(PAGE - 1))
 }
 
 impl ProcMem {
-    /// `image_end` – pierwszy adres za obrazem programu (sterta zaczyna się
-    /// stronę dalej – strona-strażnik).
+    /// `image_end` – the first address past the program image (the heap starts
+    /// one page further – guard page).
     pub fn new(image_end: u64) -> Self {
         let brk_start = page_up(image_end) + PAGE;
         let stack = Vma {
@@ -141,30 +141,30 @@ impl ProcMem {
         self.vmas.iter().filter(|v| v.kind != VmaKind::Stack).map(|v| v.end - v.start).sum()
     }
 
-    /// Dociąga stronę pod `va`, jeśli leży w obszarze (i zapis jest tam
-    /// dozwolony); `true` = strona jest teraz zamapowana przez nas.  M17b.d2:
-    /// razem z nią do FAULT_AROUND sąsiednich nieobecnych stron obszaru
-    /// (`from_copy` – kopiowanie przez kernel, tylko statystyka).
+    /// Faults in the page at `va` if it lies in an area (and writing is
+    /// allowed there); `true` = the page is now mapped by us.
+    /// Together with it up to FAULT_AROUND neighbouring non-present pages of the area
+    /// (`from_copy` – kernel copy, statistics only).
     pub fn fault_in(&mut self, space: &mut AddressSpace, va: u64, write: bool, from_copy: bool) -> bool {
         let Some(v) = self.find(va).copied() else { return false };
         if write && !v.writable {
             return false;
         }
-        // Wspólna pamięć jest zamapowana w całości – brak strony tam to błąd
-        // (nie dociągamy prywatnej strony w miejsce wspólnej).
+        // Shared memory is mapped in full – a missing page there is an error
+        // (we do not fault in a private page in place of a shared one).
         if v.kind == VmaKind::Shared {
             return false;
         }
         let page = va & !(PAGE - 1);
         if space.translate(page).is_some() {
-            return false; // obecna – to naruszenie praw, nie brak strony
+            return false; // present – this is a permission violation, not a missing page
         }
         let flags = USER | if v.writable { WRITABLE } else { 0 } | crate::memory::nx_flag();
         if space.map_new(page, flags).is_none() {
             return false;
         }
-        // Sąsiedzi: stos rośnie w dół, reszta w górę.  Brak pamięci – trudno,
-        // sama strona błędu już jest.
+        // Neighbours: the stack grows down, the rest up.  Out of memory – too bad,
+        // the faulting page itself is already there.
         let (lo, hi) = if v.kind == VmaKind::Stack {
             (page.saturating_sub((FAULT_AROUND - 1) * PAGE).max(v.start), page)
         } else {
@@ -191,13 +191,13 @@ impl ProcMem {
         true
     }
 
-    /// Czy strona leży w jakimś obszarze (do sprawdzania zakresów).
+    /// Whether the page lies in some area (for range checks).
     pub fn covers(&self, va: u64) -> bool {
         self.find(va).is_some()
     }
 
-    /// brk(addr): nowy koniec sterty (0 – tylko zapytanie).  Przy błędzie
-    /// zwraca dotychczasowy koniec (jak Linux).
+    /// brk(addr): new end of the heap (0 – query only).  On error
+    /// returns the current end (like Linux).
     pub fn set_brk(&mut self, space: &mut AddressSpace, addr: u64) -> u64 {
         if addr == 0 || addr < self.brk_start || addr > self.brk_start + BRK_MAX {
             return self.brk;
@@ -218,13 +218,13 @@ impl ProcMem {
         addr
     }
 
-    /// mmap(len, prot) – adres nowego obszaru albo błąd (-errno).
+    /// mmap(len, prot) – address of the new area or an error (-errno).
     pub fn mmap(&mut self, len: u64, prot: u64) -> Result<u64, i64> {
         use super::syscalls::{EINVAL, ENOMEM};
         if len == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 {
             return Err(EINVAL);
         }
-        // Długość od procesu: najpierw limit, potem zaokrąglenie (bez przepełnień).
+        // Length from the process: limit first, then rounding (no overflows).
         if len > MAX_MAPPED {
             return Err(ENOMEM);
         }
@@ -233,13 +233,13 @@ impl ProcMem {
             return Err(ENOMEM);
         }
         let start = self.mmap_next;
-        // Strona przerwy między obszarami – przepełnienie bufora trafia w #PF.
+        // A gap page between areas – a buffer overflow hits a #PF.
         self.mmap_next += len + PAGE;
         self.vmas.push(Vma { start, end: start + len, writable: prot & PROT_WRITE != 0, kind: VmaKind::Mmap });
         Ok(start)
     }
 
-    /// M18.e: mapuje obiekt pamięci współdzielonej (cały) – adres obszaru.
+    /// Maps a shared memory object (whole) – returns the area address.
     pub fn map_shared(
         &mut self,
         space: &mut AddressSpace,
@@ -250,8 +250,8 @@ impl ProcMem {
         self.map_pages(space, &pages, write, 0, SharedRef::Shm(obj))
     }
 
-    /// M19.c: rejestry urządzenia (strony fizyczne BAR-u) – bez cache (UC),
-    /// nigdy wykonywalne; None = dziura (MSI-X), dostęp tam = #PF.
+    /// Device registers (physical BAR pages) – uncached (UC),
+    /// never executable; None = hole (MSI-X), access there = #PF.
     pub fn map_mmio(
         &mut self,
         space: &mut AddressSpace,
@@ -263,7 +263,7 @@ impl ProcMem {
         self.map_pages(space, pages, write, CACHE_DISABLE | WRITE_THROUGH, SharedRef::Dev(claim))
     }
 
-    /// Obszar wspólny: strony mapowane od razu, `keep` trzyma ich właściciela.
+    /// Shared area: pages mapped right away, `keep` holds their owner.
     fn map_pages(
         &mut self,
         space: &mut AddressSpace,
@@ -292,8 +292,8 @@ impl ProcMem {
         Ok(start)
     }
 
-    /// M18.e: zdejmuje wszystkie mapowania wspólne (koniec procesu – zanim
-    /// przestrzeń adresowa zwolni swoje strony; ramki obiektów zostają).
+    /// Removes all shared mappings (process exit – before
+    /// the address space frees its pages; the objects' frames stay).
     pub fn release_shared(&mut self, space: &mut AddressSpace) {
         for v in self.vmas.iter().filter(|v| v.kind == VmaKind::Shared) {
             unmap_keep(space, v.start, v.end);
@@ -302,9 +302,9 @@ impl ProcMem {
         self.shared.clear();
     }
 
-    /// munmap(addr, len): usuwa [addr, addr+len) z obszarów mmap (dzieli je),
-    /// oddaje dociągnięte strony.  M18.e: obszar wspólny tylko w całości
-    /// (zakres go obejmuje) – częściowo: EINVAL.
+    /// munmap(addr, len): removes [addr, addr+len) from mmap areas (splitting them),
+    /// releases faulted-in pages.  A shared area only as a whole
+    /// (the range covers it) – partially: EINVAL.
     pub fn munmap(&mut self, space: &mut AddressSpace, addr: u64, len: u64) -> Result<(), i64> {
         use super::syscalls::EINVAL;
         if addr % PAGE != 0 || len == 0 || addr < MMAP_BASE {
@@ -338,15 +338,15 @@ impl ProcMem {
         Ok(())
     }
 
-    /// (obszary bez stosu w bajtach, strony dociągnięte) – testy.
+    /// (areas excluding the stack in bytes, pages faulted in) – tests.
     #[allow(dead_code)]
     pub fn stats(&self) -> (u64, u64) {
         (self.mapped_total(), self.faulted)
     }
 }
 
-/// M18.e: zdejmuje wpisy z [start, end) BEZ zwalniania ramek (należą do
-/// obiektu pamięci współdzielonej).
+/// Removes entries in [start, end) WITHOUT freeing the frames (they belong to
+/// a shared memory object).
 fn unmap_keep(space: &mut AddressSpace, start: u64, end: u64) {
     let mut va = start;
     while va < end {
@@ -357,7 +357,7 @@ fn unmap_keep(space: &mut AddressSpace, start: u64, end: u64) {
     }
 }
 
-/// Oddaje zamapowane strony z [start, end).
+/// Releases the mapped pages in [start, end).
 fn unmap_range(space: &mut AddressSpace, start: u64, end: u64) {
     let mut va = start;
     while va < end {

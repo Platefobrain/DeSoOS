@@ -1,32 +1,32 @@
-// M20.f: ublk – dysk USB w jądrze.  Projekt: ARCHITEKTURA.md, „Dysk – ublk”.
+// ublk – in-kernel USB disk.  Design: ARCHITECTURE.md, section "Disk – `ublk` and the request protocol".
 //
-// usbd (user space) obsługuje pendrive (Bulk-Only + SCSI) i rejestruje go
-// syscallem 50 `blk_attach(BLK, kanał, bufor, info)`.  Jądro widzi zwykły
-// `BlockDevice` („sda”, „sdb”, …) – zawsze TYLKO DO ODCZYTU – i każdy odczyt
-// zamienia na żądanie wysłane kanałem do usbd; dane pendrive wpisuje przez DMA
-// prosto do wspólnego bufora (bez kopii w usbd), jądro kopiuje je stamtąd.
+// usbd (user space) drives the flash drive (Bulk-Only + SCSI) and registers it
+// with syscall 50 `blk_attach(BLK, channel, buffer, info)`.  The kernel sees a regular
+// `BlockDevice` ("sda", "sdb", …) – always READ-ONLY – and turns every read
+// into a request sent over the channel to usbd; the flash drive writes the data via DMA
+// straight into the shared buffer (no copy in usbd), and the kernel copies it from there.
 //
-// Protokół (kanał – sterowanie, dane – bufor; zasada z M18):
-//   jądro -> usbd (32 B): id u32, op u32 (1 = READ, innych nie ma), lba u64
-//                         (bloki urządzenia), bloki u32, slot u32, 8 B zero
-//   usbd -> jądro (≥ 12 B): id u32, status i32 (0, EIO, ENODEV), bloki u32
-// * Bufor dzielony na sloty po 64 KiB (1..8), jeden slot na żądanie.  Slot:
-//   wolny -> u usbd (wysłane żądanie) -> wolny po odpowiedzi z tym `id`,
-//   statusem 0 i żądaną liczbą bloków (dopiero wtedy jądro kopiuje dane).
-//   Każda inna odpowiedź (cudze / nieznane `id`, zła liczba bloków, za krótki
-//   komunikat) – odrzucona, licznik błędów protokołu.
-// * Timeout (5 s; test może podać krótszy): EIO dla czytającego, slot w
-//   KWARANTANNIE – urządzenie może jeszcze do niego pisać.  Wraca do puli po
-//   spóźnionej odpowiedzi z tym `id` albo nigdy (dysk znika razem z buforem).
-// * 3 timeouty pod rząd, zamknięty kanał (koniec usbd) albo status ENODEV
-//   (pendrive wyjęty) = dysk ZNIKA: kolejne odczyty – NoDevice.
-// * Zadanie jądra `usb-disks` (monitor): nowy dysk -> partycje GPT, FAT32 ->
-//   /usb0, /usb1, … (tylko odczyt); dysk zniknął -> odmontowanie, usunięcie
-//   partycji i dysku, bufor i kanał zwolnione (numer dysku wraca do puli).
+// Protocol (channel – control, buffer – data):
+//   kernel -> usbd (32 B): id u32, op u32 (1 = READ, there are no others), lba u64
+//                         (device blocks), blocks u32, slot u32, 8 B zero
+//   usbd -> kernel (≥ 12 B): id u32, status i32 (0, EIO, ENODEV), blocks u32
+// * The buffer is split into 64 KiB slots (1..8), one slot per request.  Slot:
+//   free -> owned by usbd (request sent) -> free after a reply with this `id`,
+//   status 0 and the requested block count (only then does the kernel copy the data).
+//   Any other reply (someone else's / unknown `id`, wrong block count, message too
+//   short) – rejected, protocol error counter incremented.
+// * Timeout (5 s; a test may set a shorter one): EIO for the reader, slot in
+//   QUARANTINE – the device may still write to it.  It returns to the pool after a
+//   late reply with this `id` or never (the disk disappears along with the buffer).
+// * 3 timeouts in a row, a closed channel (usbd exit) or status ENODEV
+//   (flash drive removed) = the disk DISAPPEARS: further reads – NoDevice.
+// * Kernel task `usb-disks` (monitor): new disk -> GPT partitions, FAT32 ->
+//   /usb0, /usb1, … (read-only); disk gone -> unmount, remove the
+//   partitions and the disk, free the buffer and channel (the disk number returns to the pool).
 //
-// Tylko odczyt – trzy niezależne zamki: usbd nie ma żadnej komendy zapisu
-// SCSI, protokół nie ma operacji zapisu, ten dysk zgłasza read_only (warstwa
-// block odrzuca zapis, zanim dotrze do sterownika) – i `write` tu też odmawia.
+// Read-only – three independent locks: usbd has no SCSI write command,
+// the protocol has no write operation, this disk reports read_only (the block
+// layer rejects writes before they reach the driver) – and `write` here refuses too.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -41,25 +41,25 @@ use crate::block::{self, check_range, BlockDevice, BlockError, SECTOR_SIZE};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
-/// Rozmiar slotu bufora (jedno żądanie).
+/// Buffer slot size (one request).
 pub const SLOT_BYTES: usize = 64 * 1024;
-/// Najwięcej slotów na dysk.
+/// Maximum slots per disk.
 pub const SLOTS_MAX: usize = 8;
-/// Najwięcej dysków USB naraz.
+/// Maximum USB disks at once.
 pub const DISKS_MAX: usize = 8;
-/// Domyślny limit czasu na żądanie (pendrive potrafi się budzić sekundami).
+/// Default per-request timeout (a flash drive can take seconds to wake up).
 pub const TIMEOUT_MS: u64 = 5000;
-/// Tyle timeoutów pod rząd = dysk zniknął.
+/// This many timeouts in a row = the disk is gone.
 const TIMEOUTS_GONE: u32 = 3;
 const OP_READ: u32 = 1;
 
 const NEW: u8 = 0;
 const READY: u8 = 1;
 
-/// Stan wspólny dysku – czyta go monitor i testy bez blokady dysku (odczyt
-/// może trzymać ją do 5 s).
+/// Shared disk state – read by the monitor and tests without the disk lock (a read
+/// may hold it for up to 5 s).
 pub struct Shared {
-    /// sda = 0, sdb = 1, … (rośnie, nie wraca).
+    /// sda = 0, sdb = 1, … (only grows, never reused).
     #[allow(dead_code)]
     pub num: u64,
     pub name: String,
@@ -67,14 +67,14 @@ pub struct Shared {
     chan: Arc<ChanEnd>,
     gone: AtomicBool,
     state: AtomicU8,
-    /// Numer w warstwie block.
+    /// Number in the block layer.
     pub index: AtomicUsize,
     pub reads: AtomicU64,
     pub bytes: AtomicU64,
     pub timeouts: AtomicU64,
     pub proto_errors: AtomicU64,
     pub late: AtomicU64,
-    /// Punkty montowania (/usb0, …) – zmienia tylko monitor.
+    /// Mount points (/usb0, …) – changed only by the monitor.
     mounts: SpinLock<Vec<String>>,
 }
 
@@ -83,13 +83,13 @@ impl Shared {
         self.gone.load(Ordering::SeqCst)
     }
 
-    /// Monitor już sprawdził partycje i zamontował, co się dało (samotesty).
+    /// The monitor has already checked partitions and mounted what it could (self-tests).
     #[cfg_attr(not(selftest), allow(dead_code))]
     pub fn probed(&self) -> bool {
         self.state.load(Ordering::SeqCst) == READY
     }
 
-    /// Punkty montowania (samotesty).
+    /// Mount points (self-tests).
     #[cfg_attr(not(selftest), allow(dead_code))]
     pub fn mounts(&self) -> Vec<String> {
         self.mounts.lock().clone()
@@ -113,7 +113,7 @@ fn wake_monitor() {
     MONITOR_WAKE.wake_all();
 }
 
-/// Nazwa jak w Linuksie: 0 -> sda, 25 -> sdz, 26 -> sdaa.
+/// Name as in Linux: 0 -> sda, 25 -> sdz, 26 -> sdaa.
 pub fn disk_name(mut n: u64) -> String {
     let mut letters = Vec::new();
     loop {
@@ -129,7 +129,7 @@ pub fn disk_name(mut n: u64) -> String {
     s
 }
 
-/// Dyski USB obecne w jądrze (testy, `disk`).
+/// USB disks present in the kernel (tests, `disk`).
 pub fn list() -> Vec<Arc<Shared>> {
     REGISTRY.lock().clone()
 }
@@ -157,7 +157,7 @@ struct Ublk {
     timeouts_row: u32,
 }
 
-/// Kopia z bufora (ramki obiektu; DMA – ciągłe, ale nie zakładamy tego).
+/// Copy from the buffer (object frames; DMA – contiguous, but we do not assume it).
 fn copy_out(obj: &ShmObj, mut off: usize, dst: &mut [u8]) {
     let frames = obj.frames();
     let mut done = 0;
@@ -175,19 +175,19 @@ fn le32(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
-/// M20.h: żądanie w drodze – gdzie w buforze czytającego ląduje.
+/// Request in flight – where it lands in the reader's buffer.
 #[derive(Clone, Copy)]
 struct InFlight {
     id: u32,
     n: u32,
-    /// Offset w buforze czytającego, pominięte bajty na początku slotu, długość.
+    /// Offset in the reader's buffer, bytes skipped at the start of the slot, length.
     at: usize,
     skip: usize,
     len: usize,
 }
 
 impl Ublk {
-    /// Wysyła żądanie `n` bloków od `first` do wolnego slotu `slot`.
+    /// Sends a request for `n` blocks from `first` into free slot `slot`.
     fn send(&mut self, slot: usize, first: u64, n: u32) -> Result<u32, BlockError> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
@@ -202,17 +202,17 @@ impl Ublk {
                 self.sh.set_gone();
                 return Err(BlockError::NoDevice);
             }
-            return Err(BlockError::Io); // kolejka usbd pełna
+            return Err(BlockError::Io); // usbd queue full
         }
         self.slots[slot] = Slot::Busy(id);
         Ok(id)
     }
 
-    /// M20.h: odczyt potokowy – do `nslots` żądań naraz (usbd wysyła kolejną
-    /// komendę SCSI zaraz po poprzedniej, bez czekania na jądro).  Dane slotu
-    /// kopiowane dopiero po poprawnej odpowiedzi z tym `id` i liczbą bloków.
-    /// Błąd odpowiedzi: nowe żądania już nie wychodzą, na wysłane czekamy (sloty
-    /// wracają do puli); timeout: wysłane sloty w kwarantannie.
+    /// Pipelined read – up to `nslots` requests at once (usbd sends the next
+    /// SCSI command right after the previous one, without waiting for the kernel).  Slot data
+    /// is copied only after a valid reply with this `id` and block count.
+    /// Reply error: no new requests go out, we wait for the sent ones (slots
+    /// return to the pool); timeout: sent slots go to quarantine.
     fn read_pipelined(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let bs = self.bs as usize;
         let f = (bs / SECTOR_SIZE) as u64;
@@ -223,7 +223,7 @@ impl Ublk {
         let mut error: Option<BlockError> = None;
         let mut deadline = crate::time::ticks() + crate::time::ms_to_ticks(self.timeout_ms);
         loop {
-            // Nowe żądania do wolnych slotów.
+            // New requests into free slots.
             while error.is_none() && planned < buf.len() {
                 let Some(slot) = self.slots[..self.nslots].iter().position(|s| *s == Slot::Free) else { break };
                 let s512 = lba + (planned / SECTOR_SIZE) as u64;
@@ -248,7 +248,7 @@ impl Ublk {
                 if copied >= buf.len() {
                     return Ok(());
                 }
-                // Brak wolnego slotu (wszystkie w kwarantannie – urządzenie milczy).
+                // No free slot (all quarantined – the device is silent).
                 return Err(BlockError::Io);
             }
             let left = deadline.saturating_sub(crate::time::ticks());
@@ -263,7 +263,7 @@ impl Ublk {
                     if let Some(slot) = (0..SLOTS_MAX).find(|&i| fl[i].map_or(false, |x| x.id == rid)) {
                         let x = fl[slot].unwrap();
                         if status == 0 && cnt != x.n {
-                            // Zła liczba bloków – odrzucona; czekamy dalej (albo timeout).
+                            // Wrong block count – rejected; keep waiting (or time out).
                             self.sh.proto_errors.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
@@ -287,7 +287,7 @@ impl Ublk {
                         continue;
                     }
                     if let Some(q) = self.slots.iter().position(|s| *s == Slot::Quarantine(rid)) {
-                        // Spóźniona odpowiedź po timeoucie – slot wraca, dane wyrzucone.
+                        // Late reply after a timeout – the slot returns, data discarded.
                         self.slots[q] = Slot::Free;
                         self.sh.late.fetch_add(1, Ordering::Relaxed);
                         continue;
@@ -363,7 +363,7 @@ impl BlockDevice for Ublk {
     }
 }
 
-/// blk_attach: nowy dysk USB.  Wynik: numer (0 = sda).  ENOSPC – 8 dysków.
+/// blk_attach: new USB disk.  Result: number (0 = sda).  ENOSPC – 8 disks.
 pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots: usize, timeout_ms: u64, desc: String) -> Result<u64, i64> {
     if count() >= DISKS_MAX {
         return Err(ENOSPC);
@@ -412,7 +412,7 @@ pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots:
 }
 
 // ------------------------------------------------------------
-// Monitor: montowanie nowych dysków, sprzątanie po zniknięciu
+// Monitor: mounting new disks, cleanup after removal
 // ------------------------------------------------------------
 
 pub fn start_monitor() {
@@ -441,19 +441,19 @@ fn monitor(_: usize) {
                 REGISTRY.lock().retain(|x| !Arc::ptr_eq(x, &sh));
             }
         }
-        // Zamknięcie kanału przez usbd nie budzi tego zadania – przy obecnych
-        // dyskach zaglądamy co 200 ms.
+        // usbd closing the channel does not wake this task – while disks are
+        // present we check every 200 ms.
         let timeout = if count() > 0 { Some(200) } else { None };
         MONITOR_WAKE.wait_until(|| MONITOR_GEN.load(Ordering::SeqCst) != seen, timeout);
     }
 }
 
-/// Partycje GPT i FAT32 -> /usbN (pierwszy wolny).  Bez GPT: cały dysk albo
-/// pierwsza partycja FAT32 z MBR (jak /disk).
+/// GPT and FAT32 partitions -> /usbN (first free).  Without GPT: the whole disk or
+/// the first FAT32 partition from the MBR (as with /disk).
 fn probe(sh: &Shared) {
     let index = sh.index.load(Ordering::SeqCst);
     if sh.gone() {
-        return; // usbd skończył się, zanim zdążyliśmy zajrzeć
+        return; // usbd exited before we got to look
     }
     block::scan_partitions(index);
     let parts = block::partitions_of(index);
@@ -471,7 +471,7 @@ fn probe(sh: &Shared) {
                     break;
                 };
                 let _ = crate::fs::mkdir(&path);
-                // M20.g: własna blokada – czekanie na pendrive nie zatrzymuje reszty VFS.
+                // Own lock – waiting on the flash drive does not stall the rest of the VFS.
                 match crate::fs::mount(&path, Box::new(crate::fs::Locked::new(fs))) {
                     Ok(()) => {
                         crate::serial_println!("[USB] {}: {} = fat32 ({}), read-only", sh.name, path, source);
@@ -495,8 +495,8 @@ fn free_mount_point() -> Option<String> {
     (0..16).map(|n| alloc::format!("/usb{}", n)).find(|p| crate::fs::stat(p).is_err())
 }
 
-/// Dysk zniknął: odmontowanie (bez zapisu – dysk i tak tylko do odczytu),
-/// usunięcie partycji i dysku (bufor wraca, numer do puli).
+/// Disk gone: unmount (no write-back – the disk is read-only anyway),
+/// remove the partitions and the disk (buffer freed, number back to the pool).
 fn remove(sh: &Shared) {
     let mounts: Vec<String> = core::mem::take(&mut *sh.mounts.lock());
     for m in &mounts {
@@ -518,9 +518,9 @@ fn remove(sh: &Shared) {
     );
 }
 
-/// M20.h: pomiar odczytu pliku z dysku USB buforem `bufsize` (najwyżej `max`
-/// bajtów): (bajty, µs, suma kontrolna – ta sama dla każdego bufora, jeśli
-/// dane są te same).  Autostress (Legion) i USB TEST 7/7.
+/// Measures reading a file from a USB disk with buffer size `bufsize` (at most `max`
+/// bytes): (bytes, µs, checksum – the same for every buffer size if
+/// the data is the same).  Used by autostress and USB TEST 7/7.
 pub fn read_bench(path: &str, bufsize: usize, max: u64) -> Result<(u64, u64, u64), crate::fs::FsError> {
     let mut buf = alloc::vec![0u8; bufsize];
     let t0 = crate::arch::x86_64::clock::stamp();

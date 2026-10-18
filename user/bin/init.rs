@@ -1,37 +1,37 @@
-// M16: init – pierwszy proces.  Kernel uruchamia tylko /bin/init; init
-// uruchamia shell (/bin/sh) i:
-//   * zbiera zakończone procesy (wait) – także sieroty, które kernel
-//     przekazuje mu, gdy kończy się ich rodzic,
-//   * gdy shell się skończy (exit, kill, błąd), uruchamia go od nowa.
-// Init nie czyta klawiatury i nie da się go zabić z user space (kill -> EPERM).
+// init – the first process.  The kernel starts only /bin/init; init
+// starts the shell (/bin/sh) and:
+//   * reaps finished processes (wait) – including orphans, which the kernel
+//     hands over to it when their parent exits,
+//   * when the shell exits (exit, kill, error), starts it again.
+// Init does not read the keyboard and cannot be killed from user space (kill -> EPERM).
 //
-// M19.g: menedżer usług (wariant A – w init; wariant B, osobny /bin/svcmgr,
-// opisany w ARCHITEKTURA.md na później).
-//   * Tabela usług niżej: nazwa, program, urządzenie PCI (albo brak).  Usługa
-//     dostaje: 1 konsola, 3 urządzenie (dev_claim z HW_ROOT – slot 3 init),
-//     4 kanał połączeń.
-//   * Restart po końcu z odstępem 100 ms, podwajanym do 5 s (po 10 s pracy –
-//     znowu od 100 ms); 5 awarii w 30 s -> usługa zepsuta (bez restartów).
-//     Brak urządzenia (ENODEV) -> "no device", bez restartów.
-//   * Kanał `svc`: shell i jego programy mają w slocie 3 koniec tylko do
-//     wysyłania (SEND | DUP).  Prośba = komunikat z jednym uchwytem (koniec
-//     kanału klienta): "connect <nazwa>" – init przekazuje uchwyt do kanału
-//     połączeń usługi; "list" – init odpisuje listę usług i zamyka uchwyt.
-//     Nieznana / niedziałająca usługa – uchwyt zamknięty (klient: EPIPE).
-//   * Init czeka na kanał svc (wait_many, 100 ms) i zbiera dzieci (WNOHANG).
+// Service manager (variant A – inside init; variant B, a separate /bin/svcmgr,
+// is described in ARCHITECTURE.md for later).
+//   * Service table below: name, program, PCI device (or none).  A service
+//     gets: 1 console, 3 device (dev_claim from HW_ROOT – init's slot 3),
+//     4 connection channel.
+//   * Restart after exit with a 100 ms delay, doubled up to 5 s (after 10 s of running –
+//     back to 100 ms); 5 failures within 30 s -> service broken (no more restarts).
+//     No device (ENODEV) -> "no device", no restarts.
+//   * The `svc` channel: the shell and its programs hold a send-only end in slot 3
+//     (SEND | DUP).  A request = a message with one handle (the client's channel
+//     end): "connect <name>" – init forwards the handle to the service's connection
+//     channel; "list" – init replies with the service list and closes the handle.
+//     Unknown / non-running service – handle closed (client: EPIPE).
+//   * Init waits on the svc channel (wait_many, 100 ms) and reaps children (WNOHANG).
 //
-// M20.b: kontrolery USB xHCI znajduje po klasie (dev_find 0C0330) i dla
-// każdego dodaje usługę usb0, usb1, … (/bin/usbd z tym kontrolerem).
+// USB xHCI controllers are found by class (dev_find 0C0330), and for
+// each one a service usb0, usb1, … is added (/bin/usbd with that controller).
 //
-// M20.e: jądro daje init uchwyt INPUT (slot 5) – init przekazuje go tylko usbd.
-// M20.f: i uchwyt BLK (slot 6: rejestracja dysków USB) – też tylko dla usbd.
+// The kernel gives init an INPUT handle (slot 5) – init passes it only to usbd.
+// And a BLK handle (slot 6: USB disk registration) – also only for usbd.
 //
-// M19.i: jądro daje init uchwyt SYSCTL (slot 4: reboot, halt, sync, stress);
-// init przekazuje go tylko shellowi.
+// The kernel gives init a SYSCTL handle (slot 4: reboot, halt, sync, stress);
+// init passes it only to the shell.
 //
-// `init test <program>` (samotesty jądra): zamiast shella uruchamia <program>
-// (z kanałem svc w slocie 3), a gdy ten się skończy – zamyka usługi, czeka na
-// nie i kończy się kodem programu.
+// `init test <program>` (kernel self-tests): runs <program> instead of the shell
+// (with the svc channel in slot 3), and when it finishes – shuts down services, waits for
+// them and exits with the program's exit code.
 #![no_std]
 #![no_main]
 
@@ -49,21 +49,21 @@ const SHELL: &str = "/bin/sh";
 struct Def {
     name: &'static str,
     path: &'static str,
-    /// Urządzenie PCI (bus, urz., fn) albo brak.
+    /// PCI device (bus, dev, fn) or none.
     dev: Option<(u64, u64, u64)>,
 }
 
-/// M19.g: usługi uruchamiane przez init (stałe).
+/// Services started by init (fixed).
 const SERVICES: [Def; 2] = [
     Def { name: "edu", path: "/bin/edud", dev: Some((0, 6, 0)) },
     Def { name: "echo", path: "/bin/echod", dev: None },
 ];
 
-/// M20.b: najwięcej kontrolerów USB (usługi usb0..usb3).
+/// Maximum number of USB controllers (services usb0..usb3).
 const USB_NAMES: [&str; 4] = ["usb0", "usb1", "usb2", "usb3"];
 const MAX_SERVICES: usize = SERVICES.len() + USB_NAMES.len();
 
-/// Tabela usług: stałe + po jednej usbd na każdy kontroler xHCI.
+/// Service table: fixed services + one usbd per xHCI controller.
 fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
     let mut n = 0;
     for d in SERVICES {
@@ -99,7 +99,7 @@ enum State {
 
 struct Svc {
     pid: u64,
-    /// Koniec kanału połączeń po stronie init (0 = brak).
+    /// Init's end of the connection channel (0 = none).
     listen: u64,
     state: State,
     restarts: u64,
@@ -126,7 +126,7 @@ fn start_service(d: &Def, s: &mut Svc) {
             return;
         }
         if h < 0 {
-            // EBUSY: poprzednia instancja jeszcze się kończy – spróbuj za chwilę.
+            // EBUSY: the previous instance is still exiting – try again shortly.
             s.state = State::Waiting;
             s.next_start = uptime_ms() + 100;
             return;
@@ -143,13 +143,13 @@ fn start_service(d: &Def, s: &mut Svc) {
         map[n] = (dev, 3);
         n += 1;
     }
-    // M20.e: usbd dostaje kopię uchwytu INPUT (slot 5) – zdarzenia klawiatury /
-    // myszy do jądra.  Każda kopia to osobne źródło (koniec usbd puszcza klawisze).
+    // usbd gets a copy of the INPUT handle (slot 5) – keyboard /
+    // mouse events to the kernel.  Each copy is a separate source (usbd exiting releases keys).
     if d.path == "/bin/usbd" && handle_info(INPUT).map(|(k, _)| k) == Ok(KIND_INPUT) {
         map[n] = (INPUT, 5);
         n += 1;
     }
-    // M20.f: i kopię uchwytu BLK (slot 6) – pendrive'y jako dyski jądra.
+    // And a copy of the BLK handle (slot 6) – USB flash drives as kernel disks.
     if d.path == "/bin/usbd" && handle_info(BLK).map(|(k, _)| k) == Ok(KIND_BLK) {
         map[n] = (BLK, 6);
         n += 1;
@@ -174,13 +174,13 @@ fn start_service(d: &Def, s: &mut Svc) {
     } else {
         println!("init: service {} restarted (pid {}, restart {})", d.name, pid, s.restarts);
         if d.path == "/bin/usbd" {
-            // M20.g: co widzi użytkownik – klawiatura USB wróci po enumeracji.
+            // What the user sees – the USB keyboard will come back after enumeration.
             println!("init: {}: USB keyboard and disks back in a moment", d.name);
         }
     }
 }
 
-/// Usługa się skończyła – restart z odstępem albo "zepsuta".
+/// A service has exited – restart with a delay or mark it "broken".
 fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     if s.listen != 0 {
         close(s.listen);
@@ -194,7 +194,7 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     if now.saturating_sub(s.started_at) >= STABLE_MS {
         s.delay = 100;
     }
-    // Lista ostatnich awarii (okno 30 s).
+    // List of recent failures (30 s window).
     let mut k = 0;
     for i in 0..s.nfails {
         if now.saturating_sub(s.fails[i]) < FAIL_WINDOW_MS {
@@ -211,7 +211,7 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
         s.state = State::Broken;
         println!("init: service {} {} - {} failures in 30 s, not restarting", d.name, describe_status(status), FAIL_LIMIT);
         if d.path == "/bin/usbd" {
-            // M20.g: jasny komunikat – bez tego laptop bez PS/2 „po prostu” traci klawiaturę.
+            // A clear message – without it a laptop without PS/2 "just" loses its keyboard.
             println!("init: USB controller {} disabled after {} failures - its USB keyboard and disks are unavailable until reboot (PS/2 still works)", d.name, FAIL_LIMIT);
         }
         return;
@@ -233,7 +233,7 @@ fn state_name(s: State) -> &'static str {
     }
 }
 
-/// Prośby na kanale svc (bez czekania – wszystkie, które są).
+/// Requests on the svc channel (non-blocking – all that are pending).
 fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
     let mut msg = [0u8; 128];
     let mut hs = [0u64; 1];
@@ -242,7 +242,7 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
         let r = chan_recv_h(svc, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
         if r < 0 {
             if r == EMSGSIZE {
-                // Za długa / z za wieloma uchwytami – zdejmij i odrzuć.
+                // Too long / with too many handles – dequeue and reject.
                 let mut big = [0u8; MSG_MAX];
                 let mut many = [0u64; MSG_HANDLES];
                 if chan_recv_h(svc, &mut big, &mut many, CHAN_NONBLOCK, &mut info) >= 0 {
@@ -263,7 +263,7 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
             let found = defs.iter().position(|d| d.name == name);
             match found {
                 Some(i) if svcs[i].state == State::Running && svcs[i].listen != 0 => {
-                    // Uchwyt klienta idzie dalej; błąd – wraca do nas i go zamykamy.
+                    // The client's handle is passed on; on error it comes back to us and we close it.
                     if chan_send_h(svcs[i].listen, name.as_bytes(), &[h], CHAN_NONBLOCK) != 0 {
                         close(h);
                     }
@@ -291,7 +291,7 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
     }
 }
 
-/// Zapis sformatowanego tekstu do bufora (bez alokacji).
+/// Writes formatted text into a buffer (no allocation).
 struct Out2<'a> {
     buf: &'a mut [u8],
     len: usize,
@@ -313,14 +313,14 @@ impl core::fmt::Write for Out2<'_> {
     }
 }
 
-/// Shell (albo program testowy) z kanałem svc w slocie 3 i SYSCTL w slocie 4.
+/// Shell (or test program) with the svc channel in slot 3 and SYSCTL in slot 4.
 fn start_shell(path: &str, extra: Option<&str>, svc_client: u64) -> u64 {
     loop {
         let name = path.rsplit('/').next().unwrap_or(path);
-        // M19.i: shell dostaje też uchwyt SYSCTL (slot 4) – reboot, halt, sync, stress.
+        // The shell also gets the SYSCTL handle (slot 4) – reboot, halt, sync, stress.
         let map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (SYSCTL, 4)];
         let n = if handle_info(SYSCTL).map(|(k, _)| k) == Ok(KIND_SYSCTL) { 5 } else { 4 };
-        // M20.d: tryb testowy – jeden argument dla programu (`init test /bin/x arg`).
+        // Test mode – one argument for the program (`init test /bin/x arg`).
         let pid = match extra {
             Some(a) => spawn_ex(path, &[name, a], &map[..n], 0),
             None => spawn_ex(path, &[name], &map[..n], 0),
@@ -339,7 +339,7 @@ fn main(args: Args) -> i32 {
     let test_arg = if test.is_some() { args.get(3) } else { None };
     println!("init: started (pid {}), starting {}", getpid(), shell_path);
 
-    // Kanał svc: init odbiera, klienci (shell i jego programy) tylko wysyłają.
+    // svc channel: init receives, clients (the shell and its programs) only send.
     let (svc, svc_any) = channel_create().unwrap_or((0, 0));
     let svc_client = handle_dup(svc_any, R_SEND | R_DUP) as u64;
     close(svc_any);
@@ -357,7 +357,7 @@ fn main(args: Args) -> i32 {
     let mut started_at = uptime_ms();
     let mut orphans = 0u64;
     loop {
-        // Usługi czekające na restart.
+        // Services waiting for a restart.
         let now = uptime_ms();
         let mut timeout = 100;
         for (d, s) in defs.iter().zip(svcs.iter_mut()) {
@@ -372,7 +372,7 @@ fn main(args: Args) -> i32 {
         if wait_many(&[(svc, W_READABLE)], timeout.max(1)) == Ok(1) {
             serve_svc(svc, defs, svcs);
         }
-        // Zakończone dzieci: shell, usługi, sieroty.
+        // Finished children: shell, services, orphans.
         loop {
             let Ok((pid, status)) = wait(WAIT_ANY, WNOHANG) else { break };
             if pid == 0 {
@@ -380,7 +380,7 @@ fn main(args: Args) -> i32 {
             }
             if pid == shell {
                 if let Some(_) = test {
-                    // Sieroty, które jeszcze czekają – policzone w raporcie.
+                    // Orphans still waiting – counted in the report.
                     while let Ok((p, _)) = wait(WAIT_ANY, WNOHANG) {
                         if p == 0 {
                             break;
@@ -390,7 +390,7 @@ fn main(args: Args) -> i32 {
                         }
                     }
                     println!("init: test program ended, {} orphans reaped", orphans);
-                    // Tryb testowy: koniec programu = koniec init (po usługach).
+                    // Test mode: end of the program = end of init (after services).
                     for (d, s) in defs.iter().zip(svcs.iter_mut()) {
                         s.state = State::Stopped;
                         if s.listen != 0 {
@@ -406,8 +406,8 @@ fn main(args: Args) -> i32 {
                     }
                     return if status & STATUS_SIGNALED != 0 { 100 } else { status as i32 };
                 }
-                // Shell padający od razu po starcie (np. uszkodzony plik)
-                // nie może zająć CPU w kółko.
+                // A shell that dies immediately after start (e.g. a corrupted file)
+                // must not hog the CPU in a loop.
                 if uptime_ms().saturating_sub(started_at) < 1000 {
                     sleep_ms(1000);
                 }
@@ -419,7 +419,7 @@ fn main(args: Args) -> i32 {
             if let Some(i) = svcs.iter().position(|s| s.pid == pid && pid != 0) {
                 service_ended(&defs[i], &mut svcs[i], status);
             } else {
-                // Sierota przekazana przez kernel – już sprzątnięta.
+                // Orphan handed over by the kernel – already reaped.
                 orphans += 1;
             }
         }

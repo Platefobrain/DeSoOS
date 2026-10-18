@@ -1,5 +1,5 @@
-// M16: samotesty – porządki (IST, MMIO 4 KiB), rodzina procesów
-// (spawn/wait/zombie/sieroty), shell w user space (tylko build z --cfg selftest).
+// Self-tests – housekeeping (IST, 4 KiB MMIO), the process family
+// (spawn/wait/zombies/orphans), user-space shell (selftest build only, --cfg selftest).
 
 use alloc::string::String;
 
@@ -28,13 +28,13 @@ fn wait_for(ms: u64, cond: impl Fn() -> bool) -> bool {
     true
 }
 
-/// Proces z /bin (wejście z bufora, wyjście przechwycone).
+/// Process from /bin (input from a buffer, output captured).
 fn start(path: &str, args: &[&str], stdin: &[u8]) -> Option<TaskId> {
     let opts = SpawnOptions { stdin: Some(stdin.to_vec()), capture: true, ..SpawnOptions::default() };
     exec(path, args, "/", &opts).ok()
 }
 
-/// Czeka na koniec procesu; (sposób zakończenia, wyjście).
+/// Waits for the process to end; (how it ended, output).
 fn finish(id: TaskId, ms: u64) -> Option<(ExitKind, String)> {
     if !wait_for(ms, || sched::task_info(id).is_none()) {
         let _ = sched::request_exit(id);
@@ -55,7 +55,7 @@ pub fn self_test() {
     let frames = crate::selftest::settled_free_frames();
     let heap_mapped = crate::memory::heap::mapped_bytes();
 
-    // 1. Stosy IST ze stronami-strażnikami.
+    // 1. IST stacks with guard pages.
     for ist in 1..=5u8 {
         let top = gdt::ist_top(ist);
         let bottom = top - crate::sched::stack::STACK_SIZE;
@@ -69,7 +69,7 @@ pub fn self_test() {
     check!(!gdt::on_ist_stack(rsp), "task stack {:#x} reported as IST", rsp);
     serial_println!("[INIT TEST] 1/9 IST stacks in guarded slots, schedule() guard PASS");
 
-    // 2. Podział strony 2 MiB direct mapy na 4 KiB (map_mmio z RAM-em obok).
+    // 2. Splitting a 2 MiB direct-map page into 4 KiB pages (map_mmio with RAM next to it).
     let frame = crate::memory::alloc_frame();
     check!(frame.is_some(), "no frame");
     let frame = frame.unwrap();
@@ -95,7 +95,7 @@ pub fn self_test() {
     crate::memory::free_frame(frame);
     serial_println!("[INIT TEST] 2/9 direct map 2 MiB -> 4 KiB split (map_mmio) PASS");
 
-    // 3. Stos pierwszego planu (Ctrl+C kończy proces z wierzchu).
+    // 3. Foreground stack (Ctrl+C terminates the topmost process).
     crate::console::push_foreground(1001);
     crate::console::push_foreground(1002);
     check!(crate::console::top_foreground() == 1002, "top {}", crate::console::top_foreground());
@@ -105,7 +105,7 @@ pub fn self_test() {
     check!(crate::console::top_foreground() == 0, "stack not empty");
     serial_println!("[INIT TEST] 3/9 foreground stack (Ctrl+C target) PASS");
 
-    // 4. Shell w user space: wbudowane, programy, przekierowania, edycja linii.
+    // 4. User-space shell: builtins, programs, redirections, line editing.
     let script: &[u8] = b"echo hello world\n\
 pwd\n\
 cd /bin\n\
@@ -169,11 +169,11 @@ exit 7\n";
     check!(crate::fs::read_file("/m16/c").ok().as_deref() == Some(b"text\nmore\n".as_slice()), "cp content");
     serial_println!("[INIT TEST] 4/9 user shell: builtins, /bin programs, > >> <, quotes, line editing, sysinfo, mkfs / reboot refused PASS");
 
-    // 5. Bez zombie: shell odebrał status każdego dziecka.
+    // 5. No zombies: the shell collected the status of every child.
     check!(procs::zombies().is_empty(), "zombies left: {:?}", procs::zombies());
     serial_println!("[INIT TEST] 5/9 no zombies after the shell PASS");
 
-    // 6. Sierota bez init: dziecko kończącego się procesu przechodzi do kernela.
+    // 6. Orphan without init: the child of a terminating process is reparented to the kernel.
     let sh = start("/bin/sh", &["sh", "-c", "sleep", "400", "&"], b"");
     check!(sh.is_some(), "cannot start sh -c");
     let sh = sh.unwrap();
@@ -187,10 +187,10 @@ exit 7\n";
     check!(procs::zombies().is_empty(), "orphan left a zombie");
     serial_println!("[INIT TEST] 6/9 orphan without init goes to the kernel PASS");
 
-    // 7. Sierota z init: proces "init" (shell) dostaje wnuka i go sprząta.
-    // "sleep 200" na początku: set_init_pid wołamy dopiero po starcie shella –
-    // bez chwili zapasu wewnętrzny `sh -c` potrafił skończyć się wcześniej
-    // i sierota szła do kernela (v0.17.12: procesy startują bez BKL, szybciej).
+    // 7. Orphan with init: the "init" process (shell) gets the grandchild and reaps it.
+    // "sleep 200" at the start: set_init_pid is called only after the shell starts –
+    // without a little slack the inner `sh -c` could finish earlier
+    // and the orphan went to the kernel (processes start without the BKL, so faster).
     let init = start("/bin/sh", &["sh"], b"sleep 200\nsh -c \"sleep 300 &\"\nwait\nexit 3\n");
     check!(init.is_some(), "cannot start init shell");
     let init = init.unwrap();
@@ -205,14 +205,14 @@ exit 7\n";
     check!(procs::zombies().is_empty(), "zombies after init: {:?}", procs::zombies());
     serial_println!("[INIT TEST] 7/9 orphan adopted and reaped by init, kill(init) = EPERM PASS");
 
-    // 8. Ctrl+C (kill) programu na pierwszym planie kończy program, nie shell.
+    // 8. Ctrl+C (kill) of the foreground program ends the program, not the shell.
     let sh = start("/bin/sh", &["sh"], b"primes 50000000\necho after\n");
     check!(sh.is_some(), "cannot start sh");
     let sh = sh.unwrap();
     check!(wait_for(3_000, || task_named("primes").is_some()), "primes did not start");
-    // M17a.e: shell rejestruje dziecko na pierwszym planie tuż PO utworzeniu
-    // zadania – drugi CPU może zobaczyć "primes" chwilę wcześniej (u Dawida:
-    // "foreground 0 is not primes").  Czekamy na oba warunki.
+    // The shell registers the foreground child right AFTER creating
+    // the task – another CPU may see "primes" a moment earlier (seen on real hardware:
+    // "foreground 0 is not primes").  We wait for both conditions.
     wait_for(3_000, || crate::console::top_foreground() == task_named("primes").map(|t| t.id).unwrap_or(0));
     let fg = crate::console::top_foreground();
     check!(fg == task_named("primes").map(|t| t.id).unwrap_or(0), "foreground {} is not primes", fg);
@@ -222,16 +222,16 @@ exit 7\n";
     check!(crate::console::top_foreground() == 0, "foreground stack not empty");
     serial_println!("[INIT TEST] 8/9 Ctrl+C ends the foreground program, the shell continues PASS");
 
-    // 9. Sprzątanie: pliki i ramki.  Ramki heapa (heap rośnie przy wczytaniu
-    // programu i oddaje strony tylko od końca) i tablica PT z testu 2 nie są
-    // wyciekiem – liczymy je osobno.
+    // 9. Cleanup: files and frames.  Heap frames (the heap grows when loading
+    // a program and returns pages only from the end) and the PT table from test 2 are not
+    // a leak – we count them separately.
     for f in ["/m16/b", "/m16/c", "/m16/up"] {
         let _ = crate::fs::remove(f);
     }
     let _ = crate::fs::remove("/m16");
     let accounted = || {
         let heap_growth = (crate::memory::heap::mapped_bytes().saturating_sub(heap_mapped) / 4096) as u64;
-        crate::sched::stack::free_frames_flushed() + heap_growth + 1 // +1: tablica PT po podziale strony 2 MiB
+        crate::sched::stack::free_frames_flushed() + heap_growth + 1 // +1: PT table after splitting the 2 MiB page
     };
     let back = wait_for(1_000, || {
         sched::reap();

@@ -1,26 +1,26 @@
-// M14: wejście do kernela przez SYSCALL i powrót przez SYSRET.
+// Entry into the kernel via SYSCALL and return via SYSRET.
 //
-// SYSCALL (z ring 3): RIP -> RCX, RFLAGS -> R11, CS/SS z MSR STAR, RIP z
-// LSTAR, RFLAGS &= ~SFMASK (IF = 0).  Stos NIE jest przełączany (TSS.RSP0
-// dotyczy tylko przerwań/wyjątków), więc pierwsze instrukcje muszą same
-// wziąć stos kernela:
+// SYSCALL (from ring 3): RIP -> RCX, RFLAGS -> R11, CS/SS from MSR STAR, RIP from
+// LSTAR, RFLAGS &= ~SFMASK (IF = 0).  The stack is NOT switched (TSS.RSP0
+// applies only to interrupts/exceptions), so the first instructions must
+// pick up the kernel stack themselves:
 //
-//   swapgs                 GS.base = blok per CPU (MSR KERNEL_GS_BASE)
-//   mov gs:[8], rsp        RSP użytkownika na bok
-//   mov rsp, gs:[0]        stos kernela bieżącego zadania (ustawia scheduler)
+//   swapgs                 GS.base = per-CPU block (MSR KERNEL_GS_BASE)
+//   mov gs:[8], rsp        stash the user RSP
+//   mov rsp, gs:[0]        kernel stack of the current task (set by the scheduler)
 //   push gs:[8]
-//   swapgs                 GS.base znów użytkownika
+//   swapgs                 GS.base is the user's again
 //
-// GS kernela jest aktywne tylko przez te kilka instrukcji (IF = 0), więc
-// przełączanie zadań w trakcie syscalla i przerwania nie muszą o nim wiedzieć.
+// The kernel GS is active only for these few instructions (IF = 0), so
+// task switching during a syscall and interrupts need not know about it.
 //
-// Dalej: ramka SyscallFrame (rejestry), syscall_dispatch (user/syscalls.rs),
-// cli, odtworzenie rejestrów, RSP użytkownika, SYSRET.  SYSRET z
-// niekanonicznym RCX dałby #GP w ring 0 na stosie użytkownika (znana pułapka
-// Intela) – dispatch sprawdza RIP powrotu i w razie czego kończy proces.
+// Then: a SyscallFrame (registers), syscall_dispatch (user/syscalls.rs),
+// cli, register restore, user RSP, SYSRET.  SYSRET with a
+// non-canonical RCX would raise #GP in ring 0 on the user stack (a well-known Intel
+// pitfall) – dispatch checks the return RIP and kills the process if needed.
 //
-// ABI (jak w Linuksie): RAX = numer, argumenty RDI, RSI, RDX, R10, R8, R9,
-// wynik w RAX (ujemny = -errno).  RCX i R11 są niszczone, reszta zachowana.
+// ABI (as in Linux): RAX = number, arguments RDI, RSI, RDX, R10, R8, R9,
+// result in RAX (negative = -errno).  RCX and R11 are clobbered, the rest preserved.
 
 use core::arch::global_asm;
 
@@ -34,16 +34,16 @@ const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 const EFER_SCE: u64 = 1;
 
-/// RFLAGS czyszczone przy wejściu: TF, IF, DF, NT, AC.
+/// RFLAGS cleared on entry: TF, IF, DF, NT, AC.
 pub const SFMASK: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 14) | (1 << 18);
 
-/// Blok per CPU (M17: po jednym na rdzeń; KERNEL_GS_BASE każdego CPU
-/// wskazuje jego blok).
+/// Per-CPU block (one per core; each CPU's KERNEL_GS_BASE
+/// points to its block).
 #[repr(C)]
 pub struct PerCpu {
-    /// Szczyt stosu kernela bieżącego zadania (offset 0 – używa go asembler).
+    /// Kernel stack top of the current task (offset 0 – used by the assembly).
     pub kernel_rsp: u64,
-    /// RSP użytkownika na chwilę wejścia (offset 8).
+    /// User RSP at the moment of entry (offset 8).
     pub user_rsp: u64,
 }
 
@@ -54,7 +54,7 @@ fn percpu(c: usize) -> *mut PerCpu {
     unsafe { core::ptr::addr_of_mut!(PERCPU[c]) }
 }
 
-/// Rejestry procesu odłożone przez syscall_entry (kolejność = odwrotność push).
+/// Process registers saved by syscall_entry (order = reverse of the pushes).
 #[repr(C)]
 pub struct SyscallFrame {
     pub r15: u64,
@@ -70,9 +70,9 @@ pub struct SyscallFrame {
     pub rdx: u64,
     pub rbx: u64,
     pub rax: u64,
-    /// RIP powrotu (z RCX).
+    /// Return RIP (from RCX).
     pub rip: u64,
-    /// RFLAGS użytkownika (z R11).
+    /// User RFLAGS (from R11).
     pub rflags: u64,
     pub rsp: u64,
 }
@@ -142,24 +142,24 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     }
 }
 
-/// Baza selektorów SYSRET w STAR[63:48] – z RPL 3 (patrz init_cpu).
+/// SYSRET selector base in STAR[63:48] – with RPL 3 (see init_cpu).
 pub const SYSRET_BASE: u64 = 0x10 | 3;
 
-/// Włącza SYSCALL/SYSRET.  Selektory (gdt.rs): STAR[47:32] = 0x08 ->
+/// Enables SYSCALL/SYSRET.  Selectors (gdt.rs): STAR[47:32] = 0x08 ->
 /// SYSCALL: CS 0x08, SS 0x10; STAR[63:48] = 0x13 -> SYSRET: SS 0x18|3,
 /// CS 0x20|3 (64-bit).
 pub fn init() {
     init_cpu(super::cpu::id());
 }
 
-/// MSR-y SYSCALL bieżącego procesora `c` (BSP: init, AP: przy starcie).
+/// SYSCALL MSRs of the current processor `c` (BSP: init, AP: at startup).
 pub fn init_cpu(c: usize) {
     unsafe {
-        // STAR[63:48] = 0x13 (0x10 | RPL 3), jak w Linuksie (__USER32_CS z RPL 3):
-        // SYSRET daje CS = 0x13 + 16 = 0x23, SS = 0x13 + 8 = 0x1b.  Intel sam
-        // wymusza RPL 3, AMD bierze selektor tak, jak jest – z 0x10 na Ryzenie
-        // (KVM, Legion) SS po SYSRET = 0x18 (RPL 0), a następny powrót z
-        // przerwania do procesu (iretq) kończył się #GP(0x18) w kernelu.
+        // STAR[63:48] = 0x13 (0x10 | RPL 3), as in Linux (__USER32_CS with RPL 3):
+        // SYSRET gives CS = 0x13 + 16 = 0x23, SS = 0x13 + 8 = 0x1b.  Intel itself
+        // forces RPL 3, AMD takes the selector as is – with 0x10 on AMD CPUs
+        // (KVM and real hardware) SS after SYSRET = 0x18 (RPL 0), and the next return from
+        // an interrupt to the process (iretq) ended in #GP(0x18) in the kernel.
         wrmsr(IA32_STAR, ((KERNEL_CS as u64) << 32) | (SYSRET_BASE << 48));
         wrmsr(IA32_LSTAR, syscall_entry as *const () as u64);
         wrmsr(IA32_FMASK, SFMASK);
@@ -170,12 +170,12 @@ pub fn init_cpu(c: usize) {
     }
 }
 
-/// Stos kernela dla SYSCALL (scheduler, razem z TSS.RSP0) – bieżący CPU.
+/// Kernel stack for SYSCALL (scheduler, together with TSS.RSP0) – current CPU.
 pub fn set_kernel_stack(top: u64) {
     unsafe { (*percpu(super::cpu::id())).kernel_rsp = top };
 }
 
-/// (EFER.SCE, STAR, LSTAR, SFMASK, KERNEL_GS_BASE, kernel_rsp) – testy.
+/// (EFER.SCE, STAR, LSTAR, SFMASK, KERNEL_GS_BASE, kernel_rsp) – for tests.
 #[allow(dead_code)]
 pub fn state() -> (bool, u64, u64, u64, u64, u64) {
     unsafe {

@@ -1,16 +1,16 @@
-// M19.b: test wait_many – czekanie na wiele uchwytów naraz: błędy listy
-// (EINVAL / EBADF / EACCES), tylko sprawdzenie (timeout 0), limit czasu,
-// gotowość do odczytu / zapisu kanału i potoku, zamknięcie drugiej strony,
-// pobudka przez komunikat od dziecka, serwer obsługujący 4 klientów naraz
-// (wzór usługi z M19), pełna kolejka, kill procesu czekającego w wait_many.
-// Wynik: "waittest: N checks OK, ..." i kod 0, albo opis pierwszego błędu i
-// kod 1.  Uruchamia go SVC TEST (samotesty).
+// wait_many test – waiting on many handles at once: list errors
+// (EINVAL / EBADF / EACCES), check only (timeout 0), timeout,
+// channel and pipe readiness for read / write, closing the other side,
+// wakeup by a message from a child, a server handling 4 clients at once
+// (the user-space service pattern), full queue, kill of a process waiting in wait_many.
+// Result: "waittest: N checks OK, ..." and exit code 0, or a description of the first error and
+// exit code 1.  Run by SVC TEST (self-tests).
 //
-// Tryby dziecka (uchwyt 0 = koniec kanału):
-//   waittest sender <ms>  – śpi <ms>, wysyła jeden komunikat, kod 0
-//   waittest client <n>   – n razy: wysyła liczbę, czeka na liczbę + 1
-//   waittest drain        – odbiera 64 komunikaty, kod 0
-//   waittest waiter       – wait_many bez limitu (do kill)
+// Child modes (handle 0 = channel end):
+//   waittest sender <ms>  – sleeps <ms>, sends one message, exit code 0
+//   waittest client <n>   – n times: sends a number, waits for number + 1
+//   waittest drain        – receives 64 messages, exit code 0
+//   waittest waiter       – wait_many without a timeout (until killed)
 #![no_std]
 #![no_main]
 
@@ -70,7 +70,7 @@ fn drain() -> i32 {
 
 fn waiter() -> i32 {
     let _ = wait_many(&[(0, W_READABLE)], FOREVER);
-    6 // tu nie dochodzi – proces ma zginąć w wait_many
+    6 // never reached – the process is meant to die in wait_many
 }
 
 fn spawn_child(mode: &[&str], ch: u64) -> i64 {
@@ -92,8 +92,8 @@ fn main(args: Args) -> i32 {
     let mut buf = [0u8; 64];
     let mut info = RecvInfo::default();
 
-    // 1. Błędy listy: pusta / za długa, zły uchwyt, brak sygnałów, nieznany
-    //    sygnał, konsola, IRQ na kanale, brak prawa RECV / SEND.
+    // 1. List errors: empty / too long, bad handle, no signals, unknown
+    //    signal, console, IRQ on a channel, missing RECV / SEND right.
     let (a, b) = channel_create().unwrap_or((0, 0));
     let r = syscall3(SYS_WAIT_MANY, 0, 0, 0);
     check!(n, r == -22, "n = 0 must be EINVAL ({})", r);
@@ -115,7 +115,7 @@ fn main(args: Args) -> i32 {
     check!(n, wait_many(&[(recv_only, W_WRITABLE)], 0) == Err(-13), "WRITABLE without R_SEND must be EACCES");
     check!(n, syscall3(SYS_WAIT_MANY, 8, 1, 0) == -14, "bad list pointer must be EFAULT");
 
-    // 2. Tylko sprawdzenie i limit czasu; pusty kanał do zapisu – gotowy od razu.
+    // 2. Check only and timeout; an empty channel for writing – ready immediately.
     check!(n, wait_many(&[(a, W_READABLE)], 0) == Ok(0), "empty channel must not be readable");
     let t0 = uptime_ms();
     let r = wait_many(&[(a, W_READABLE), (b, W_READABLE)], 50);
@@ -124,7 +124,7 @@ fn main(args: Args) -> i32 {
     check!(n, wait_many(&[(a, W_WRITABLE)], FOREVER) == Ok(1), "empty peer queue must be writable");
     check!(n, wait_many(&[(a, W_READABLE | W_WRITABLE)], 0) == Ok(1), "READABLE | WRITABLE: one bit");
 
-    // 3. Komunikat w kolejce – właściwy bit; ten sam uchwyt dwa razy – oba bity.
+    // 3. A message in the queue – the right bit; the same handle twice – both bits.
     let (c, d) = channel_create().unwrap_or((0, 0));
     chan_send(d, b"x", 0);
     check!(n, wait_many(&[(a, W_READABLE), (c, W_READABLE), (b, W_READABLE)], FOREVER) == Ok(0b010), "only entry 1 readable");
@@ -132,13 +132,13 @@ fn main(args: Args) -> i32 {
     chan_recv(c, &mut buf, 0, &mut info);
     check!(n, wait_many(&[(c, W_READABLE)], 0) == Ok(0), "after recv: not readable");
 
-    // 4. Zamknięta druga strona – gotowy do odczytu (recv da EPIPE) i do zapisu (EPIPE).
+    // 4. Other side closed – ready for read (recv gives EPIPE) and for write (EPIPE).
     close(d);
     check!(n, wait_many(&[(c, W_READABLE), (c, W_WRITABLE)], FOREVER) == Ok(0b11), "closed peer: readable + writable");
     check!(n, chan_recv(c, &mut buf, CHAN_NONBLOCK, &mut info) == EPIPE, "closed peer: recv EPIPE");
     close(c);
 
-    // 5. Pobudka: dziecko po 40 ms wysyła na drugi z trzech kanałów.
+    // 5. Wakeup: after 40 ms a child sends on the second of three channels.
     let (s1, s1c) = channel_create().unwrap_or((0, 0));
     let (s2, s2c) = channel_create().unwrap_or((0, 0));
     let (s3, s3c) = channel_create().unwrap_or((0, 0));
@@ -154,8 +154,8 @@ fn main(args: Args) -> i32 {
         close(h);
     }
 
-    // 6. Serwer: 4 klientów, każdy z własnym kanałem, po ROUNDS próśb; jeden
-    //    proces obsługuje wszystkich przez wait_many (wzór usługi z M19).
+    // 6. Server: 4 clients, each with its own channel, ROUNDS requests each; one
+    //    process serves all of them via wait_many (the user-space service pattern).
     let mut ends = [0u64; CLIENTS];
     let mut pids = [0i64; CLIENTS];
     for i in 0..CLIENTS {
@@ -188,7 +188,7 @@ fn main(args: Args) -> i32 {
             break;
         };
         if mask == 0 {
-            bad += 1; // 5 s bez żadnej prośby – coś utknęło
+            bad += 1; // 5 s without any request – something got stuck
             break;
         }
         wakeups += 1;
@@ -221,8 +221,8 @@ fn main(args: Args) -> i32 {
     }
     check!(n, bad == 0 && served == CLIENTS as u64 * ROUNDS && clients_ok, "server: served {} of {}, bad {}, clients ok {}", served, CLIENTS as u64 * ROUNDS, bad, clients_ok);
 
-    // 7. Potok: odczyt gotowy po zapisie, zapis gotowy od razu, odczyt gotowy po
-    //    zamknięciu piszącego; zły kierunek – EINVAL.
+    // 7. Pipe: read ready after a write, write ready immediately, read ready after
+    //    the writer closes; wrong direction – EINVAL.
     let (pr, pw) = pipe().unwrap_or((0, 0));
     check!(n, wait_many(&[(pr, W_READABLE)], 0) == Ok(0) && wait_many(&[(pw, W_WRITABLE)], 0) == Ok(1), "empty pipe");
     check!(n, wait_many(&[(pr, W_WRITABLE)], 0) == Err(-22) && wait_many(&[(pw, W_READABLE)], 0) == Err(-22), "wrong pipe direction must be EINVAL");
@@ -233,8 +233,8 @@ fn main(args: Args) -> i32 {
     check!(n, wait_many(&[(pr, W_READABLE)], FOREVER) == Ok(1), "pipe readable after the writer closed (EOF)");
     close(pr);
 
-    // 8. Pełna kolejka: 64 komunikaty – zapis niegotowy; dziecko je odbiera –
-    //    wait_many budzi się.
+    // 8. Full queue: 64 messages – write not ready; a child receives them –
+    //    wait_many wakes up.
     let (f, fc) = channel_create().unwrap_or((0, 0));
     let mut sent = 0;
     while chan_send(f, b"fill", CHAN_NONBLOCK) == 0 {
@@ -247,7 +247,7 @@ fn main(args: Args) -> i32 {
     check!(n, wait(pid as u64, 0) == Ok((pid as u64, 0)), "drain exit");
     close(f);
 
-    // 9. Kill procesu czekającego w wait_many.
+    // 9. Kill of a process waiting in wait_many.
     let (k1, k1c) = channel_create().unwrap_or((0, 0));
     let pid = spawn_child(&["waiter"], k1c);
     close(k1c);

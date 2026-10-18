@@ -8,53 +8,53 @@ OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.fd"
 [ -f "$OVMF_CODE" ] || OVMF_CODE="/usr/share/OVMF/OVMF_CODE.fd"
 
 if [ ! -f "$OVMF_CODE" ]; then
-  echo "Nie znaleziono OVMF. Zainstaluj: sudo apt install ovmf qemu-system-x86"
+  echo "OVMF not found. Install: sudo apt install ovmf qemu-system-x86"
   exit 1
 fi
 
-# M8: dysk danych dla virtio-blk (plik obrazu, tworzony przy pierwszym
-# uruchomieniu).  Poza katalogiem build/, bo build/ QEMU widzi jako dysk FAT.
+# Data disk for virtio-blk (an image file, created on first run).
+# Outside build/, because QEMU sees build/ as a FAT disk.
 DISK="$ROOT/disk.img"
 DISK_SIZE="64M"
 if [ ! -f "$DISK" ]; then
-  echo "Tworze obraz dysku $DISK ($DISK_SIZE)"
+  echo "Creating disk image $DISK ($DISK_SIZE)"
   truncate -s "$DISK_SIZE" "$DISK"
 fi
 
-# M16b: dysk NVMe (emulowany kontroler QEMU – jedyny NVMe, do którego
-# DeSoOS zapisuje; prawdziwe SSD są tylko do odczytu).
+# NVMe disk (QEMU's emulated controller – the only NVMe that DeSoOS
+# writes to; real SSDs are read-only).
 NVME="$ROOT/nvme.img"
 if [ ! -f "$NVME" ]; then
-  echo "Tworze obraz dysku NVMe $NVME ($DISK_SIZE)"
+  echo "Creating NVMe disk image $NVME ($DISK_SIZE)"
   truncate -s "$DISK_SIZE" "$NVME"
 fi
 
-# M16b: build/ to pendrive USB tylko do odczytu (jak prawdziwy start
-# z pendrive'a).  Wcześniej "fat:rw:" – OVMF zapisywał tam NvVars, a QEMU
-# potrafił przy tym uszkodzić BOOTX64.EFI.  Stary plik NvVars usuwamy.
+# build/ is a read-only USB stick (like a real boot from a USB stick).
+# Previously "fat:rw:" – OVMF wrote NvVars there, and QEMU could
+# corrupt BOOTX64.EFI in the process.  We remove the stale NvVars file.
 rm -f "$ROOT/build/NvVars"
 
-# M17a: akcelerator QEMU.
-#   ACCEL=tcg (domyślnie) – emulacja, wielowątkowa (każdy wirtualny CPU
-#                           osobnym wątkiem hosta – inaczej Big Kernel Lock
-#                           przekazywany "po kolei" daje sekundowe przestoje)
-#   ACCEL=kvm             – wirtualizacja sprzętowa (Linux z /dev/kvm):
-#                           prawdziwy równoległy sprzęt, natywna szybkość
+# QEMU accelerator.
+#   ACCEL=tcg (default)   – emulation, multi-threaded (each virtual CPU is
+#                           a separate host thread – otherwise the Big Kernel Lock
+#                           handed over "in turn" causes second-long stalls)
+#   ACCEL=kvm             – hardware virtualization (Linux with /dev/kvm):
+#                           truly parallel hardware, native speed
 ACCEL="${ACCEL:-tcg}"
 case "$ACCEL" in
   kvm)
-    [ -w /dev/kvm ] || { echo "ACCEL=kvm: brak dostępu do /dev/kvm (sudo usermod -aG kvm $USER, potem wyloguj się)"; exit 1; }
+    [ -w /dev/kvm ] || { echo "ACCEL=kvm: no access to /dev/kvm (sudo usermod -aG kvm $USER, then log out)"; exit 1; }
     ACCEL_ARGS=(-accel kvm -cpu host) ;;
   tcg) ACCEL_ARGS=(-accel tcg,thread=multi -cpu max) ;;
-  *) echo "ACCEL: tcg albo kvm (jest: $ACCEL)"; exit 1 ;;
+  *) echo "ACCEL: tcg or kvm (got: $ACCEL)"; exit 1 ;;
 esac
 SMP="${SMP:-4}"
 
-# M20.e: USB=1 – jak laptop bez PS/2 (Legion): bez kontrolera 8042, klawiatura
-# i mysz tylko na USB (usbd -> jądro).  Pisanie w oknie QEMU idzie wtedy przez
-# klawiaturę USB.  Domyślnie jak dotąd: PS/2.
-# M20.d: HUB=1 – hub USB w porcie 3, a urządzenia z USB=1 i usb.img za nim
-# (porty 3.1, 3.2, 3.3) – jak gniazda laptopa podłączone przez wewnętrzny hub.
+# USB=1 – like a laptop without PS/2: no 8042 controller, keyboard
+# and mouse only on USB (usbd -> kernel).  Typing in the QEMU window then goes through
+# the USB keyboard.  Default as before: PS/2.
+# HUB=1 – a USB hub on port 3, with the USB=1 devices and usb.img behind it
+# (ports 3.1, 3.2, 3.3) – like laptop sockets connected through an internal hub.
 MACHINE="q35"
 USB_ARGS=()
 AT=()
@@ -68,8 +68,8 @@ if [ "${USB:-0}" = 1 ]; then
   MACHINE="q35,i8042=off"
   USB_ARGS+=(-device "usb-kbd${AT[0]}" -device "usb-mouse${AT[1]}")
 fi
-# M20.f: usb.img (jeśli jest) = drugi pendrive, TYLKO DO ODCZYTU – jądro
-# zamontuje go w /usb0.  Obraz testowy: python3 tests/mkfat32.py usb.img plik1 plik2
+# usb.img (if present) = a second USB stick, READ-ONLY – the kernel
+# mounts it at /usb0.  Test image: python3 tests/mkfat32.py usb.img file1 file2
 if [ -f "$ROOT/usb.img" ]; then
   USB_ARGS+=(-drive if=none,id=usbimg,format=raw,file="$ROOT/usb.img",readonly=on -device "usb-storage,drive=usbimg${AT[2]}")
 fi

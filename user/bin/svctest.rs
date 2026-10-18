@@ -1,11 +1,11 @@
-// M19.g: test menedżera usług w init.  Uruchamia go jądro przez
-// `init test /bin/svctest` (init z HW_ROOT, svctest zamiast shella, z kanałem
-// svc w slocie 3).  Sprawdza: prawa kanału svc, listę usług (edu i echo
-// działają), rozmowę z echo po nazwie, restart po awarii (nowy pid, licznik
-// restartów), edu przez menedżer (PING, silnia), restart edud po kill,
-// nieznana usługa -> EPIPE, zła prośba nie psuje init, shell przekazuje
-// slot 3 programom (`sh -c services`), 5 awarii w 30 s -> "broken".
-// Wynik: "svctest: N checks OK, ..." i kod 0.
+// Test of the service manager in init.  The kernel runs it via
+// `init test /bin/svctest` (init with HW_ROOT, svctest instead of the shell, with the svc
+// channel in slot 3).  Checks: svc channel rights, the service list (edu and echo
+// are running), talking to echo by name, restart after a crash (new pid, restart
+// counter), edu through the manager (PING, factorial), restarting edud after kill,
+// unknown service -> EPIPE, a bad request does not break init, the shell passes
+// slot 3 to programs (`sh -c services`), 5 crashes in 30 s -> "broken".
+// Result: "svctest: N checks OK, ..." and exit code 0.
 #![no_std]
 #![no_main]
 
@@ -30,7 +30,7 @@ macro_rules! check {
     };
 }
 
-/// Stan usługi z listy init: (stan, pid, restarty).
+/// Service state from init's list: (state, pid, restarts).
 fn status(name: &str) -> Option<([u8; 16], usize, u64, u64)> {
     let mut buf = [0u8; 2048];
     let n = svc_list(&mut buf).ok()?;
@@ -55,7 +55,7 @@ fn state_is(name: &str, want: &str) -> Option<(u64, u64)> {
     if &s[..l] == want.as_bytes() { Some((pid, restarts)) } else { None }
 }
 
-/// Czeka (do `ms`), aż usługa będzie w stanie `want` i spełni `cond`.
+/// Waits (up to `ms`) until the service is in state `want` and satisfies `cond`.
 fn wait_state(name: &str, want: &str, ms: u64, cond: impl Fn(u64, u64) -> bool) -> Option<(u64, u64)> {
     let t0 = uptime_ms();
     loop {
@@ -97,13 +97,13 @@ fn edu_call(c: u64, op: u32, arg: u64) -> Result<(i32, u64), i64> {
     Ok((u32_at(&msg, 0) as i32, u64_at(&msg, 8)))
 }
 
-/// `sh -c <cmd>` z wyjściem w potoku; z kanałem svc w slocie 3 albo bez.
+/// `sh -c <cmd>` with output into a pipe; with or without the svc channel in slot 3.
 fn shell_cmd(cmd: &str, with_svc: bool, out: &mut [u8]) -> (u64, usize) {
     let Ok((r, w)) = pipe() else { return (99, 0) };
     shell_cmd_map(cmd, if with_svc { &[(SVC, 3)] } else { &[] }, r, w, out)
 }
 
-/// `sh -c <cmd>` z dodatkowymi uchwytami `extra` (np. SYSCTL w slocie 4).
+/// `sh -c <cmd>` with extra handles `extra` (e.g. SYSCTL in slot 4).
 fn shell_cmd_with(cmd: &str, extra: &[(u64, u64)], out: &mut [u8]) -> (u64, usize) {
     let Ok((r, w)) = pipe() else { return (99, 0) };
     shell_cmd_map(cmd, extra, r, w, out)
@@ -137,12 +137,12 @@ fn main(_args: Args) -> i32 {
     let mut n = 0;
     let mut out = [0u8; MSG_MAX];
 
-    // 1. Kanał svc: tylko wysyłanie (+ kopiowanie), odbiór zabroniony.
+    // 1. svc channel: send only (+ duplicate), receiving is forbidden.
     check!(n, handle_info(SVC) == Ok((KIND_CHANNEL, R_SEND | R_DUP)), "slot 3 rights: {:?}", handle_info(SVC));
     let mut info = RecvInfo::default();
     check!(n, chan_recv(SVC, &mut out, CHAN_NONBLOCK, &mut info) == -13, "recv on the svc channel must be EACCES");
 
-    // 2. Lista: edu i echo działają.
+    // 2. List: edu and echo are running.
     let edu0 = wait_state("edu", "running", 3000, |p, _| p != 0);
     check!(n, edu0.is_some(), "edu service not running: {:?}", status("edu").map(|s| (s.2, s.3)));
     let echo0 = wait_state("echo", "running", 3000, |p, _| p != 0);
@@ -150,7 +150,7 @@ fn main(_args: Args) -> i32 {
     let (edu_pid, _) = edu0.unwrap_or((0, 0));
     let (echo_pid, echo_r0) = echo0.unwrap_or((0, 0));
 
-    // 3. Echo po nazwie: odbicie, pid usługi zgodny z listą.
+    // 3. Echo by name: reflection, the service pid matches the list.
     let c = svc_connect("echo");
     check!(n, c.is_ok(), "svc_connect echo: {:?}", c);
     let c = c.unwrap_or(0);
@@ -159,7 +159,7 @@ fn main(_args: Args) -> i32 {
     let pid_txt = r.map(|l| core::str::from_utf8(&out[..l]).unwrap_or("").parse::<u64>().unwrap_or(0));
     check!(n, pid_txt == Ok(echo_pid), "echo pid {:?} vs list {}", pid_txt, echo_pid);
 
-    // 4. Awaria usługi: klient dostaje EPIPE, init restartuje (nowy pid, restarts+1).
+    // 4. Service crash: the client gets EPIPE, init restarts it (new pid, restarts+1).
     check!(n, chan_send(c, b"crash", 0) == 0, "send crash");
     let r = chan_recv(c, &mut out, 0, &mut info);
     check!(n, r == EPIPE, "client of a crashed service must get EPIPE: {}", r);
@@ -170,16 +170,16 @@ fn main(_args: Args) -> i32 {
     check!(n, matches!(echo(c, b"again", &mut out), Ok(5)), "restarted echo answers");
     close(c);
 
-    // 5. edu przez menedżer usług.
+    // 5. edu through the service manager.
     let e = svc_connect("edu").unwrap_or(0);
     check!(n, edu_call(e, OP_PING, 0) == Ok((0, 0x010000ed)), "edu PING via svc");
     check!(n, edu_call(e, OP_FACT, 12) == Ok((0, 479001600)), "edu 12! via svc");
-    // M19.h: svcbench z shella (bez HW_ROOT) mierzy przez usługę z init.
+    // svcbench from the shell (without HW_ROOT) measures through the service from init.
     let (_st, l) = shell_cmd("svcbench", true, &mut out);
     let text = core::str::from_utf8(&out[..l]).unwrap_or("");
     check!(n, text.contains("via edud service: PING"), "svcbench from the shell: {:?}", text);
 
-    // 6. edud zabity – restart (urządzenie wraca i nowa instancja je przejmuje).
+    // 6. edud killed – restart (the device comes back and the new instance claims it).
     check!(n, kill(edu_pid) == 0, "kill edud");
     check!(n, matches!(edu_call(e, OP_PING, 0), Err(EPIPE)), "client of killed edud must get EPIPE");
     close(e);
@@ -190,7 +190,7 @@ fn main(_args: Args) -> i32 {
     close(e);
     check!(n, dev_claim(HW_ROOT, bdf(0, 6, 0)) < 0, "svctest must not have HW_ROOT (slot 3 is the svc channel)");
 
-    // 7. Nieznana usługa -> kanał zamknięty; złe prośby nie psują init.
+    // 7. Unknown service -> channel closed; bad requests do not break init.
     let c = svc_connect("nope").unwrap_or(0);
     check!(n, chan_recv(c, &mut out, 0, &mut info) == EPIPE, "unknown service must give EPIPE");
     close(c);
@@ -201,7 +201,7 @@ fn main(_args: Args) -> i32 {
     close(a);
     check!(n, state_is("echo", "running").is_some(), "init still answers after bad requests");
 
-    // 8. Shell przekazuje slot 3 programom; bez kanału `services` kończy się błędem.
+    // 8. The shell passes slot 3 to programs; without the channel `services` fails.
     let (st, l) = shell_cmd("services", true, &mut out);
     let text = core::str::from_utf8(&out[..l]).unwrap_or("");
     check!(n, st == 0 && text.contains("SERVICE") && text.contains("edu") && text.contains("running") && text.contains("/bin/echod"), "sh -c services: status {:#x} {:?}", st, text);
@@ -209,7 +209,7 @@ fn main(_args: Args) -> i32 {
     let text2 = core::str::from_utf8(&out[..l]).unwrap_or("");
     check!(n, text2.contains("no service manager"), "services without slot 3: status {:#x} {:?}", _st, text2);
 
-    // M19.i: sysinfo (tylko odczyt) i SYSCTL (od init w slocie 4, tylko DUP).
+    // sysinfo (read-only) and SYSCTL (from init in slot 4, DUP only).
     let mut big = [0u8; 8192];
     let r = sysinfo("mem", &mut big);
     let mem_ok = matches!(r, Ok(l) if core::str::from_utf8(&big[..l]).unwrap_or("").contains("free frames"));
@@ -237,8 +237,8 @@ fn main(_args: Args) -> i32 {
     let t = core::str::from_utf8(&out[..l]).unwrap_or("");
     check!(n, t.contains("free frames"), "sh -c mem via sysinfo: {:?}", t);
 
-    // 9. 5 awarii w 30 s -> "broken", bez restartów; połączenie -> EPIPE.
-    //    (echo miało już 1 awarię; odstępy 200, 400, 800 ms.)
+    // 9. 5 crashes in 30 s -> "broken", no restarts; connecting -> EPIPE.
+    //    (echo has already had 1 crash; intervals 200, 400, 800 ms.)
     let mut last = echo1.map(|x| x.0).unwrap_or(0);
     let mut crashes = 1;
     let mut broken = None;

@@ -1,11 +1,11 @@
-// M18.b: test uchwytów z prawami – handle_dup (prawa tylko maleją),
-// handle_info, read / write bez prawa (EBADF), kopie bez R_DUP (EACCES),
-// dziecko po spawn dostaje uchwyt z tymi samymi (zmniejszonymi) prawami,
-// limit 64 uchwytów.  Wynik: "handletest: N checks OK" i kod 0, albo opis
-// pierwszego błędu i kod 1.  Uruchamia go IPC TEST (samotesty).
+// Test of handles with rights – handle_dup (rights can only shrink),
+// handle_info, read / write without the right (EBADF), copies without R_DUP (EACCES),
+// a child after spawn gets the handle with the same (reduced) rights,
+// the 64-handle limit.  Result: "handletest: N checks OK" and code 0, or a description
+// of the first failure and code 1.  Run by IPC TEST (self-tests).
 //
-// `handletest child` – tryb dziecka: uchwyt 0 ma być plikiem tylko do odczytu
-// (R_READ | R_DUP); kod 0 = zgadza się, 3 = nie.
+// `handletest child` – child mode: handle 0 must be a read-only file
+// (R_READ | R_DUP); code 0 = matches, 3 = does not.
 #![no_std]
 #![no_main]
 
@@ -39,7 +39,7 @@ fn child() -> i32 {
         let h = handle_dup(0, R_ALL);
         h >= 0 && handle_info(h as u64) == Ok((KIND_FILE, R_READ | R_DUP))
     };
-    // Uchwyt 0 to plik, nie konsola – klawiatura niedostępna.
+    // Handle 0 is a file, not the console – keyboard unavailable.
     let ok_key = readkey("").err() == Some(EBADF);
     if ok_info && ok_read && ok_write && ok_amplify && ok_key { 0 } else { 3 }
 }
@@ -52,7 +52,7 @@ fn main(args: Args) -> i32 {
     let mut buf = [0u8; 64];
     unlink(PATH);
 
-    // 1. Prawa wynikające z obiektu (jak przed M18).
+    // 1. Rights derived from the object (as before rights were introduced).
     check!(n, handle_info(1) == Ok((KIND_CONSOLE, R_READ | R_WRITE | R_DUP | R_TRANSFER)), "console: {:?}", handle_info(1));
     let fd = open(PATH, O_READ | O_WRITE | O_CREATE | O_TRUNC);
     check!(n, fd >= 3, "open: {}", strerror(fd));
@@ -72,7 +72,7 @@ fn main(args: Args) -> i32 {
     check!(n, handle_info(pr) == Ok((KIND_PIPE, R_READ | R_DUP | R_TRANSFER)), "pipe read end: {:?}", handle_info(pr));
     check!(n, handle_info(pw) == Ok((KIND_PIPE, R_WRITE | R_DUP | R_TRANSFER)), "pipe write end: {:?}", handle_info(pw));
 
-    // 2. handle_dup zmniejsza prawa; read / write bez prawa = EBADF.
+    // 2. handle_dup reduces rights; read / write without the right = EBADF.
     let ro = handle_dup(fd, R_READ | R_DUP);
     check!(n, ro >= 3, "handle_dup: {}", strerror(ro));
     let ro = ro as u64;
@@ -83,27 +83,27 @@ fn main(args: Args) -> i32 {
     let wo = handle_dup(fd, R_WRITE);
     check!(n, wo >= 3 && read(wo as u64, &mut buf) == -9, "read without R_READ must be EBADF");
 
-    // 3. Prawa nigdy nie rosną – ani przez handle_dup z pełną maską, ani przez dup / dup2.
+    // 3. Rights never grow – neither via handle_dup with a full mask, nor via dup / dup2.
     let again = handle_dup(ro, R_ALL);
     check!(n, again >= 0 && handle_info(again as u64) == Ok((KIND_FILE, R_READ | R_DUP)), "handle_dup(ALL) amplified: {:?}", handle_info(again as u64));
     let d = dup(ro);
     check!(n, d >= 0 && handle_info(d as u64) == Ok((KIND_FILE, R_READ | R_DUP)), "dup changed rights: {:?}", handle_info(d as u64));
     check!(n, dup2(ro, 40) == 40 && handle_info(40) == Ok((KIND_FILE, R_READ | R_DUP)), "dup2 changed rights: {:?}", handle_info(40));
 
-    // 4. Bez R_DUP nie ma kopii (dup, dup2, handle_dup, spawn) – EACCES.
+    // 4. Without R_DUP there are no copies (dup, dup2, handle_dup, spawn) – EACCES.
     let nodup = handle_dup(fd, R_READ);
     check!(n, nodup >= 0, "handle_dup without DUP: {}", strerror(nodup));
     let nodup = nodup as u64;
     check!(n, dup(nodup) == -13 && dup2(nodup, 41) == -13 && handle_dup(nodup, R_READ) == -13, "copy without R_DUP must be EACCES");
     check!(n, spawn("/bin/hello", &["hello"], 0, fds(nodup, 1, 2)) == -13, "spawn with a handle without R_DUP must be EACCES");
 
-    // 5. Dziecko dostaje uchwyt z tymi samymi (zmniejszonymi) prawami.
+    // 5. The child gets the handle with the same (reduced) rights.
     seek(ro, 0, SEEK_SET);
     let pid = spawn("/bin/handletest", &["handletest", "child"], 0, fds(ro, 1, 2));
     check!(n, pid > 0, "spawn child: {}", strerror(pid));
     check!(n, wait(pid as u64, 0) == Ok((pid as u64, 0)), "child saw wrong rights (or could write / amplify)");
 
-    // 6. Zamknięty uchwyt – EBADF; limit 64 uchwytów – EMFILE.
+    // 6. Closed handle – EBADF; 64-handle limit – EMFILE.
     check!(n, close(nodup) == 0 && handle_info(nodup) == Err(-9), "closed handle must be EBADF");
     let mut opened = 0;
     loop {

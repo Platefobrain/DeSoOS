@@ -1,14 +1,14 @@
-// M19.d: test przerwań urządzenia w user space – irq_bind (prawa, EBUSY),
-// przerwanie z `edu` budzi wait_many (W_IRQ), licznik irq_read, kilka
-// przerwań przed obsługą = jedna pobudka z licznikiem, silnia zakończona
-// przerwaniem, przerwanie razem z kanałem na jednej liście, zamknięcie
-// uchwytu zwalnia wektor (20 razy więcej niż jest wektorów), zabicie
-// procesu z przypiętym przerwaniem – urządzenie i wektor wracają.
-// Wynik: "irqtest: N checks OK, ..." i kod 0, albo opis błędu i kod 1.
-// Uruchamia go SVC TEST z uchwytem HW_ROOT (QEMU z `-device edu,addr=06`).
+// Test of device interrupts in user space – irq_bind (rights, EBUSY),
+// an interrupt from `edu` wakes wait_many (W_IRQ), the irq_read counter, several
+// interrupts before handling = one wakeup with a counter, factorial completed
+// by an interrupt, an interrupt together with a channel on one list, closing
+// the handle releases the vector (20 times more than there are vectors), killing
+// a process with a bound interrupt – the device and the vector come back.
+// Result: "irqtest: N checks OK, ..." and exit code 0, or an error description and exit code 1.
+// Run by SVC TEST with the HW_ROOT handle (QEMU with `-device edu,addr=06`).
 //
-// Tryb dziecka: `irqtest holder` (uchwyt 0 = urządzenie) – przypina
-// przerwanie i czeka w wait_many (do kill).
+// Child mode: `irqtest holder` (handle 0 = device) – binds the
+// interrupt and waits in wait_many (until killed).
 #![no_std]
 #![no_main]
 
@@ -26,7 +26,7 @@ const REG_STATUS: u64 = 0x20;
 const REG_IRQ_STATUS: u64 = 0x24;
 const REG_IRQ_RAISE: u64 = 0x60;
 const REG_IRQ_ACK: u64 = 0x64;
-/// Status: przerwanie po skończonej silni; bit przerwania silni.
+/// Status: interrupt after the factorial completes; the factorial interrupt bit.
 const STATUS_IRQ_FACT: u32 = 0x80;
 const IRQ_FACT: u32 = 0x1;
 const KILLED: u64 = 0x100 | 9;
@@ -55,7 +55,7 @@ fn holder() -> i32 {
         return 30;
     }
     let _ = wait_many(&[(irq as u64, W_IRQ)], FOREVER);
-    31 // tu nie dochodzi – proces ma zginąć w wait_many
+    31 // never reached – the process is meant to die in wait_many
 }
 
 fn main(args: Args) -> i32 {
@@ -77,7 +77,7 @@ fn main(args: Args) -> i32 {
         }
     };
 
-    // 1. irq_bind: prawa, rodzaj uchwytu, drugie przypięcie – EBUSY.
+    // 1. irq_bind: rights, handle kind, a second bind – EBUSY.
     let ro = handle_dup(dev, R_MAP_READ | R_DUP) as u64;
     check!(n, irq_bind(ro) == -13, "irq_bind without R_MAP_WRITE must be EACCES");
     check!(n, irq_bind(1) == -9, "irq_bind on the console must be EBADF");
@@ -91,8 +91,8 @@ fn main(args: Args) -> i32 {
     check!(n, wait_many(&[(irq, W_READABLE)], 0) == Err(-22), "READABLE on an IRQ must be EINVAL");
     check!(n, irq_read(dev) == -9, "irq_read on a device must be EBADF");
 
-    // 2. Przerwanie na żądanie: zapis do rejestru "raise" – pobudka, licznik,
-    //    status w urządzeniu; potwierdzenie (ack).
+    // 2. Interrupt on demand: write to the "raise" register – wakeup, counter,
+    //    status in the device; acknowledgement (ack).
     wr(m, REG_IRQ_RAISE, 0x100);
     let r = wait_many(&[(irq, W_IRQ)], 2000);
     check!(n, r == Ok(1), "woken by the interrupt: {:?}", r);
@@ -101,11 +101,11 @@ fn main(args: Args) -> i32 {
     wr(m, REG_IRQ_ACK, 0x100);
     check!(n, rd(m, REG_IRQ_STATUS) == 0 && irq_read(irq) == 0, "acknowledged");
 
-    // 3. 10 przerwań przed obsługą – pobudka (jedna albo kilka) z licznikiem.
-    //    Licznik może być MNIEJSZY niż 10: przerwania tego samego wektora, które
-    //    przyjdą, zanim procesor obsłuży poprzednie, APIC łączy w jedno (w QEMU
-    //    zdarzyło się 9 z 10).  Dlatego usługa zawsze sprawdza status urządzenia
-    //    – tu: wszystkie 10 bitów w rejestrze statusu przerwań edu.
+    // 3. 10 interrupts before handling – a wakeup (one or several) with a counter.
+    //    The counter may be LESS than 10: interrupts of the same vector that
+    //    arrive before the CPU has handled the previous ones are merged by the APIC (in QEMU
+    //    9 out of 10 has been seen).  That is why a service always checks the device status
+    //    – here: all 10 bits in the edu interrupt status register.
     let all = 0x3FFu32 << 8;
     for i in 0..10u32 {
         wr(m, REG_IRQ_RAISE, 1 << (8 + i));
@@ -132,7 +132,7 @@ fn main(args: Args) -> i32 {
     sleep_ms(5);
     irq_read(irq);
 
-    // 4. Silnia zakończona przerwaniem (zamiast odpytywania statusu).
+    // 4. Factorial completed by an interrupt (instead of polling the status).
     wr(m, REG_STATUS, STATUS_IRQ_FACT);
     wr(m, REG_FACT, 12);
     let r = wait_many(&[(irq, W_IRQ)], 2000);
@@ -142,7 +142,7 @@ fn main(args: Args) -> i32 {
     wr(m, REG_STATUS, 0);
     irq_read(irq);
 
-    // 5. Przerwanie i kanał na jednej liście (wzór usługi): właściwy bit.
+    // 5. Interrupt and channel on one list (the service pattern): the right bit.
     let (a, b) = channel_create().unwrap_or((0, 0));
     wr(m, REG_IRQ_RAISE, 0x1);
     check!(n, wait_many(&[(a, W_READABLE), (irq, W_IRQ)], 2000) == Ok(0b10), "IRQ bit in a mixed list");
@@ -153,8 +153,8 @@ fn main(args: Args) -> i32 {
     close(a);
     close(b);
 
-    // 6. Zamknięcie uchwytu zwalnia wektor: 20 razy przypięcie / zamknięcie
-    //    (wektorów jest 16 – bez zwalniania zabrakłoby ich).
+    // 6. Closing the handle releases the vector: 20 rounds of bind / close
+    //    (there are 16 vectors – without releasing we would run out).
     close(irq);
     let mut binds = 0;
     for _ in 0..20 {
@@ -172,7 +172,7 @@ fn main(args: Args) -> i32 {
     wr(m, REG_IRQ_ACK, 0x2);
     close(q);
 
-    // 7. Zabity proces z przypiętym przerwaniem – urządzenie i wektor wracają.
+    // 7. A killed process with a bound interrupt – the device and the vector come back.
     check!(n, munmap(m, 1024 * 1024) == 0, "munmap");
     let pid = spawn_ex("/bin/irqtest", &["irqtest", "holder"], &[(dev, 0), (1, 1)], 0);
     check!(n, pid > 0, "spawn holder: {}", strerror(pid));

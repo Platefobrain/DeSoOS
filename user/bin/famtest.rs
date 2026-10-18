@@ -1,19 +1,19 @@
-// P1 (po M19): test rodziny procesów po przeniesieniu zombie do rodziców
-// (koniec globalnej tablicy ZOMBIES).  Uruchamia go jądro przez
-// `init test /bin/famtest` (init zarejestrowany jako init – sieroty idą do
-// niego) na kilku CPU:
-//   1. 200 dzieci kończy się naraz – wait(ANY) odbiera każde dokładnie raz,
-//      z właściwym kodem; potem ECHILD (także z WNOHANG),
-//   2. wait na konkretny pid w odwrotnej kolejności,
-//   3. WNOHANG przy żywym dziecku -> (0, 0), potem zwykłe wait,
-//   4. 8 procesów "middle" (każdy 25 wnuków: połowa kończy się od razu, połowa
-//      po chwili) kończy się bez wait – wnuki (żywe i zombie) przejmuje init;
-//      famtest odbiera tylko swoje 8 dzieci,
-//   5. 4 procesy po 50 dzieci każdy, równolegle, każdy liczy swoje statusy
-//      (rodzice nie widzą cudzych zombie).
-// Wynik: "famtest: N checks OK, ..." i kod 0.
+// Test of the process family after zombies were moved into their parents
+// (no global ZOMBIES table).  The kernel runs it via
+// `init test /bin/famtest` (registered as init – orphans go to
+// it) on several CPUs:
+//   1. 200 children exit at once – wait(ANY) reaps each exactly once,
+//      with the right code; then ECHILD (also with WNOHANG),
+//   2. wait for a specific pid in reverse order,
+//   3. WNOHANG with a live child -> (0, 0), then a plain wait,
+//   4. 8 "middle" processes (each with 25 grandchildren: half exit immediately, half
+//      after a while) exit without waiting – init adopts the grandchildren (live and zombie);
+//      famtest reaps only its own 8 children,
+//   5. 4 processes with 50 children each, in parallel, each counting its own statuses
+//      (parents do not see other parents' zombies).
+// Result: "famtest: N checks OK, ..." and exit code 0.
 //
-// Tryby dziecka: `famtest exit <kod>`, `famtest sleep <ms> <kod>`,
+// Child modes: `famtest exit <code>`, `famtest sleep <ms> <code>`,
 // `famtest middle <n>`, `famtest parent <n>`.
 #![no_std]
 #![no_main]
@@ -64,8 +64,8 @@ fn text(v: u64, buf: &mut [u8; 20]) -> &str {
     core::str::from_utf8(&buf[..n]).unwrap_or("0")
 }
 
-/// `famtest middle n`: n wnuków (parzyste kończą się od razu, nieparzyste po
-/// 30 ms), sam kończy się kodem 7 bez czekania.
+/// `famtest middle n`: n grandchildren (even ones exit immediately, odd ones after
+/// 30 ms), itself exits with code 7 without waiting.
 fn middle(n: u64) -> i32 {
     for i in 0..n {
         if i % 2 == 0 {
@@ -77,7 +77,7 @@ fn middle(n: u64) -> i32 {
     7
 }
 
-/// `famtest parent n`: n dzieci, odbiera wszystkie; kod 0 = suma kodów zgodna.
+/// `famtest parent n`: n children, reaps all of them; code 0 = the sum of codes matches.
 fn parent(n: u64) -> i32 {
     let mut want = 0u64;
     let mut b = [0u8; 20];
@@ -115,7 +115,7 @@ fn main(args: Args) -> i32 {
     let mut n = 0;
     let mut b = [0u8; 20];
 
-    // 1. 200 dzieci naraz, każde odebrane dokładnie raz.
+    // 1. 200 children at once, each reaped exactly once.
     const N: usize = 200;
     let mut pids = [0u64; N];
     for (i, p) in pids.iter_mut().enumerate() {
@@ -137,7 +137,7 @@ fn main(args: Args) -> i32 {
     check!(n, ok && seen.iter().all(|&s| s), "200 statuses, each once with its own code");
     check!(n, wait(WAIT_ANY, 0) == Err(ECHILD) && wait(WAIT_ANY, WNOHANG) == Err(ECHILD), "no children left -> ECHILD");
 
-    // 2. Konkretne pid w odwrotnej kolejności.
+    // 2. Specific pids in reverse order.
     let mut few = [0u64; 20];
     for (i, p) in few.iter_mut().enumerate() {
         *p = child(&["famtest", "exit", text(100 + i as u64, &mut b)]).max(0) as u64;
@@ -149,12 +149,12 @@ fn main(args: Args) -> i32 {
     check!(n, ok, "wait(pid) in reverse order");
     check!(n, wait(few[0], 0) == Err(ECHILD), "wait on a reaped pid -> ECHILD");
 
-    // 3. WNOHANG przy żywym dziecku.
+    // 3. WNOHANG with a live child.
     let s = child(&["famtest", "sleep", "50", "9"]).max(0) as u64;
     check!(n, wait(WAIT_ANY, WNOHANG) == Ok((0, 0)) && wait(s, WNOHANG) == Ok((0, 0)), "WNOHANG with a live child -> (0, 0)");
     check!(n, wait(s, 0) == Ok((s, 9)), "then a blocking wait returns it");
 
-    // 4. Sieroty: 8 x middle (25 wnuków) – wnuki przejmuje init.
+    // 4. Orphans: 8 x middle (25 grandchildren) – init adopts the grandchildren.
     let mut mids = [0u64; 8];
     for m in mids.iter_mut() {
         *m = child(&["famtest", "middle", "25"]).max(0) as u64;
@@ -169,7 +169,7 @@ fn main(args: Args) -> i32 {
     check!(n, ok, "8 middle processes reaped (exit 7), grandchildren not ours");
     check!(n, wait(WAIT_ANY, WNOHANG) == Err(ECHILD), "orphans went to init, not to us");
 
-    // 5. 4 rodziców po 50 dzieci równolegle.
+    // 5. 4 parents with 50 children each, in parallel.
     let mut ps = [0u64; 4];
     for p in ps.iter_mut() {
         *p = child(&["famtest", "parent", "50"]).max(0) as u64;
@@ -180,7 +180,7 @@ fn main(args: Args) -> i32 {
     }
     check!(n, ok, "4 parents x 50 children in parallel, each got exactly its own");
 
-    // Sieroty z punktu 4 muszą zniknąć (init je odbiera) – po 30 ms + zapas.
+    // The orphans from step 4 must disappear (init reaps them) – after 30 ms + margin.
     sleep_ms(200);
     println!("famtest: {} checks OK, 200 + 20 + 1 children, 8 x 25 orphans to init, 4 x 50 parallel", n);
     0

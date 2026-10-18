@@ -1,4 +1,4 @@
-// M17a krok b: samotesty TLB shootdown (tylko build z --cfg selftest).
+// TLB shootdown self-tests (only in builds with --cfg selftest).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,12 +22,12 @@ macro_rules! check {
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// Strona testowa: koniec obszaru on-demand, mapowana jawnie.
+/// Test page: the end of the on-demand region, mapped explicitly.
 const VA: u64 = crate::memory::DEMAND_START + crate::memory::DEMAND_SIZE - 0x10_0000;
 const VAL_A: u64 = 0xA1A1_A1A1_A1A1_A1A1;
 const VAL_B: u64 = 0xB2B2_B2B2_B2B2_B2B2;
 
-/// Czytelnik: ostatnio widziana wartość, CPU, liczba odczytów, koniec.
+/// Reader: last seen value, CPU, number of reads, stop flag.
 static SEEN: AtomicU64 = AtomicU64::new(0);
 static READER_CPU: AtomicU64 = AtomicU64::new(u64::MAX);
 static READER_CPUS: AtomicU64 = AtomicU64::new(0);
@@ -35,8 +35,8 @@ static READS: AtomicU64 = AtomicU64::new(0);
 static READER_DONE: AtomicBool = AtomicBool::new(false);
 static READER_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Po FAIL: czytelnik musi skończyć, zanim ruszy następny test (stress
-/// liczy zadania; strona testowa zostaje wtedy zmapowana – to tylko test).
+/// After a FAIL: the reader must finish before the next test starts (stress
+/// counts tasks; the test page then stays mapped – it is only a test).
 fn stop_reader() {
     if READER_STARTED.swap(false, Ordering::SeqCst) {
         wait_for(2_000, || READER_DONE.load(Ordering::SeqCst));
@@ -58,7 +58,7 @@ fn wait_for(ms: u64, mut cond: impl FnMut() -> bool) -> bool {
     true
 }
 
-/// Czyta stronę testową w kółko, bez BKL (żeby działać równolegle z testem).
+/// Reads the test page in a loop, without the BKL (to run in parallel with the test).
 fn reader(_: usize) {
     bkl::unlocked(|| {
         while !STOP.load(Ordering::Relaxed) {
@@ -74,7 +74,7 @@ fn reader(_: usize) {
     READER_DONE.store(true, Ordering::SeqCst);
 }
 
-/// Wielu inicjatorów naraz (bez BKL): shootdown konkuruje o blokadę żądania.
+/// Many initiators at once (without the BKL): shootdowns compete for the request lock.
 fn flusher(_: usize) {
     bkl::unlocked(|| {
         for _ in 0..FLUSHES_PER_TASK {
@@ -84,7 +84,7 @@ fn flusher(_: usize) {
     FLUSHERS_DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Czeka, aż czytelnik zobaczy `val` (świeże odczyty po zmianie).
+/// Waits until the reader sees `val` (fresh reads after the change).
 fn reader_sees(val: u64, ms: u64) -> bool {
     let r0 = READS.load(Ordering::Relaxed);
     wait_for(ms, || READS.load(Ordering::Relaxed) > r0 + 1000 && SEEN.load(Ordering::Relaxed) == val)
@@ -96,8 +96,8 @@ pub fn self_test() {
     STOP.store(false, Ordering::SeqCst);
     let n = smp::online_count();
 
-    // 1. Shootdown dociera do wszystkich pozostałych CPU (pojedyncza strona
-    //    i pełny flush), handler bez BKL.
+    // 1. A shootdown reaches all other CPUs (single page
+    //    and full flush), handler without the BKL.
     let (r0, i0, f0, _, h0) = tlb::stats();
     tlb::flush_kernel(VA, 1);
     tlb::flush_kernel_all();
@@ -116,7 +116,7 @@ pub fn self_test() {
         return;
     }
 
-    // Czytelnik na innym CPU "rozgrzewa" TLB stroną VA -> ramka A.
+    // A reader on another CPU "warms up" the TLB with page VA -> frame A.
     let (Some(fa), Some(fb)) = (alloc_frame(), alloc_frame()) else {
         check!(false, "no frames");
         return;
@@ -131,8 +131,8 @@ pub fn self_test() {
     SEEN.store(0, Ordering::SeqCst);
     check!(crate::sched::spawn("tlb-reader", reader, 0).is_ok(), "spawn reader");
     READER_STARTED.store(true, Ordering::SeqCst);
-    // Czytelnik działa (czyta bez przerwy), a my też – więc na pewno na
-    // innym CPU niż my w tej chwili.
+    // The reader is running (reading nonstop), and so are we – so it is surely on
+    // a different CPU than ours at this moment.
     let r0 = READS.load(Ordering::Relaxed);
     check!(
         wait_for(5_000, || SEEN.load(Ordering::Relaxed) == VAL_A && READS.load(Ordering::Relaxed) > r0 + 1000),
@@ -143,9 +143,9 @@ pub fn self_test() {
     let me = cpu::id() as u64;
     let rcpu = READER_CPU.load(Ordering::Relaxed);
 
-    // 2. Kontrola testu: BEZ shootdownu czytelnik powinien dalej widzieć A
-    //    (stary wpis w swoim TLB).  QEMU TCG trzyma takie wpisy; prawdziwy
-    //    CPU / KVM może wpis sam wyrzucić – wtedy tylko informacja.
+    // 2. Test control: WITHOUT a shootdown the reader should still see A
+    //    (stale entry in its TLB).  QEMU TCG keeps such entries; a real
+    //    CPU / KVM may evict the entry on its own – then it is informational only.
     let old = crate::memory::retarget_page_local(VA, fb);
     check!(old == Some(fa), "retarget A->B: {:?}", old);
     let r_before = READS.load(Ordering::Relaxed);
@@ -160,11 +160,11 @@ pub fn self_test() {
         reads,
         if moved { ", reader moved to another CPU" } else { "" }
     );
-    // Teraz z shootdownem (czytelnik widzi B tak czy inaczej po flushu).
+    // Now with a shootdown (the reader sees B either way after the flush).
     tlb::flush_kernel(VA, 1);
     check!(reader_sees(VAL_B, 2_000), "reader still sees {:#x} after shootdown A->B", SEEN.load(Ordering::Relaxed));
 
-    // 3. B -> A ze shootdownem: czytelnik MUSI zobaczyć A.
+    // 3. B -> A with a shootdown: the reader MUST see A.
     let old = crate::memory::retarget_page_local(VA, fa);
     check!(old == Some(fb), "retarget B->A: {:?}", old);
     let (_, _, _, w0, _) = tlb::stats();
@@ -178,8 +178,8 @@ pub fn self_test() {
         w1 - w0
     );
 
-    // 4. Wielu inicjatorów naraz (bez BKL) przy działającym czytelniku:
-    //    każde żądanie potwierdzone przez wszystkie pozostałe CPU.
+    // 4. Many initiators at once (without the BKL) with a running reader:
+    //    every request acknowledged by all other CPUs.
     let k = n.clamp(2, 4) as u64;
     FLUSHERS_DONE.store(0, Ordering::SeqCst);
     let (r0, _, _, _, h0) = tlb::stats();
@@ -198,7 +198,7 @@ pub fn self_test() {
         tlb::polled()
     );
 
-    // Sprzątanie: czytelnik kończy, strona zdjęta (shootdown), ramki wracają.
+    // Cleanup: the reader stops, the page is unmapped (shootdown), frames come back.
     STOP.store(true, Ordering::SeqCst);
     check!(wait_for(2_000, || READER_DONE.load(Ordering::SeqCst)), "reader did not end");
     READER_STARTED.store(false, Ordering::SeqCst);
@@ -209,11 +209,11 @@ pub fn self_test() {
     check!(free_frame(fa) && free_frame(fb), "free test frames");
     check!(free_frame_count() >= free0 + 2, "frames not returned ({} -> {})", free0, free_frame_count());
 
-    // 5. Heap przy wielu CPU znowu oddaje strony (od M17 tylko rósł).
+    // 5. With multiple CPUs the heap gives pages back again (it used to only grow).
     let mapped0 = crate::memory::heap_mapped_bytes();
     let (rq0, _, _, _, _) = tlb::stats();
-    // M17b.h: w heapie mogą być wolne dziury po blokach z list CPU – bloki po
-    // 1 MiB, aż heap naprawdę urośnie (najwyżej 32).
+    // The heap may contain free holes left by blocks from per-CPU lists – allocate
+    // 1 MiB blocks until the heap really grows (at most 32).
     let mut bigs: Vec<Vec<u8>> = Vec::new();
     while bigs.len() < 32 && crate::memory::heap_mapped_bytes() < mapped0 + 1024 * 1024 {
         let mut big: Vec<u8> = Vec::new();

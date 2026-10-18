@@ -1,18 +1,18 @@
-// M20.f: test protokołu ublk bez sprzętu (samotest jądra USB TEST 3/5).
+// Test of the ublk protocol without hardware (kernel self-test USB TEST 3/5).
 //
-// Program udaje usbd z pendrive'em: z uchwytem BLK rejestruje dysk
-// (blk_attach – zwykła pamięć współdzielona zamiast bufora DMA, timeout 1 s)
-// i obsługuje żądania jądra, celowo psując protokół dla wybranych sektorów:
-//   lba 100 – najpierw odpowiedź z cudzym id, potem ze złą liczbą bloków
-//             (jądro ma je odrzucić), na końcu poprawna,
-//   lba 200 – brak odpowiedzi (timeout, slot w kwarantannie); spóźniona
-//             odpowiedź przychodzi przed obsługą lba 201 (slot wraca),
+// The program pretends to be usbd with a USB stick: using the BLK handle it registers a disk
+// (blk_attach – plain shared memory instead of a DMA buffer, 1 s timeout)
+// and serves kernel requests, deliberately breaking the protocol for chosen sectors:
+//   lba 100 – first a reply with someone else's id, then with a wrong block count
+//             (the kernel must reject them), finally a correct one,
+//   lba 200 – no reply (timeout, slot quarantined); the late
+//             reply arrives before lba 201 is served (the slot comes back),
 //   lba 300 – status EIO,
-//   lba 400..402 – brak odpowiedzi (3 timeouty = dysk znika),
-//   reszta – dane wzoru (jądro sprawdza każdy bajt).
-// Najpierw błędy blk_attach: zły uchwyt, brak praw, zły rozmiar bloku,
-// 0 bloków / slotów, za mały bufor.  Koniec: jądro zamyka kanał (dysk
-// zniknął) -> EPIPE -> kod 0 i "blktest: N checks OK".
+//   lba 400..402 – no reply (3 timeouts = the disk disappears),
+//   the rest – pattern data (the kernel checks every byte).
+// First the blk_attach errors: bad handle, missing rights, bad block size,
+// 0 blocks / slots, buffer too small.  End: the kernel closes the channel (the disk
+// disappeared) -> EPIPE -> exit code 0 and "blktest: N checks OK".
 #![no_std]
 #![no_main]
 
@@ -38,7 +38,7 @@ macro_rules! check {
     };
 }
 
-/// Wzór danych – to samo liczy jądro.
+/// Data pattern – the kernel computes the same.
 fn pat(sector: u64, i: usize) -> u8 {
     ((sector.wrapping_mul(13) as usize + i) ^ (sector >> 3) as usize) as u8
 }
@@ -68,7 +68,7 @@ fn main(_args: Args) -> i32 {
     check!(n, small >= 0 && buf >= 0, "shm_create");
     let (small, buf) = (small as u64, buf as u64);
 
-    // Błędy rejestracji.
+    // Registration errors.
     check!(n, blk_attach(1, theirs, buf, &info(1024, 512, 4)) == EBADF, "blk_attach with the console handle must be EBADF");
     check!(n, blk_attach(blk, buf, buf, &info(1024, 512, 4)) == EBADF, "blk_attach with SHM as the channel must be EBADF");
     check!(n, blk_attach(blk, theirs, small, &info(1024, 512, 4)) == EINVAL, "buffer smaller than 4 slots must be EINVAL");
@@ -92,7 +92,7 @@ fn main(_args: Args) -> i32 {
     check!(n, disk >= 0, "blk_attach: {}", disk);
     close(theirs);
 
-    // Obsługa żądań do zamknięcia kanału przez jądro.
+    // Serve requests until the kernel closes the channel.
     let mut msg = [0u8; 64];
     let mut ri = RecvInfo::default();
     let mut late: Option<(u32, u32)> = None;

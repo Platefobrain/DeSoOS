@@ -1,14 +1,14 @@
-// M15: ładowanie programów ELF do przestrzeni adresowej procesu.
+// Loading ELF programs into a process address space.
 //
-// Ten sam parser co w DSB (common/elf.rs) + zasady dla programów:
-//   * segmenty tylko w dolnej połowie: od USER_MIN (pierwsze 1 MiB puste –
-//     null pointer) do USER_MAX (pod stosem, z odstępem),
-//   * W^X: segment nie może być naraz zapisywalny i wykonywalny; strony
-//     bez PF_X dostają NX,
-//   * punkt wejścia w segmencie wykonywalnym, cały obraz max 64 MiB,
-//   * .bss (memsz > filesz) = wyzerowane ramki.
-// Stos: 16 KiB pod USER_STACK_TOP, a na nim (SysV): argc, argv[], NULL,
-// envp NULL, auxv AT_NULL; napisy argumentów na samej górze.
+// The same parser as in the bootloader (common/elf.rs) + rules for programs:
+//   * segments only in the lower half: from USER_MIN (the first 1 MiB is empty –
+//     null pointer) to USER_MAX (below the stack, with a gap),
+//   * W^X: a segment cannot be both writable and executable; pages
+//     without PF_X get NX,
+//   * entry point in an executable segment, the whole image at most 64 MiB,
+//   * .bss (memsz > filesz) = zeroed frames.
+// Stack: 16 KiB below USER_STACK_TOP, and on it (SysV): argc, argv[], NULL,
+// envp NULL, auxv AT_NULL; the argument strings at the very top.
 
 use alloc::vec::Vec;
 
@@ -52,9 +52,9 @@ impl LoadError {
 pub struct Loaded {
     pub space: AddressSpace,
     pub entry: u64,
-    /// RSP na starcie (wskazuje argc).
+    /// RSP at startup (points at argc).
     pub rsp: u64,
-    /// M17b.d: pierwszy adres za obrazem (sterta – stronę dalej).
+    /// First address after the image (heap – one page further).
     pub image_end: u64,
 }
 
@@ -65,7 +65,7 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
-/// Sprawdza plik i buduje przestrzeń adresową (proces jeszcze nie działa).
+/// Validates the file and builds the address space (the process is not running yet).
 pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
     let image = elf::parse(bytes).map_err(LoadError::Elf)?;
     for seg in image.segments() {
@@ -104,8 +104,8 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
                     space.map_new(page, flags).ok_or(LoadError::NoMemory)?;
                 }
                 Some((_, old)) => {
-                    // Strona dzielona z poprzednim segmentem: suma praw,
-                    // nadal W^X.
+                    // Page shared with the previous segment: union of rights,
+                    // still W^X.
                     let w = (old | flags) & WRITABLE;
                     let exec = (old & NO_EXECUTE == 0 && nx != 0) || flags & nx == 0;
                     if w != 0 && exec && nx != 0 {
@@ -123,7 +123,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
         }
     }
 
-    // Stos (strona pod nim zostaje pusta – strażnik).
+    // Stack (the page below it stays empty – guard).
     let mut va = USER_STACK_TOP - USER_STACK_SIZE;
     while va < USER_STACK_TOP {
         space.map_new(va, USER | WRITABLE | nx).ok_or(LoadError::NoMemory)?;
@@ -133,7 +133,7 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
     Ok(Loaded { space, entry: image.entry, rsp, image_end: page_up(hi) })
 }
 
-/// Układ SysV na szczycie stosu; zwraca RSP (wyrównany do 16, wskazuje argc).
+/// SysV layout at the top of the stack; returns RSP (16-byte aligned, points at argc).
 fn push_args(space: &mut AddressSpace, args: &[&str]) -> Result<u64, LoadError> {
     let mut sp = USER_STACK_TOP;
     let mut pointers = Vec::with_capacity(args.len());
@@ -152,7 +152,7 @@ fn push_args(space: &mut AddressSpace, args: &[&str]) -> Result<u64, LoadError> 
     words.extend_from_slice(&pointers);
     words.extend_from_slice(&[0, 0, 0, 0]);
     if words.len() % 2 == 1 {
-        sp -= 8; // RSP % 16 == 0 przy argc
+        sp -= 8; // RSP % 16 == 0 at argc
     }
     sp -= words.len() as u64 * 8;
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();

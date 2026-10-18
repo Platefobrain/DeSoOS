@@ -1,19 +1,19 @@
-// M16b: Local APIC – minimum potrzebne do przerwań MSI/MSI-X.
+// Local APIC – the minimum needed for MSI/MSI-X interrupts.
 //
-// Przerwania z PIC-a (zegar, klawiatura, serial) dalej idą jak dotąd:
-// firmware zostawia LAPIC w trybie "virtual wire" (PIC -> LINT0 jako ExtINT)
-// i ich EOI dostaje PIC.  Urządzenia PCIe z MSI/MSI-X piszą natomiast
-// komunikat pod adres 0xFEE0_0000 – trafia on prosto do LAPIC jako
-// przerwanie o podanym wektorze i wymaga EOI w LAPIC.
+// Interrupts from the PIC (timer, keyboard, serial) still go as before:
+// firmware leaves the LAPIC in "virtual wire" mode (PIC -> LINT0 as ExtINT)
+// and their EOI goes to the PIC.  PCIe devices with MSI/MSI-X, by contrast, write a
+// message to address 0xFEE0_0000 – it goes straight to the LAPIC as an
+// interrupt with the given vector and needs an EOI in the LAPIC.
 //
-// Dlaczego MSI, a nie INTx: na prawdziwym komputerze to, do której linii
-// IRQ podłączono INTx urządzenia, opisuje ACPI w kodzie AML (_PRT) – bez
-// interpretera AML nie da się tego ustalić.  MSI nie ma tego problemu.
+// Why MSI and not INTx: on a real computer, which IRQ line a device's INTx
+// is wired to is described by ACPI in AML code (_PRT) – without
+// an AML interpreter it cannot be determined.  MSI does not have this problem.
 //
-// M17: I/O APIC (ioapic.rs) zamiast PIC, timer LAPIC na AP, IPI (start AP,
-// pobudka bezczynnego CPU, zatrzymanie przy panic).
-// Obsługiwane oba tryby: xAPIC (MMIO pod adresem z MSR) i x2APIC (MSR),
-// bo część firmware włącza x2APIC przed startem systemu.
+// Also: I/O APIC (ioapic.rs) instead of the PIC, LAPIC timer on APs, IPIs (AP startup,
+// waking an idle CPU, halting on panic).
+// Both modes are supported: xAPIC (MMIO at the address from the MSR) and x2APIC (MSR),
+// because some firmware enables x2APIC before the OS starts.
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -41,18 +41,18 @@ const REG_TIMER_DIVIDE: u32 = 0x3E0;
 
 const LVT_MASKED: u32 = 1 << 16;
 const TIMER_PERIODIC: u32 = 1 << 17;
-/// Dzielnik zegara timera: 16 (kod 0b0011).
+/// Timer clock divisor: 16 (code 0b0011).
 const TIMER_DIV_16: u32 = 0b0011;
 
-/// M17: wektory LAPIC – timer AP, IPI "przełącz zadanie", IPI "stop" (panic).
+/// LAPIC vectors – AP timer, "switch task" IPI, "stop" IPI (panic).
 pub const TIMER_VECTOR: u8 = 0x40;
 pub const RESCHED_VECTOR: u8 = 0x41;
 pub const HALT_VECTOR: u8 = 0x42;
-/// Okres timera LAPIC na AP (ms).
+/// LAPIC timer period on APs (ms).
 pub const AP_TICK_MS: u32 = 10;
 
 const SVR_ENABLE: u32 = 1 << 8;
-/// Wektor "spurious" LAPIC (handler nic nie robi, bez EOI – idt.rs).
+/// LAPIC "spurious" vector (the handler does nothing, no EOI – idt.rs).
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 const MODE_NONE: u8 = 0;
@@ -60,11 +60,11 @@ const MODE_XAPIC: u8 = 1;
 const MODE_X2APIC: u8 = 2;
 
 static MODE: AtomicU8 = AtomicU8::new(MODE_NONE);
-static BASE: AtomicU64 = AtomicU64::new(0); // adres wirtualny (xAPIC)
+static BASE: AtomicU64 = AtomicU64::new(0); // virtual address (xAPIC)
 static ID: AtomicU64 = AtomicU64::new(0);
-/// Takty timera LAPIC (dzielnik 16) na 1 ms – z kalibracji na BSP.
+/// LAPIC timer ticks (divisor 16) per 1 ms – from calibration on the BSP.
 static TICKS_PER_MS: AtomicU64 = AtomicU64::new(0);
-/// Takty TSC na 1 ms (ta sama kalibracja; watchdog).
+/// TSC ticks per 1 ms (same calibration; watchdog).
 static TSC_PER_MS: AtomicU64 = AtomicU64::new(0);
 
 fn rdtsc() -> u64 {
@@ -73,7 +73,7 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-/// Takty TSC na ms (0 = nieskalibrowane).
+/// TSC ticks per ms (0 = not calibrated).
 pub fn tsc_per_ms() -> u64 {
     TSC_PER_MS.load(Ordering::Relaxed)
 }
@@ -111,8 +111,8 @@ fn write(reg: u32, value: u32) {
     }
 }
 
-/// Włącza dostęp do LAPIC.  `false` – brak (MSI niedostępne, sterowniki
-/// przechodzą na odpytywanie).  Po starcie pamięci (map_mmio).
+/// Enables access to the LAPIC.  `false` – none (MSI unavailable, drivers
+/// fall back to polling).  After memory init (map_mmio).
 pub fn init() -> bool {
     #[allow(unused_unsafe)]
     let has_apic = unsafe { core::arch::x86_64::__cpuid(1) }.edx & (1 << 9) != 0;
@@ -140,9 +140,9 @@ pub fn init() -> bool {
     let id = if x2 { read(REG_ID) as u64 } else { (read(REG_ID) >> 24) as u64 };
     ID.store(id, Ordering::SeqCst);
 
-    // LAPIC programowo wyłączony (rzadkie) – włączamy go w konfiguracji
-    // "virtual wire" (LINT0 = ExtINT z PIC-a, LINT1 = NMI), tak jak Linux,
-    // żeby przerwania z PIC-a dalej dochodziły.
+    // LAPIC disabled in software (rare) – we enable it in the
+    // "virtual wire" configuration (LINT0 = ExtINT from the PIC, LINT1 = NMI), like Linux,
+    // so that interrupts from the PIC still get through.
     let svr = read(REG_SVR);
     let was_enabled = svr & SVR_ENABLE != 0;
     if !was_enabled {
@@ -164,17 +164,17 @@ pub fn available() -> bool {
     MODE.load(Ordering::Relaxed) != MODE_NONE
 }
 
-/// Koniec obsługi przerwania MSI.
+/// End of MSI interrupt handling.
 pub fn eoi() {
     write(REG_EOI, 0);
 }
 
-/// ID Local APIC procesora startowego (BSP) – zapisane przy init.
+/// Local APIC ID of the boot processor (BSP) – recorded at init.
 pub fn bsp_id() -> u64 {
     ID.load(Ordering::Relaxed)
 }
 
-/// ID Local APIC procesora, na którym działa kod (M17: SMP).
+/// Local APIC ID of the processor the code is running on (SMP).
 pub fn id() -> u64 {
     match MODE.load(Ordering::Relaxed) {
         MODE_X2APIC => read(REG_ID) as u64,
@@ -184,17 +184,17 @@ pub fn id() -> u64 {
 }
 
 // ------------------------------------------------------------
-// M17: timer LAPIC i przerwania między procesorami (IPI)
+// LAPIC timer and inter-processor interrupts (IPI)
 // ------------------------------------------------------------
 
-/// Kalibruje timer LAPIC zegarem PIT (ticki co 1 ms).  BSP, z włączonymi
-/// przerwaniami, po time::init.  `false` – nie wyszło (brak LAPIC / zegara).
+/// Calibrates the LAPIC timer against the PIT clock (1 ms ticks).  BSP, with interrupts
+/// enabled, after time::init.  `false` – it failed (no LAPIC / clock).
 pub fn calibrate_timer() -> bool {
     if !available() {
         return false;
     }
     const MS: u64 = 20;
-    // Start na granicy ticku.
+    // Start on a tick boundary.
     let t0 = crate::time::ticks();
     let mut guard = 0u64;
     while crate::time::ticks() == t0 {
@@ -233,7 +233,7 @@ pub fn timer_ticks_per_ms() -> u64 {
     TICKS_PER_MS.load(Ordering::Relaxed)
 }
 
-/// Okresowy timer LAPIC bieżącego CPU: wektor TIMER_VECTOR co `ms` ms.
+/// Periodic LAPIC timer of the current CPU: vector TIMER_VECTOR every `ms` ms.
 pub fn start_periodic_timer(ms: u32) {
     let per_ms = TICKS_PER_MS.load(Ordering::Relaxed);
     let count = (per_ms * ms as u64).clamp(1, u32::MAX as u64) as u32;
@@ -242,8 +242,8 @@ pub fn start_periodic_timer(ms: u32) {
     write(REG_TIMER_INITIAL, count);
 }
 
-/// LAPIC procesora AP: ten sam tryb co BSP, włączony, LINT0/LINT1
-/// zamaskowane (przerwania ISA idą przez I/O APIC do BSP), TPR = 0.
+/// LAPIC of an AP: same mode as the BSP, enabled, LINT0/LINT1
+/// masked (ISA interrupts go via the I/O APIC to the BSP), TPR = 0.
 pub fn init_ap() -> bool {
     let base = unsafe { rdmsr(IA32_APIC_BASE) };
     match MODE.load(Ordering::Relaxed) {
@@ -255,7 +255,7 @@ pub fn init_ap() -> bool {
         }
         MODE_XAPIC => {
             if base & APIC_X2APIC != 0 {
-                return false; // AP w innym trybie niż BSP – nie obsługujemy
+                return false; // AP in a different mode than the BSP – not supported
             }
             if base & APIC_GLOBAL_ENABLE == 0 {
                 unsafe { wrmsr(IA32_APIC_BASE, base | APIC_GLOBAL_ENABLE) };
@@ -273,14 +273,14 @@ pub fn init_ap() -> bool {
     true
 }
 
-/// Wysyła IPI: `low` = tryb dostarczenia + wektor, `dest` = APIC ID.
+/// Sends an IPI: `low` = delivery mode + vector, `dest` = APIC ID.
 fn send_icr(dest: u32, low: u32) {
     match MODE.load(Ordering::Relaxed) {
         MODE_X2APIC => unsafe { wrmsr(0x830, ((dest as u64) << 32) | low as u64) },
         MODE_XAPIC => {
             write(REG_ICR_HIGH, (dest & 0xFF) << 24);
             write(REG_ICR_LOW, low);
-            // Czekamy, aż LAPIC wyśle (bit 12: delivery status).
+            // Wait until the LAPIC has sent it (bit 12: delivery status).
             let mut n = 0;
             while read(REG_ICR_LOW) & (1 << 12) != 0 && n < 1_000_000 {
                 core::hint::spin_loop();
@@ -291,33 +291,33 @@ fn send_icr(dest: u32, low: u32) {
     }
 }
 
-/// INIT (procesor `apic_id` wraca do stanu po resecie i czeka na SIPI).
+/// INIT (processor `apic_id` returns to its post-reset state and waits for SIPI).
 pub fn send_init(apic_id: u32) {
     send_icr(apic_id, 0x0000_4500); // INIT, level assert
 }
 
-/// Startup IPI: procesor zaczyna w trybie rzeczywistym od adresu `page * 4096`.
+/// Startup IPI: the processor starts in real mode at address `page * 4096`.
 pub fn send_sipi(apic_id: u32, page: u8) {
     send_icr(apic_id, 0x0000_4600 | page as u32);
 }
 
-/// Zwykłe przerwanie `vector` na procesorze `apic_id`.
+/// Ordinary interrupt `vector` on processor `apic_id`.
 pub fn send_ipi(apic_id: u32, vector: u8) {
     send_icr(apic_id, 0x0000_4000 | vector as u32);
 }
 
-/// NMI do wszystkich procesorów poza bieżącym (watchdog – działa także przy
-/// wyłączonych przerwaniach).
+/// NMI to all processors except the current one (watchdog – works even with
+/// interrupts disabled).
 pub fn send_nmi_others() {
     send_icr(0, (0b11 << 18) | 0x0000_4400);
 }
 
-/// Przerwanie `vector` do wszystkich procesorów poza bieżącym.
+/// Interrupt `vector` to all processors except the current one.
 pub fn send_ipi_others(vector: u8) {
     send_icr(0, (0b11 << 18) | 0x0000_4000 | vector as u32);
 }
 
-/// Adres komunikatu MSI: przerwanie do procesora startowego (BSP), tryb fizyczny.
+/// MSI message address: interrupt to the boot processor (BSP), physical mode.
 pub fn msi_address() -> u64 {
     0xFEE0_0000 | ((bsp_id() & 0xFF) << 12)
 }

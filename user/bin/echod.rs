@@ -1,9 +1,9 @@
-// M19.g: echod – najprostsza usługa (bez urządzenia), do testów menedżera
-// usług w init i jako wzór usługi.  Uchwyty: 1 = konsola, 4 = kanał połączeń.
-// Każdy klient (koniec kanału z komunikatu na kanale połączeń) dostaje z
-// powrotem to, co wysłał; "pid" -> numer procesu usługi (tekst);
-// "crash" -> usługa kończy się kodem 7 (test restartu).
-// Koniec: kanał połączeń zamknięty i żaden klient nie został -> kod 0.
+// echod – the simplest service (no device), for testing the service manager
+// in init and as a template service.  Handles: 1 = console, 4 = connection channel.
+// Every client (a channel end from a message on the connection channel) gets
+// back what it sent; "pid" -> the service's process number (text);
+// "crash" -> the service exits with code 7 (restart test).
+// Exit: connection channel closed and no clients left -> code 0.
 #![no_std]
 #![no_main]
 

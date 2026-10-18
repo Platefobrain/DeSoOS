@@ -1,9 +1,9 @@
-// M18.f: pomiar IPC – opóźnienie wymiany (ping-pong 8 B), przepustowość
-// kanału (komunikaty 4 KiB w jedną stronę) i te same dane przez kanał
-// (kopiowanie przez jądro) kontra pamięć współdzielona (dzwonek przez kanał).
-// Wynik: linia "ipcbench: ..." dla ludzi i "ipcbench-result k=v ..." dla
-// [RESULT] w autostressie; kod 0.  Dziecko: `ipcbench echo|sink|shm`
-// (0 = kanał, 1 = pamięć w trybie shm).
+// IPC benchmark – round-trip latency (8 B ping-pong), channel
+// throughput (4 KiB messages one way) and the same data over a channel
+// (copied by the kernel) versus shared memory (doorbell over a channel).
+// Result: an "ipcbench: ..." line for humans and "ipcbench-result k=v ..." for
+// [RESULT] in autostress; code 0.  Child: `ipcbench echo|sink|shm`
+// (0 = channel, 1 = memory in shm mode).
 #![no_std]
 #![no_main]
 
@@ -17,7 +17,7 @@ entry!(main);
 
 const PINGPONG: u64 = 20_000;
 const SINK_MSGS: u64 = 20_000;
-/// Dane do porównania kanał / pamięć: 16 MiB w kawałkach 1 MiB.
+/// Data for the channel / memory comparison: 16 MiB in 1 MiB chunks.
 const CHUNK: u64 = 1024 * 1024;
 const CHUNKS: u64 = 16;
 
@@ -38,8 +38,8 @@ fn echo() -> i32 {
     0
 }
 
-/// Odbiera komunikaty (4 KiB albo kawałki danych) i sumuje bajty; pusty
-/// komunikat = "podaj sumę".
+/// Receives messages (4 KiB or data chunks) and sums the bytes; an empty
+/// message = "send the sum".
 fn sink() -> i32 {
     let mut buf = [0u8; MSG_MAX];
     let mut info = RecvInfo::default();
@@ -58,7 +58,7 @@ fn sink() -> i32 {
     }
 }
 
-/// Na każdy dzwonek sumuje cały kawałek wspólnej pamięci i odpowiada.
+/// On each doorbell sums the whole shared-memory chunk and replies.
 fn shm_reader() -> i32 {
     let Ok(a) = shm_map(1, PROT_READ) else { return 3 };
     let m = unsafe { core::slice::from_raw_parts(a as *const u8, CHUNK as usize) };
@@ -96,7 +96,7 @@ fn main(args: Args) -> i32 {
     let mut buf = [0u8; MSG_MAX];
     let mut info = RecvInfo::default();
 
-    // 1. Ping-pong: komunikat 8 B tam i z powrotem.
+    // 1. Ping-pong: an 8 B message there and back.
     let Some((p, pid)) = start("echo", None) else {
         println!("ipcbench: FAIL spawn");
         return 1;
@@ -110,7 +110,7 @@ fn main(args: Args) -> i32 {
     stop(p, pid);
     let pp_ns = pp_ms * 1_000_000 / PINGPONG;
 
-    // 2. Przepustowość kanału: komunikaty 4 KiB w jedną stronę.
+    // 2. Channel throughput: 4 KiB messages one way.
     let Some((p, pid)) = start("sink", None) else { return 1 };
     let block = [0x5Au8; MSG_MAX];
     let t0 = uptime_ms();
@@ -124,7 +124,7 @@ fn main(args: Args) -> i32 {
     let chan_mbs = SINK_MSGS * MSG_MAX as u64 / 1024 * 1000 / 1024 / sink_ms;
     let msgs_s = SINK_MSGS * 1000 / sink_ms;
 
-    // 3a. 16 MiB przez kanał (4 KiB komunikaty, suma na końcu kawałka).
+    // 3a. 16 MiB over a channel (4 KiB messages, sum at the end of a chunk).
     let t0 = uptime_ms();
     let mut via_chan_ok = true;
     for c in 0..CHUNKS {
@@ -139,7 +139,7 @@ fn main(args: Args) -> i32 {
     let chan_data_ms = (uptime_ms() - t0).max(1);
     stop(p, pid);
 
-    // 3b. 16 MiB przez pamięć współdzieloną: kawałek 1 MiB, dzwonek, suma.
+    // 3b. 16 MiB over shared memory: 1 MiB chunk, doorbell, sum.
     let shm = shm_create(CHUNK) as u64;
     let Ok(a) = shm_map(shm, PROT_READ | PROT_WRITE) else { return 1 };
     let m = unsafe { core::slice::from_raw_parts_mut(a as *mut u8, CHUNK as usize) };

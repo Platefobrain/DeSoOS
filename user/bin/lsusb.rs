@@ -1,7 +1,7 @@
-// M20.c: lsusb – urządzenia USB na wszystkich kontrolerach.  Pyta każdą usługę
-// usbN (init, kanał svc w slocie 3) prośbą "list"; usbd odpisuje linią na
-// urządzenie: port, VID:PID, prędkość, wersja USB, adres, rodzaj, klasy
-// interfejsów, producent i produkt (z napisów urządzenia).
+// lsusb – USB devices on all controllers.  Sends a "list" request to every
+// usbN service (via init, svc channel in slot 3); usbd replies with one line per
+// device: port, VID:PID, speed, USB version, address, kind, interface
+// classes, manufacturer and product (from the device's strings).
 #![no_std]
 #![no_main]
 

@@ -1,20 +1,20 @@
-// M8: warstwa urządzeń blokowych – wspólny interfejs dysków.
+// Block device layer – a common interface for disks.
 //
-// Każdy sterownik dysku (virtio-blk teraz, NVMe / AHCI później) implementuje
-// `BlockDevice` i rejestruje się przez `register()`.  Wyżej (system plików
-// w M9, shell) używa się tylko tego interfejsu – nie wie, jaki to dysk.
+// Every disk driver (virtio-blk now, NVMe / AHCI later) implements
+// `BlockDevice` and registers itself via `register()`.  Upper layers (the file
+// system, the shell) use only this interface – they do not know what disk it is.
 //
-// Jedno żądanie naraz na dysk (wywołanie czeka na zakończenie).  M12: dostęp
-// pod blokadą (od M20.f – osobna dla każdego dysku); zadanie czekające na
-// dysk śpi (virtio: BLK_WAIT).
+// One request at a time per disk (the call waits for completion).  Access is
+// under a lock (a separate one for each disk); a task waiting for the
+// disk sleeps (virtio: BLK_WAIT).
 //
-// M16b:
-//   * Dysk tylko do odczytu jest pilnowany TUTAJ (niezależnie od sterownika
-//     i systemu plików): `write` na takim dysku kończy się ReadOnly, zanim
-//     cokolwiek trafi do sterownika.  Prawdziwe dyski NVMe są zawsze tylko
-//     do odczytu (drivers/nvme.rs).
-//   * Partycje (GPT – gpt.rs) są osobnymi dyskami, np. "nvme0n1p1": mają
-//     przesunięcie i długość, dziedziczą "tylko do odczytu" po dysku.
+// Notes:
+//   * Read-only disks are enforced HERE (independently of the driver
+//     and file system): `write` on such a disk fails with ReadOnly before
+//     anything reaches the driver.  Real NVMe disks are always
+//     read-only (drivers/nvme.rs).
+//   * Partitions (GPT – gpt.rs) are separate disks, e.g. "nvme0n1p1": they have
+//     an offset and length and inherit "read-only" from the disk.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -25,19 +25,19 @@ pub const SECTOR_SIZE: usize = 512;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockError {
-    /// LBA lub długość poza dyskiem.
+    /// LBA or length beyond the disk.
     OutOfRange,
-    /// Bufor nie jest wielokrotnością rozmiaru sektora.
+    /// Buffer is not a multiple of the sector size.
     BadBuffer,
-    /// Dysk tylko do odczytu.
+    /// Read-only disk.
     ReadOnly,
-    /// Urządzenie zgłosiło błąd I/O.
+    /// The device reported an I/O error.
     Io,
-    /// Operacja nieobsługiwana przez urządzenie.
+    /// Operation not supported by the device.
     Unsupported,
-    /// Urządzenie nie odpowiedziało w czasie.
+    /// The device did not respond in time.
     Timeout,
-    /// Nie ma dysku o takim numerze.
+    /// There is no disk with that number.
     NoDevice,
 }
 
@@ -57,35 +57,35 @@ impl core::fmt::Display for BlockError {
 }
 
 pub trait BlockDevice {
-    /// Krótka nazwa, np. "vda".
+    /// Short name, e.g. "vda".
     fn name(&self) -> &str;
-    /// Opis dla ludzi (typ, model).
+    /// Human-readable description (type, model).
     fn description(&self) -> String;
-    /// Liczba sektorów po 512 B.
+    /// Number of 512 B sectors.
     fn sector_count(&self) -> u64;
     fn read_only(&self) -> bool;
-    /// M16b: natywny rozmiar bloku urządzenia (512 albo 4096) – interfejs i tak
-    /// liczy w sektorach po 512 B, ale GPT podaje adresy w blokach urządzenia.
+    /// Native block size of the device (512 or 4096) – the interface still
+    /// counts in 512 B sectors, but GPT gives addresses in device blocks.
     fn logical_block_size(&self) -> usize {
         SECTOR_SIZE
     }
-    /// M16b: typ partycji GPT (None: cały dysk, nie partycja).
+    /// GPT partition type (None: a whole disk, not a partition).
     fn partition_kind(&self) -> Option<&'static str> {
         None
     }
-    /// M20.f: numer dysku-rodzica (partycja) albo None.
+    /// Number of the parent disk (for a partition) or None.
     fn parent(&self) -> Option<usize> {
         None
     }
-    /// Czyta `buf.len() / 512` sektorów od `lba`.
+    /// Reads `buf.len() / 512` sectors starting at `lba`.
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError>;
-    /// Zapisuje `buf.len() / 512` sektorów od `lba`.
+    /// Writes `buf.len() / 512` sectors starting at `lba`.
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError>;
-    /// Wymusza zapis z cache urządzenia na nośnik.
+    /// Forces the device cache to be written to the medium.
     fn flush(&mut self) -> Result<(), BlockError>;
 }
 
-/// Sprawdzenie zakresu wspólne dla sterowników.
+/// Range check shared by the drivers.
 pub fn check_range(dev_sectors: u64, lba: u64, len: usize) -> Result<u64, BlockError> {
     if len == 0 || len % SECTOR_SIZE != 0 {
         return Err(BlockError::BadBuffer);
@@ -97,27 +97,27 @@ pub fn check_range(dev_sectors: u64, lba: u64, len: usize) -> Result<u64, BlockE
     }
 }
 
-// M20.f: blokada PER DYSK (dawniej jedna globalna „block layer”) – odczyt z
-// pendrive'a może czekać na usbd do 5 s, a nie może przy tym zatrzymać NVMe
-// ani virtio.  Lista dysków pod krótką blokadą (wyszukanie wpisu, Arc),
-// operacja pod blokadą dysku (KMutex – reentrant, usypiająca).  Partycja
-// bierze swoją blokadę, potem blokadę dysku-rodzica (zawsze w tej kolejności).
-// Kolejność: FS_LOCK -> blokada partycji -> blokada dysku.
+// One lock PER DISK (rather than one global „block layer” lock) – a read from
+// a USB stick can wait up to 5 s for usbd, and it must not stall NVMe
+// or virtio meanwhile.  The disk list is under a short lock (entry lookup, Arc),
+// the operation under the disk lock (KMutex – reentrant, sleeping).  A partition
+// takes its own lock, then the parent disk's lock (always in this order).
+// Order: FS_LOCK -> partition lock -> disk lock.
 //
-// Usuwanie (M20.f, dysk USB zniknął): wpis listy = None, numer wraca do puli
-// dopiero, gdy nic już go nie używa – usuwający najpierw odmontowuje systemy
-// plików z dysku i jego partycji (ublk.rs).  Operacja w toku trzyma Arc.
+// Removal (a USB disk went away): the list entry = None, the number returns to the pool
+// only when nothing uses it any more – the remover first unmounts the file
+// systems on the disk and its partitions (ublk.rs).  An operation in progress holds an Arc.
 
 struct Disk {
-    /// Kopia nazwy – `find` bez brania blokady dysku.
+    /// Copy of the name – `find` without taking the disk lock.
     name: String,
-    /// Dysk-rodzic (partycja) – `partitions_of` bez blokad dysków.
+    /// Parent disk (for a partition) – `partitions_of` without disk locks.
     parent: Option<usize>,
     lock: crate::sched::sync::KMutex,
     dev: core::cell::UnsafeCell<Box<dyn BlockDevice>>,
 }
 
-// Urządzenie zmienia się tylko pod `lock` (KMutex – jedno zadanie naraz).
+// The device changes only under `lock` (KMutex – one task at a time).
 unsafe impl Sync for Disk {}
 unsafe impl Send for Disk {}
 
@@ -128,7 +128,7 @@ fn disk(index: usize) -> Option<Arc<Disk>> {
     DISKS.lock().get(index).cloned().flatten()
 }
 
-/// Dodaje dysk; zwraca jego numer (pierwszy wolny – po usuniętym dysku USB).
+/// Adds a disk; returns its number (the first free one – e.g. after a removed USB disk).
 pub fn register(device: Box<dyn BlockDevice>) -> usize {
     let d = Arc::new(Disk {
         name: String::from(device.name()),
@@ -138,7 +138,7 @@ pub fn register(device: Box<dyn BlockDevice>) -> usize {
     });
     let mut list = DISKS.lock();
     if list.capacity() == 0 {
-        // Bez przenoszenia tablicy przy kolejnych dyskach (testy liczą ramki).
+        // No moving of the table as more disks are added (tests count frames).
         list.reserve(32);
     }
     if let Some(i) = list.iter().position(|e| e.is_none()) {
@@ -149,8 +149,8 @@ pub fn register(device: Box<dyn BlockDevice>) -> usize {
     list.len() - 1
 }
 
-/// M20.f: usuwa dysk (wpis wolny).  Wołający odmontował już systemy plików z
-/// niego i z jego partycji.
+/// Removes a disk (frees the entry).  The caller has already unmounted file systems from
+/// it and from its partitions.
 pub fn remove(index: usize) {
     let old = {
         let mut list = DISKS.lock();
@@ -159,15 +159,15 @@ pub fn remove(index: usize) {
             None => None,
         }
     };
-    drop(old); // Drop urządzenia poza blokadą listy
+    drop(old); // Drop the device outside the list lock
 }
 
-/// Liczba wpisów (numery 0..count; usunięte dają NoDevice).
+/// Number of entries (numbers 0..count; removed ones give NoDevice).
 pub fn count() -> usize {
     DISKS.lock().len()
 }
 
-/// Operacja na dysku o numerze `index` (pod blokadą tego dysku).
+/// Operation on disk number `index` (under that disk's lock).
 pub fn with_device<R>(index: usize, f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Result<R, BlockError> {
     let d = disk(index).ok_or(BlockError::NoDevice)?;
     let _g = d.lock.lock();
@@ -180,7 +180,7 @@ pub fn read(index: usize, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 
 pub fn write(index: usize, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     with_device(index, |d| {
-        // M16b: druga linia obrony – dysk tylko do odczytu nie dostaje zapisu.
+        // Second line of defense – a read-only disk never receives a write.
         if d.read_only() {
             return Err(BlockError::ReadOnly);
         }
@@ -197,26 +197,26 @@ pub fn is_read_only(index: usize) -> bool {
     with_device(index, |d| d.read_only()).unwrap_or(true)
 }
 
-/// Numer dysku o nazwie `name`.
+/// Number of the disk named `name`.
 #[allow(dead_code)]
 pub fn find(name: &str) -> Option<usize> {
     DISKS.lock().iter().position(|d| matches!(d, Some(d) if d.name == name))
 }
 
-/// M20.f: numery partycji dysku `parent` (rejestruje je scan_partitions).
+/// Partition numbers of disk `parent` (registered by scan_partitions).
 pub fn partitions_of(parent: usize) -> Vec<usize> {
     let list = DISKS.lock();
     (0..list.len()).filter(|&i| matches!(&list[i], Some(d) if d.parent == Some(parent))).collect()
 }
 
 // ------------------------------------------------------------
-// M16b: partycje jako osobne dyski
+// Partitions as separate disks
 // ------------------------------------------------------------
 
 pub struct Partition {
     name: String,
     parent: usize,
-    /// Początek i długość w sektorach po 512 B.
+    /// Start and length in 512 B sectors.
     start: u64,
     sectors: u64,
     read_only: bool,
@@ -271,9 +271,9 @@ impl BlockDevice for Partition {
     }
 }
 
-/// Czyta GPT dysku `disk` i rejestruje jego partycje jako dyski
-/// "<nazwa>p<n>" (albo "<nazwa><n>", gdy nazwa kończy się cyfrą... jak w
-/// Linuksie: nvme0n1 -> nvme0n1p1, vda -> vda1).  Zwraca liczbę partycji.
+/// Reads the GPT of disk `disk` and registers its partitions as disks
+/// "<name>p<n>" (or "<name><n>" unless the name ends with a digit... as in
+/// Linux: nvme0n1 -> nvme0n1p1, vda -> vda1).  Returns the number of partitions.
 pub fn scan_partitions(disk: usize) -> usize {
     let Ok((name, read_only, block_size)) =
         with_device(disk, |d| (String::from(d.name()), d.read_only(), d.logical_block_size()))
@@ -293,7 +293,7 @@ pub fn scan_partitions(disk: usize) -> usize {
     for p in &parts {
         let pname = alloc::format!("{}{}{}", name, sep, p.index);
         if find(&pname).is_some() {
-            continue; // już zarejestrowana
+            continue; // already registered
         }
         let part = Partition {
             name: pname.clone(),
@@ -319,14 +319,14 @@ pub fn scan_partitions(disk: usize) -> usize {
     n
 }
 
-/// Typ partycji dysku `index` (None: to nie partycja).
+/// Partition type of disk `index` (None: not a partition).
 #[allow(dead_code)]
 pub fn partition_kind(index: usize) -> Option<&'static str> {
     with_device(index, |d| d.partition_kind()).ok().flatten()
 }
 
 // ------------------------------------------------------------
-// Dysk w pamięci (testy systemu plików bez ruszania prawdziwego dysku)
+// In-memory disk (file system tests without touching a real disk)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]

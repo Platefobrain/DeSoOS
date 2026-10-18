@@ -1,6 +1,6 @@
-// M19.g: services – stan usług uruchomionych przez init (menedżer usług).
-// Pyta init przez kanał w slocie 3 ("list") i wypisuje odpowiedź:
-//   nazwa  stan  pid  restarty  program
+// services – state of the services started by init (service manager).
+// Asks init over the channel in slot 3 ("list") and prints the reply:
+//   name  state  pid  restarts  program
 #![no_std]
 #![no_main]
 
@@ -28,7 +28,7 @@ fn main(_args: Args) -> i32 {
     let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
     println!("{:<8} {:<11} {:>5} {:>8}  {}", "SERVICE", "STATE", "PID", "RESTARTS", "PROGRAM");
     for line in text.lines() {
-        // "nazwa stan pid N restarts N (program)"; stan może mieć spację ("no device").
+        // "name state pid N restarts N (program)"; state may contain a space ("no device").
         let Some((head, prog)) = line.rsplit_once(" (") else { continue };
         let prog = prog.trim_end_matches(')');
         let Some((head, restarts)) = head.rsplit_once(" restarts ") else { continue };

@@ -1,6 +1,6 @@
-// M17b.b: test potoków – odczyt / zapis, koniec danych, EPIPE, dane większe
-// niż bufor (64 KiB) przez `cat` w dziecku, wyjście dziecka przez potok.
-// Wynik: "pipetest: N checks OK" i kod 0 albo opis błędu i kod 1.
+// Pipe test – read / write, end of data, EPIPE, data larger
+// than the buffer (64 KiB) through `cat` in a child, child output through a pipe.
+// Result: "pipetest: N checks OK" and exit code 0, or an error description and code 1.
 #![no_std]
 #![no_main]
 
@@ -29,7 +29,7 @@ macro_rules! check {
     };
 }
 
-/// Wszystko z deskryptora do końca danych.
+/// Everything from the descriptor until end of data.
 fn drain(fd: u64) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
@@ -46,7 +46,7 @@ fn main(_args: Args) -> i32 {
     let mut n = 0;
     let mut buf = [0u8; 64];
 
-    // 1. Zapis i odczyt w jednym procesie, koniec danych po zamknięciu.
+    // 1. Write and read in a single process, end of data after close.
     let p = pipe();
     check!(n, p.is_ok(), "pipe: {:?}", p);
     let (r, w) = p.unwrap();
@@ -61,14 +61,14 @@ fn main(_args: Args) -> i32 {
     check!(n, read(r, &mut buf) == 0, "end of data after the writer closed");
     close(r);
 
-    // 2. Nikt nie czyta: EPIPE.
+    // 2. Nobody reads: EPIPE.
     let (r, w) = pipe().unwrap();
     close(r);
     check!(n, write(w, b"lost") == -32, "write without readers must be EPIPE");
     close(w);
 
-    // 3. 200 KiB (więcej niż bufor) przez `cat` w dziecku do pliku: zapis
-    // czeka, aż cat odczyta.
+    // 3. 200 KiB (more than the buffer) through `cat` in a child into a file: the writer
+    // waits until cat reads.
     unlink(PATH);
     let out = open(PATH, O_WRITE | O_CREATE | O_TRUNC);
     check!(n, out >= 0, "open: {}", strerror(out));
@@ -77,7 +77,7 @@ fn main(_args: Args) -> i32 {
     check!(n, pid > 0, "spawn cat: {}", strerror(pid));
     close(r);
     close(out as u64);
-    // Wzór (i % 251) w kawałkach – sterta programu to jeszcze 256 KiB.
+    // Pattern (i % 251) in chunks – the program heap is still only 256 KiB.
     let mut chunk = [0u8; 4096];
     let mut wrote = 0usize;
     while wrote < BIG {
@@ -111,7 +111,7 @@ fn main(_args: Args) -> i32 {
     close(f);
     check!(n, pos == BIG && same, "file after cat: {} bytes, content ok {}", pos, same);
 
-    // 4. Wyjście dziecka przez potok: primes 100 | (ten proces).
+    // 4. Child output through a pipe: primes 100 | (this process).
     let (r, w) = pipe().unwrap();
     let pid = spawn("/bin/primes", &["primes", "100"], 0, fds(0, w, 2));
     check!(n, pid > 0, "spawn primes: {}", strerror(pid));
@@ -122,7 +122,7 @@ fn main(_args: Args) -> i32 {
     let s = core::str::from_utf8(&text).unwrap_or("");
     check!(n, matches!(st, Ok((_, 0))) && s.contains("25 primes below 100"), "primes via pipe: {:?}", s);
 
-    // 5. Czytający czeka na dane od dziecka (sleep, potem zapis).
+    // 5. Reader waits for data from the child (sleep, then write).
     let (r, w) = pipe().unwrap();
     let t0 = uptime_ms();
     let pid = spawn("/bin/sh", &["sh", "-c", "sleep", "100"], 0, fds(0, w, 2));

@@ -1,39 +1,39 @@
-// M5: zegar systemowy – ticki z PIT (IRQ0), uptime, sleep.
+// System clock – ticks from the PIT (IRQ0), uptime, sleep.
 //
-// PIT kanał 0 -> IRQ0 -> on_tick(): TICKS += 1 (+ opcjonalny hook, np. dla
-// schedulera w M12).  Wszystko, co tu jest, zakłada jeden rdzeń.
+// PIT channel 0 -> IRQ0 -> on_tick(): TICKS += 1 (+ an optional hook, e.g. for
+// the scheduler).  Everything here assumes a single core.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{interrupts, irq, pit};
 use crate::serial_println;
 
-/// Docelowa częstotliwość ticków (1 tick ≈ 1 ms).
+/// Target tick frequency (1 tick ≈ 1 ms).
 pub const HZ: u32 = 1000;
 
 const TIMER_IRQ: u8 = 0;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
-// fn(u64) jako usize; 0 = brak hooka.
+// fn(u64) as usize; 0 = no hook.
 static TICK_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 pub type TickHook = fn(ticks: u64);
 
-/// M17a: licznik ticków zwiększany jeszcze PRZED Big Kernel Lock
-/// (exceptions.rs, wektor IRQ0) – czas systemu idzie dokładnie także wtedy,
-/// gdy przerwanie zegara czeka w kolejce do BKL.  Reszta ticku (budzenie
-/// zadań, kwant) – w on_tick, już pod BKL.
+/// Tick counter incremented even BEFORE the Big Kernel Lock
+/// (exceptions.rs, IRQ0 vector) – system time stays accurate even when
+/// the timer interrupt is queued waiting for the BKL.  The rest of the tick (waking
+/// tasks, time slice) happens in on_tick, already under the BKL.
 pub fn pit_tick_early() {
-    // M17a.b: ticki doganiają zegar HPET.  CPU 0 czekający na BKL z IF = 0
-    // gubił przerwania PIT (kontroler trzyma tylko jedno oczekujące), więc
-    // przy zatorze czas systemu stał: u Dawida 10 s testu trwało 99 s,
-    // `stress 30` – ~115 s.  Teraz przerwanie PIT jest tylko "budzikiem":
-    // każde dodaje co najmniej 1 tick (jak dotąd), a gdy HPET mówi, że
-    // minęło więcej milisekund, brakujące ticki są dodawane od razu.
+    // Ticks catch up with the HPET clock.  CPU 0 waiting for the BKL with IF = 0
+    // used to lose PIT interrupts (the controller holds only one pending), so
+    // under congestion system time stood still: on real hardware a 10 s test took 99 s,
+    // `stress 30` – ~115 s.  Now the PIT interrupt is only an "alarm clock":
+    // each one adds at least 1 tick (as before), and when the HPET says that
+    // more milliseconds have passed, the missing ticks are added right away.
     //
-    // Tylko przy SMP: na jednym CPU przerwania giną wyłącznie wtedy, gdy
-    // emulator nie dostaje czasu od hosta – testy z ciasnymi limitami
-    // (sleep 30 ms -> 30..40) mierzyłyby wtedy przestoje hosta.
+    // SMP only: on a single CPU interrupts are lost only when
+    // the emulator gets no time from the host – tests with tight limits
+    // (sleep 30 ms -> 30..40) would then measure host stalls.
     use crate::arch::x86_64::{clock, smp};
     let mut n: u64 = 1;
     if !smp::active() {
@@ -43,7 +43,7 @@ pub fn pit_tick_early() {
         let last = HPET_LAST.swap(now, Ordering::Relaxed);
         if last != 0 {
             let d = clock::diff_us(last, now).clamp(0, 10_000_000);
-            // v0.32.1: najdłuższa przerwa między przerwaniami PIT (CPU 0) i ile > 2 ms.
+            // Longest gap between PIT interrupts (CPU 0) and how many are > 2 ms.
             GAP_MAX_US.fetch_max(d as u64, Ordering::Relaxed);
             if d > 2000 {
                 GAP_LONG.fetch_add(1, Ordering::Relaxed);
@@ -52,7 +52,7 @@ pub fn pit_tick_early() {
             let due = (acc / 1000).max(0) as u64;
             n = due.clamp(1, 10_000);
             acc -= n as i64 * 1000;
-            // Zapas ujemny (PIT minimalnie szybszy niż HPET) nie rośnie bez końca.
+            // A negative margin (PIT slightly faster than HPET) does not grow forever.
             HPET_ACC_US.store(acc.max(-5_000), Ordering::Relaxed);
             if n > 1 {
                 CAUGHT_UP.fetch_add(n - 1, Ordering::Relaxed);
@@ -62,33 +62,33 @@ pub fn pit_tick_early() {
     TICKS.fetch_add(n, Ordering::Relaxed);
 }
 
-/// M17a.b: HPET przy poprzednim przerwaniu PIT i niedoliczone mikrosekundy.
+/// HPET at the previous PIT interrupt and the microseconds not yet accounted for.
 static HPET_LAST: AtomicU64 = AtomicU64::new(0);
 static HPET_ACC_US: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
-/// Ile ticków dodano za zgubione przerwania PIT (`cpus`, testy).
+/// How many ticks were added for lost PIT interrupts (`cpus`, tests).
 static CAUGHT_UP: AtomicU64 = AtomicU64::new(0);
 static GAP_MAX_US: AtomicU64 = AtomicU64::new(0);
 static GAP_LONG: AtomicU64 = AtomicU64::new(0);
 
-/// v0.32.1: (najdłuższa przerwa między przerwaniami PIT w µs, ile przerw > 2 ms).
+/// (longest gap between PIT interrupts in µs, number of gaps > 2 ms).
 pub fn tick_gaps() -> (u64, u64) {
     (GAP_MAX_US.load(Ordering::Relaxed), GAP_LONG.load(Ordering::Relaxed))
 }
 
-/// Ticki dodane za zgubione przerwania PIT (doganianie HPET).
+/// Ticks added for lost PIT interrupts (HPET catch-up).
 pub fn caught_up_ticks() -> u64 {
     CAUGHT_UP.load(Ordering::Relaxed)
 }
 
 fn on_tick(_irq: u8) {
     let now = TICKS.load(Ordering::Relaxed);
-    // M12: kwant czasu i budzenie śpiących zadań.
+    // Time slice and waking sleeping tasks.
     crate::sched::on_tick(now);
-    // M16b: klawiatura PS/2 także bez IRQ1 (laptopy) – odpytywanie portu.
-    // M17a.g4: tick działa bez BKL, a dekoder klawiatury i wejście shella
-    // są jeszcze pod BKL – odpytujemy tylko, gdy BKL jest wolny od ręki
-    // (inaczej przy następnym ticku odpytywania; IRQ1 bierze go normalnie).
-    // Gdy przerwany kontekst już go trzyma, przerwanie może z niego korzystać.
+    // PS/2 keyboard also without IRQ1 (laptops) – port polling.
+    // The tick runs without the BKL, while the keyboard decoder and shell input
+    // are still under the BKL – we poll only when the BKL is free right away
+    // (otherwise on the next polling tick; IRQ1 takes it normally).
+    // When the interrupted context already holds it, the interrupt may use it.
     if crate::drivers::keyboard::poll_due(now) {
         use crate::sched::bkl;
         if bkl::held() {
@@ -105,8 +105,8 @@ fn on_tick(_irq: u8) {
     }
 }
 
-/// Programuje PIT, rejestruje handler IRQ0 i odmaskowuje linię.
-/// Przerwania włącza wołający (`interrupts::enable()`).
+/// Programs the PIT, registers the IRQ0 handler and unmasks the line.
+/// Interrupts are enabled by the caller (`interrupts::enable()`).
 pub fn init() {
     let actual = pit::init(HZ);
     if !irq::register(TIMER_IRQ, on_tick) {
@@ -125,12 +125,12 @@ pub fn init() {
     );
 }
 
-/// Liczba ticków od startu timera.
+/// Number of ticks since the timer started.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Czas od startu timera w ms, liczony z rzeczywistej częstotliwości PIT.
+/// Time since the timer started in ms, computed from the actual PIT frequency.
 #[allow(dead_code)]
 pub fn uptime_ms() -> u64 {
     let mhz = pit::actual_frequency_millihz();
@@ -141,26 +141,26 @@ pub fn uptime_ms() -> u64 {
     (ticks() as u128 * 1_000_000 / mhz as u128) as u64
 }
 
-/// Ustawia (Some) lub zdejmuje (None) funkcję wołaną w każdym ticku,
-/// z kontekstu przerwania.
+/// Sets (Some) or removes (None) the function called on every tick,
+/// from interrupt context.
 #[allow(dead_code)]
 pub fn set_tick_hook(hook: Option<TickHook>) {
     TICK_HOOK.store(hook.map_or(0, |h| h as usize), Ordering::Release);
 }
 
-/// Czeka co najmniej `n` ticków, usypiając CPU (hlt) między przerwaniami.
-/// Wymaga włączonych przerwań – inaczej czekałoby wiecznie.
+/// Waits at least `n` ticks, halting the CPU (hlt) between interrupts.
+/// Requires interrupts to be enabled – otherwise it would wait forever.
 #[allow(dead_code)]
 pub fn sleep_ticks(n: u64) {
     assert!(interrupts::are_enabled(), "sleep with interrupts disabled");
     let target = ticks() + n;
-    // M12: po starcie schedulera zadanie zasypia, a CPU dostają inne.
+    // Once the scheduler has started the task goes to sleep and the CPU goes to others.
     if crate::sched::can_block() {
         crate::sched::sleep_until(target);
         return;
     }
     while ticks() < target {
-        // sti+hlt atomowo: tick nie może przepaść między sprawdzeniem a hlt.
+        // sti+hlt atomically: a tick cannot slip in between the check and hlt.
         interrupts::disable();
         if ticks() >= target {
             interrupts::enable();
@@ -170,21 +170,21 @@ pub fn sleep_ticks(n: u64) {
     }
 }
 
-/// Milisekundy -> ticki (w górę).
+/// Milliseconds -> ticks (rounded up).
 pub fn ms_to_ticks(ms: u64) -> u64 {
     (ms * HZ as u64).div_ceil(1000)
 }
 
-/// Czeka co najmniej `ms` milisekund (zaokrąglone w górę do ticków).
+/// Waits at least `ms` milliseconds (rounded up to ticks).
 #[allow(dead_code)]
 pub fn sleep_ms(ms: u64) {
     let n = (ms * HZ as u64).div_ceil(1000);
-    // +1: bieżący tick jest już częściowo miniony.
+    // +1: the current tick has already partly elapsed.
     sleep_ticks(n + 1);
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only in builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -197,13 +197,13 @@ macro_rules! check {
     };
 }
 
-/// Odmierza `n` przeładowań licznika PIT, patrząc tylko na sam licznik
-/// (niezależnie od IRQ).  Każde przeładowanie = 1 okres = ~1 ms.
+/// Counts `n` reloads of the PIT counter, looking only at the counter itself
+/// (independently of the IRQ).  Each reload = 1 period = ~1 ms.
 ///
-/// Między odczytami jest krótka przerwa: w QEMU (TCG) każdy dostęp do portu
-/// bierze globalną blokadę emulatora, a ciasna pętla `in/out` potrafi
-/// zagłodzić wątek, który zgłasza IRQ z PIT – licznik biegnie, ale ticki
-/// nie przychodzą (widać to zwłaszcza w buildzie bez optymalizacji).
+/// There is a short pause between reads: in QEMU (TCG) every port access
+/// takes the emulator's global lock, and a tight `in/out` loop can
+/// starve the thread that raises the PIT IRQ – the counter runs, but ticks
+/// do not arrive (especially visible in an unoptimized build).
 #[cfg(selftest)]
 fn wait_pit_periods(n: u32) {
     let mut last = pit::read_counter();
@@ -220,16 +220,16 @@ fn wait_pit_periods(n: u32) {
     }
 }
 
-// Przerwa między odczytami portów w pętlach testowych (patrz wyżej).
+// Pause between port reads in the test loops (see above).
 #[cfg(selftest)]
 const POLL_GAP_SPINS: u32 = 2000;
 
-// CMOS RTC: sekundy (rejestr 0x00), bit UIP w rejestrze 0x0A.
+// CMOS RTC: seconds (register 0x00), UIP bit in register 0x0A.
 #[cfg(selftest)]
 fn cmos_read(reg: u8) -> u8 {
     use crate::arch::x86_64::port::{inb, outb};
     interrupts::without_interrupts(|| unsafe {
-        outb(0x70, reg | 0x80); // bit 7 = NMI wyłączone na czas odczytu
+        outb(0x70, reg | 0x80); // bit 7 = NMI disabled during the read
         let v = inb(0x71);
         outb(0x70, 0x00);
         v
@@ -251,8 +251,8 @@ fn rtc_seconds() -> u8 {
     }
 }
 
-/// Czeka na zmianę sekundy RTC; między odczytami CPU śpi do kolejnego
-/// ticku (hlt), więc odczyt CMOS jest raz na ~1 ms, a nie w ciasnej pętli.
+/// Waits for the RTC second to change; between reads the CPU sleeps until the next
+/// tick (hlt), so CMOS is read once per ~1 ms rather than in a tight loop.
 #[cfg(selftest)]
 fn wait_rtc_edge() {
     let start = rtc_seconds();
@@ -291,8 +291,8 @@ pub fn self_test() {
     serial_println!("[TIME TEST] Starting timer + IRQ tests...");
     crate::selftest::begin();
 
-    // 1. PIC zremapowany, IMR: tylko IRQ0 odblokowane; bramki IRQ w IDT.
-    //    M17: z I/O APIC – PIC cały zamaskowany, IRQ0 odblokowane w I/O APIC.
+    // 1. PIC remapped, IMR: only IRQ0 unmasked; IRQ gates in the IDT.
+    //    With an I/O APIC – the PIC is fully masked, IRQ0 unmasked in the I/O APIC.
     let imr = crate::arch::x86_64::pic::masks();
     if irq::ioapic_mode() {
         check!(imr == 0xFFFF, "IMR = {:#06x}, expected 0xffff (PIC disabled)", imr);
@@ -304,8 +304,8 @@ pub fn self_test() {
         check!(gate_present(v), "IRQ gate {:#x} not present", v);
         check!(gate_ist(v) == 0, "IRQ gate {:#x} uses IST {}", v, gate_ist(v));
     }
-    // M16b: zaraz za IRQ są wektory MSI (0x30..0x3F); M17: potem timer
-    // LAPIC i IPI (0x40..0x43), bez IST; dalej nic.
+    // Right after the IRQs come the MSI vectors (0x30..0x3F); then the LAPIC
+    // timer and IPIs (0x40..0x43), without IST; nothing beyond that.
     use crate::arch::x86_64::lapic;
     for v in [lapic::TIMER_VECTOR, lapic::RESCHED_VECTOR, lapic::HALT_VECTOR, crate::arch::x86_64::tlb::TLB_VECTOR] {
         check!(gate_present(v as usize), "LAPIC gate {:#x} not present", v);
@@ -318,7 +318,7 @@ pub fn self_test() {
         if irq::ioapic_mode() { "I/O APIC: IRQ0 routed, PIC disabled" } else { "PIC remapped, IMR = 0xfffe" }
     );
 
-    // 2. PIT: dzielnik i licznik, który faktycznie odlicza.
+    // 2. PIT: divisor and a counter that actually counts down.
     let div = pit::divisor();
     check!(div == 1193, "PIT divisor = {}", div);
     let first = pit::read_counter();
@@ -333,11 +333,11 @@ pub fn self_test() {
     check!(moved, "PIT counter stuck at {}", first);
     serial_println!("[TIME TEST] 2/8 PIT channel 0 counting (divisor {}) PASS", div);
 
-    // 3. Po sti (kernel_main) ticki płyną; >1 tick dowodzi, że EOI działa.
-    //    Czekamy przez hlt (CPU śpi do przerwania) – nie ma ciasnej pętli
-    //    na portach, więc wynik nie zależy od szybkości hosta / emulatora.
-    //    Jedyne odmaskowane IRQ to IRQ0, więc każde wybudzenie = tick.
-    //    Jeśli IRQ0 w ogóle nie działa, system zatrzyma się tutaj.
+    // 3. After sti (kernel_main) ticks flow; >1 tick proves that EOI works.
+    //    We wait with hlt (the CPU sleeps until an interrupt) – there is no tight loop
+    //    on ports, so the result does not depend on host / emulator speed.
+    //    The only unmasked IRQ is IRQ0, so every wakeup = a tick.
+    //    If IRQ0 does not work at all, the system will stop here.
     check!(interrupts::are_enabled(), "interrupts not enabled (IF = 0)");
     let t0 = ticks();
     let pit_start = pit::read_counter();
@@ -346,13 +346,13 @@ pub fn self_test() {
     }
     let t1 = ticks();
     check!(t1 - t0 >= 20, "only {} ticks after 20 wake-ups", t1 - t0);
-    // M17a.b: ticki = przerwania + doliczone za zgubione (HPET).
+    // Ticks = interrupts + those added for lost ones (HPET).
     check!(irq::count(0) + caught_up_ticks() >= t1, "IRQ0 count {} + caught up {} < ticks {}", irq::count(0), caught_up_ticks(), t1);
     check!(pit_start >= 1 && pit_start <= div, "PIT counter {}", pit_start);
     serial_println!("[TIME TEST] 3/8 IRQ0 delivered, {} ticks (EOI ok) PASS", t1 - t0);
 
-    // 4. mask/unmask: zamaskowane IRQ0 nie dochodzi, po odmaskowaniu
-    //    oczekujące przerwanie zostaje dostarczone.
+    // 4. mask/unmask: a masked IRQ0 is not delivered, after unmasking
+    //    the pending interrupt gets delivered.
     irq::mask(0);
     let before = ticks();
     wait_pit_periods(10);
@@ -363,9 +363,9 @@ pub fn self_test() {
     check!(ticks() > before, "no ticks after unmask");
     serial_println!("[TIME TEST] 4/8 IRQ0 mask/unmask PASS");
 
-    // 5. without_interrupts: zagnieżdżanie przywraca IF, w środku cisza.
-    // Odczyt "przed" już przy wyłączonych przerwaniach – inaczej tick między
-    // odczytem a cli liczyłby się jako "w środku" (wyścig w samym teście).
+    // 5. without_interrupts: nesting restores IF, silence inside.
+    // The "before" read already with interrupts disabled – otherwise a tick between
+    // the read and cli would count as "inside" (a race in the test itself).
     let outer_before = ticks();
     let inside = interrupts::without_interrupts(|| {
         let before = ticks();
@@ -381,14 +381,14 @@ pub fn self_test() {
     check!(ticks() > outer_before, "pending tick lost after without_interrupts");
     serial_println!("[TIME TEST] 5/8 without_interrupts (nested, IF restored) PASS");
 
-    // 6. sleep_ms: nie krócej niż zadano i niewiele dłużej.
+    // 6. sleep_ms: not shorter than requested and not much longer.
     let before = ticks();
     sleep_ms(100);
     let slept = ticks() - before;
     check!(slept >= 100 && slept <= 110, "sleep_ms(100) took {} ticks", slept);
     serial_println!("[TIME TEST] 6/8 sleep_ms(100) = {} ticks PASS", slept);
 
-    // 7. Częstotliwość względem niezależnego zegara (CMOS RTC, 1 s).
+    // 7. Frequency against an independent clock (CMOS RTC, 1 s).
     wait_rtc_edge();
     let before = ticks();
     wait_rtc_edge();
@@ -396,7 +396,7 @@ pub fn self_test() {
     let lo = HZ as u64 * 8 / 10;
     let hi = HZ as u64 * 12 / 10;
     check!(per_second >= lo && per_second <= hi, "{} ticks per RTC second (expected ~{})", per_second, HZ);
-    // M17a.g14: zegar ścienny z uptime – konwersje i zgodność z RTC.
+    // Wall clock from uptime – conversions and agreement with the RTC.
     {
         use crate::drivers::rtc::{self, DateTime};
         for (secs, y, mo, d, h, mi, se) in [
@@ -414,19 +414,19 @@ pub fn self_test() {
     }
     serial_println!("[TIME TEST] 7/8 {} ticks per RTC second (target {}), wall clock = RTC PASS", per_second, HZ);
 
-    // 8. Heap z przerwaniami: hook ticku alokuje w IRQ, pętla główna też.
+    // 8. Heap with interrupts: the tick hook allocates in the IRQ, so does the main loop.
     let hook_start = HOOK_CALLS.load(Ordering::Relaxed);
     let used_start = crate::memory::heap_used_bytes();
     set_tick_hook(Some(heap_hook));
-    // M17a.b: 50 PRZERWAŃ (hook działa raz na przerwanie; ticki mogą
-    // przeskakiwać, gdy przerwania PIT giną – doganianie HPET).
+    // 50 INTERRUPTS (the hook runs once per interrupt; ticks may
+    // jump when PIT interrupts are lost – HPET catch-up).
     //
-    // M17a.c: heap pod IrqSpinLock – w ciasnej pętli alokacji IF = 1 tylko
-    // przez kilka instrukcji między `sti` a kolejnym `cli`, a QEMU (TCG)
-    // sprawdza przerwania na granicach bloków kodu: u Dawida przerwanie nie
-    // trafiało w to okno i test stał (licznik przerwań, ticki – wszystko
-    // od przerwań).  Co rundę krótka pętla z IF = 1 (gałęzie = granice
-    // bloków), a na wszelki wypadek limit czasu z HPET.
+    // The heap is under an IrqSpinLock – in a tight allocation loop IF = 1 only
+    // for a few instructions between `sti` and the next `cli`, and QEMU (TCG)
+    // checks interrupts at code-block boundaries: on some hosts the interrupt never
+    // hit that window and the test hung (interrupt counter, ticks – everything
+    // depends on interrupts).  Each round has a short loop with IF = 1 (branches = block
+    // boundaries), plus an HPET time limit just in case.
     let irq_end = irq::count(0) + 50;
     let end = ticks() + 5_000;
     let start = crate::arch::x86_64::clock::stamp();

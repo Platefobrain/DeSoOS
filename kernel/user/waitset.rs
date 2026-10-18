@@ -1,36 +1,36 @@
-// M19.b: czekanie na wiele uchwytów naraz (`wait_many`).
-// Projekt: ARCHITEKTURA.md, „Usługi w user space”.
+// Waiting on many handles at once (`wait_many`).
+// Design: ARCHITECTURE.md, "User-space services".
 //
-// Każdy obiekt, na który da się czekać (kolejka końca kanału, potok, później
-// przerwanie), ma `Observers` – listę kanałów WaitQueue zadań, które na niego
-// czekają.  `wait_many`:
-//   1. zapisuje swój kanał (adres lokalnej WaitQueue) u każdego obiektu,
-//   2. sprawdza warunki i śpi na własnej WaitQueue (warunek pod blokadą
-//      schedulera – sched::wait_event),
-//   3. wypisuje się ze wszystkich obiektów.
-// Obiekt po zmianie stanu (atomiki, SeqCst) czyta listę i budzi każdy kanał.
-// Pobudka nie ginie: zapis do listy jest przed sprawdzeniem warunku, a zmiana
-// stanu przed odczytem listy – albo czekający widzi nowy stan, albo jest już
-// na liście i dostaje pobudkę (wake_channel bierze blokadę schedulera).
+// Every object that can be waited on (a channel end queue, a pipe, an
+// interrupt) has `Observers` – a list of WaitQueue channels of the tasks waiting
+// on it.  `wait_many`:
+//   1. registers its channel (the address of a local WaitQueue) with every object,
+//   2. checks the conditions and sleeps on its own WaitQueue (condition under the
+//      scheduler lock – sched::wait_event),
+//   3. unregisters from all objects.
+// After a state change (atomics, SeqCst) an object reads the list and wakes every channel.
+// No wakeup is lost: the list write happens before the condition check, and the state
+// change before the list read – either the waiter sees the new state, or it is already
+// on the list and gets woken (wake_channel takes the scheduler lock).
 //
-// Lista pod IrqSpinLock (poziom WAITERS: nad kolejkami kanałów i potoków,
-// pod schedulerem) – będzie ją czytać handler przerwania (19.d).  Budzenie
-// po zwolnieniu listy: kopia do tablicy na stosie, bez alokacji.
+// The list is under an IrqSpinLock (level WAITERS: above the channel and pipe queues,
+// below the scheduler) – the interrupt handler reads it as well.  Waking
+// happens after releasing the list: a copy into an array on the stack, no allocation.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sched::spin::{level, IrqSpinLock};
 
-/// Najwięcej obserwatorów budzonych naraz bez alokacji (więcej – druga runda).
+/// Maximum number of observers woken at once without allocation (more – a second round).
 const BATCH: usize = 16;
 
 pub struct Observers {
     list: IrqSpinLock<Vec<usize>>,
-    /// Długość listy (zmieniana pod blokadą) – `notify` bez czekających nie
-    /// bierze blokady (każdy send / recv woła notify).  SeqCst jak stan
-    /// obiektów: czekający zwiększa licznik PRZED sprawdzeniem warunku, a
-    /// obiekt zmienia stan PRZED odczytem licznika – jedno z nich widzi drugie.
+    /// List length (changed under the lock) – `notify` with no waiters does not
+    /// take the lock (every send / recv calls notify).  SeqCst like the object
+    /// state: a waiter increments the counter BEFORE checking the condition, and
+    /// the object changes state BEFORE reading the counter – one of them sees the other.
     count: AtomicUsize,
 }
 
@@ -39,15 +39,15 @@ impl Observers {
         Observers { list: IrqSpinLock::new("waiters", level::WAITERS, Vec::new()), count: AtomicUsize::new(0) }
     }
 
-    /// Zapisuje kanał czekającego (alokacja – nie z przerwania).
+    /// Registers a waiter's channel (allocates – not from an interrupt).
     pub fn add(&self, channel: usize) {
         let mut l = self.list.lock();
         l.push(channel);
         self.count.store(l.len(), Ordering::SeqCst);
     }
 
-    /// Wypisuje kanał (jeden wpis – ten sam obiekt może być na liście
-    /// `wait_many` kilka razy).
+    /// Unregisters a channel (one entry – the same object may be on a
+    /// `wait_many` list several times).
     pub fn remove(&self, channel: usize) {
         let mut l = self.list.lock();
         if let Some(i) = l.iter().position(|&c| c == channel) {
@@ -56,7 +56,7 @@ impl Observers {
         self.count.store(l.len(), Ordering::SeqCst);
     }
 
-    /// Budzi wszystkich czekających (także z przerwania – bez alokacji).
+    /// Wakes all waiters (also from an interrupt – no allocation).
     pub fn notify(&self) {
         if self.count.load(Ordering::SeqCst) == 0 {
             return;

@@ -1,16 +1,16 @@
-// M9: VFS – wirtualny system plików.
+// VFS – virtual file system.
 //
-// Jedno drzewo katalogów, w które "montuje się" konkretne systemy plików:
+// A single directory tree into which concrete file systems are "mounted":
 //
-//   /          ramfs (w pamięci; znika po restarcie)
-//   /disk      FAT32 na pierwszym dysku (jeśli jest sformatowany)
+//   /          ramfs (in memory; gone after a reboot)
+//   /disk      FAT32 on the first disk (if it is formatted)
 //
-// Każdy system plików implementuje `FileSystem` i dostaje ścieżki względem
-// swojego punktu montowania (zawsze znormalizowane, zaczynają się od '/').
-// VFS wybiera system plików po najdłuższym pasującym punkcie montowania.
+// Each file system implements `FileSystem` and gets paths relative to
+// its mount point (always normalized, starting with '/').
+// The VFS picks the file system by the longest matching mount point.
 //
-// Na razie API jest oparte na ścieżkach (bez deskryptorów plików) – tablica
-// otwartych plików przyjdzie z procesami i syscallami (M13–M14).
+// The API here is path-based (no file descriptors) – the open file
+// table belongs to processes and syscalls.
 
 pub mod fat32;
 pub mod ramfs;
@@ -32,10 +32,10 @@ pub enum FsError {
     InvalidName,
     NoSpace,
     ReadOnly,
-    /// Operacja na punkcie montowania (np. usunięcie /disk).
+    /// Operation on a mount point (e.g. removing /disk).
     Busy,
     Unsupported,
-    /// Na dysku nie ma (obsługiwanego) systemu plików.
+    /// The disk has no (supported) file system.
     NoFileSystem,
     Corrupt(&'static str),
     Io(BlockError),
@@ -44,7 +44,7 @@ pub enum FsError {
 impl From<BlockError> for FsError {
     fn from(e: BlockError) -> Self {
         match e {
-            // M16b: dysk tylko do odczytu (np. prawdziwy SSD) = system plików tylko do odczytu.
+            // Read-only disk (e.g. a real SSD) = read-only file system.
             BlockError::ReadOnly => FsError::ReadOnly,
             e => FsError::Io(e),
         }
@@ -99,54 +99,54 @@ pub struct FsStats {
     pub free_bytes: u64,
 }
 
-/// Interfejs systemu plików.  Ścieżki są względem punktu montowania,
-/// znormalizowane ("/", "/a/b").
+/// File system interface.  Paths are relative to the mount point,
+/// normalized ("/", "/a/b").
 pub trait FileSystem {
-    /// Typ, np. "ramfs", "fat32".
+    /// Type, e.g. "ramfs", "fat32".
     fn kind(&self) -> &'static str;
-    /// Opis dla `mount` (dysk, etykieta).
+    /// Description for `mount` (disk, label).
     fn source(&self) -> String;
     fn stat(&mut self, path: &str) -> Result<Metadata>;
     fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>>;
-    /// Czyta od `offset`; zwraca liczbę przeczytanych bajtów (0 = koniec pliku).
+    /// Reads from `offset`; returns the number of bytes read (0 = end of file).
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
-    /// Pisze od `offset` (plik rośnie w razie potrzeby, dziury wypełniane zerami).
+    /// Writes from `offset` (the file grows as needed, holes are zero-filled).
     fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<usize>;
-    /// Ustawia rozmiar pliku (skraca albo dopełnia zerami).
+    /// Sets the file size (truncates or zero-extends).
     fn truncate(&mut self, path: &str, size: u64) -> Result<()>;
-    /// Tworzy pusty plik (błąd, jeśli istnieje).
+    /// Creates an empty file (error if it exists).
     fn create(&mut self, path: &str) -> Result<()>;
     fn mkdir(&mut self, path: &str) -> Result<()>;
-    /// Usuwa plik albo pusty katalog.
+    /// Removes a file or an empty directory.
     fn remove(&mut self, path: &str) -> Result<()>;
     fn stats(&mut self) -> Option<FsStats>;
-    /// Zapisuje wszystko, co jest w buforach, na dysk.
+    /// Writes everything that is in buffers to disk.
     fn sync(&mut self) -> Result<()>;
-    /// M17a.g7: system plików z własnymi blokadami – VFS woła go równolegle,
-    /// trzymając FS_LOCK tylko do odczytu.  `None` (np. FAT32: bufory,
-    /// czytanie z dysku) – każda operacja pod FS_LOCK do zapisu.
+    /// A file system with its own locks – the VFS calls it concurrently,
+    /// holding FS_LOCK for reading only.  `None` (e.g. FAT32: buffers,
+    /// disk reads) – every operation under FS_LOCK for writing.
     fn concurrent(&self) -> Option<&dyn ConcurrentFs> {
         None
     }
-    /// M20.f: system plików tylko do odczytu (dysk read-only) – open do
-    /// zapisu kończy się EROFS od razu.
+    /// Read-only file system (read-only disk) – opening for
+    /// writing fails with EROFS immediately.
     fn read_only(&self) -> bool {
         false
     }
 }
 
-/// M17a.g7: operacje systemu plików bezpieczne do wołania z wielu zadań naraz
-/// (`&self` – system plików sam się blokuje).  `read_all`, `write_whole`,
-/// `append` – całe operacje niepodzielne (read_file / write_file / >>).
+/// File system operations safe to call from many tasks at once
+/// (`&self` – the file system does its own locking).  `read_all`, `write_whole`,
+/// `append` – whole operations are atomic (read_file / write_file / >>).
 pub trait ConcurrentFs {
     fn stat(&self, path: &str) -> Result<Metadata>;
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>>;
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     fn read_all(&self, path: &str) -> Result<Vec<u8>>;
     fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<usize>;
-    /// Tworzy plik albo zastępuje zawartość.
+    /// Creates a file or replaces its contents.
     fn write_whole(&self, path: &str, data: &[u8]) -> Result<()>;
-    /// Dopisuje (tworzy, jeśli nie ma).
+    /// Appends (creates the file if missing).
     fn append(&self, path: &str, data: &[u8]) -> Result<()>;
     fn truncate(&self, path: &str, size: u64) -> Result<()>;
     fn create(&self, path: &str) -> Result<()>;
@@ -156,18 +156,18 @@ pub trait ConcurrentFs {
 }
 
 // ------------------------------------------------------------
-// M20.g: system plików z własną blokadą (dysk USB)
+// File system with its own lock (USB disk)
 // ------------------------------------------------------------
 
-/// Opakowanie systemu plików bez własnych blokad (FAT32) w jedną blokadę
-/// usypiającą – VFS woła go jak `ConcurrentFs`, czyli pod FS_LOCK tylko do
-/// odczytu.  Po co: odczyt z pendrive'a może czekać na usbd do 5 s (timeout
-/// ublk); pod FS_LOCK do zapisu stałby w tym czasie CAŁY VFS (ramfs, /bin,
-/// spawn).  Teraz czeka tylko ten jeden system plików.  Używane dla dysków USB
-/// (ublk.rs); /disk i /esp – jak dotąd.
+/// Wraps a file system without its own locks (FAT32) in a single sleeping
+/// lock – the VFS calls it like a `ConcurrentFs`, i.e. under FS_LOCK for
+/// reading only.  Why: a read from a USB stick may wait for usbd up to 5 s (ublk
+/// timeout); under FS_LOCK for writing the WHOLE VFS (ramfs, /bin,
+/// spawn) would be stuck meanwhile.  Now only this one file system waits.  Used for USB
+/// disks (ublk.rs); /disk and /esp – unchanged.
 pub struct Locked<F: FileSystem> {
     fs: crate::sched::sync::Mutex<F>,
-    /// Kopie z montowania – `mount` i `open` nie czekają na blokadę dysku.
+    /// Copies taken at mount time – `mount` and `open` do not wait for the disk lock.
     kind: &'static str,
     source: String,
     read_only: bool,
@@ -303,11 +303,11 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
 }
 
 // ------------------------------------------------------------
-// Ścieżki
+// Paths
 // ------------------------------------------------------------
 
-/// Łączy `cwd` i `path` i normalizuje ("." i ".." , podwójne "/").
-/// Wynik zawsze zaczyna się od '/' i nie kończy się '/' (poza samym "/").
+/// Joins `cwd` and `path` and normalizes ("." and "..", double "/").
+/// The result always starts with '/' and never ends with '/' (except "/" itself).
 pub fn normalize(cwd: &str, path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let full: String = if path.starts_with('/') {
@@ -329,7 +329,7 @@ pub fn normalize(cwd: &str, path: &str) -> String {
     out
 }
 
-/// ("/a/b", "c") dla "/a/b/c"; ("/", "x") dla "/x".
+/// ("/a/b", "c") for "/a/b/c"; ("/", "x") for "/x".
 pub fn split_parent(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(0) => ("/", &path[1..]),
@@ -339,7 +339,7 @@ pub fn split_parent(path: &str) -> (&str, &str) {
 }
 
 // ------------------------------------------------------------
-// Tablica montowań
+// Mount table
 // ------------------------------------------------------------
 
 struct Mount {
@@ -349,18 +349,18 @@ struct Mount {
 
 static mut MOUNTS: Vec<Mount> = Vec::new();
 
-/// M12: VFS jest wspólny dla wszystkich zadań – każda operacja bierze
-/// FS_LOCK (reentrant: write_file -> stat itd. w tym samym zadaniu).
-/// Kolejność blokad: FS_LOCK, potem blokady dysków (block.rs).
+/// The VFS is shared by all tasks – every operation takes
+/// FS_LOCK (reentrant: write_file -> stat etc. in the same task).
+/// Lock order: FS_LOCK, then the disk locks (block.rs).
 ///
-/// M17a.g6: blokada czytelnicy–pisarz.  stat / read / read_dir / read_file
-/// na systemie plików, który to umie (ramfs: `*_shared`), biorą ją do
-/// odczytu – wielu naraz (Legion v0.17.14: 2 mln wzięć, 710 s czekania przy
-/// jednej blokadzie).  Zmiany i systemy bez odczytu współdzielonego (FAT32)
-/// – do zapisu.  Tablicę montowań zmienia tylko pisarz.
+/// A readers–writer lock.  stat / read / read_dir / read_file
+/// on a file system that supports it (ramfs: `*_shared`) take it for
+/// reading – many at once (with a single lock it was a heavily contended
+/// hotspot).  Modifications and file systems without shared reads (FAT32)
+/// – for writing.  Only a writer changes the mount table.
 static FS_LOCK: crate::sched::sync::KRwLock = crate::sched::sync::KRwLock::new_named("vfs (FS_LOCK)");
 
-/// Do zapisu (jak dawny KMutex).
+/// For writing (like the former KMutex).
 struct FsWrite;
 impl FsWrite {
     fn lock() -> crate::sched::sync::KRwGuard<'static> {
@@ -369,11 +369,11 @@ impl FsWrite {
 }
 
 fn mounts() -> &'static mut Vec<Mount> {
-    // Zmiany tylko pod FS_LOCK do zapisu; odczyt także pod blokadą do odczytu.
+    // Modified only under FS_LOCK for writing; read also under the read lock.
     unsafe { &mut *core::ptr::addr_of_mut!(MOUNTS) }
 }
 
-/// Indeks montowania i ścieżka względna (pod FS_LOCK – odczyt albo zapis).
+/// Mount index and relative path (under FS_LOCK – read or write).
 fn find_mount(path: &str) -> Result<(usize, String)> {
     let path = normalize("/", path);
     let m = mounts();
@@ -397,11 +397,11 @@ fn find_mount(path: &str) -> Result<(usize, String)> {
     Ok((i, rel))
 }
 
-/// M17a.g7: operacja na systemie plików ścieżki – równolegle (FS_LOCK do
-/// odczytu), jeśli system plików ma własne blokady (`concurrent`), inaczej
-/// z wyłącznością (`excl`, FS_LOCK do zapisu).  Zadanie trzymające FS_LOCK
-/// do odczytu nie może przejść na zapis – wtedy Busy (nie zdarza się: VFS
-/// nie trzyma odczytu, wołając operację na systemie bez blokad).
+/// An operation on the path's file system – concurrently (FS_LOCK for
+/// reading) if the file system has its own locks (`concurrent`), otherwise
+/// exclusively (`excl`, FS_LOCK for writing).  A task holding FS_LOCK
+/// for reading cannot upgrade to writing – then Busy (does not happen: the VFS
+/// does not hold a read lock when calling an operation on a file system without locks).
 fn with_fs<R>(
     path: &str,
     conc: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>,
@@ -420,7 +420,7 @@ fn with_fs<R>(
     resolve(path, excl)
 }
 
-/// Montuje system plików w `path` (katalog musi istnieć, poza "/").
+/// Mounts a file system at `path` (the directory must exist, except for "/").
 pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
     let _g = FsWrite::lock();
     let path = normalize("/", path);
@@ -451,8 +451,8 @@ pub fn unmount(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// M20.f: odmontowanie bez zapisu buforów – dysk zniknął (pendrive wyjęty,
-/// usbd zakończony); dysk USB i tak jest tylko do odczytu.
+/// Unmount without flushing buffers – the disk is gone (USB stick removed,
+/// usbd exited); a USB disk is read-only anyway.
 pub fn unmount_lost(path: &str) -> Result<()> {
     let _g = FsWrite::lock();
     let path = normalize("/", path);
@@ -465,7 +465,7 @@ pub fn unmount_lost(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// M20.f: ścieżka leży na systemie plików tylko do odczytu.
+/// The path lies on a read-only file system.
 pub fn is_read_only(path: &str) -> bool {
     let _g = FS_LOCK.read();
     match find_mount(path) {
@@ -474,15 +474,15 @@ pub fn is_read_only(path: &str) -> bool {
     }
 }
 
-/// (punkt montowania, typ, źródło)
+/// (mount point, type, source)
 pub fn mount_list() -> Vec<(String, &'static str, String)> {
     let _g = FS_LOCK.read();
     mounts().iter().map(|m| (m.path.clone(), m.fs.kind(), m.fs.source())).collect()
 }
 
-/// Statystyki systemu plików zamontowanego dokładnie w `path`.
+/// Statistics of the file system mounted exactly at `path`.
 pub fn mount_stats(path: &str) -> Option<FsStats> {
-    // M20.g: system z własną blokadą (dysk USB) – bez blokowania całego VFS.
+    // A file system with its own lock (USB disk) – without locking the whole VFS.
     {
         let _g = FS_LOCK.read();
         if let Some(m) = mounts().iter().find(|m| m.path == path) {
@@ -500,7 +500,7 @@ fn is_mount_point(path: &str) -> bool {
     path != "/" && mounts().iter().any(|m| m.path == path)
 }
 
-/// Znajduje system plików dla ścieżki absolutnej; zwraca go i ścieżkę względną.
+/// Finds the file system for an absolute path; returns it and the relative path.
 fn resolve<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>) -> Result<R> {
     let _g = FsWrite::lock();
     let (i, rel) = find_mount(path)?;
@@ -508,7 +508,7 @@ fn resolve<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>
 }
 
 // ------------------------------------------------------------
-// Operacje (ścieżki absolutne)
+// Operations (absolute paths)
 // ------------------------------------------------------------
 
 pub fn stat(path: &str) -> Result<Metadata> {
@@ -522,7 +522,7 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>> {
 }
 
 pub fn read(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
-    // `buf` potrzebny w obu gałęziach – przez wskaźnik (używana tylko jedna).
+    // `buf` is needed in both branches – via a pointer (only one is used).
     let ptr = buf.as_mut_ptr();
     let len = buf.len();
     with_fs(
@@ -545,8 +545,8 @@ pub fn mkdir(path: &str) -> Result<()> {
 }
 
 pub fn remove(path: &str) -> Result<()> {
-    // FS_LOCK do odczytu przez całą operację – tablica montowań nie zmieni
-    // się między sprawdzeniem a usunięciem (montowanie bierze zapis).
+    // FS_LOCK for reading during the whole operation – the mount table cannot
+    // change between the check and the removal (mounting takes the write lock).
     let _g = FS_LOCK.read();
     if is_mount_point(&normalize("/", path)) {
         return Err(FsError::Busy);
@@ -567,8 +567,8 @@ pub fn truncate(path: &str, size: u64) -> Result<()> {
     with_fs(path, |c, p| c.truncate(p, size), |fs, p| fs.truncate(p, size))
 }
 
-/// M17a.g7: system plików ścieżki ma własne blokady – wołamy go pod FS_LOCK
-/// do odczytu (`Some(wynik)`); `None` – trzeba starej ścieżki z wyłącznością.
+/// The path's file system has its own locks – we call it under FS_LOCK
+/// for reading (`Some(result)`); `None` – the old exclusive path is needed.
 fn try_concurrent<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>) -> Option<Result<R>> {
     let _g = FS_LOCK.read();
     let (i, rel) = match find_mount(path) {
@@ -578,7 +578,7 @@ fn try_concurrent<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Resu
     mounts()[i].fs.concurrent().map(|c| f(c, &rel))
 }
 
-/// Zapisuje bufory wszystkich systemów plików.
+/// Flushes the buffers of all file systems.
 pub fn sync_all() -> Result<()> {
     let _g = FsWrite::lock();
     for m in mounts().iter_mut() {
@@ -587,13 +587,13 @@ pub fn sync_all() -> Result<()> {
     Ok(())
 }
 
-/// Cały plik do pamięci.
+/// A whole file into memory.
 pub fn read_file(path: &str) -> Result<Vec<u8>> {
-    // M17a.g7: system z własnymi blokadami – jednym niepodzielnym odczytem.
+    // A file system with its own locks – one atomic read.
     if let Some(r) = try_concurrent(path, |c, p| c.read_all(p)) {
         return r;
     }
-    let _g = FsWrite::lock(); // cały odczyt spójny
+    let _g = FsWrite::lock(); // the whole read is consistent
     let meta = stat(path)?;
     if meta.kind == FileType::Directory {
         return Err(FsError::IsADirectory);
@@ -611,7 +611,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Tworzy plik albo zastępuje jego zawartość.
+/// Creates a file or replaces its contents.
 pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
     if let Some(r) = try_concurrent(path, |c, p| c.write_whole(p, data)) {
         return r;
@@ -629,7 +629,7 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
     resolve(path, |fs, _| fs.sync())
 }
 
-/// Dopisuje na końcu pliku (tworzy, jeśli nie istnieje).
+/// Appends to the end of a file (creates it if it does not exist).
 pub fn append_file(path: &str, data: &[u8]) -> Result<()> {
     if let Some(r) = try_concurrent(path, |c, p| c.append(p, data)) {
         return r;
@@ -649,21 +649,21 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<()> {
 }
 
 // ------------------------------------------------------------
-// Start
+// Startup
 // ------------------------------------------------------------
 
-/// Montuje ramfs w "/" i FAT32 z pierwszego dysku w "/disk".
+/// Mounts ramfs at "/" and FAT32 from the first disk at "/disk".
 pub fn init() {
     use crate::serial_println;
 
-    // /disk powstaje dopiero przy montowaniu dysku – bez tego zapis do
-    // "/disk" trafiałby po cichu do RAM-u i znikał po restarcie.
-    // M17a.g7: ramfs ma w sobie KRwLock (rejestr statystyk trzyma jej adres
-    // od pierwszego użycia) – najpierw na heap, dopiero potem pierwsza operacja.
+    // /disk is created only when a disk is mounted – otherwise writes to
+    // "/disk" would silently go to RAM and vanish after a reboot.
+    // ramfs contains a KRwLock (the statistics registry keeps its address
+    // from first use) – move it to the heap first, only then do the first operation.
     let _ = mount("/", Box::new(ramfs::RamFs::new()));
     let _ = mkdir("/tmp");
 
-    // M15: programy wbudowane w kernel -> /bin (pliki ELF).
+    // Programs built into the kernel -> /bin (ELF files).
     let programs = crate::initrd::install();
     serial_println!("[FS] /bin: {} programs (ELF, built from user/bin/*.rs)", programs);
 
@@ -691,12 +691,12 @@ pub fn init() {
     mount_esp();
 }
 
-/// M16b: pierwsza partycja "EFI System" (GPT) z FAT32 -> /esp.  Na
-/// prawdziwym SSD tylko do odczytu (zapis blokuje warstwa block).
+/// The first "EFI System" partition (GPT) with FAT32 -> /esp.  On a
+/// real SSD it is read-only (writes are blocked by the block layer).
 pub fn mount_esp() -> Option<usize> {
     use crate::serial_println;
     if stat("/esp").is_ok() {
-        return None; // już zamontowana
+        return None; // already mounted
     }
     for i in 0..crate::block::count() {
         if crate::block::partition_kind(i) != Some("EFI System") {
@@ -725,7 +725,7 @@ pub fn mount_esp() -> Option<usize> {
 }
 
 // ------------------------------------------------------------
-// TEST (tylko build z --cfg selftest)
+// TEST (only in builds with --cfg selftest)
 // ------------------------------------------------------------
 
 #[cfg(selftest)]
@@ -767,14 +767,14 @@ pub fn self_test() {
     serial_println!("[FS TEST] Starting VFS + ramfs + FAT32 tests...");
     crate::selftest::begin();
 
-    // 1. Ścieżki.
+    // 1. Paths.
     check!(normalize("/", "a/b/../c/./d") == "/a/c/d", "normalize 1");
     check!(normalize("/x/y", "..") == "/x", "normalize 2");
     check!(normalize("/x", "/../..//z/") == "/z", "normalize 3");
     check!(split_parent("/a/b") == ("/a", "b") && split_parent("/a") == ("/", "a"), "split_parent");
     serial_println!("[FS TEST] 1/10 path normalization PASS");
 
-    // 2. ramfs przez VFS: pliki, katalogi, błędy.
+    // 2. ramfs through the VFS: files, directories, errors.
     t!(mkdir("/tmp/t"), "mkdir /tmp/t");
     t!(write_file("/tmp/t/a.txt", b"hello"), "write a.txt");
     t!(append_file("/tmp/t/a.txt", b" world"), "append");
@@ -786,7 +786,7 @@ pub fn self_test() {
     check!(mkdir("/tmp/t/a.txt/x") == Err(FsError::NotADirectory), "mkdir under file");
     t!(remove("/tmp/t/a.txt"), "rm a.txt");
     t!(remove("/tmp/t"), "rmdir");
-    // Punktu montowania nie da się usunąć.
+    // A mount point cannot be removed.
     t!(mkdir("/tmp/mp"), "mkdir mp");
     t!(mount("/tmp/mp", Box::new(ramfs::RamFs::new())), "mount ramfs");
     check!(remove("/tmp/mp") == Err(FsError::Busy), "remove mount point");
@@ -794,7 +794,7 @@ pub fn self_test() {
     t!(remove("/tmp/mp"), "rm mp");
     serial_println!("[FS TEST] 2/10 ramfs: files, dirs, append, errors PASS");
 
-    // 3. FAT32 na dysku w RAM (8 MiB) – mkfs + montowanie.
+    // 3. FAT32 on a RAM disk (8 MiB) – mkfs + mount.
     let disk = block::register(alloc::boxed::Box::new(RamDisk::new("ram0", 16384)));
     let info = t!(fat32::mkfs(disk, "TESTVOL", true), "mkfs");
     let fs = t!(fat32::Fat32::open(disk), "open fat32");
@@ -805,7 +805,7 @@ pub fn self_test() {
     check!(t!(read_dir("/tmp/fat"), "ls root").is_empty(), "fresh root not empty");
     serial_println!("[FS TEST] 3/10 mkfs + mount ({}) PASS", info);
 
-    // 4. Nazwy: 8.3, małe litery (NT), długie z polskimi znakami, wielkość liter.
+    // 4. Names: 8.3, lowercase (NT), long names with Polish characters, letter case.
     t!(write_file("/tmp/fat/README.TXT", b"upper"), "8.3 upper");
     t!(write_file("/tmp/fat/notes.txt", b"lower"), "8.3 lower");
     t!(write_file("/tmp/fat/Zażółć gęślą jaźń.md", b"polski"), "LFN polish");
@@ -820,7 +820,7 @@ pub fn self_test() {
     check!(create("/tmp/fat/bad:name") == Err(FsError::InvalidName), "invalid name");
     serial_println!("[FS TEST] 4/10 names: 8.3, lowercase, long + Polish, case-insensitive PASS");
 
-    // 5. Duży plik przez wiele klastrów, odczyt z przesunięciem, dopisywanie.
+    // 5. A large file spanning many clusters, reading at an offset, appending.
     let big: Vec<u8> = (0..5000u32).map(|i| (i * 31 % 251) as u8).collect();
     t!(write_file("/tmp/fat/big.bin", &big), "write big");
     check!(t!(read_file("/tmp/fat/big.bin"), "read big") == big, "big content");
@@ -833,7 +833,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/big.bin"), "read appended") == expect, "append content");
     serial_println!("[FS TEST] 5/10 multi-cluster file, offset read, append PASS");
 
-    // 6. Zapis w środku, dziura wypełniona zerami, skracanie.
+    // 6. Writing in the middle, a zero-filled hole, truncation.
     t!(write("/tmp/fat/big.bin", 10, b"XYZ"), "overwrite middle");
     expect[10..13].copy_from_slice(b"XYZ");
     check!(t!(read_file("/tmp/fat/big.bin"), "read mid") == expect, "middle write");
@@ -848,7 +848,7 @@ pub fn self_test() {
     check!(g.len() == 1000 && g[..600] == expect[..600] && g[600..].iter().all(|&b| b == 0), "grow zeroes");
     serial_println!("[FS TEST] 6/10 overwrite, sparse hole = zeros, truncate/grow PASS");
 
-    // 7. Katalogi: zagnieżdżone, dużo wpisów (katalog rośnie o klastry), usuwanie.
+    // 7. Directories: nested, many entries (the directory grows by clusters), removal.
     t!(mkdir("/tmp/fat/dir"), "mkdir");
     t!(mkdir("/tmp/fat/dir/sub"), "mkdir nested");
     for i in 0..40 {
@@ -867,7 +867,7 @@ pub fn self_test() {
     t!(remove("/tmp/fat/dir"), "rmdir dir");
     serial_println!("[FS TEST] 7/10 nested dirs, 40 long names (dir grows), rm/rmdir PASS");
 
-    // 8. Brak wycieków: po usunięciu wszystkiego wolne miejsce jak po mkfs.
+    // 8. No leaks: after removing everything the free space is as after mkfs.
     for f in ["README.TXT", "notes.txt", "Zażółć gęślą jaźń.md", "a very long file name with spaces.text", "big.bin", "sparse"] {
         t!(remove(&format!("/tmp/fat/{}", f)), "cleanup");
     }
@@ -875,7 +875,7 @@ pub fn self_test() {
     check!(free1 == free0, "leaked clusters: free {} -> {}", free0, free1);
     serial_println!("[FS TEST] 8/10 no leaked clusters ({} KiB free) PASS", free1 / 1024);
 
-    // 9. Trwałość: odmontowanie, ponowne otwarcie z dysku, dane są.
+    // 9. Persistence: unmount, reopen from disk, the data is there.
     t!(write_file("/tmp/fat/persist.txt", "zapisane na dysku ✓".as_bytes()), "persist write");
     t!(mkdir("/tmp/fat/Katalog"), "persist dir");
     t!(unmount("/tmp/fat"), "unmount");
@@ -886,7 +886,7 @@ pub fn self_test() {
     check!(t!(stat("/tmp/fat/persist.txt"), "stat").modified.is_some(), "timestamp");
     serial_println!("[FS TEST] 9/10 unmount + reopen: data persists PASS");
 
-    // 10. Między systemami plików + przekierowanie w shellu.
+    // 10. Across file systems + redirection in the shell.
     t!(write_file("/tmp/src.txt", b"from ramfs"), "ramfs src");
     let data = t!(read_file("/tmp/src.txt"), "read src");
     t!(write_file("/tmp/fat/Katalog/copy.txt", &data), "copy to fat");
@@ -904,7 +904,7 @@ pub fn self_test() {
     check!(ctx.cwd.as_str() == "/tmp/fat/Katalog", "cd -> {}", ctx.cwd);
     serial_println!("[FS TEST] 10/10 ramfs -> FAT32 copy, shell > >>, quotes, cd PASS");
 
-    // Sprzątanie: odmontowanie i usunięcie dysku testowego.
+    // Cleanup: unmount and remove the test disk.
     let _ = unmount("/tmp/fat");
     let _ = remove("/tmp/fat");
     let _ = remove("/tmp/src.txt");

@@ -1,17 +1,17 @@
-// M17b.b: potoki – `pipe()` daje dwa deskryptory: do odczytu i do zapisu.
+// Pipes – `pipe()` returns two descriptors: one for reading and one for writing.
 //
-// * Bufor w kernelu (PIPE_CAP bajtów) pod SpinLockiem (poziom PROCESS;
-//   pod nim tylko kopiowanie bajtów i alokacja), długość także w atomiku –
-//   warunek czekania (sprawdzany pod blokadą schedulera) nie bierze blokad.
-// * read: czeka, aż będą dane; pusty potok bez piszących = koniec (0).
-// * write: pisze wszystko, czekając na miejsce; bez czytających – EPIPE
-//   (gdy nic nie zapisał; inaczej liczba zapisanych bajtów).
-// * Końce (PipeEnd) liczone przez Arc: deskryptory z dup / spawn dzielą
-//   jeden koniec; gdy znika ostatni – koniec się zamyka (Drop) i budzi
-//   drugą stronę.  Proces zamyka deskryptory już w exit_current (nie
-//   dopiero przy reap) – czytający dostaje koniec danych od razu.
-// * Czekanie przerywa kill / Ctrl+C (EINTR).
-// * M19.b: lista obserwatorów `wait_many` – budzona przy każdej zmianie.
+// * Kernel buffer (PIPE_CAP bytes) under a SpinLock (PROCESS level; under it only
+//   byte copying and allocation), the length is also kept in an atomic – the
+//   wait condition (checked under the scheduler lock) takes no locks.
+// * read: waits until there is data; an empty pipe with no writers = end (0).
+// * write: writes everything, waiting for space; with no readers – EPIPE
+//   (if nothing was written; otherwise the number of bytes written).
+// * Ends (PipeEnd) are reference-counted with Arc: descriptors from dup / spawn share
+//   one end; when the last one goes away the end closes (Drop) and wakes the
+//   other side.  A process closes its descriptors already in exit_current (not
+//   only at reap) – the reader sees end of data immediately.
+// * Waiting is interrupted by kill / Ctrl+C (EINTR).
+// * A list of `wait_many` observers – woken on every change.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -23,7 +23,7 @@ use super::waitset::Observers;
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
-/// Pojemność bufora (jak PIPE_BUF w Linuksie: 64 KiB).
+/// Buffer capacity (like PIPE_BUF in Linux: 64 KiB).
 pub const PIPE_CAP: usize = 64 * 1024;
 
 pub struct Pipe {
@@ -31,15 +31,15 @@ pub struct Pipe {
     len: AtomicUsize,
     readers: AtomicU32,
     writers: AtomicU32,
-    /// Czytający czekają na dane / koniec piszących.
+    /// Readers wait for data / for the writers to go away.
     readable: WaitQueue,
-    /// Piszący czekają na miejsce / koniec czytających.
+    /// Writers wait for space / for the readers to go away.
     writable: WaitQueue,
-    /// M19.b: `wait_many` na którymkolwiek końcu.
+    /// `wait_many` on either end.
     obs: Observers,
 }
 
-/// v0.35.2: niedoczytane dane wracają do budżetu kbuf.
+/// Unread data is returned to the kbuf budget.
 impl Drop for Pipe {
     fn drop(&mut self) {
         let n = self.buf.lock().len();
@@ -76,7 +76,7 @@ impl Drop for PipeEnd {
     }
 }
 
-/// Nowy potok: (koniec do odczytu, koniec do zapisu).
+/// New pipe: (read end, write end).
 pub fn new() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
     let pipe = Arc::new(Pipe {
         buf: SpinLock::new("pipe", level::PROCESS, VecDeque::new()),
@@ -91,8 +91,8 @@ pub fn new() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
 }
 
 impl PipeEnd {
-    /// M19.b: koniec do odczytu – są dane albo nikt nie pisze (read nie
-    /// będzie czekać); koniec do zapisu – jest miejsce albo nikt nie czyta.
+    /// Read end – there is data or nobody is writing (read will not
+    /// wait); write end – there is space or nobody is reading.
     pub fn ready(&self) -> bool {
         let p = &self.pipe;
         if self.write {
@@ -106,7 +106,7 @@ impl PipeEnd {
         &self.pipe.obs
     }
 
-    /// Do `max` bajtów; pusty wynik = koniec danych (nikt już nie pisze).
+    /// Up to `max` bytes; an empty result = end of data (nobody writes any more).
     pub fn read(&self, max: usize) -> Result<Vec<u8>, i64> {
         let p = &self.pipe;
         loop {
@@ -123,7 +123,7 @@ impl PipeEnd {
                 }
             }
             if p.writers.load(Ordering::SeqCst) == 0 {
-                // Ostatni piszący mógł dopisać tuż przed zamknięciem.
+                // The last writer may have appended just before closing.
                 if p.len.load(Ordering::SeqCst) == 0 {
                     return Ok(Vec::new());
                 }
@@ -142,7 +142,7 @@ impl PipeEnd {
         }
     }
 
-    /// Całe `data` (czeka na miejsce); EPIPE, gdy nikt nie czyta.
+    /// All of `data` (waits for space); EPIPE when nobody is reading.
     pub fn write(&self, data: &[u8]) -> Result<usize, i64> {
         let p = &self.pipe;
         let mut done = 0;
@@ -153,7 +153,7 @@ impl PipeEnd {
             let wrote = {
                 let mut b = p.buf.lock();
                 let room = PIPE_CAP.saturating_sub(b.len());
-                // v0.35.2: w budżecie buforów jądra (kbuf).
+                // Counted in the kernel buffer budget (kbuf).
                 let want = room.min(data.len() - done);
                 let n = super::kbuf::take_upto(want as u64) as usize;
                 if want > 0 && n == 0 {

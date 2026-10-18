@@ -1,6 +1,6 @@
-// M17a krok c: heap i alokator ramek na własnych blokadach – samotesty
-// (tylko build z --cfg selftest).  Wszystko tu dzieje się BEZ Big Kernel
-// Lock, na wielu CPU naraz.
+// Heap and frame allocator on their own locks – self-tests
+// (selftest build only, --cfg selftest).  Everything here runs WITHOUT the Big Kernel
+// Lock, on many CPUs at once.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,8 +29,8 @@ static OPS: AtomicU64 = AtomicU64::new(0);
 static IRQ_ALLOCS: AtomicU64 = AtomicU64::new(0);
 
 const BIG_ROUNDS: usize = 12;
-/// Więcej niż SHRINK_AT (512 KiB) – każde zwolnienie zmniejsza heap
-/// (TLB shootdown), każda alokacja go powiększa (map_page) – bez BKL.
+/// More than SHRINK_AT (512 KiB) – every free shrinks the heap
+/// (TLB shootdown), every allocation grows it (map_page) – without the BKL.
 const BIG_WORDS: usize = 640 * 1024 / 8;
 const SMALL_ROUNDS: u64 = 1500;
 
@@ -50,20 +50,20 @@ fn pattern(i: usize, round: usize, j: usize) -> u64 {
 }
 
 // ------------------------------------------------------------
-// M17b.h2: blok wzięty na jednym CPU, oddany na innym (listy heapa per CPU)
+// Block taken on one CPU, freed on another (per-CPU heap lists)
 // ------------------------------------------------------------
 
-/// Kanał producent -> konsument: (adres, rozmiar, ziarno wzoru, CPU alokacji).
+/// Producer -> consumer channel: (address, size, pattern seed, allocating CPU).
 static XCHAN: crate::sched::spin::SpinLock<Vec<(usize, usize, u32, u8)>> =
     crate::sched::spin::SpinLock::new("alloc-xchan", crate::sched::spin::level::TEST_INNER, Vec::new());
 static X_PRODUCED: AtomicU64 = AtomicU64::new(0);
 static X_FREED: AtomicU64 = AtomicU64::new(0);
-/// Zwolnione na innym CPU niż wzięte.
+/// Freed on a different CPU than allocated.
 static X_CROSS: AtomicU64 = AtomicU64::new(0);
 static X_PRODUCERS_LEFT: AtomicU64 = AtomicU64::new(0);
 const X_ROUNDS: u32 = 6000;
-/// Rozmiary: wszystkie klasy, także nie-potęgi 2 (zaokrąglane do klasy).
-// P2: także duże klasy (do 32 KiB) i granice klas.
+/// Sizes: all classes, including non-powers of 2 (rounded up to a class).
+// Also large classes (up to 32 KiB) and class boundaries.
 const X_SIZES: [usize; 17] = [8, 16, 24, 40, 64, 100, 128, 300, 512, 777, 1500, 2048, 2049, 4096, 6000, 12000, 32768];
 
 fn x_byte(seed: u32, k: usize) -> u8 {
@@ -84,9 +84,9 @@ fn x_layout(size: usize) -> core::alloc::Layout {
     core::alloc::Layout::from_size_align(size, 8).unwrap()
 }
 
-/// Producent: bierze bloki, wypełnia wzorem, co czwarty trzyma do końca
-/// (sprawdzany na końcu – cudze zwolnienia nie mogą go ruszyć), resztę
-/// oddaje konsumentom przez kanał.
+/// Producer: takes blocks, fills them with a pattern, keeps every fourth until the end
+/// (checked at the end – frees by others must not touch it), hands the rest
+/// to consumers through the channel.
 fn x_producer(i: usize) {
     bkl::unlocked(|| {
         let mut kept: Vec<(usize, usize, u32)> = Vec::with_capacity(X_ROUNDS as usize / 4 + 1);
@@ -107,7 +107,7 @@ fn x_producer(i: usize) {
                 kept.push((p as usize, size, seed));
                 continue;
             }
-            // Kanał ograniczony – nie zalewamy heapa.
+            // Bounded channel – we do not flood the heap.
             loop {
                 {
                     let mut q = XCHAN.lock();
@@ -131,8 +131,8 @@ fn x_producer(i: usize) {
     DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Konsument: sprawdza wzór (nikt nie pisał po bloku w drodze) i zwalnia
-/// – zwykle na innym CPU niż ten, który blok wziął.
+/// Consumer: checks the pattern (nobody wrote over the block in transit) and frees it
+/// – usually on a different CPU than the one that took the block.
 fn x_consumer(_: usize) {
     bkl::unlocked(|| loop {
         let item = XCHAN.lock().pop();
@@ -141,7 +141,7 @@ fn x_consumer(_: usize) {
                 if !x_ok(p as *const u8, size, seed) {
                     let _ = BAD.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
                 }
-                // Zapis po bloku tuż przed zwolnieniem (jak prawdziwy kod).
+                // Write over the block right before freeing it (like real code).
                 unsafe { core::ptr::write_bytes(p as *mut u8, 0xEE, size) };
                 if cpu::id() as u8 != at {
                     X_CROSS.fetch_add(1, Ordering::Relaxed);
@@ -161,9 +161,9 @@ fn x_consumer(_: usize) {
     DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Duże bloki: heap rośnie i maleje równolegle na kilku CPU.
-/// M17b.h: największy rozmiar heapa w czasie testu dużych bloków (mogą się
-/// zmieścić w dziurach – wtedy heap nie rośnie i nie ma czego oddawać).
+/// Large blocks: the heap grows and shrinks in parallel on several CPUs.
+/// Largest heap size during the large-block test (blocks may
+/// fit into holes – then the heap does not grow and there is nothing to return).
 static PEAK: AtomicU64 = AtomicU64::new(0);
 
 fn big(i: usize) {
@@ -191,7 +191,7 @@ fn big(i: usize) {
     DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Małe bloki i ramki naraz.
+/// Small blocks and frames at once.
 fn small(i: usize) {
     bkl::unlocked(|| {
         let mut kept: Vec<Vec<u32>> = Vec::new();
@@ -233,7 +233,7 @@ fn small(i: usize) {
     DONE.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Alokacja z przerwania zegara w trakcie testu 2.
+/// Allocation from the timer interrupt during test 2.
 fn irq_hook(_: u64) {
     let v: Vec<u8> = alloc::vec![0xA5; 96];
     if v.iter().any(|&b| b != 0xA5) {
@@ -256,8 +256,8 @@ fn bad_text(code: u64) -> &'static str {
 
 fn noop(_: usize) {}
 
-// P3: zapasy ramek per CPU – każda ramka u jednego właściciela, ramki oddawane
-// na innym CPU niż wzięte, double-free odrzucany także dla ramki w zapasie.
+// Per-CPU frame caches – every frame has a single owner, frames are freed
+// on a different CPU than allocated, double-free is rejected for a cached frame too.
 const F_PER: usize = 400;
 static F_POOL: crate::sched::spin::SpinLock<Vec<u64>> =
     crate::sched::spin::SpinLock::new("alloc-fpool", crate::sched::spin::level::TEST_INNER, Vec::new());
@@ -285,8 +285,8 @@ fn f_worker(i: usize) {
             }
         }
     }
-    // Wszyscy wzięli swoje – dopiero teraz sprawdzenie znaczników (ramka
-    // wydana dwóm właścicielom miałaby znacznik drugiego).
+    // Everyone has taken theirs – only now check the markers (a frame
+    // handed to two owners would carry the second one's marker).
     F_READY.fetch_add(1, Ordering::SeqCst);
     while F_READY.load(Ordering::SeqCst) < k && !STOP.load(Ordering::SeqCst) {
         crate::sched::yield_now();
@@ -296,7 +296,7 @@ fn f_worker(i: usize) {
             let _ = BAD.compare_exchange(0, 5, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
-    // Połowa do wspólnej puli, z puli oddajemy cudze (na innym CPU).
+    // Half goes to a shared pool; from the pool we free others' frames (on a different CPU).
     let half = mine.split_off(F_PER / 2);
     F_POOL.lock().extend_from_slice(&half);
     F_PUSHED.fetch_add(1, Ordering::SeqCst);
@@ -312,7 +312,7 @@ fn f_worker(i: usize) {
         }
         if first {
             first = false;
-            // Ramka leży teraz w zapasie tego CPU – drugi zwrot musi odpaść.
+            // The frame now sits in this CPU's cache – a second free must fail.
             if crate::memory::free_frame(f) {
                 let _ = BAD.compare_exchange(0, 6, Ordering::SeqCst, Ordering::SeqCst);
             }
@@ -335,8 +335,8 @@ pub fn self_test() {
     crate::sched::reap();
     let (_, _, dl0) = crate::sched::spin::stats();
 
-    // 1. Duże bloki: heap rośnie (map_page) i maleje (unmap + TLB shootdown)
-    //    na kilku CPU naraz, bez BKL.
+    // 1. Large blocks: the heap grows (map_page) and shrinks (unmap + TLB shootdown)
+    //    on several CPUs at once, without the BKL.
     let mapped0 = crate::memory::heap_mapped_bytes();
     let used0 = crate::memory::heap_used_bytes();
     let (rq0, _, _, _, _) = tlb::stats();
@@ -369,9 +369,9 @@ pub fn self_test() {
         rq1 - rq0
     );
 
-    // 2. Małe bloki + ramki na kilku CPU, przerwanie zegara też alokuje,
-    //    a zadanie testowe (z BKL) w tym czasie tworzy i kończy zadania
-    //    (stosy: map/unmap w innym obszarze kernela).
+    // 2. Small blocks + frames on several CPUs, the timer interrupt allocates too,
+    //    while the test task (with the BKL) creates and ends tasks
+    //    (stacks: map/unmap in another kernel region).
     let frames0 = crate::memory::free_frame_count();
     DONE.store(0, Ordering::SeqCst);
     CPUS.store(0, Ordering::SeqCst);
@@ -403,8 +403,8 @@ pub fn self_test() {
     check!(used1 <= used0 + 16 * 1024, "heap used {} -> {} bytes (leak?)", used0, used1);
     let frames1 = crate::memory::free_frame_count();
     let heap_pages = (crate::memory::heap_mapped_bytes() as u64).saturating_sub(mapped0 as u64) / 4096;
-    // Zapas na tablice stron obszarów kernela (sloty stosów 2000 zadań, heap),
-    // które chwilę zostają – prawdziwy wyciek to ramki na każdą rundę.
+    // Headroom for page tables of kernel regions (stack slots of 2000 tasks, heap),
+    // which linger for a while – a real leak is frames on every round.
     check!(frames1 + heap_pages + 64 >= frames0, "frames {} -> {} (+{} heap pages)", frames0, frames1, heap_pages);
     serial_println!(
         "[ALLOC TEST] 2/5 {} tasks x {} small blocks + frames, {} allocs in the timer IRQ, {} task stacks meanwhile, nothing lost PASS",
@@ -414,8 +414,8 @@ pub fn self_test() {
         spawned
     );
 
-    // 3. M17b.h2: bloki wzięte na jednym CPU, zwalniane na innym (listy heapa
-    //    per CPU) – wzory nienaruszone, nic nie ginie.
+    // 3. Blocks taken on one CPU, freed on another (per-CPU heap
+    //    lists) – patterns intact, nothing is lost.
     let used_x0 = crate::memory::heap_used_bytes();
     DONE.store(0, Ordering::SeqCst);
     CPUS.store(0, Ordering::SeqCst);
@@ -446,12 +446,12 @@ pub fn self_test() {
         cross
     );
 
-    // 4. P3: zapasy ramek per CPU.  Odmowy bez blokady: adres 0, niewyrównany,
-    // poza RAM-em, zarezerwowany (bitmapa), double-free (też z zapasu CPU);
-    // potem k zadań po F_PER ramek, połowa oddana na innym CPU.
+    // 4. Per-CPU frame caches.  Rejections without the lock: address 0, unaligned,
+    // outside RAM, reserved (bitmap), double-free (also from the CPU cache);
+    // then k tasks with F_PER frames each, half freed on another CPU.
     crate::sched::reap();
-    // v0.27.1: punkt odniesienia po sprzątnięciu zadań z kroku 3 (stosy wracają
-    // przy reap) – pomiar od razu dawał na końcu WIĘCEJ wolnych (110629 -> 110727).
+    // Reference point taken after the tasks from step 3 are reaped (stacks come back
+    // at reap) – measuring right away ended with MORE free frames than at the start.
     let fr0 = {
         let (mut last, mut stable) = (u64::MAX, 0);
         for _ in 0..400 {
@@ -503,7 +503,7 @@ pub fn self_test() {
         fr0
     );
 
-    // 5. Blokady alokatorów: nikt nie zgłosił zakleszczenia w trakcie testu.
+    // 5. Allocator locks: nobody reported a deadlock during the test.
     let (acq, cont, dl) = crate::sched::spin::stats();
     check!(dl == dl0, "{} deadlock report(s) during the test", dl - dl0);
     serial_println!("[ALLOC TEST] 5/5 spinlocks so far: {} taken, {} contended, 0 deadlock reports PASS", acq, cont);
