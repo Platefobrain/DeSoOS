@@ -631,6 +631,22 @@ pub fn cpus_report(out: &mut dyn Write) {
         grow,
         shrink
     );
+    // v0.35.2: limity – procesy, zapas pamięci jądra, bufory IPC, ramfs.
+    let (res, denied) = crate::memory::user_reserve_stats();
+    let (kb, kb_denied) = crate::user::kbuf::stats();
+    let _ = writeln!(
+        out,
+        "limits: {} of {} processes, kernel memory reserve {} MiB ({} user frame(s) refused), IPC buffers {} of {} KiB ({} refused), ramfs {} of {} KiB",
+        crate::user::process::LIVE_PROCS.load(core::sync::atomic::Ordering::Relaxed),
+        crate::user::process::MAX_PROCS,
+        res * 4096 / (1024 * 1024),
+        denied,
+        kb / 1024,
+        crate::user::kbuf::KBUF_MAX / 1024,
+        kb_denied,
+        crate::fs::ramfs::bytes_used() / 1024,
+        crate::fs::ramfs::RAMFS_MAX / 1024
+    );
     let (sw_n, ow_n, ow_us) = crate::sched::switch_stats();
     let _ = writeln!(
         out,

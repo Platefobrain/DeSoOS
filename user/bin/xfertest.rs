@@ -181,6 +181,33 @@ fn main(args: Args) -> i32 {
     close(p);
     close(t);
 
+    // 8. Bez cykli: koniec kanału, w którego kolejce leży inny koniec kanału,
+    // nie może podróżować (EBUSY) – inaczej dwa kanały trzymałyby się nawzajem
+    // po zamknięciu wszystkich uchwytów i pamięć nigdy by nie wróciła.
+    let (x0, x1) = channel_create().unwrap_or((0, 0));
+    let (y0, y1) = channel_create().unwrap_or((0, 0));
+    let (z0, z1) = channel_create().unwrap_or((0, 0));
+    check!(n, chan_send_h(x0, b"y0", &[y0], 0) == 0, "y0 into the queue of x1");
+    check!(n, chan_send_h(y1, b"x1", &[x1], 0) == EBUSY, "x1 (a channel in its queue) must not travel: cycle x1 <-> y0");
+    check!(n, handle_info(x1).is_ok(), "x1 must stay after EBUSY");
+    check!(n, chan_send_h(z1, b"x1", &[x1], 0) == EBUSY, "x1 must not travel through any channel");
+    check!(n, chan_send_h(x0, b"data", &[], 0) == 0 && chan_send_h(y1, b"data", &[], 0) == 0, "plain messages still pass");
+    // Po odebraniu y0 kolejka x1 nie ma kanałów – x1 może podróżować; teraz to
+    // y0 (w jego kolejce leży x1) nie może.
+    let r = chan_recv_h(x1, &mut buf, &mut hs, 0, &mut info);
+    check!(n, r == 2 && info.handles == 1, "x1 receives y0: {} {:?}", r, info);
+    let y0b = hs[0];
+    check!(n, chan_recv(x1, &mut buf, 0, &mut info) == 4, "x1 receives the plain message");
+    check!(n, chan_send_h(y1, b"x1", &[x1], 0) == 0, "x1 travels once its queue holds no channel");
+    check!(n, chan_send_h(x0, b"y0", &[y0b], 0) == EBUSY, "y0 (x1 in its queue) must not travel: cycle refused");
+    check!(n, chan_send_h(z1, b"y0", &[y0b], 0) == EBUSY, "y0 must not travel through a third channel either");
+    // Łańcuch bez cyklu dalej działa: z0 (pusta kolejka) w kolejce x1, która jest w drodze.
+    check!(n, chan_send_h(x0, b"z0", &[z0], 0) == 0, "a chain without a cycle is allowed");
+    close(x0);
+    close(y0b);
+    close(y1);
+    close(z1);
+
     unlink(PATH);
     println!("xfertest: {} checks OK", n);
     0

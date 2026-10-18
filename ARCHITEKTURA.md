@@ -200,7 +200,10 @@ z procesu kopiowane przed wzięciem blokady, do procesu po jej zwolnieniu; pod b
 16 MiB kanałem 21–25 ms / wspólną pamięcią 5 ms. Stress z ciągłą komunikacją procesów (zabijanych w trakcie
 czekania) nie spowalnia reszty systemu.
 
-Znane ograniczenie: cykl uchwytów przez kolejki kilku kanałów zostaje w pamięci (opisany, nie wykrywany).
+Bez cykli (v0.35.1): koniec kanału, w którego kolejce leży komunikat z innym końcem kanału, nie może sam podróżować
+w komunikacie (`EBUSY`). Cykl końców w kolejkach jest wtedy niemożliwy – ostatnie włożenie domykające cykl wkładałoby
+koniec, w którego kolejce leży już poprzedni element. Sprawdzenie i włożenie pod jedną blokadą `chan-xfer` (poziom 35,
+przed blokadą kolejki); biorą ją tylko komunikaty z końcami kanałów.
 
 ## Wiele rdzeni
 
@@ -802,6 +805,21 @@ wyrównanie), MuQSS (trylock przy wyborze), pobudka na cudzy CPU listą + IPI �
 zwolnione zadanie = FAIL), (c) burza uśpień i pobudek między CPU z terminem bezpieczeństwa (pobudka po terminie =
 zgubiona = FAIL), exit + reap w pętli (licznik czekań na `on_cpu`, asercja: reap nigdy nie zwalnia zadania z
 `on_cpu`), mutacja: bez czekania na `on_cpu` test musi się wywrócić. Na końcu autostress KVM i Legion (compare, max6).
+
+## Limity zasobów (v0.35.2)
+
+Żaden program nie może zająć zasobów, od których zależy jądro – dostaje błąd albo ginie sam.
+
+| Zasób | Limit | Ponad limitem |
+|---|---|---|
+| procesy | 1024 (ostatnie 64 tylko dla init i jego dzieci: shell, usługi) | `spawn` → `EAGAIN` |
+| ramki dla procesów (strony, tablice stron, pamięć wspólna) | wszystko poza zapasem jądra: 1/16 RAM, 16–256 MiB | #PF → proces zabity, `shm_create` → `ENOMEM` |
+| bufory IPC na heapie (kolejki kanałów + potoki) | 16 MiB razem (`kbuf`) | `chan_send` / zapis do potoku → `ENOMEM` |
+| dane plików ramfs (heap) | 24 MiB | `ENOSPC` |
+| uchwyty, mapowania, kolejka kanału, stos | 64 / 4 GiB / 64 komunikaty / 8 MiB na proces (od M17b–M18) | `EMFILE` / `ENOMEM` / `EAGAIN` / #PF |
+
+Limity są globalne (nie ma jeszcze użytkowników). Zapas sprawdzany bez blokady (kopia licznika wolnych ramek +
+zapasy CPU) – przy każdym #PF procesu. Test: `/bin/limtest` (FILE TEST 6/6).
 
 ## Pomiar i testy
 

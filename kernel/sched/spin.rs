@@ -49,6 +49,9 @@ pub mod level {
     /// Warstwa block i sterowniki dysków.
     pub const BLOCK: u8 = 30;
     /// Procesy: tablica zombie, rodzina, deskryptory.
+    /// v0.35.1: przekazywanie końców kanałów w komunikatach (zasada „bez cykli”);
+    /// pod nią blokada kolejki kanału (PROCESS).
+    pub const CHAN_XFER: u8 = 35;
     pub const PROCESS: u8 = 40;
     /// M19.b: listy obserwatorów `wait_many` (kanały, potoki, przerwania) –
     /// nad kolejkami kanałów / potoków (PROCESS), pod schedulerem (pobudka po

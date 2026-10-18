@@ -2,6 +2,71 @@
 
 Format: najnowsze na gorze. Daty wg czasu polskiego.
 
+## v0.35.2 — 2026-10-17
+
+### Bezpieczeństwo, krok 3: limity – etap zamknięty
+- **Procesy:** najwyżej 1024 (żywe + jeszcze nie sprzątnięte). Ponad 960 `spawn` dostaje `EAGAIN`; ostatnie 64 miejsca
+  tylko dla init i jego bezpośrednich dzieci (shell, usługi) – po bombie procesów shell nadal uruchomi `ps` / `kill`,
+  a init zrestartuje usługę.
+- **Zapas pamięci tylko dla jądra:** 1/16 RAM (16–256 MiB; Legion 16 GB → 256 MiB, QEMU 512 MiB → 32 MiB). Strony
+  procesów, ich tablice stron i pamięć współdzielona – tylko ponad zapasem (`alloc_frame_user`, sprawdzenie bez
+  blokady). Pożeracz pamięci ginie (brak strony), `shm_create` dostaje `ENOMEM`, jądro dalej ma z czego działać.
+- **Bufory IPC na heapie jądra:** kolejki kanałów i dane w potokach razem najwyżej 16 MiB (`kbuf`). Wcześniej kilka
+  procesów mogło zapełnić heap (64 MiB) kolejkami i jądro padało przy następnej alokacji. Ponad budżetem: `chan_send`
+  i zapis do potoku – `ENOMEM` (komunikat wraca, nic nie ginie).
+- **ramfs:** pliki (też na heapie) najwyżej 24 MiB – ponad tym `ENOSPC`. **Znaleziony przy okazji błąd:** `seek` na
+  ogromną pozycję + zapis 1 bajtu kazał jądru zaalokować gigantyczny bufor – panika jądra z dowolnego programu. Teraz
+  `ENOSPC`. Rozmiar plików zmieniany przez `try_reserve` (brak pamięci = błąd, nie panika).
+- `cpus`: linia `limits: N of 1024 processes, kernel memory reserve X MiB (… refused), IPC buffers … ramfs …`.
+- **Test:** FILE TEST 6/6 – `/bin/limtest` (17 sprawdzeń): bomba procesów do `EAGAIN` (959 procesów w QEMU), potem
+  znowu działa; `shm_create(16 MiB)` do `ENOMEM`; pożeracz pamięci zabity; ramfs do `ENOSPC` + zapis na 1 TiB →
+  `ENOSPC`; kolejki kanałów (z pomocnikiem) do `ENOMEM`, potok w tym czasie – `ENOMEM`, po zamknięciu działa. Jądro
+  sprawdza, że procesy, budżet IPC, ramfs i ramki wróciły, a zwykły program działa.
+- **Legion (v0.35.2):** porównawczy **600 637** (v0.34.3: 599 726), max6 **593 350** (593 119) – limity nic nie
+  kosztują; `limits: 6 of 1024 processes, kernel memory reserve 256 MiB (0 user frame(s) refused), IPC buffers 0 of
+  16384 KiB (0 refused), ramfs 1287 of 24576 KiB` – normalna praca nie dotyka żadnego limitu. pass=1.
+- USB TEST: końcowe sprawdzenie ramek całego zestawu uwzględnia wzrost heapu (jak stress i nowe testy) – u Dawida (KVM)
+  raz „frames leaked (111927 -> 111913)”, choć wszystkie 7 testów USB, każdy z własnym sprawdzeniem, przeszło; heap
+  po dużych testach (ramfs, kolejki) bywa pofragmentowany i rośnie na końcu. Linia `[USB TEST] frames after the suite:
+  … (heap +N pages)` pokazuje, ile.
+- QEMU 28/28.
+
+## v0.35.1 — 2026-10-17
+
+### Bezpieczeństwo, krok 2: bez cykli uchwytów w kanałach
+- **Błąd (znany brak, wskazany też przez Pawła i ChatGPT):** proces mógł włożyć koniec kanału A do kolejki kanału B,
+  a koniec B do kolejki A, i zamknąć resztę uchwytów. Kanały trzymały się nawzajem – nikt ich już nie odbierze, a
+  pamięć jądra nigdy nie wracała. Jeden program mógł tak w pętli zjadać pamięć.
+- **Zasada:** koniec kanału, w którego kolejce leży komunikat z innym końcem kanału, nie może sam podróżować w
+  komunikacie – `chan_send` zwraca `EBUSY`, uchwyt zostaje u nadawcy. Po odebraniu tego komunikatu koniec znowu może
+  podróżować. Cykl jest niemożliwy: ostatnie włożenie, które by go domknęło, zawsze trafia na tę zasadę. Sprawdzenie i
+  włożenie razem pod jedną blokadą `chan-xfer` – biorą ją tylko komunikaty z końcami kanałów, zwykłe komunikaty bez
+  zmian (wydajność IPC ta sama). Usługi (usbd, łączenie po nazwie przez init) działają jak dotąd.
+- **Test:** IPC TEST 3/5 – xfertest 43 sprawdzenia (było 32): cykl z 2 i 3 kanałami odrzucony, zwykłe komunikaty
+  przechodzą, po odebraniu koniec znowu podróżuje, łańcuch bez cyklu dozwolony; jądro liczy żywe kanały – po teście
+  żaden nie zostaje. Sprawdzone: bez zasady test pada (check 34).
+- QEMU 28/28.
+
+## v0.35.0 — 2026-10-17
+
+### Bezpieczeństwo, krok 1: audyt wywołań systemowych + fuzzer
+- **Audyt:** przejrzane wszystkie wywołania systemowe pod kątem arytmetyki na liczbach od procesu (długości, adresy,
+  liczniki – jak błąd w `mmap` z v0.34.2): kopiowanie z / do procesu (`user_range_ok` z `checked_add`, każda długość
+  ograniczona: MAX_IO, 255 B ścieżki, 4 KiB argumentów, MSG_MAX, limity list), `sleep` (do 1 h), `seek`, `wait_many`
+  (długi limit = bez limitu), `dup2`, pamięć współdzielona, wywołania usług (`dev_map`, `blk_attach`,
+  `input_inject`), parser i loader ELF. **Nowych błędów nie znaleziono** – poprzedni był jedyny w tym rodzaju.
+- **Fuzzer `/bin/sysfuzz`** (FILE TEST 5/5):
+  - 32 dzieci bez żadnych uchwytów, każde do 3000 losowych wywołań ze skrajnymi argumentami (0, −1, 2^64−1, adresy
+    jądra, prawie-przepełnienia, prawdziwy bufor ze złą długością, losowe uchwyty; na start prawdziwe obiekty:
+    potok, kanały, pamięć wspólna, plik), 8 naraz na kilku CPU; dziecko, które utknie (sleep, wait_many, recv),
+    jest zabijane – to sprawdza też sprzątanie procesu w trakcie wywołania;
+  - 300 zepsutych plików ELF (kopie `/bin/hello` z losowo zmienionymi bajtami, głównie w nagłówkach, czasem ucięte)
+    – zapis do pliku i `spawn`: proces może uruchomić dowolny plik, więc loader to też wejście od programu;
+  - pomijane: `exit`, `spawn` (bomba procesów – krok 3, limity), `kill` (mógłby zabić rodzica albo init);
+  - test: jądro nie pada ani się nie zawiesza, ramki wracają, śmieci z losowych ścieżek usuwa jądro.
+- Jednorazowy długi przebieg (256 dzieci × 4000 wywołań ≈ 1 mln, 2000 plików ELF): jądro przeżyło, 0 wycieków.
+- QEMU 28/28.
+
 ## v0.34.3 — 2026-10-16
 
 ### Stress mniej mierzy sam siebie

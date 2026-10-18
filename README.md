@@ -1,4 +1,4 @@
-# DeSoOS v0.34.3
+# DeSoOS v0.35.2
 
 Wlasny system operacyjny
 

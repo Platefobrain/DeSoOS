@@ -631,6 +631,20 @@ Na podstawie pomiarów z Legiona (v0.19.7, pełne obciążenie, 16 CPU). Każdy 
   - [ ] **e.** Pomiar i zamknięcie: Legion (compare, max6), `cpus` – czekanie na blokadę schedulera.
       Heap w max6: 1,1 mln czekań (1%) – P2b (bloki 32–128 KiB) opcjonalnie.
 
+### Bezpieczeństwo (po przeglądach Pawła i ChatGPT, 2026-10-17)
+
+Przed siecią: żaden program (zepsuty ani złośliwy) nie może położyć jądra ani zająć wszystkich zasobów.
+- [x] **1.** (v0.35.0) Audyt arytmetyki argumentów wszystkich wywołań systemowych (bez nowych błędów; poprzedni –
+      `mmap`, v0.34.2) + fuzzer `/bin/sysfuzz` w samotestach: losowe wywołania ze skrajnymi argumentami z dzieci bez
+      uchwytów + zepsute pliki ELF. Długi przebieg: ~1 mln wywołań, 2000 ELF – jądro przeżyło.
+- [x] **2.** (v0.35.1) Bez cykli uchwytów: koniec kanału z kanałem w swojej kolejce nie podróżuje (EBUSY); xfertest
+      43 sprawdzenia + licznik żywych kanałów w jądrze (0 wycieków).
+- [x] **3.** (v0.35.2) Limity: 1024 procesy (ostatnie 64 tylko dla init i jego dzieci – shell, usługi), zapas pamięci
+      tylko dla jądra (1/16 RAM, 16–256 MiB; strony procesów i pamięć wspólna ponad nim), budżet buforów IPC 16 MiB
+      (kanały + potoki, ENOMEM), ramfs 24 MiB (ENOSPC; przy okazji: `seek` daleko + zapis wywracał jądro). FILE TEST 6/6
+      (`/bin/limtest`: bomba, shm, pożeracz pamięci, ramfs, IPC – 17 sprawdzeń). Legion: compare 600 637, max6
+      593 350 (bez zmian wobec v0.34.3), 0 odmów w normalnej pracy. **Etap zamknięty.**
+
 ### ✅ M20 – USB (plan 2026-10-12, gotowe 2026-10-14, v0.29.1)
 
 **Cel:** DeSoOS na sprzęcie bez PS/2 – na Legionie działa wbudowana klawiatura (USB HID, ITE 8910, xHCI AMD
@@ -791,10 +805,10 @@ Numer w nawiasie = etap, w którym brak znika.
 - PID = numer zadania schedulera (0 = idle BSP, 1 = zadanie startowe kernela, dalej zadania idle pozostałych rdzeni – przy 4 CPU init ma PID 5)
 - shell: linia max ~70 znaków (mieści się w 80 kolumnach), brak skryptów, zmiennych i `$?`
 - brak katalogów przez deskryptor (readdir po ścieżce)
-- IPC: cykl uchwytów przez kolejki kilku kanałów zostaje w pamięci (opisany, nie wykrywany); brak futexa i ring bufferów w bibliotece
+- IPC: brak futexa i ring bufferów w bibliotece
 - ELF: tylko statyczne ET_EXEC, envp i auxv puste
 - programy z `/bin` wbudowane w obraz kernela (initrd); programy testowe w asm (M13–M14) też (od M19.i tylko z awaryjnego shella jądra: `run <nazwa>`)
-- brak limitów zasobów procesu
+- limity (v0.35.2) globalne, nie na użytkownika: 1024 procesy, zapas pamięci jądra, 16 MiB buforów IPC, 24 MiB ramfs; heap jądra 64 MiB
 - `read(0)` czyta całą linię; procesy w tle konkurują z shellem o klawiaturę (`readkey`/`read` – kto pierwszy)
 
 **Scheduler i współbieżność**

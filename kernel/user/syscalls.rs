@@ -1099,6 +1099,7 @@ fn exec_error(e: super::ExecError) -> i64 {
     match e {
         super::ExecError::Fs(e) => fs_error(e),
         super::ExecError::TooBig => E2BIG,
+        super::ExecError::TooManyProcesses => EAGAIN,
         super::ExecError::Load(LoadError::NoMemory) => ENOMEM,
         super::ExecError::Load(LoadError::TooManyArgs) => E2BIG,
         super::ExecError::Load(_) => ENOEXEC,

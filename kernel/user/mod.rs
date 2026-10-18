@@ -47,6 +47,7 @@ pub mod channel;
 pub mod waitset;
 pub mod device;
 pub mod pipe;
+pub mod kbuf;
 pub mod shm;
 // M20.e: uchwyt INPUT (zdarzenia wejścia z usbd).
 pub mod inputsrc;
@@ -281,6 +282,8 @@ pub enum ExecError {
     Fs(crate::fs::FsError),
     TooBig,
     Load(elf_loader::LoadError),
+    /// v0.35.2: limit procesów (EAGAIN).
+    TooManyProcesses,
 }
 
 impl core::fmt::Display for ExecError {
@@ -288,6 +291,7 @@ impl core::fmt::Display for ExecError {
         match self {
             ExecError::Fs(e) => write!(f, "{}", e),
             ExecError::TooBig => write!(f, "file too big (max 8 MiB)"),
+            ExecError::TooManyProcesses => write!(f, "too many processes"),
             ExecError::Load(e) => write!(f, "{}", e.as_str()),
         }
     }
@@ -325,6 +329,12 @@ pub fn spawn_child(
     foreground: bool,
     fds: Vec<Option<process::Handle>>,
 ) -> Result<TaskId, ExecError> {
+    // v0.35.2: limit procesów; init i jego dzieci (shell, usługi) mają rezerwę.
+    let privileged = parent_pid == procs::init_pid() || parent.trusted;
+    let limit = if privileged { process::MAX_PROCS } else { process::MAX_PROCS - process::PROC_RESERVE };
+    if process::LIVE_PROCS.load(Ordering::SeqCst) >= limit {
+        return Err(ExecError::TooManyProcesses);
+    }
     let t0 = prof::start();
     let bytes = read_program(path)?;
     let t1 = prof::start();
@@ -340,6 +350,7 @@ pub fn spawn_child(
     child.stdin = parent.stdin.clone();
     child.stdout = parent.stdout.clone();
     child.ppid.store(parent_pid, Ordering::SeqCst);
+    child.trusted = parent_pid == procs::init_pid();
     // M17a.g11: zanim dziecko stanie się widoczne (on_exit rodzica sprawdza).
     parent.has_children.store(true, Ordering::SeqCst);
     child.fds = fds;

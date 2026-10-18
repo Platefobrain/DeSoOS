@@ -441,6 +441,8 @@ pub fn self_test() {
     serial_println!("[USB TEST] Starting USB tests (descriptor parser, xHCI controller + enumeration in the usbd service)...");
     crate::selftest::begin();
     let frames0 = crate::selftest::settled_free_frames();
+    // v0.35.2: heap oddaje strony z opóźnieniem (jak w stressie) – jego wzrost to nie wyciek.
+    let heap0 = crate::memory::heap::mapped_bytes() as u64;
 
     let xhci = pci::devices().iter().position(|d| (d.class, d.subclass, d.prog_if) == (0x0C, 0x03, 0x30));
     check!(xhci.is_some(), "no xHCI controller (QEMU needs -device qemu-xhci)");
@@ -545,14 +547,17 @@ pub fn self_test() {
     serial_println!("[RESULT-USB] ver={} {} {} {}", crate::shell::VERSION, res.trim_start_matches("usbtest-result "), res2.trim_start_matches("usbtest-disk "), MEASURED.lock().clone());
 
     crate::sched::reap();
+    let heap_growth = || (crate::memory::heap::mapped_bytes() as u64).saturating_sub(heap0) / 4096;
     check!(
         wait_for(2_000, || {
             crate::sched::reap();
-            crate::sched::stack::free_frames_flushed() >= frames0
+            crate::sched::stack::free_frames_flushed() + heap_growth() >= frames0
         }),
-        "frames leaked ({} -> {})",
+        "frames leaked ({} -> {}, heap +{} pages)",
         frames0,
-        crate::sched::stack::free_frames_flushed()
+        crate::sched::stack::free_frames_flushed(),
+        heap_growth()
     );
+    serial_println!("[USB TEST] frames after the suite: {} -> {} (heap +{} pages)", frames0, crate::sched::stack::free_frames_flushed(), heap_growth());
     crate::selftest::pass();
 }

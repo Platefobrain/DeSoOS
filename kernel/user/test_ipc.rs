@@ -65,11 +65,15 @@ pub fn self_test() {
     // 3. M18.d: uchwyty w komunikatach (przeniesienie, prawa, TRANSFER, własny
     // kanał, EMSGSIZE / EMFILE bez utraty), zwalnianie z zamkniętej kolejki,
     // spawn_ex – dziecko tylko z jednym uchwytem dostaje plik przez kanał.
+    let live0 = super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
     let r = run("/bin/xfertest", &["xfertest"], 20_000);
     check!(r.is_some(), "xfertest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "xfertest: {:?} {:?}", kind, out.trim());
-    serial_println!("[IPC TEST] 3/5 handles in messages + spawn_ex: moved with rights, TRANSFER, own channel refused, nothing lost on EMSGSIZE / EMFILE, child with one handle: {} PASS", out.trim());
+    // v0.35.1: wszystkie kanały z testu (także te w komunikatach w drodze) zwolnione.
+    let live = || super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
+    check!(wait_for(2_000, || live() <= live0), "channels leaked: {} live before xfertest, {} after", live0, live());
+    serial_println!("[IPC TEST] 3/5 handles in messages + spawn_ex: moved with rights, TRANSFER, own channel refused, nothing lost on EMSGSIZE / EMFILE, child with one handle, no channel cycles (EBUSY), no channel leaked: {} PASS", out.trim());
 
     // 4. M18.e: pamięć współdzielona – dwa mapowania i dwa procesy na tych
     // samych stronach, dane + dzwonek przez kanał, tylko do odczytu, NX,

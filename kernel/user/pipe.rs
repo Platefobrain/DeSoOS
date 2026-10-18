@@ -18,7 +18,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use super::syscalls::{EINTR, EPIPE};
+use super::syscalls::{EINTR, ENOMEM, EPIPE};
 use super::waitset::Observers;
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
@@ -37,6 +37,14 @@ pub struct Pipe {
     writable: WaitQueue,
     /// M19.b: `wait_many` na którymkolwiek końcu.
     obs: Observers,
+}
+
+/// v0.35.2: niedoczytane dane wracają do budżetu kbuf.
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        let n = self.buf.lock().len();
+        super::kbuf::give(n as u64);
+    }
 }
 
 impl Pipe {
@@ -109,6 +117,7 @@ impl PipeEnd {
                     let out: Vec<u8> = b.drain(..n).collect();
                     p.len.store(b.len(), Ordering::SeqCst);
                     drop(b);
+                    super::kbuf::give(n as u64);
                     p.wake_writers();
                     return Ok(out);
                 }
@@ -144,7 +153,13 @@ impl PipeEnd {
             let wrote = {
                 let mut b = p.buf.lock();
                 let room = PIPE_CAP.saturating_sub(b.len());
-                let n = room.min(data.len() - done);
+                // v0.35.2: w budżecie buforów jądra (kbuf).
+                let want = room.min(data.len() - done);
+                let n = super::kbuf::take_upto(want as u64) as usize;
+                if want > 0 && n == 0 {
+                    drop(b);
+                    return if done > 0 { Ok(done) } else { Err(ENOMEM) };
+                }
                 b.extend(&data[done..done + n]);
                 p.len.store(b.len(), Ordering::SeqCst);
                 n

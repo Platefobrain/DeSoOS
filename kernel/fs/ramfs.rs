@@ -36,6 +36,48 @@ struct FileInner {
     modified: DateTime,
 }
 
+/// v0.35.2: limit danych w ramfs.  Pliki leżą na heapie jądra (64 MiB) –
+/// bez limitu jeden program zapełniłby heap zapisem plików (albo `seek` daleko
+/// + zapis 1 bajtu) i jądro padłoby przy następnej alokacji.  Ponad limitem:
+/// ENOSPC.
+pub const RAMFS_MAX: u64 = 24 * 1024 * 1024;
+static RAMFS_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Bajty danych w ramfs (wszystkie pliki).
+pub fn bytes_used() -> u64 {
+    RAMFS_BYTES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+impl FileInner {
+    /// Zmienia rozmiar danych na `new_len` – w limicie ramfs i bez paniki przy
+    /// braku pamięci (try_reserve).  Nowe bajty = 0.
+    fn set_len(&mut self, new_len: usize) -> Result<()> {
+        use core::sync::atomic::Ordering::SeqCst;
+        let old = self.data.len();
+        if new_len > old {
+            let delta = (new_len - old) as u64;
+            if RAMFS_BYTES.fetch_update(SeqCst, SeqCst, |u| u.checked_add(delta).filter(|&n| n <= RAMFS_MAX)).is_err() {
+                return Err(FsError::NoSpace);
+            }
+            if self.data.try_reserve_exact(new_len - old).is_err() {
+                RAMFS_BYTES.fetch_sub(delta, SeqCst);
+                return Err(FsError::NoSpace);
+            }
+            self.data.resize(new_len, 0);
+        } else {
+            self.data.truncate(new_len);
+            RAMFS_BYTES.fetch_sub((old - new_len) as u64, SeqCst);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FileInner {
+    fn drop(&mut self) {
+        RAMFS_BYTES.fetch_sub(self.data.len() as u64, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 struct FileNode {
     inner: Mutex<FileInner>,
 }
@@ -218,9 +260,10 @@ impl ConcurrentFs for RamFs {
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();
-        let end = offset as usize + bytes.len();
+        // v0.35.2: offset z `seek` może być ogromny – bez przepełnienia, w limicie.
+        let end = (offset as usize).checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
         if i.data.len() < end {
-            i.data.resize(end, 0);
+            i.set_len(end)?;
         }
         i.data[offset as usize..end].copy_from_slice(bytes);
         i.modified = rtc::now();
@@ -230,8 +273,9 @@ impl ConcurrentFs for RamFs {
     fn write_whole(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let f = self.file_or_create(path)?;
         let mut i = f.inner.lock();
-        i.data.clear();
-        i.data.extend_from_slice(bytes);
+        i.set_len(0)?;
+        i.set_len(bytes.len())?;
+        i.data.copy_from_slice(bytes);
         i.modified = rtc::now();
         Ok(())
     }
@@ -239,7 +283,9 @@ impl ConcurrentFs for RamFs {
     fn append(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let f = self.file_or_create(path)?;
         let mut i = f.inner.lock();
-        i.data.extend_from_slice(bytes);
+        let old = i.data.len();
+        i.set_len(old.checked_add(bytes.len()).ok_or(FsError::NoSpace)?)?;
+        i.data[old..].copy_from_slice(bytes);
         i.modified = rtc::now();
         Ok(())
     }
@@ -247,7 +293,7 @@ impl ConcurrentFs for RamFs {
     fn truncate(&self, path: &str, size: u64) -> Result<()> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();
-        i.data.resize(size as usize, 0);
+        i.set_len(usize::try_from(size).map_err(|_| FsError::NoSpace)?)?;
         i.modified = rtc::now();
         Ok(())
     }

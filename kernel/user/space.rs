@@ -14,7 +14,7 @@
 // nie musi być aktywny (CR3) w czasie budowania.
 
 use crate::memory::{
-    alloc_frame, free_frame, kernel_cr3, phys_to_virt, PRESENT, USER, WRITABLE,
+    alloc_frame_user, free_frame, kernel_cr3, phys_to_virt, PRESENT, USER, WRITABLE,
 };
 
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
@@ -27,8 +27,10 @@ fn table(phys: u64) -> &'static mut [u64; 512] {
     unsafe { &mut *(phys_to_virt(phys) as *mut [u64; 512]) }
 }
 
+/// Ramka dla przestrzeni procesu (strony i tablice) – v0.35.2: tylko ponad
+/// zapasem jądra (`alloc_frame_user`).
 fn zeroed_frame() -> Option<u64> {
-    let f = alloc_frame()?;
+    let f = alloc_frame_user()?;
     unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE as usize) };
     Some(f)
 }

@@ -13,6 +13,14 @@
 //   (uchwyty w komunikatach zwolnione), druga strona budzona (EPIPE).
 // * M19.b: każda kolejka ma też listę obserwatorów `wait_many` – budzonych
 //   przy każdej zmianie (komunikat, miejsce, zamknięcie).
+// * v0.35.1: bez cykli.  Koniec kanału, w którego kolejce leży komunikat z
+//   innym końcem kanału, nie może sam podróżować w komunikacie (EBUSY).
+//   Bez tej zasady: koniec A w kolejce B, koniec B w kolejce A, proces zamyka
+//   resztę – kanały trzymają się nawzajem i pamięć nigdy nie wraca.  Dowód,
+//   że cykl jest niemożliwy: ostatnie włożenie domykające cykl wkładałoby
+//   koniec, w którego kolejce już leży poprzedni element cyklu – odmowa.
+//   Sprawdzenie i włożenie razem pod globalną blokadą XFER (tylko komunikaty
+//   z końcami kanałów – zwykłe komunikaty jej nie biorą).
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -21,7 +29,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::process::Handle;
 use super::waitset::Observers;
-use super::syscalls::{EAGAIN, EINTR, EPIPE};
+use super::syscalls::{EAGAIN, EBUSY, EINTR, ENOMEM, EPIPE};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
@@ -39,10 +47,38 @@ pub struct Message {
     pub sender: u64,
 }
 
+impl Message {
+    /// Końce kanałów niesione w komunikacie.
+    fn channel_ends(&self) -> impl Iterator<Item = &Arc<ChanEnd>> {
+        self.handles.iter().filter_map(|h| if let super::process::Fd::Channel(e) = &h.obj { Some(e) } else { None })
+    }
+    fn carries_channel(&self) -> bool {
+        self.channel_ends().next().is_some()
+    }
+    /// v0.35.2: koszt w budżecie buforów jądra (kbuf).
+    fn cost(&self) -> u64 {
+        self.data.len() as u64 + super::kbuf::MSG_OVERHEAD
+    }
+}
+
+/// v0.35.1: sprawdzenie „bez cykli” + włożenie komunikatu z końcami kanałów.
+static XFER: SpinLock<()> = SpinLock::new("chan-xfer", level::CHAN_XFER, ());
+
+/// Ile kanałów żyje (test wycieków: po teście wraca do stanu sprzed).
+pub static LIVE_CHANNELS: AtomicUsize = AtomicUsize::new(0);
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        LIVE_CHANNELS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Kolejka przychodzących jednego końca.
 struct Inbox {
     q: SpinLock<VecDeque<Message>>,
     len: AtomicUsize,
+    /// v0.35.1: komunikaty w kolejce niosące końce kanałów.
+    chans: AtomicUsize,
     /// Koniec-właściciel tej kolejki zamknięty (zniknął ostatni uchwyt).
     closed: AtomicBool,
     /// Odbiorcy czekają na komunikat / zamknięcie drugiej strony.
@@ -59,6 +95,7 @@ impl Inbox {
         Inbox {
             q: SpinLock::new("channel", level::PROCESS, VecDeque::new()),
             len: AtomicUsize::new(0),
+            chans: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             readable: WaitQueue::new(),
             writable: WaitQueue::new(),
@@ -98,6 +135,7 @@ pub enum RecvError {
 /// Nowy kanał: dwa końce.
 pub fn new() -> (Arc<ChanEnd>, Arc<ChanEnd>) {
     let ch = Arc::new(Channel { inbox: [Inbox::new(), Inbox::new()] });
+    LIVE_CHANNELS.fetch_add(1, Ordering::Relaxed);
     (Arc::new(ChanEnd { ch: ch.clone(), side: 0 }), Arc::new(ChanEnd { ch, side: 1 }))
 }
 
@@ -127,6 +165,13 @@ impl ChanEnd {
                 return Err((EPIPE, msg.take().unwrap()));
             }
             {
+                // v0.35.1: komunikat z końcami kanałów – żaden z nich nie może mieć
+                // w swojej kolejce komunikatu z kanałem (inaczej możliwy cykl).
+                let carries = msg.as_ref().unwrap().carries_channel();
+                let _x = if carries { Some(XFER.lock()) } else { None };
+                if carries && msg.as_ref().unwrap().channel_ends().any(|e| e.mine().chans.load(Ordering::SeqCst) > 0) {
+                    return Err((EBUSY, msg.take().unwrap()));
+                }
                 let mut q = peer.q.lock();
                 // Ponownie pod blokadą kolejki: odbiorca mógł się zamknąć po
                 // sprawdzeniu wyżej.  Drop ustawia `closed` przed wzięciem tej
@@ -137,6 +182,14 @@ impl ChanEnd {
                     return Err((EPIPE, msg.take().unwrap()));
                 }
                 if q.len() < QUEUE_MAX {
+                    // v0.35.2: budżet buforów jądra – ponad nim ENOMEM, komunikat wraca.
+                    if !super::kbuf::try_take(msg.as_ref().unwrap().cost()) {
+                        drop(q);
+                        return Err((ENOMEM, msg.take().unwrap()));
+                    }
+                    if carries {
+                        peer.chans.fetch_add(1, Ordering::SeqCst);
+                    }
                     q.push_back(msg.take().unwrap());
                     peer.len.store(q.len(), Ordering::SeqCst);
                     drop(q);
@@ -178,6 +231,10 @@ impl ChanEnd {
                         return Err(RecvError::Code(super::syscalls::EMFILE));
                     }
                     let m = q.pop_front().unwrap();
+                    super::kbuf::give(m.cost());
+                    if m.carries_channel() {
+                        mine.chans.fetch_sub(1, Ordering::SeqCst);
+                    }
                     mine.len.store(q.len(), Ordering::SeqCst);
                     drop(q);
                     mine.wake_writers();
@@ -219,6 +276,10 @@ impl ChanEnd {
             {
                 let mut q = mine.q.lock();
                 if let Some(m) = q.pop_front() {
+                    super::kbuf::give(m.cost());
+                    if m.carries_channel() {
+                        mine.chans.fetch_sub(1, Ordering::SeqCst);
+                    }
                     mine.len.store(q.len(), Ordering::SeqCst);
                     drop(q);
                     mine.wake_writers();
@@ -280,8 +341,10 @@ impl Drop for ChanEnd {
         // kanał i wziąć jego blokadę.
         let left: Vec<Message> = {
             let mut q = mine.q.lock();
-            let v = q.drain(..).collect();
+            let v: Vec<Message> = q.drain(..).collect();
+            super::kbuf::give(v.iter().map(|m| m.cost()).sum());
             mine.len.store(0, Ordering::SeqCst);
+            mine.chans.store(0, Ordering::SeqCst);
             v
         };
         drop(left);

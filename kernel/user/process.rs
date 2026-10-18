@@ -10,7 +10,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::space::AddressSpace;
 use super::syscalls::EBADF;
@@ -160,6 +160,8 @@ pub enum Fd {
 }
 
 pub struct Process {
+    /// v0.35.2: dziecko init (shell, usługi) – może sięgać do rezerwy procesów.
+    pub(super) trusted: bool,
     pub space: AddressSpace,
     /// M17b.d: obszary pamięci (sterta, mmap, stos) – leniwy przydział stron.
     pub mem: super::vm::ProcMem,
@@ -205,8 +207,18 @@ pub struct Process {
 /// M18.e: mapowania pamięci współdzielonej zdejmowane, ZANIM pola się zwolnią
 /// – Drop przestrzeni adresowej oddaje każdą zamapowaną ramkę, a ramki
 /// obiektu należą do obiektu (inne procesy mogą jej jeszcze używać).
+/// v0.35.2: limit procesów.  Ponad MAX_PROCS − PROC_RESERVE spawn dostaje
+/// EAGAIN; ostatnie PROC_RESERVE miejsc tylko dla init i jego bezpośrednich
+/// dzieci (shell, usługi) – po bombie `spawn` shell nadal uruchomi `ps`/`kill`,
+/// a init zrestartuje usługę.  Stosów zadań jest 4096 – limit zostawia zapas na
+/// zadania jądra.
+pub const MAX_PROCS: usize = 1024;
+pub const PROC_RESERVE: usize = 64;
+pub static LIVE_PROCS: AtomicUsize = AtomicUsize::new(0);
+
 impl Drop for Process {
     fn drop(&mut self) {
+        LIVE_PROCS.fetch_sub(1, Ordering::SeqCst);
         self.mem.release_shared(&mut self.space);
     }
 }
@@ -242,7 +254,15 @@ impl Process {
             zombies: super::procs::ChildList::new(),
             child_gen: AtomicU64::new(0),
             key_decoder: SerialDecoder::new(),
+            trusted: false,
         }
+        .counted()
+    }
+
+    /// v0.35.2: licznik procesów (żywe + jeszcze nie sprzątnięte).
+    fn counted(self) -> Self {
+        LIVE_PROCS.fetch_add(1, Ordering::SeqCst);
+        self
     }
 
     pub fn ppid(&self) -> TaskId {

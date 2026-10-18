@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::syscalls::{EINVAL, ENOMEM};
-use crate::memory::{alloc_frame, alloc_frames_below, free_frame, phys_to_virt};
+use crate::memory::{alloc_frame_user, alloc_frames_below, free_frame, phys_to_virt};
 
 /// Największy obiekt (bajty).
 pub const SHM_MAX: u64 = 16 * 1024 * 1024;
@@ -35,7 +35,8 @@ impl ShmObj {
         let mut frames = Vec::new();
         frames.try_reserve_exact(pages).map_err(|_| ENOMEM)?;
         for _ in 0..pages {
-            let Some(f) = alloc_frame() else {
+            // v0.35.2: ponad zapasem jądra.
+            let Some(f) = alloc_frame_user() else {
                 for &f in frames.iter() {
                     free_frame(f);
                 }

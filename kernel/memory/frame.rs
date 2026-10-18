@@ -499,6 +499,7 @@ pub fn init(boot: &BootInfo) {
     }
     TRAMPOLINE.store(tramp.unwrap_or(0), core::sync::atomic::Ordering::SeqCst);
 
+    FREE_MIRROR.store(alloc.free_frames, core::sync::atomic::Ordering::Relaxed);
     *ALLOCATOR.lock() = Some(alloc);
 }
 
@@ -524,7 +525,47 @@ pub fn alloc_frame_below(limit: u64) -> Option<u64> {
 unsafe fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator) -> R) -> Option<R> {
     let mut slot = ALLOCATOR.lock();
     let alloc = slot.as_mut()?;
-    Some(f(alloc))
+    let r = f(alloc);
+    FREE_MIRROR.store(alloc.free_frames, core::sync::atomic::Ordering::Relaxed);
+    Some(r)
+}
+
+// ------------------------------------------------------------
+// v0.35.2: zapas pamięci tylko dla jądra
+// ------------------------------------------------------------
+
+/// Kopia `free_frames` z bitmapy czytana bez blokady (przybliżona – do
+/// sprawdzania zapasu przy każdym #PF procesu bez dotykania blokady).
+static FREE_MIRROR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Ile razy procesowi odmówiono ramki (zapas jądra).
+static USER_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Wolne ramki bez blokady (bitmapa + zapasy CPU), przybliżenie.
+pub fn free_frames_approx() -> u64 {
+    use core::sync::atomic::Ordering::Relaxed;
+    FREE_MIRROR.load(Relaxed) + FCACHED.iter().map(|c| c.load(Relaxed)).sum::<u64>()
+}
+
+/// Zapas ramek, których procesy nie dostaną: 1/16 pamięci, 16..256 MiB.
+/// Z niego żyje jądro (heap, stosy zadań, tablice) – proces zjadający pamięć
+/// dostaje błąd albo ginie, a jądro dalej działa.
+pub fn user_reserve_frames() -> u64 {
+    (NFRAMES.load(core::sync::atomic::Ordering::Relaxed) / 16).clamp(4096, 65536)
+}
+
+/// Ramka dla procesu (strony, tablice stron, pamięć współdzielona) – tylko
+/// ponad zapasem jądra.
+pub fn alloc_frame_user() -> Option<u64> {
+    if free_frames_approx() < user_reserve_frames() {
+        USER_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    alloc_frame()
+}
+
+/// (zapas w ramkach, odmowy).
+pub fn user_reserve_stats() -> (u64, u64) {
+    (user_reserve_frames(), USER_DENIED.load(core::sync::atomic::Ordering::Relaxed))
 }
 
 pub fn alloc_frame() -> Option<u64> {
@@ -704,6 +745,7 @@ fn cached_alloc() -> Option<u64> {
                     None => break,
                 }
             }
+            FREE_MIRROR.store(alloc.free_frames, core::sync::atomic::Ordering::Relaxed);
         }
     }
     let f = if c.n > 0 {
@@ -735,6 +777,7 @@ fn cached_free(frame: u64) {
                 alloc.set_free(f / PAGE_SIZE, true);
                 alloc.free_frames += 1;
             }
+            FREE_MIRROR.store(alloc.free_frames, core::sync::atomic::Ordering::Relaxed);
         }
     }
     c.frames[c.n] = frame;

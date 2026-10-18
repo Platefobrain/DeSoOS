@@ -154,6 +154,8 @@ pub const ENOENT: i64 = -2;
 pub const EBADF: i64 = -9;
 pub const ECHILD: i64 = -10;
 pub const ERANGE: i64 = -34;
+pub const ENOMEM: i64 = -12;
+pub const ENOSPC: i64 = -28;
 
 /// Deskryptory rodzica, które dziecko dostanie jako 0, 1, 2.
 pub const fn fds(stdin: u64, stdout: u64, stderr: u64) -> u64 {

@@ -18,6 +18,9 @@ pub use layout::{
 pub use frame::{
     init,
     alloc_frame,
+    alloc_frame_user,
+    free_frames_approx,
+    user_reserve_stats,
     alloc_frames,
     alloc_frames_below,
     free_frame,
