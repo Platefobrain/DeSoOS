@@ -62,7 +62,7 @@ const BUILTINS: &[(&str, &str)] = &[
 const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress"];
 
 /// Information from the kernel (sysinfo syscall, read-only).
-const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "secinfo", "caps"];
+const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "dcp"];
 
 /// Commands that remain only in the kernel's emergency shell.
 const KERNEL_ONLY: &[&str] = &["mkfs", "run", "hexdump", "write", "spawn", "colors", "keys", "k"];
@@ -455,6 +455,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 fn suggest(name: &str) -> Option<String> {
+    // Old names of the permission commands.
+    if matches!(name, "caps" | "secinfo") {
+        return Some(String::from("dcp"));
+    }
     command_names()
         .into_iter()
         .map(|n| (edit_distance(name, &n), n))

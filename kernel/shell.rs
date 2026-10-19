@@ -272,8 +272,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "sleep", usage: "sleep <ms>", help: "wait (the shell task sleeps)", run: cmd_sleep },
     Command { name: "ps", usage: "ps", help: "list tasks (id, state, CPU, CPU time)", run: cmd_ps },
     Command { name: "cpus", usage: "cpus", help: "processors: online, current task, timer ticks, IPIs", run: cmd_cpus },
-    Command { name: "secinfo", usage: "secinfo", help: "what every process may do (handles: hardware, system, files)", run: cmd_secinfo },
-    Command { name: "caps", usage: "caps <pid>", help: "handles of one process: kind, rights, detail", run: cmd_caps },
+    Command { name: "dcp", usage: "dcp [inspect <pid> | audit]", help: "permissions (DCP): who may do what, capabilities of a process, refusals", run: cmd_dcp },
     Command { name: "stress", usage: "stress [s]", help: "SMP stress test: processes, files, spinlocks (default 10 s)", run: cmd_stress },
     Command { name: "spawn", usage: "spawn <spin|tick>", help: "start a demo task: spin = busy loop, tick = wakes every 1 s", run: cmd_spawn },
     Command { name: "kill", usage: "kill <id>", help: "ask a task to end", run: cmd_kill },
@@ -719,19 +718,14 @@ pub fn cpus_report(out: &mut dyn Write) {
     }
 }
 
-/// What every process may do (user/caps.rs).
-fn cmd_secinfo(_: &str, out: &mut dyn Write, _: &mut Context) {
-    let _ = write!(out, "{}", crate::user::caps::secinfo());
-}
-
-/// Handles of one process (user/caps.rs).
-fn cmd_caps(args: &str, out: &mut dyn Write, _: &mut Context) {
-    match args.trim().parse::<u64>() {
-        Ok(pid) => {
-            let _ = write!(out, "{}", crate::user::caps::caps(pid));
+/// Permissions (DCP, user/dcp.rs) – the emergency shell sees every process.
+fn cmd_dcp(args: &str, out: &mut dyn Write, _: &mut Context) {
+    match crate::user::dcp::dcp(args, None) {
+        Some(text) => {
+            let _ = write!(out, "{}", text);
         }
-        Err(_) => {
-            let _ = writeln!(out, "usage: caps <pid>  (pids: ps or secinfo)");
+        None => {
+            let _ = writeln!(out, "{}", crate::user::dcp::USAGE);
         }
     }
 }
@@ -1662,7 +1656,7 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 /// Read-only commands for user space (sysinfo syscall) –
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
 /// (sector read / write, mkfs, run – only in the kernel fallback shell).
-pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "secinfo", "caps"];
+pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
     let line = line.trim();
@@ -1674,7 +1668,6 @@ pub fn sysinfo(line: &str) -> Option<String> {
     }
     let args_ok = match name {
         "lspci" => args.is_empty() || args == ["-v"],
-        "caps" => args.len() == 1 && args[0].parse::<u64>().is_ok(),
         _ => args.is_empty(),
     };
     if !args_ok {

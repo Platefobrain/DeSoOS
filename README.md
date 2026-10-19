@@ -1,4 +1,4 @@
-# DeSoOS v0.36.1
+# DeSoOS v0.36.2
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -261,9 +261,10 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
 - `lsusb` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
   (keyboard, mouse, mass storage, hub, ...), interface classes, manufacturer and product.
   `lsusb -v` also prints each controller (version, ports, BIOS handoff and its timing).
-- `secinfo` - what every process may do: its handles (hardware, system powers, files). `caps <pid>` -
-  every handle of one process with its rights. DeSoOS has no users or `rwx` bits: a program may do
-  exactly what its handles allow (see ARCHITECTURE.md, "Syscalls and handles").
+- `dcp` - permissions (DCP, DeSoOS Capability Permissions): what every process may do (devices,
+  system powers, files). `dcp inspect <pid>` - every capability of one process with its rights;
+  `dcp audit` - the last refused attempts. DeSoOS has no users or `rwx` bits: a program may do
+  exactly what its capabilities allow (see ARCHITECTURE.md, "Syscalls and handles").
 - `nofiles <program> [args]` - run a program in the file sandbox: it cannot open any path, only
   use what the shell hands it (`nofiles cat < notes.txt` works, `nofiles cat notes.txt` is refused).
 - Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`

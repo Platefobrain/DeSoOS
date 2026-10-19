@@ -196,12 +196,12 @@ impl IrqObj {
         &SLOTS[self.vector as usize - msi::MSI_BASE]
     }
 
-    /// MSI vector (`caps`).
+    /// MSI vector (`dcp`).
     pub fn vector(&self) -> u8 {
         self.vector
     }
 
-    /// The claimed device (`caps`).
+    /// The claimed device (`dcp`).
     pub fn device(&self) -> &'static crate::drivers::pci::Device {
         self.claim.dev()
     }

@@ -1533,6 +1533,15 @@ pub fn for_each_process(mut f: impl FnMut(TaskId, &crate::user::Process)) {
     })
 }
 
+/// Name of the current task (`dcp audit`).
+pub fn current_name() -> String {
+    without_interrupts(|| {
+        let _g = lock_sched_at(&"current_name");
+        let s = sched();
+        find(s, cur_id(s)).map(|p| tm(p).name.clone()).unwrap_or_default()
+    })
+}
+
 /// Top of the current task's kernel stack (return from ring 3 to the kernel).
 pub fn current_kernel_stack_top() -> u64 {
     without_interrupts(|| {
@@ -1547,11 +1556,11 @@ pub fn should_exit() -> bool {
     active() && without_interrupts(should_exit_unlocked)
 }
 
-/// Published handle summaries of user processes (`caps`, `secinfo`):
+/// Published handle summaries of user processes (`dcp`):
 /// (pid, ppid, name, file sandbox, summary of each slot).  Read under the scheduler lock – a
 /// process is freed only after its task is removed under the same lock, and only
 /// atomics are read (the owner changes its table without locks).
-pub fn process_caps() -> Vec<(TaskId, TaskId, String, bool, [u64; crate::user::caps::SLOTS])> {
+pub fn process_caps() -> Vec<(TaskId, TaskId, String, bool, [u64; crate::user::dcp::SLOTS])> {
     if !active() {
         return Vec::new();
     }

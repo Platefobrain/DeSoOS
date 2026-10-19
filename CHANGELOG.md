@@ -2,6 +2,29 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.36.2 — 2026-10-19
+
+### Permissions (DCP), step 3: the `dcp` command, limited view, audit log – stage closed
+- **DCP** (DeSoOS Capability Permissions) is now the name of the permission model and of its single command.
+  `secinfo` and `caps` are removed (the shell suggests `dcp` when you type them):
+  - `dcp` – every visible process: `DEVICES` (`DEVICE_CLAIM`, or the claimed device), `SYSTEM` (`SYS_POWER`,
+    `INPUT_SEND`, `DISK_ATTACH`), `FILES` (`all` / `none`);
+  - `dcp inspect <pid>` – every capability: slot, DCP name, rights, what it is for, and the parent's name;
+  - `dcp audit` – the last 64 refusals with time, program, call and argument (the path for sandbox refusals) and the
+    reason: `no files (sandbox)`, `capability has no WRITE right` (read / write on a handle without the right),
+    `permission (EACCES)`.
+- DCP names on screen: kinds `CONSOLE`, `FILE`, `PIPE`, `IPC`, `MEM_SHARE`, `DEVICE_CLAIM`, `DEVICE_CONTROL`,
+  `DEVICE_IRQ`, `SYS_POWER`, `INPUT_SEND`, `DISK_ATTACH`; rights `READ`, `WRITE`, `SEND`, `RECEIVE`, `MAP_READ`,
+  `MAP_WRITE`, `COPY`, `SHARE`. Nothing changes underneath.
+- **Who sees what:** a process sees itself and its descendants (and audit entries of itself and its children);
+  only a holder of `SYS_POWER` (the shell) – and the kernel's emergency shell – sees every process.
+- Audit: a fixed ring of 64 entries under a leaf spinlock, written only on the error path of a syscall.
+- Tests: handletest (IPC TEST 1/5, 34 checks) – missing pid, an exited process, a child without `SYS_POWER` cannot
+  inspect its parent, the parent inspects a child that dup/closes handles on another CPU as fast as it can (every
+  view well-formed). sandtest (FILE TEST 7/7, 13 checks) – the child's 11 sandbox refusals, the refused path and the
+  write without `WRITE` appear in `dcp audit`.
+- `kernel/user/caps.rs` became `kernel/user/dcp.rs`.
+
 ## v0.36.1 — 2026-10-18
 
 ### Permissions (DCP), step 2: file sandbox

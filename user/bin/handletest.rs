@@ -1,7 +1,7 @@
 // Test of handles with rights – handle_dup (rights can only shrink),
 // handle_info, read / write without the right (EBADF), copies without R_DUP (EACCES),
 // a child after spawn gets the handle with the same (reduced) rights,
-// the 64-handle limit, and the kernel's view of the table (`caps <pid>` – the
+// the 64-handle limit, and the kernel's view of the table (`dcp inspect <pid>` – the
 // published summary other processes see) follows every change.  Result: "handletest: N checks OK" and code 0, or a description
 // of the first failure and code 1.  Run by IPC TEST (self-tests).
 //
@@ -47,24 +47,25 @@ fn child() -> i32 {
 
 static mut CAPS: [u8; 8192] = [0; 8192];
 
-/// `caps <own pid>` as the kernel shows it to others (sysinfo); "" on error.
-fn my_caps() -> &'static str {
-    let mut topic = *b"caps                    ";
-    let mut pid = getpid();
+/// `dcp <args> <pid>` as the kernel shows it to this process (sysinfo); "" on error.
+fn dcp_pid(prefix: &str, pid: u64) -> &'static str {
+    let mut topic = [0u8; 48];
+    let p = prefix.as_bytes();
+    topic[..p.len()].copy_from_slice(p);
     let mut digits = [0u8; 20];
-    let mut k = 0;
+    let (mut k, mut v) = (0, pid);
     loop {
-        digits[k] = b'0' + (pid % 10) as u8;
+        digits[k] = b'0' + (v % 10) as u8;
         k += 1;
-        pid /= 10;
-        if pid == 0 {
+        v /= 10;
+        if v == 0 {
             break;
         }
     }
     for i in 0..k {
-        topic[5 + i] = digits[k - 1 - i];
+        topic[p.len() + i] = digits[k - 1 - i];
     }
-    let topic = core::str::from_utf8(&topic[..5 + k]).unwrap_or("caps");
+    let topic = core::str::from_utf8(&topic[..p.len() + k]).unwrap_or("dcp");
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(CAPS) };
     match sysinfo(topic, buf) {
         Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
@@ -72,7 +73,12 @@ fn my_caps() -> &'static str {
     }
 }
 
-/// The line of slot `slot` in `caps` output (columns: slot, kind, rights).
+/// `dcp inspect <own pid>` – the published view other processes get.
+fn my_caps() -> &'static str {
+    dcp_pid("dcp inspect ", getpid())
+}
+
+/// The line of slot `slot` in `dcp inspect` output (columns: slot, capability, rights).
 fn caps_line(text: &str, slot: u64) -> Option<&str> {
     text.lines().find(|l| {
         let mut w = l.split_whitespace();
@@ -80,9 +86,32 @@ fn caps_line(text: &str, slot: u64) -> Option<&str> {
     })
 }
 
+/// Child modes for the DCP view checks.
+fn peek_parent() -> i32 {
+    // A child without SYS_POWER must not see its parent's capabilities.
+    let t = dcp_pid("dcp inspect ", getppid());
+    if t.contains("is not yours") { 0 } else { 4 }
+}
+
+fn churn() -> i32 {
+    // Changes the handle table as fast as possible while the parent inspects it.
+    let t = uptime_ms();
+    while uptime_ms() - t < 300 {
+        let a = dup(1);
+        let b = dup(1);
+        close(a as u64);
+        close(b as u64);
+    }
+    0
+}
+
 fn main(args: Args) -> i32 {
-    if args.get(1) == Some("child") {
-        return child();
+    match args.get(1) {
+        Some("child") => return child(),
+        Some("peek") => return peek_parent(),
+        Some("churn") => return churn(),
+        Some("exit") => return 0,
+        _ => {}
     }
     let mut n = 0;
     let mut buf = [0u8; 64];
@@ -133,15 +162,35 @@ fn main(args: Args) -> i32 {
     check!(n, dup(nodup) == -13 && dup2(nodup, 41) == -13 && handle_dup(nodup, R_READ) == -13, "copy without R_DUP must be EACCES");
     check!(n, spawn("/bin/hello", &["hello"], 0, fds(nodup, 1, 2)) == -13, "spawn with a handle without R_DUP must be EACCES");
 
-    // 4b. The kernel's view for other processes (`caps <pid>`) shows the same
+    // 4b. The kernel's view for other processes (`dcp inspect <pid>`) shows the same
     // kinds and rights – the summary is published on every change.
     let t = my_caps();
     check!(n, t.contains("handletest (pid"), "caps header: {:?}", t.lines().next());
-    check!(n, caps_line(t, 1).map_or(false, |l| l.contains("console") && l.contains("read write dup transfer")), "caps console slot: {:?}", caps_line(t, 1));
-    check!(n, caps_line(t, ro).map_or(false, |l| l.contains("file") && l.contains("read dup") && !l.contains("write")), "caps reduced file slot: {:?}", caps_line(t, ro));
-    check!(n, caps_line(t, nodup).map_or(false, |l| l.contains("file") && l.contains(" read ") && !l.contains("dup")), "caps no-DUP slot: {:?}", caps_line(t, nodup));
-    check!(n, caps_line(t, pw).map_or(false, |l| l.contains("pipe") && l.contains("write dup transfer")), "caps pipe slot: {:?}", caps_line(t, pw));
-    check!(n, close(pw) == 0 && caps_line(my_caps(), pw).is_none(), "caps still shows a closed handle");
+    check!(n, caps_line(t, 1).map_or(false, |l| l.contains("CONSOLE") && l.contains("READ WRITE COPY SHARE")), "dcp console slot: {:?}", caps_line(t, 1));
+    check!(n, caps_line(t, ro).map_or(false, |l| l.contains("FILE") && l.contains("READ COPY") && !l.contains("WRITE")), "dcp reduced file slot: {:?}", caps_line(t, ro));
+    check!(n, caps_line(t, nodup).map_or(false, |l| l.contains("FILE") && l.contains(" READ ") && !l.contains("COPY")), "dcp no-COPY slot: {:?}", caps_line(t, nodup));
+    check!(n, caps_line(t, pw).map_or(false, |l| l.contains("PIPE") && l.contains("WRITE COPY SHARE")), "dcp pipe slot: {:?}", caps_line(t, pw));
+    check!(n, close(pw) == 0 && caps_line(my_caps(), pw).is_none(), "dcp still shows a closed handle");
+    // No such process; a process that already exited; a child may not look at its parent.
+    check!(n, dcp_pid("dcp inspect ", 999_999).contains("no user process"), "dcp inspect of a missing pid");
+    let gone = spawn("/bin/handletest", &["handletest", "exit"], 0, fds(0, 1, 2));
+    check!(n, gone > 0 && wait(gone as u64, 0).is_ok() && dcp_pid("dcp inspect ", gone as u64).contains("no user process"), "dcp inspect of an exited process");
+    let peek = spawn("/bin/handletest", &["handletest", "peek"], 0, fds(0, 1, 2));
+    check!(n, peek > 0 && wait(peek as u64, 0) == Ok((peek as u64, 0)), "a child without SYS_POWER saw its parent's capabilities");
+    // The parent sees its child, also while the child changes its table on another CPU.
+    let ch = spawn("/bin/handletest", &["handletest", "churn"], 0, fds(0, 1, 2));
+    check!(n, ch > 0, "spawn churn child: {}", ch);
+    let mut views = 0;
+    let mut bad = false;
+    while matches!(wait(ch as u64, WNOHANG), Ok((0, _))) {
+        let t = dcp_pid("dcp inspect ", ch as u64);
+        if t.contains("handletest (pid") {
+            views += 1;
+            // Every slot line well-formed: number, capability, rights.
+            bad |= t.lines().filter(|l| l.split_whitespace().next().map_or(false, |w| w.parse::<u64>().is_ok())).any(|l| l.split_whitespace().count() < 3);
+        }
+    }
+    check!(n, views > 0 && !bad, "dcp inspect during handle churn: {} views, malformed: {}", views, bad);
 
     // 5. The child gets the handle with the same (reduced) rights.
     seek(ro, 0, SEEK_SET);

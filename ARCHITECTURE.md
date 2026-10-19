@@ -226,12 +226,18 @@ there). File handles it was given keep working with their rights. The flag is in
 never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
 passes the handle), `nofiles cat file` gets "permission denied". Half of the `sysfuzz` children run in it.
 
-**Viewing it:** `secinfo` (one line per process: handle count, hardware, system powers, file access) and
-`caps <pid>` (every handle: kind, rights, detail such as the PCI device, MSI vector or shared memory size; file
-access `all` or `none`). A
-process changes its own table without locks, so other CPUs never touch its handles: the table (`FdTable`) publishes
-a 64-bit summary per slot in atomics on every change (kind, rights, detail), and `caps` reads only those under the
-scheduler lock (`user/caps.rs`, `sched::process_caps`).
+**DCP (DeSoOS Capability Permissions)** is the name of this model, and `dcp` the command that shows it:
+`dcp` (every visible process: devices, system powers, file access), `dcp inspect <pid>` (every capability with
+its rights and a detail such as the PCI device, MSI vector or shared memory size) and `dcp audit` (the last 64
+refusals: sandbox path calls, read / write on a handle without the right, `EACCES`). DCP names: kinds `CONSOLE`,
+`FILE`, `PIPE`, `IPC`, `MEM_SHARE`, `DEVICE_CLAIM` (HW_ROOT), `DEVICE_CONTROL`, `DEVICE_IRQ`, `SYS_POWER` (SYSCTL),
+`INPUT_SEND`, `DISK_ATTACH` (BLK); rights `READ`, `WRITE`, `SEND`, `RECEIVE`, `MAP_READ`, `MAP_WRITE`, `COPY` (DUP),
+`SHARE` (TRANSFER). **Who sees what:** a process sees itself and its descendants (and audit entries of itself and
+its children); a holder of `SYS_POWER` (the shell) and the kernel's emergency shell see everything. A process
+changes its own table without locks, so other CPUs never touch its handles: the table (`FdTable`) publishes a
+64-bit summary per slot in atomics on every change (kind, rights, detail), and `dcp` reads only those under the
+scheduler lock (`user/dcp.rs`, `sched::process_caps`). The audit log is a fixed ring under a leaf spinlock,
+written only on the error path of a syscall.
 
 ## IPC
 

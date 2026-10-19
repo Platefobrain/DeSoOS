@@ -648,13 +648,16 @@ Before networking: no program (buggy or malicious) may bring down the kernel or 
 
 DeSoOS's own model instead of Linux users/`rwx` or Windows ACLs: a process may do exactly what its handles allow
 (capabilities). Rights per handle (reduce-only, enforced in syscalls, `DUP` / `TRANSFER`) exist since M17/M19.
-- [x] **1.** (v0.36.0) View: `secinfo` (every process: hardware, system powers, files) and `caps <pid>` (every
-      handle with rights and detail). Published per-slot summaries in atomics – no lock on the hot path.
+- [x] **1.** (v0.36.0) View: `secinfo` and `caps <pid>` (replaced by `dcp` in step 3). Published per-slot summaries in atomics – no lock on the hot path.
 - [x] **2.** (v0.36.1) File sandbox: `SPAWN_NO_FILES` – `open`, `stat`, `readdir`, `mkdir`, `unlink`, `chdir`,
       `spawn`, `spawn_ex` give `EACCES` (one check before decoding); inherited, cannot be dropped; handles passed in
       work with their rights. Shell `nofiles <program>`; half of the `sysfuzz` children in it; `secinfo` shows `none`.
       FILE TEST 7/7 (`/bin/sandtest`: 18 escape attempts and permission checks in the sandboxed child).
       A sandboxed process cannot start programs (no spawn by path) – spawning from a handle comes with the manifest.
+- [x] **3.** (v0.36.2) One command `dcp` with DCP names (`dcp`, `dcp inspect <pid>`, `dcp audit`); `caps` and
+      `secinfo` removed. View limited to own process and descendants (all with `SYS_POWER`). Audit log of the last
+      64 refusals. Tests: missing / exited pid, a child cannot see its parent, inspection during handle churn on
+      another CPU, refusals of the sandboxed child in the audit. **Stage closed.**
 - [ ] Then networking: the network service and sockets as handles with their own rights (send, receive, listen,
       transfer).
 - Later: sandbox limited to one directory, a manifest for init (what each service gets), full file capabilities

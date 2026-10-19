@@ -6,7 +6,8 @@
 //   - the handle it was given works, with exactly its rights (read yes, write
 //     EBADF, handle_dup cannot add rights),
 //   - console, memory, pipes, channels and getcwd still work (no path),
-//   - the kernel's view (`caps <own pid>`) says "files: none".
+//   - the kernel's view (`dcp inspect <own pid>`) says "files: none",
+//   - the refusals appear in `dcp audit` (sandbox, a capability without WRITE).
 // The parent then checks that nothing changed on disk, that unknown spawn flags
 // give EINVAL, and that an unsandboxed child still has files.
 // Result: "sandtest: N checks OK" and code 0.  Child mode: `sandtest child`
@@ -53,7 +54,7 @@ macro_rules! expect {
 static mut BUF: [u8; 4096] = [0; 4096];
 
 fn own_caps() -> &'static str {
-    let mut topic = *b"caps                    ";
+    let mut topic = *b"dcp inspect                    ";
     let mut pid = getpid();
     let mut digits = [0u8; 20];
     let mut k = 0;
@@ -66,9 +67,9 @@ fn own_caps() -> &'static str {
         }
     }
     for i in 0..k {
-        topic[5 + i] = digits[k - 1 - i];
+        topic[12 + i] = digits[k - 1 - i];
     }
-    let topic = core::str::from_utf8(&topic[..5 + k]).unwrap_or("caps");
+    let topic = core::str::from_utf8(&topic[..12 + k]).unwrap_or("dcp");
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
     match sysinfo(topic, buf) {
         Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
@@ -132,7 +133,17 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0, "spawn sandboxed child: {}", pid);
     let st = wait(pid as u64, 0);
     let code = st.map(|(_, s)| s).unwrap_or(999);
-    check!(n, code == 0, "sandboxed child failed its check {} (1-9 path refused, 10-11 spawn refused, 12-14 handle rights, 15-17 no-path calls, 18 caps view)", code);
+    check!(n, code == 0, "sandboxed child failed its check {} (1-9 path refused, 10-11 spawn refused, 12-14 handle rights, 15-17 no-path calls, 18 dcp view)", code);
+    // The refusals are in the audit log, attributed to the child (we are its parent).
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(BUF) };
+    let audit = match sysinfo("dcp audit", buf) {
+        Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
+        Err(_) => "",
+    };
+    let mine = |needle: &str| audit.lines().filter(|l| l.contains("sandtest (") && l.contains(needle)).count();
+    check!(n, mine("no files (sandbox)") >= 11, "dcp audit: sandbox refusals of the child missing ({} found)", mine("no files (sandbox)"));
+    check!(n, mine("open /sandtest.tmp") >= 1, "dcp audit: the refused path is not shown");
+    check!(n, mine("has no WRITE right") >= 1, "dcp audit: write without WRITE not recorded");
 
     // Nothing changed on disk; the parent still has files.
     let mut b = [0u8; 32];
@@ -147,6 +158,6 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "an unsandboxed child must still read files");
     println!();
     unlink(PATH);
-    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights)", n);
+    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights; refusals in dcp audit)", n);
     0
 }

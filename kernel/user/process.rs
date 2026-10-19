@@ -160,19 +160,19 @@ pub enum Fd {
 }
 
 /// Handle table: the slots plus a published summary of each slot (kind,
-/// rights, a detail – `caps::summary`) in atomics.  Only the owning process
-/// changes its table (no lock); other CPUs (`caps`, `secinfo`) read just the
+/// rights, a detail – `dcp::summary`) in atomics.  Only the owning process
+/// changes its table (no lock); other CPUs (`dcp`) read just the
 /// summary, never the handles themselves – no locking on the hot path, no
 /// shared references to objects being closed.  Every change goes through a
 /// method here, so the summary cannot go stale.
 pub struct FdTable {
     v: Vec<Option<Handle>>,
-    summary: alloc::boxed::Box<[AtomicU64; super::caps::SLOTS]>,
+    summary: alloc::boxed::Box<[AtomicU64; super::dcp::SLOTS]>,
 }
 
 impl FdTable {
     pub fn new() -> FdTable {
-        FdTable { v: Vec::new(), summary: alloc::boxed::Box::new([const { AtomicU64::new(0) }; super::caps::SLOTS]) }
+        FdTable { v: Vec::new(), summary: alloc::boxed::Box::new([const { AtomicU64::new(0) }; super::dcp::SLOTS]) }
     }
 
     pub fn from_vec(v: Vec<Option<Handle>>) -> FdTable {
@@ -186,7 +186,7 @@ impl FdTable {
 
     fn publish(&self, i: usize) {
         if let Some(s) = self.summary.get(i) {
-            let val = self.v.get(i).and_then(|h| h.as_ref()).map_or(0, super::caps::summary);
+            let val = self.v.get(i).and_then(|h| h.as_ref()).map_or(0, super::dcp::summary);
             s.store(val, Ordering::Release);
         }
     }
@@ -234,8 +234,8 @@ impl FdTable {
         }
     }
 
-    /// Published summary of every slot (other CPUs; see `caps`).
-    pub fn summary(&self) -> [u64; super::caps::SLOTS] {
+    /// Published summary of every slot (other CPUs; see `dcp`).
+    pub fn summary(&self) -> [u64; super::dcp::SLOTS] {
         core::array::from_fn(|i| self.summary[i].load(Ordering::Acquire))
     }
 }
@@ -368,8 +368,8 @@ impl Process {
         matches!(self.fds.get(fd as usize), Some(Some(Handle { obj: Fd::Console, .. })))
     }
 
-    /// Published summary of the handle table (other CPUs – `caps`).
-    pub fn handle_summary(&self) -> [u64; super::caps::SLOTS] {
+    /// Published summary of the handle table (other CPUs – `dcp`).
+    pub fn handle_summary(&self) -> [u64; super::dcp::SLOTS] {
         self.fds.summary()
     }
 

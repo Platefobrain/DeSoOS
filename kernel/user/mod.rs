@@ -19,7 +19,7 @@
 // tasks run with CR0.TS = 1: FPU/SSE in the kernel = #NM = kernel bug.
 
 pub mod elf_loader;
-pub mod caps;
+pub mod dcp;
 pub mod process;
 pub mod procs;
 pub mod programs;

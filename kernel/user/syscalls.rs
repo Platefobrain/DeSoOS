@@ -1326,7 +1326,15 @@ fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysRe
     }
     let raw = copy_from_user(p, ptr, len)?;
     let topic = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
-    let text = crate::shell::sysinfo(topic).ok_or(ENOENT)?;
+    // `dcp` – what the caller may see depends on the caller (dcp.rs).
+    let text = match topic.trim().strip_prefix("dcp") {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => {
+            let all = p.fds.iter().flatten().any(|h| matches!(h.obj, Fd::Sysctl));
+            let viewer = super::dcp::Viewer { pid: sched::current_id(), all };
+            super::dcp::dcp(rest, Some(viewer)).ok_or(ENOENT)?
+        }
+        _ => crate::shell::sysinfo(topic).ok_or(ENOENT)?,
+    };
     text_to_user(p, buf, cap, &text)
 }
 
@@ -1412,8 +1420,30 @@ pub fn is_path_call(nr: u64) -> bool {
     matches!(nr, SYS_OPEN | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_SPAWN | SYS_SPAWN_EX)
 }
 
-/// Path calls refused in the file sandbox (`secinfo`, tests).
+/// Path calls refused in the file sandbox (tests).
 pub static SANDBOX_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Records a refused call in the DCP audit log (dcp.rs).  Only on errors.
+#[cold]
+fn audit_refusal(p: &mut Process, frame: &SyscallFrame, sandboxed: bool, e: i64) {
+    use super::dcp::Reason;
+    let (reason, what): (Reason, Vec<u8>) = if sandboxed {
+        // The path (best effort, at most 40 bytes).
+        let path = if (1..=255).contains(&frame.rsi) { copy_from_user(p, frame.rdi, frame.rsi.min(40)).unwrap_or_default() } else { Vec::new() };
+        (Reason::Sandbox, path)
+    } else if e == EBADF {
+        // read / write on an existing handle without the right (not a bad number).
+        let need = if frame.rax == SYS_READ { rights::READ } else { rights::WRITE };
+        match p.handle(frame.rdi) {
+            Ok(h) if h.rights & need == 0 => (Reason::NoRight(need), alloc::format!("handle {}", frame.rdi).into_bytes()),
+            _ => return,
+        }
+    } else {
+        (Reason::Denied, alloc::format!("handle {}", frame.rdi).into_bytes())
+    };
+    let name = sched::current_name();
+    super::dcp::record(sched::current_id(), p.ppid(), &name, frame.rax, &what, reason);
+}
 
 /// Called from syscall_entry (assembly) – on the task's kernel stack.
 #[unsafe(no_mangle)]
@@ -1520,6 +1550,12 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MUNMAP => p.mem.munmap(&mut p.space, a0, a1).map(|_| 0),
         _ => Err(ENOSYS),
     };
+    // DCP audit: refusals (sandbox, a handle without the right, EACCES).
+    if let Err(e) = result {
+        if sandboxed || e == EACCES || (e == EBADF && matches!(frame.rax, SYS_READ | SYS_WRITE)) {
+            audit_refusal(p, frame, sandboxed, e);
+        }
+    }
     frame.rax = match result {
         Ok(v) => v,
         Err(e) => e as u64,
