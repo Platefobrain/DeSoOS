@@ -26,21 +26,22 @@ system.
 ## Layers
 
 ```
-                              DeSoOS
-                                │
-        ┌───────────────────────┴───────────────────────┐
-     KERNEL                                         USER SPACE
-        │                                               │
-   syscalls + handles ────────── boundary ─────── init, shell, programs (/bin)
-        │                                               │
-  ┌─────┼──────────┬──────────┬────────────┐       services
-  MM   Scheduler  IPC        VFS       drivers      ┌────┼─────┐
-  │    + locks    channels,   │        (console,    USB  NET  AUDIO
-  │               shared   page cache   PS/2, PCI,       │
-  │               memory      │         NVMe, virtio)    │
-  │                  ╚════════╪══════ data: shared memory ═══╡
-  │                         block                         │
-  │     hardware delegation: MMIO, IRQ→handle, DMA, (IOMMU) ═╛  control
+                                 DeSoOS
+                                    │
+        ┌───────────────────────────┴───────────────────────────┐
+     KERNEL                                                 USER SPACE
+        │                                                       │
+syscalls + handles ────────── boundary ────────── init, shell, programs (/bin)
+        │                                                       │
+  ┌─────┼────────────┬───────────┬─────────────┐                │
+ MM Scheduler       IPC         VFS         drivers         services
+  │  + locks     channels,       │         (console,      ┌─────┼─────┐
+  │            shared memory     │        PS/2, PCI,     USB   NET  AUDIO
+  │                  │      page cache   NVMe, virtio)          │
+  │                  │           │             │                │
+  │                  ╚═══════════╪═════════════╪════════════════╡  data: shared memory
+  │                            block           │                │
+  │                                            ╘════════════════╛  control: MMIO, IRQ→handle, DMA, (IOMMU)
   │
   └──────── arch / SMP: per-CPU, APIC, IPI, spinlocks, TLB shootdown ────────
 ```
