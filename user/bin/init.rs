@@ -22,6 +22,8 @@
 //
 // USB xHCI controllers are found by class (dev_find 0C0330), and for
 // each one a service usb0, usb1, … is added (/bin/usbd with that controller).
+// Network cards likewise (class 020000) – net0, net1 (/bin/netd); a card netd has
+// no driver for ends with exit code 78 and is not restarted ("no driver").
 //
 // The kernel gives init an INPUT handle (slot 5) – init passes it only to usbd.
 // And a BLK handle (slot 6: USB disk registration) – also only for usbd.
@@ -61,7 +63,11 @@ const SERVICES: [Def; 2] = [
 
 /// Maximum number of USB controllers (services usb0..usb3).
 const USB_NAMES: [&str; 4] = ["usb0", "usb1", "usb2", "usb3"];
-const MAX_SERVICES: usize = SERVICES.len() + USB_NAMES.len();
+/// Maximum number of network cards (services net0, net1).
+const NET_NAMES: [&str; 2] = ["net0", "net1"];
+const MAX_SERVICES: usize = SERVICES.len() + USB_NAMES.len() + NET_NAMES.len();
+/// Exit code of a service that has no driver for its device – not restarted.
+const EXIT_NO_DRIVER: u64 = 78;
 
 /// Service table: fixed services + one usbd per xHCI controller.
 fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
@@ -81,6 +87,17 @@ fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
         defs[n] = Def { name, path: "/bin/usbd", dev: Some(dev) };
         n += 1;
     }
+    for (i, name) in NET_NAMES.iter().enumerate() {
+        let bdf = dev_find(HW_ROOT, CLASS_ETHERNET, i as u64);
+        if bdf < 0 {
+            break;
+        }
+        let b = bdf as u64;
+        let dev = (b >> 8, (b >> 3) & 31, b & 7);
+        println!("init: {} = network card {:02x}:{:02x}.{}", name, dev.0, dev.1, dev.2);
+        defs[n] = Def { name, path: "/bin/netd", dev: Some(dev) };
+        n += 1;
+    }
     n
 }
 
@@ -93,6 +110,7 @@ enum State {
     Running,
     Waiting,
     NoDevice,
+    NoDriver,
     Broken,
     Stopped,
 }
@@ -190,6 +208,11 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     if s.state == State::Stopped {
         return;
     }
+    if status == EXIT_NO_DRIVER {
+        s.state = State::NoDriver;
+        println!("init: service {}: no driver for this device - not restarting", d.name);
+        return;
+    }
     let now = uptime_ms();
     if now.saturating_sub(s.started_at) >= STABLE_MS {
         s.delay = 100;
@@ -228,13 +251,56 @@ fn state_name(s: State) -> &'static str {
         State::Running => "running",
         State::Waiting => "restarting",
         State::NoDevice => "no device",
+        State::NoDriver => "no driver",
         State::Broken => "broken",
         State::Stopped => "stopped",
     }
 }
 
 /// Requests on the svc channel (non-blocking – all that are pending).
-fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
+/// What a service channel may do: the shell's channel everything; a narrowed
+/// one (for sandboxed programs, `svc_narrow`) only network connections.
+const G_ALL: u8 = 0xFF;
+const G_NET: u8 = 1;
+const G_LISTEN: u8 = 2;
+/// Narrowed channels at once.
+const NARROW_MAX: usize = 12;
+
+/// Narrowed service channels: (init's receiving end, grants); handle 0 = free.
+struct Narrowed {
+    ch: [(u64, u8); NARROW_MAX],
+}
+
+impl Narrowed {
+    const fn new() -> Narrowed {
+        Narrowed { ch: [(0, 0); NARROW_MAX] }
+    }
+}
+
+/// The text init hands to a network service with a client connection: the
+/// service name and what this client may do ("admin" – DNS server, DHCP;
+/// "listen" – servers; "client" – connections only).
+fn net_kind(name: &str, grants: u8, out: &mut [u8; 64]) -> usize {
+    let mut n = 0;
+    let mut put = |b: &[u8], out: &mut [u8; 64]| {
+        let k = b.len().min(64 - n);
+        out[n..n + k].copy_from_slice(&b[..k]);
+        n += k;
+    };
+    put(name.as_bytes(), out);
+    if grants == G_ALL {
+        put(b" admin listen", out);
+    } else {
+        put(b" client", out);
+        if grants & G_LISTEN != 0 {
+            put(b" listen", out);
+        }
+    }
+    n
+}
+
+/// Serves the queued requests; true when nobody holds the sending end any more.
+fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Narrowed) -> bool {
     let mut msg = [0u8; 128];
     let mut hs = [0u64; 1];
     let mut info = RecvInfo::default();
@@ -252,7 +318,7 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
                 }
                 continue;
             }
-            return;
+            return r == EPIPE;
         }
         if info.handles != 1 {
             continue;
@@ -261,10 +327,20 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
         let text = core::str::from_utf8(&msg[..r as usize]).unwrap_or("");
         if let Some(name) = text.strip_prefix("connect ") {
             let found = defs.iter().position(|d| d.name == name);
+            let net = name.starts_with("net");
+            // A narrowed channel reaches network services only.
+            let allowed = grants == G_ALL || (net && grants & G_NET != 0);
             match found {
-                Some(i) if svcs[i].state == State::Running && svcs[i].listen != 0 => {
+                Some(i) if allowed && svcs[i].state == State::Running && svcs[i].listen != 0 => {
+                    let mut kind = [0u8; 64];
+                    let msg: &[u8] = if net {
+                        let n = net_kind(name, grants, &mut kind);
+                        &kind[..n]
+                    } else {
+                        name.as_bytes()
+                    };
                     // The client's handle is passed on; on error it comes back to us and we close it.
-                    if chan_send_h(svcs[i].listen, name.as_bytes(), &[h], CHAN_NONBLOCK) != 0 {
+                    if chan_send_h(svcs[i].listen, msg, &[h], CHAN_NONBLOCK) != 0 {
                         close(h);
                     }
                 }
@@ -272,6 +348,38 @@ fn serve_svc(svc: u64, defs: &[Def], svcs: &[Svc]) {
                     close(h);
                 }
             }
+        } else if let Some(tokens) = text.strip_prefix("narrow ") {
+            // A new service channel with fewer rights; never more than this one has.
+            let mut want = 0u8;
+            for t in tokens.split_whitespace() {
+                match t {
+                    "net" => want |= G_NET,
+                    "listen" => want |= G_NET | G_LISTEN,
+                    _ => {}
+                }
+            }
+            let want = want & grants;
+            let slot = narrowed.ch.iter().position(|c| c.0 == 0);
+            match (want != 0, slot, channel_create()) {
+                (true, Some(k), Ok((srv, cli_any))) => {
+                    let cli = handle_dup(cli_any, R_SEND | R_DUP | R_TRANSFER);
+                    close(cli_any);
+                    if cli >= 0 && chan_send_h(h, b"narrowed", &[cli as u64], CHAN_NONBLOCK) == 0 {
+                        narrowed.ch[k] = (srv, want);
+                    } else {
+                        close(srv);
+                        if cli >= 0 {
+                            close(cli as u64);
+                        }
+                    }
+                }
+                (_, _, Ok((a, b))) => {
+                    close(a);
+                    close(b);
+                }
+                _ => {}
+            }
+            close(h);
         } else if text == "list" {
             let mut out = [0u8; 1024];
             let mut n = 0;
@@ -353,6 +461,7 @@ fn main(args: Args) -> i32 {
         start_service(d, s);
     }
 
+    let mut narrowed = Narrowed::new();
     let mut shell = start_shell(shell_path, test_arg, svc_client);
     let mut started_at = uptime_ms();
     let mut orphans = 0u64;
@@ -369,8 +478,31 @@ fn main(args: Args) -> i32 {
                 }
             }
         }
-        if wait_many(&[(svc, W_READABLE)], timeout.max(1)) == Ok(1) {
-            serve_svc(svc, defs, svcs);
+        // The shell's service channel and the narrowed ones.
+        let mut list = [(svc, W_READABLE); 1 + NARROW_MAX];
+        let mut which = [usize::MAX; 1 + NARROW_MAX];
+        let mut k = 1;
+        for (i, c) in narrowed.ch.iter().enumerate() {
+            if c.0 != 0 {
+                list[k] = (c.0, W_READABLE);
+                which[k] = i;
+                k += 1;
+            }
+        }
+        let ready = wait_many(&list[..k], timeout.max(1)).unwrap_or(0);
+        if ready & 1 != 0 {
+            serve_svc(svc, G_ALL, defs, svcs, &mut narrowed);
+        }
+        for e in 1..k {
+            if ready & (1 << e) != 0 {
+                let i = which[e];
+                let (ch, grants) = narrowed.ch[i];
+                // Nobody holds the other end any more: forget the channel.
+                if serve_svc(ch, grants, defs, svcs, &mut narrowed) {
+                    close(ch);
+                    narrowed.ch[i] = (0, 0);
+                }
+            }
         }
         // Finished children: shell, services, orphans.
         loop {

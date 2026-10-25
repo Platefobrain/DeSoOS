@@ -223,6 +223,9 @@ pub extern "sysv64" fn kernel_main(
     // USB – xHCI controller and usbd in user space.
     #[cfg(selftest)]
     user::usb_self_test();
+    // Network card – netd in user space.
+    #[cfg(selftest)]
+    user::net_self_test();
     #[cfg(selftest)]
     user::stress_self_test();
 

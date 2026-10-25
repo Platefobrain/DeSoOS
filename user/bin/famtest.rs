@@ -77,6 +77,26 @@ fn middle(n: u64) -> i32 {
     7
 }
 
+static mut TASKS: [u8; 32768] = [0; 32768];
+
+/// Is any famtest process other than this one still in the task list?
+fn others_alive() -> bool {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(TASKS) };
+    let n = tasks(buf);
+    if n < 0 {
+        return false;
+    }
+    let me = getpid();
+    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+    text.lines().any(|l| {
+        let f: [&str; 7] = {
+            let mut it = l.split('\t');
+            core::array::from_fn(|_| it.next().unwrap_or(""))
+        };
+        f[5] == "user" && f[6] == "famtest" && f[0].parse::<u64>().ok() != Some(me)
+    })
+}
+
 /// `famtest parent n`: n children, reaps all of them; code 0 = the sum of codes matches.
 fn parent(n: u64) -> i32 {
     let mut want = 0u64;
@@ -180,8 +200,14 @@ fn main(args: Args) -> i32 {
     }
     check!(n, ok, "4 parents x 50 children in parallel, each got exactly its own");
 
-    // The orphans from step 4 must disappear (init reaps them) – after 30 ms + margin.
-    sleep_ms(200);
+    // The orphans from step 4 must disappear (init reaps them).  They sleep 30 ms,
+    // but on a busy host that can take longer – wait until no famtest process
+    // other than us is left (at most 10 s), instead of a fixed pause.
+    let t = uptime_ms();
+    while others_alive() && uptime_ms() - t < 10_000 {
+        sleep_ms(20);
+    }
+    sleep_ms(50);
     println!("famtest: {} checks OK, 200 + 20 + 1 children, 8 x 25 orphans to init, 4 x 50 parallel", n);
     0
 }

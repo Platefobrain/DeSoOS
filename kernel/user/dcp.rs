@@ -25,6 +25,9 @@
 //                DEVICE  bus:dev.fn (16 bits) + class + subclass
 //                IRQ     MSI vector (8 bits) + bus:dev.fn of the device
 //                SHM     size in pages (39 bits) + bit 39: DMA buffer
+//                IPC, PIPE  object identity (39 bits, from its address) +
+//                        bit 39: which end – `dcp inspect` finds who holds the
+//                        other end by matching identities across processes
 //                others  0
 
 use alloc::string::String;
@@ -44,9 +47,17 @@ pub fn summary(h: &Handle) -> u64 {
         Fd::Device(c) => dev_bits(c.dev()),
         Fd::Irq(o) => o.vector() as u64 | (bdf(o.device()) << 8),
         Fd::Shm(s) => (s.len() / 4096).min((1 << 39) - 1) | if s.dma_phys().is_some() { 1 << 39 } else { 0 },
+        Fd::Channel(e) => end_bits(e.ident()),
+        Fd::Pipe(e) => end_bits(e.ident()),
         _ => 0,
     };
     h.kind() | ((h.rights as u64 & 0xFFFF) << 8) | (detail << 24)
+}
+
+/// Identity of a channel / pipe end: the object's address (heap, 16-byte
+/// aligned – unique among live objects) in 39 bits, the side in bit 39.
+fn end_bits((obj, side): (u64, u64)) -> u64 {
+    ((obj >> 4) & ((1 << 39) - 1)) | (side & 1) << 39
 }
 
 fn bdf(d: &crate::drivers::pci::Device) -> u64 {
@@ -151,6 +162,71 @@ fn detail_text(s: u64) -> String {
         }
         k => String::from(cap_meaning(k)),
     }
+}
+
+/// What a slot is for: slots 0, 1, 2 are the standard input, output and error
+/// output of every program (also when redirected to a file or a pipe).
+fn slot_text(slot: usize, s: u64, rows: &[ProcRow], me: u64) -> String {
+    let what = match kind_of(s) {
+        kind::CHANNEL | kind::PIPE => peer_text(s, rows, me),
+        _ => detail_text(s),
+    };
+    // Slots 0–2 are stdin / stdout / stderr only when they hold something you can
+    // read or write (a service may keep e.g. an interrupt in slot 0).
+    if !matches!(kind_of(s), kind::CONSOLE | kind::FILE | kind::PIPE) {
+        return what;
+    }
+    let role = match slot {
+        0 => "input",
+        1 => "output",
+        2 => "errors",
+        _ => return what,
+    };
+    if kind_of(s) == kind::CONSOLE {
+        return String::from(match slot {
+            0 => "input (keyboard)",
+            1 => "output (screen)",
+            _ => "errors (screen)",
+        });
+    }
+    alloc::format!("{}: {}", role, what)
+}
+
+/// Who holds the other end of a channel or pipe: "channel to usbd (10)",
+/// "pipe to cat (12)", "channel to itself (slot 9)".
+fn peer_text(s: u64, rows: &[ProcRow], me: u64) -> String {
+    let d = detail_of(s);
+    let (obj, side) = (d & ((1 << 39) - 1), d >> 39);
+    let mut holders: Vec<String> = Vec::new();
+    for (pid, _, name, _, slots) in rows.iter() {
+        for (i, &o) in slots.iter().enumerate() {
+            let od = detail_of(o);
+            if kind_of(o) == kind_of(s) && od & ((1 << 39) - 1) == obj && od >> 39 != side {
+                if *pid == me {
+                    holders.push(alloc::format!("itself (slot {})", i));
+                } else {
+                    holders.push(alloc::format!("{} ({})", name, pid));
+                }
+            }
+        }
+    }
+    holders.dedup();
+    let what = if kind_of(s) == kind::PIPE {
+        if side == 1 { "pipe (write end) to" } else { "pipe (read end) from" }
+    } else {
+        "channel to"
+    };
+    if holders.is_empty() {
+        let what = if kind_of(s) == kind::PIPE { "pipe" } else { "channel" };
+        return alloc::format!("{} - other end held by no program (the kernel, closed, or in a message)", what);
+    }
+    let more = holders.len().saturating_sub(3);
+    holders.truncate(3);
+    let mut t = alloc::format!("{} {}", what, holders.join(", "));
+    if more > 0 {
+        let _ = write!(t, " +{} more", more);
+    }
+    t
 }
 
 // ------------------------------------------------------------
@@ -276,7 +352,7 @@ fn inspect(pid: u64, viewer: Option<Viewer>) -> String {
             continue;
         }
         n += 1;
-        let _ = writeln!(out, "  {:>4}  {:<14}  {:<30}  {}", i, cap_name(kind_of(s)), rights_text(rights_of(s)), detail_text(s));
+        let _ = writeln!(out, "  {:>4}  {:<14}  {:<30}  {}", i, cap_name(kind_of(s)), rights_text(rights_of(s)), slot_text(i, s, &rows, *id));
     }
     if n == 0 {
         let _ = writeln!(out, "  (no capabilities)");

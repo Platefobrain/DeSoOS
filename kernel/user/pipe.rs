@@ -77,6 +77,13 @@ impl Drop for PipeEnd {
 }
 
 /// New pipe: (read end, write end).
+impl PipeEnd {
+    /// Identity for `dcp`: (pipe object, 1 = write end / 0 = read end).
+    pub fn ident(&self) -> (u64, u64) {
+        (Arc::as_ptr(&self.pipe) as u64, self.write as u64)
+    }
+}
+
 pub fn new() -> (Arc<PipeEnd>, Arc<PipeEnd>) {
     let pipe = Arc::new(Pipe {
         buf: SpinLock::new("pipe", level::PROCESS, VecDeque::new()),

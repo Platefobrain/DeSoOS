@@ -148,6 +148,12 @@ impl ChanEnd {
         &self.ch.inbox[1 - self.side]
     }
 
+    /// Identity for `dcp`: (channel object, side 0 / 1) – which end of which
+    /// channel; both ends share the first value.
+    pub fn ident(&self) -> (u64, u64) {
+        (Arc::as_ptr(&self.ch) as u64, self.side as u64)
+    }
+
     /// The same channel (either end).  No end of a channel may
     /// travel through that channel: the end would land in its own queue
     /// (or a queue it holds itself) and would never be released.

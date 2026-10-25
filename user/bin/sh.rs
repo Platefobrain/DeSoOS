@@ -587,15 +587,45 @@ impl Shell {
         let mut cmd = cmds.remove(0);
         // `nofiles prog args` – run prog in the file sandbox: it cannot open any
         // path, only use the handles the shell gives it (stdio and redirections).
+        // `nofiles --net prog` – plus network connections, `--listen` – plus
+        // servers: the program gets a narrowed service channel from init that opens
+        // only network connections (no other services, no DNS / DHCP settings).
         if cmd.args[0] == "nofiles" {
             cmd.args.remove(0);
+            let net = match cmd.args.first().map(|a| a.as_str()) {
+                Some("--net") => Some("net"),
+                Some("--listen") => Some("net listen"),
+                _ => None,
+            };
+            if net.is_some() {
+                cmd.args.remove(0);
+            }
             let Some(name) = cmd.args.first().cloned() else {
-                eprintln!("usage: nofiles <program> [args]   (e.g. nofiles cat < file)");
+                eprintln!("usage: nofiles [--net | --listen] <program> [args]   (e.g. nofiles cat < file, nofiles --listen httpd 8080 < page.html)");
                 return;
             };
+            let svc = match net {
+                None => None,
+                Some(tokens) => {
+                    if !SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("sh: nofiles {}: no service manager (start the shell from init)", if tokens == "net" { "--net" } else { "--listen" });
+                        return;
+                    }
+                    match desoos::svc_narrow(tokens) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            eprintln!("sh: nofiles: init refused a network channel: {}", strerror(e));
+                            return;
+                        }
+                    }
+                }
+            };
             match find_program(&name) {
-                Some(path) => self.external(&path, &cmd, true),
+                Some(path) => self.external_svc(&path, &cmd, true, svc),
                 None => eprintln!("sh: nofiles: {}: no such program in /bin", name),
+            }
+            if let Some(h) = svc {
+                close(h);
             }
             return;
         }
@@ -624,6 +654,11 @@ impl Shell {
     }
 
     fn external(&mut self, path: &str, cmd: &Command, nofiles: bool) {
+        self.external_svc(path, cmd, nofiles, None)
+    }
+
+    /// `svc`: a narrowed service channel for slot 3 (sandboxed network programs).
+    fn external_svc(&mut self, path: &str, cmd: &Command, nofiles: bool, svc: Option<u64>) {
         let (fin, fout) = match open_redirects(cmd) {
             Ok(f) => f,
             Err(e) => {
@@ -633,7 +668,10 @@ impl Shell {
         };
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
         let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { desoos::SPAWN_NO_FILES } else { 0 };
-        let pid = spawn_child(path, &args, flags, fin, fout);
+        let pid = match svc {
+            Some(h) => desoos::spawn_ex(path, &args, &[(fin, 0), (fout, 1), (2, 2), (h, desoos::SVC)], flags),
+            None => spawn_child(path, &args, flags, fin, fout),
+        };
         close_redirects(fin, fout);
         if pid < 0 {
             eprintln!("sh: {}: {}", cmd.args[0], strerror(pid));
@@ -791,6 +829,7 @@ impl Shell {
                 let _ = writeln!(o, "System information (read-only, from the kernel):");
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
                 let _ = writeln!(o, "File sandbox: nofiles <program> [args] - no file access by path, only < > redirections");
+                let _ = writeln!(o, "  nofiles --net <program> - plus network connections; --listen - plus servers (no other services)");
                 let _ = writeln!(o, "Only in the kernel emergency shell: mkfs, disk read/write, run");
                 let _ = writeln!(o, "Syntax: cmd args  > file  >> file  < file  a | b  &   (\"quotes\" group words)");
             }

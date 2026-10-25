@@ -2,6 +2,248 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.45.1 — 2026-10-25
+
+### Realtek driver: interrupts no longer go silent
+- Test laptop with v0.45.0: the 10 MiB download stopped at 8.1 MiB ("cut short") – `ifconfig` showed only 298
+  interrupts but 6010 frames found by polling, and causes still pending in the card (int 4085). Once a cause
+  stayed set, the card raised no new message interrupt, so netd only looked at the ring once a second; the
+  256-frame ring overflowed and the connection suffered.
+- Now interrupts are masked while the causes are acknowledged and opened again after the rings are handled (a
+  cause still pending then raises a new interrupt), and pending causes are also acknowledged on the polling path.
+- `ifconfig` shows how the last TCP connection a program used ended (closed by the peer / reset / timed out) and
+  how many segments connections dropped (out of order / outside the window).
+- **Confirmed on the test laptop:** 10 MiB from the UK in 3874 ms – **2643 KiB/s** (15× v0.44.3), 7222 frames,
+  7918 interrupts, 5 frames found by polling, 0 resent, 0 dropped, closed by the peer. Step N8 done.
+
+## v0.45.0 — 2026-10-25
+
+### Network, step N8: throughput
+- Measured on the test laptop (v0.44.3): 10 MiB from a server in the UK in 57 s – **178 KiB/s**, no loss, no
+  resends. The limit was our TCP window: an 8 KiB receive ring lets the server send only 8 KiB per round trip
+  (8 KiB / 45 ms = 178 KiB/s – exactly what was measured).
+- **TCP window scaling** (RFC 7323): our SYN offers a shift of 3; when the peer offers one too, window fields
+  outside SYN segments are shifted both ways. **Receive ring 256 KiB** per connection – at 45 ms that allows
+  about 5.5 MiB/s. Without scaling on the other side the window stays at 64 KiB.
+- **Card rings 256 descriptors** (were 32) – a full window arrives as a burst of ~180 frames.
+- Tcb is now set up in place (`init_connect` / `init_accept`) – with 264 KiB of buffers it no longer fits a
+  16 KiB stack. tcptest **72 checks** (+ window scaling on both sides, full 256 KiB buffer).
+
+## v0.44.3 — 2026-10-25
+
+### Realtek driver: the receive fix
+- Third run found it: the card's registers point at our ring, but in the first lap 30 of 32 frames arrived in
+  empty buffers (a 369-byte DHCP offer as all zeros – the data written somewhere else) and a finished descriptor
+  carried another buffer's address; then reception stopped after the lap. After `ifconfig rxrestart` (receive
+  off, ring set up again, the card told where it is, receive on) frames came in correctly and DHCP gave the
+  laptop an address (192.168.1.60 from the router) – **the first real network address for DeSoOS**.
+- So the receive ring is now set up again: at the end of start, whenever the link comes up, when a frame
+  arrives with an all-zero header, and when the card signals 8 frames without filling the ring. Each finished
+  descriptor gets its buffer address written again. `ifconfig` counts "rx restarts".
+- **Confirmed on the test laptop** (cable to the home router): address 192.168.1.60/24 by DHCP 7.7 s after
+  start (2 rx restarts: start and link up), `ping 192.168.1.1` 4/4 under 1 ms, `fetch http://example.com/`
+  from the internet three times (577 bytes, 35–45 ms, DNS through the router), 60 frames received, none empty.
+
+## v0.44.2 — 2026-10-25
+
+### Realtek driver: second run, deeper diagnostics
+- Second run confirmed the receive side stops after one ring: all 32 descriptors back with the card, no frame
+  for 85+ s, while the card keeps raising "received" interrupts. Most received frames had ethertype 0000 –
+  possibly empty buffers (the data written somewhere else). The transmitter is fine (nothing left waiting).
+- `ifconfig` on a Realtek card now also shows the DMA address, where the card thinks the rings are (registers
+  read back), the raw descriptors around our position, how many frames came with an all-zero header, and the
+  first bytes of the first "other" frame.
+- `ifconfig rxrestart` (admin, diagnosis): sets the receive ring up again from descriptor 0 and tells the card
+  where it is – if frames start coming again, the card lost its place in the ring.
+
+## v0.44.1 — 2026-10-25
+
+### Realtek driver: first run on the test laptop, more diagnostics
+- First run: the card starts, link up at 1000 Mb/s, interrupts work, frames go out and come in, one DHCP offer
+  arrives – but no ACK, and after 32 received frames (exactly one ring) nothing more. To tell a stalled receive
+  ring from a silent transmitter, `ifconfig` on a Realtek card now also shows: descriptors still the card's in
+  each ring and our next positions, how long ago the last frame came, interrupt causes counted (rx, rx-no-desc,
+  rx-fifo, tx, link, ...), the ethertypes of "other" frames, and DHCP answers ignored / ACKs.
+
+## v0.44.0 — 2026-10-25
+
+### Network, step N8 (first part): Realtek RTL8111/8168 driver
+- netd drives Realtek RTL8111/8168 cards (`10ec:8168`) next to the Intel ones: registers in memory BAR 2,
+  16-byte descriptor rings, the chip taken over from the firmware (out-of-band mode off, reception gated during
+  the reset), our address from the chip's factory copy, MSI interrupt, PHY auto-negotiation 10/100/1000.
+  Written for the 8168g/8168h generation (the test laptop's chip, version 541); other versions start with a
+  warning.
+- `ifconfig` on a Realtek card adds a line with the chip version and key registers, and lists any start-up wait
+  that ran out – for diagnosing on real hardware, where QEMU cannot help (it has no model of this chip).
+- The Intel path is unchanged; QEMU tests as before (231).
+
+## v0.43.0 — 2026-10-24
+
+### Network: address checks, RELEASE, an address by hand (before the real network card)
+- **Addresses are checked before use** (RFC 5227): after the DHCP server's ACK netd asks the network twice
+  ("does anyone have 10.0.2.15?", 300 ms apart). If another machine answers, the address is declined (DHCPDECLINE)
+  and DHCP starts over after 10 s; if not, the address is used and announced (gratuitous ARP). Another machine
+  claiming our address later is reported on the console.
+- **`ifconfig set a.b.c.d/nn [gw a.b.c.d] [dns a.b.c.d]`** – an address by hand, for a cable without a DHCP server
+  (e.g. the test laptop connected straight to another computer). Checked the same way first: an address another
+  machine uses is refused ("already used by 52:55:..."). The DHCP lease is given back. **`ifconfig dhcp`** – back
+  to DHCP. Both need the admin right.
+- **RELEASE:** the lease goes back to the DHCP server when switching to an address by hand and when netd ends.
+- The DHCP client got the states `Checking` and `Off` (`conflict`, `release`, `start`) – still pure, tested with a
+  simulated clock: **dhcptest 68 checks** (+ probe timing, DECLINE and the 10 s wait, RELEASE, stop/start).
+  **nettest 96 checks** (+ the router's address refused, bad input, a free address with the lease released and a
+  ping from it, refused for a sandboxed program, back to DHCP).
+- The DHCP address now comes about 0.6 s later (the two probes).
+
+## v0.42.0 — 2026-10-23
+
+### Network, step N7: servers, loopback, network rights for sandboxed programs
+- **Servers:** `listen port` on a netd connection; every accepted connection arrives at the server as a message
+  `accepted a.b.c.d:port to port N` with a new channel – that connection's socket. TCP got its server side (SYN →
+  SYN+ACK → open; repeated SYN, wrong ACK, resends 1/2/4 s, half-open connections dropped, data on the handshake
+  ACK kept). Up to 4 connections per listener in the handshake.
+- **New `httpd`:** a minimal web server whose page comes from stdin – `nofiles --listen httpd 8080 < /index.html`
+  serves without any file access.
+- **Loopback:** connections and pings to 127.0.0.1 or to DeSoOS's own address stay inside netd (a queue back into
+  the receive path; 127.x never accepted from the cable). Client and server inside one machine work; ping to
+  ourselves is answered.
+- **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 in DeSoOS (`HOSTFWD`), so
+  `curl http://127.0.0.1:18080/` on the host reaches `httpd 8080`.
+- **Network rights:** init can hand out a *narrowed* service channel (`svc_narrow("net")` / `"net listen"`) that
+  only opens network connections – no other services, no administrator requests, never wider than its parent.
+  The shell uses it for **`nofiles --net`** (connections) and **`nofiles --listen`** (plus servers). init tells
+  netd each connection's rights (`net0 admin listen` / `net0 client [listen]`); netd refuses `listen` without the
+  listen right and `dns` / `renew` without admin.
+- Fixed while testing: a request arriving together with the handshake ACK (QEMU's port forwarding sends them
+  back to back) was taken for data of a program that is gone and the connection was reset.
+- **Tests:** tcptest 67 checks (+ the server side). nettest 85 checks: narrowed rights (no listen, no DNS change,
+  no other service, no widening), listen + loopback to 127.0.0.1 and to our own address with 200 KiB and 100 KiB
+  both ways, the close seen by the server, a refused port, ping to ourselves, and a sandboxed `httpd` reached over
+  loopback and from the host (`tests/http-stub.py /connect?port=58082` – the host connects through QEMU's
+  forwarding into DeSoOS; `tests/test.sh` forwards 127.0.0.1:58082 to port 8081).
+
+## v0.41.1 — 2026-10-23
+
+### Fix: a rare deadlock between the zombie-list lock and TLB shootdown
+- Found on TCG (about 1 run in 3–4; the self-tests hung, the watchdog showed CPU 0 waiting for a TLB shootdown
+  acknowledgement from CPUs 1 and 3, which spun with interrupts disabled in `on_exit`). A process handing its
+  orphans to init freed heap memory while holding init's zombie-list lock; the heap shrank and sent a TLB
+  shootdown; the orphans exiting at that moment waited for the same lock with IF = 0 – and the zombie-list lock
+  (`ChildList`, a small lock of its own) was the only IF = 0 wait loop that did not acknowledge shootdowns. Both
+  sides waited forever.
+- `ChildList::lock` now calls `tlb::poll_from_wait()` in its spin loop, like every other lock; `on_exit` frees the
+  handed-over vector after releasing the lock. All other spin loops in the kernel were checked: they either poll
+  or are bounded.
+- **TLB TEST 6/6** (new): 3 CPUs spin on a zombie-list lock with IF = 0 while its holder sends a shootdown – it must
+  be acknowledged from their spin loop. Without the fix the test hangs exactly like the original
+  ("waits for shootdown ack from CPU mask 0b1110").
+
+## v0.41.0 — 2026-10-22
+
+### Network, step N6: TCP and fetch
+- **`fetch http://host[:port]/path`** (new): HTTP/1.0 download through netd's TCP – to the console or with `-o` to a
+  file, `-v` shows the headers; a summary with the speed; exit codes for no connection, a cut page, an HTTP error.
+  `https://` is refused (needs TLS).
+- **TCP client** (`user/lib/tcp.rs`, a pure state machine like DHCP): handshake with MSS, 8 KiB send and receive
+  rings, peer window + congestion window (slow start, congestion avoidance, fast retransmit), retransmission timer
+  from the measured RTT (200 ms – 60 s, doubled per loss), zero-window probes, in-order receiving with trimming of
+  overlaps, all closing paths with TIME-WAIT. Segments are checked: outside the window dropped with an ACK, RST only
+  with the exact sequence number (else a challenge ACK, RFC 5961), SYN on an open connection likewise, ACKs for
+  unsent data dropped. Random initial sequence numbers and ports; a RST for segments to no connection.
+- **Sockets:** `tcp host port` on a netd connection turns it into the socket – messages are data both ways, closing
+  it closes the connection, the end of the peer's data arrives as `EPIPE`. Flow control both ways (netd reads from
+  the program only when a message fits; a slow reader closes the TCP window). A program that leaves mid-download
+  gets its connection reset and freed. 8 connections at once; `ifconfig` lists them with their state and RTT.
+- **Tests:** NET TEST now 6 parts – new 4/6 **`/bin/tcptest`** (57 checks against a simulated peer and clock,
+  20 000 random segments). **`tests/http-stub.py`** – an HTTP server started by `tests/test.sh` (the guest
+  connects to 10.0.2.2:58080). nettest 61 checks (+ TCP: a page, 1 MiB with a byte pattern, two slow downloads at
+  once, a page cut short, a server reset, a closed port, an unreachable host, an unknown name, leaving
+  mid-download, `fetch` to a file / 404 / cut page / https).
+- NOBKL TEST 10/10 (`famtest`): the check that init reaped all 200 orphans waited a fixed 200 ms for them to finish;
+  on a busy host one was still alive (KVM: "199 orphans reaped"). famtest now waits until no other famtest process
+  is left (at most 10 s).
+- The test HTTP server builds its 1 MiB page only when first asked (building it at start competed with the booting
+  guest for the host CPU and made the TIME TEST fail on a 2-core machine).
+
+## v0.40.0 — 2026-10-21
+
+### Network, step N5: names (DNS) and many programs at once
+- **`ping example.com`**, new **`host <name>`**: netd resolves names with the DNS server from DHCP (QEMU: 10.0.2.3)
+  – `router.desoos is 10.0.2.2 (DNS 10.0.2.2:53530, 2 ms)`, then `(cached)`. CNAME chains, up to 4 addresses,
+  "no such name", "has no IPv4 address", server errors.
+- **Cache:** 16 names, the server's TTL (at most 1 h), "no such name" 30 s, TTL 0 not kept.
+- **Answers are untrusted:** random query id and port, sender must be our server, our question must be in the
+  answer, names decoded with only backward compression pointers (no loops), at most 253 characters, CNAME chain at
+  most 8; a forged answer with a wrong id is ignored and counted, the real one still accepted.
+- **netd no longer waits inside a request:** each connection has its own operation (ping, arp, resolve, renew)
+  with timers, advanced by the event loop; answers to programs never block netd; a program that leaves mid-ping
+  is forgotten. Two pings at once take 3 s instead of 6; `status` answers during a ping.
+- `ifconfig dns <a.b.c.d[:port] | auto>`; `ifconfig` shows DNS counters, cached names and connected programs.
+- **Tests:** NET TEST now 5 parts – new 3/5 **`/bin/dnstest`** (41 checks: names, query bytes, valid answers, 19
+  malicious answers – pointer to itself, forward pointer, name over 253 through pointers, CNAME chain of 9,
+  record past the end, wrong question, truncated... – cache, 20 000 mutations). **`tests/dns-stub.py`**: a small
+  DNS server started by `tests/test.sh` on the host (reached by the guest as 10.0.2.2:53530) with 13 kinds of
+  answers under `.desoos`, so the test needs no internet. nettest: 46 checks (+ DNS, ping by name, concurrency).
+
+## v0.39.0 — 2026-10-20
+
+### Network, step N4: UDP and DHCP
+- netd gets its address from the network: **DHCP client** for the address, subnet, gateway and DNS servers, with
+  lease renewal at half the lease (to the server), rebinding at 7/8 (to any server) and giving the address up when
+  the lease ends or the server refuses. In QEMU: `net0: address 10.0.2.15/24 from DHCP server 10.0.2.2 in 5 ms,
+  gateway 10.0.2.2, DNS 10.0.2.3`. The static 10.0.2.15 is gone; without a lease `ping` and `arp` say "no
+  address yet".
+- **UDP** parsing and sending (pseudo-header checksum). **DHCP parser** with every option length checked.
+- The client is a pure state machine (`user/lib/dhcp.rs`): netd passes the time in and sends what comes out.
+  Server answers are untrusted: our transaction id and MAC required, a server identifier in offers, no
+  0.x / loopback / multicast / broadcast addresses, only the chosen server believed while requesting and
+  renewing, a gateway off the subnet ignored, leases under 30 s stretched, resends at least 60 s apart while
+  renewing (a dead server gets fewer than 30 messages per lease).
+- `ifconfig`: `IPv4 10.0.2.15/24 from DHCP server 10.0.2.2, lease 24 h (renew in 11 h 59 min)`, gateway and DNS
+  line; **`ifconfig renew`** renews the lease now.
+- **NET TEST** now 4 parts: 1/4 netparse – 59 checks, + 4 UDP and 13 DHCP malicious cases, DHCP option
+  mutations; **2/4 `/bin/dhcptest`** (new) – 54 checks, a simulated day of lease: unusable answers, resends
+  1–16 s, renewal, rebinding with another server, lease end, NAK, changed address, odd leases; 3/4 nettest – 24
+  checks, + DHCP lease from QEMU (address, /24, gateway, DNS, 24 h), renewal, address back after a netd restart;
+  4/4 card and memory returned.
+
+## v0.38.0 — 2026-10-20
+
+### Network, step N3: ARP, IPv4 and ping
+- **`ping <ip> [count]`** – ICMP echo through netd, one request per second, each answer printed as it comes
+  (`64 bytes from 10.0.2.2: seq=1 ttl=255 time<1 ms`), then sent / received / loss and min/avg/max. Exit code 0 with
+  at least one answer, 2 with none.
+- netd has an IPv4 address (static 10.0.2.15/24, gateway 10.0.2.2 until DHCP), an ARP cache (16 entries, 60 s),
+  answers ARP requests and pings for its address, and picks the next hop (destination on the subnet, else the
+  gateway). An unknown host: "host unreachable (no ARP answer)". `arping` now asks from our address.
+- **Packet parsers** in `user/lib/netproto.rs`: pure code without allocation or panics; checksums, lengths checked
+  against the frame, Ethernet padding removed, fragments refused. Malformed frames are dropped and counted.
+- `ifconfig`: IPv4 line, answered ARP requests and pings, malformed packets, ARP cache size.
+- **NET TEST** now 3 parts: 1/3 `/bin/netparse` – 36 checks, 20 malicious frames refused with the right error,
+  20 000 mutations (no panic, sizes consistent); 2/3 nettest – 17 checks, adds address 10.0.2.15, `ping 10.0.2.2`
+  3 of 3 answered, unreachable host, bad address refused, 0 malformed packets; 3/3 card and memory returned.
+
+## v0.37.0 — 2026-10-20
+
+### Network, step N2: the card driver in user space
+- **`/bin/netd`** – one service per network card (`net0`, `net1`), started by init, which now finds cards by PCI
+  class (Ethernet controller, 020000) like USB controllers. netd supports the Intel 8254x / 82574 family with legacy
+  descriptors (QEMU's e1000e and e1000); any other card (e.g. the test laptop's Realtek) prints "no driver yet" and
+  exits with code 78 – init shows the service as **"no driver"** and does not restart it.
+- Driver: reset, MAC (RA[0], EEPROM fallback), one 136 KiB DMA buffer with 32 receive and 32 transmit descriptors
+  and 2 KiB buffers, MSI bound before the card may use DMA, receive / transmit enabled, link up. Received frames are
+  counted by type (ARP, IPv4, IPv6, other) and dropped – no protocol stack yet. A 1 s timeout re-checks the ring in
+  case an interrupt is lost (counted separately; 0 in practice).
+- The first real frames: on request netd sends an **ARP probe** (from 0.0.0.0) and waits for the answer – in QEMU
+  the virtual router 10.0.2.2 replies `is-at 52:55:0a:00:02:02` within a millisecond.
+- New programs: **`ifconfig`** (card, MAC, link and speed, counters for every `netN`) and **`arping <ip>`**.
+- QEMU: `run-qemu.sh` and `tests/test.sh` add the card explicitly (`-netdev user -device e1000e`, MAC
+  52:54:00:12:34:56) at the same PCI slot QEMU's default card used (00:02.0), so other devices keep their addresses.
+- **NET TEST** (new suite, 29 in total): `init test /bin/nettest` – init found the card and started net0, QEMU MAC,
+  link up, ARP to 10.0.2.2 answered, an unused address gets no reply, counters and interrupts, no receive errors;
+  netd killed → restarted by init → answers again from zero. Afterwards the kernel checks the card is free, bus
+  mastering off, the MSI vector and all DMA frames returned.
+
 ## v0.36.2 — 2026-10-19
 
 ### Permissions (DCP), step 3: the `dcp` command, limited view, audit log – stage closed
@@ -24,6 +266,14 @@ Format: newest on top. Dates in Central European time.
   view well-formed). sandtest (FILE TEST 7/7, 13 checks) – the child's 11 sandbox refusals, the refused path and the
   write without `WRITE` appear in `dcp audit`.
 - `kernel/user/caps.rs` became `kernel/user/dcp.rs`.
+- `dcp inspect`: slots 0, 1, 2 are labelled as the program's input, output and error output (`input (keyboard)`,
+  `output (screen)`, `errors (screen)`; with a redirection e.g. `output: an open file`) – only when they hold a console,
+  file or pipe (a service may keep e.g. an interrupt in slot 0).
+- `dcp inspect`: channels and pipes show **who holds the other end** – `channel to usbd (10)`, `channel to itself
+  (slot 9), sh (11)`, `pipe (write end) to cat (12)`, or `other end held by no program (the kernel, closed, or in a
+  message)`. Each published summary of a channel / pipe end carries the object's identity (from its address) and
+  the side; `dcp` matches identities across processes – still without touching anyone's handles.
+  handletest: 37 checks (pipe and channel peers, a closed peer).
 
 ## v0.36.1 — 2026-10-18
 

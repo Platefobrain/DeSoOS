@@ -170,6 +170,15 @@ fn main(args: Args) -> i32 {
     check!(n, caps_line(t, ro).map_or(false, |l| l.contains("FILE") && l.contains("READ COPY") && !l.contains("WRITE")), "dcp reduced file slot: {:?}", caps_line(t, ro));
     check!(n, caps_line(t, nodup).map_or(false, |l| l.contains("FILE") && l.contains(" READ ") && !l.contains("COPY")), "dcp no-COPY slot: {:?}", caps_line(t, nodup));
     check!(n, caps_line(t, pw).map_or(false, |l| l.contains("PIPE") && l.contains("WRITE COPY SHARE")), "dcp pipe slot: {:?}", caps_line(t, pw));
+    // Who holds the other end: here we hold both ends of a pipe and of a channel.
+    let pr_line = caps_line(t, pr).unwrap_or("");
+    check!(n, pr_line.contains("pipe (read end) from itself (slot"), "dcp pipe peer: {:?}", pr_line);
+    let (ca, cb) = channel_create().unwrap_or((0, 0));
+    let t2 = my_caps();
+    check!(n, caps_line(t2, ca).map_or(false, |l| l.contains("channel to itself (slot")) && caps_line(t2, cb).map_or(false, |l| l.contains("channel to itself (slot")), "dcp channel peer: {:?}", caps_line(t2, ca));
+    close(cb);
+    check!(n, caps_line(my_caps(), ca).map_or(false, |l| l.contains("other end held by no program")), "dcp closed channel peer: {:?}", caps_line(my_caps(), ca));
+    close(ca);
     check!(n, close(pw) == 0 && caps_line(my_caps(), pw).is_none(), "dcp still shows a closed handle");
     // No such process; a process that already exited; a child may not look at its parent.
     check!(n, dcp_pid("dcp inspect ", 999_999).contains("no user process"), "dcp inspect of a missing pid");

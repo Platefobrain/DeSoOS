@@ -366,6 +366,8 @@ pub fn dev_claim(root: u64, bdf: u64) -> i64 {
 
 /// PCI class of an xHCI controller (USB 3): 0C (serial bus), 03 (USB), 30 (xHCI).
 pub const CLASS_XHCI: u64 = 0x0C_03_30;
+/// PCI class: Ethernet controller.
+pub const CLASS_ETHERNET: u64 = 0x02_00_00;
 
 /// Address (bdf) of the `nr`-th PCI device of class `class` (24 bits:
 /// class << 16 | subclass << 8 | prog_if) – HW_ROOT only.  ENOENT: no
@@ -509,6 +511,11 @@ pub const SVC: u64 = 3;
 /// talking to the service.  Unknown / not running service: the channel is closed by
 /// init, the first operation on it gives EPIPE.
 pub fn svc_connect(name: &str) -> Result<u64, i64> {
+    svc_connect_via(SVC, name)
+}
+
+/// `svc_connect` through another service channel (e.g. a narrowed one).
+pub fn svc_connect_via(svc: u64, name: &str) -> Result<u64, i64> {
     let mut msg = [0u8; 64];
     let p = b"connect ";
     if p.len() + name.len() > msg.len() {
@@ -517,13 +524,51 @@ pub fn svc_connect(name: &str) -> Result<u64, i64> {
     msg[..p.len()].copy_from_slice(p);
     msg[p.len()..p.len() + name.len()].copy_from_slice(name.as_bytes());
     let (mine, theirs) = channel_create()?;
-    let r = chan_send_h(SVC, &msg[..p.len() + name.len()], &[theirs], 0);
+    let r = chan_send_h(svc, &msg[..p.len() + name.len()], &[theirs], 0);
     if r != 0 {
         close(mine);
         close(theirs);
         return Err(r);
     }
     Ok(mine)
+}
+
+/// A narrowed service channel from init (for a sandboxed program's slot 3): it
+/// opens only network connections – `tokens` "net" (client: connect, resolve,
+/// ping) or "net listen" (also servers).  No other services, no administrator
+/// requests (DNS server, DHCP renew).  A narrowed channel can only narrow further.
+pub fn svc_narrow(tokens: &str) -> Result<u64, i64> {
+    svc_narrow_via(SVC, tokens)
+}
+
+/// `svc_narrow` through another service channel (narrowing a narrowed one).
+pub fn svc_narrow_via(svc: u64, tokens: &str) -> Result<u64, i64> {
+    let mut msg = [0u8; 64];
+    let p = b"narrow ";
+    if p.len() + tokens.len() > msg.len() {
+        return Err(-22);
+    }
+    msg[..p.len()].copy_from_slice(p);
+    msg[p.len()..p.len() + tokens.len()].copy_from_slice(tokens.as_bytes());
+    let (mine, theirs) = channel_create()?;
+    let r = chan_send_h(svc, &msg[..p.len() + tokens.len()], &[theirs], 0);
+    if r != 0 {
+        close(mine);
+        close(theirs);
+        return Err(r);
+    }
+    let mut buf = [0u8; 64];
+    let mut hs = [0u64; 1];
+    let mut info = RecvInfo::default();
+    let r = chan_recv_h(mine, &mut buf, &mut hs, 0, &mut info);
+    close(mine);
+    if r < 0 {
+        return Err(r);
+    }
+    if info.handles != 1 {
+        return Err(-13);
+    }
+    Ok(hs[0])
 }
 
 /// Service list from init (lines "name state pid N restarts N (program)")

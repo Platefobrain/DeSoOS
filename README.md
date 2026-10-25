@@ -1,4 +1,4 @@
-# DeSoOS v0.36.2
+# DeSoOS v0.45.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -265,8 +265,27 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   system powers, files). `dcp inspect <pid>` - every capability of one process with its rights;
   `dcp audit` - the last refused attempts. DeSoOS has no users or `rwx` bits: a program may do
   exactly what its capabilities allow (see ARCHITECTURE.md, "Syscalls and handles").
+- `ifconfig` - network cards: driver, MAC address, link, IPv4 address, gateway and DNS servers (from
+  DHCP), lease time, frame counters. `ifconfig renew` - renew the DHCP lease now. `ifconfig set
+  192.168.1.50/24 gw 192.168.1.1 dns 192.168.1.1` - an address by hand (for a cable without a DHCP server;
+  checked first - an address another machine uses is refused); `ifconfig dhcp` - back to DHCP. The address comes from the
+  network's DHCP server a few milliseconds after the card starts (in QEMU: 10.0.2.15/24, gateway 10.0.2.2,
+  DNS 10.0.2.3). `arping <a.b.c.d>` - send one ARP request and show who answered.
+- `ping <address or name> [count]` - ICMP echo, one per second (default 4), each answer with its time, then a
+  summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSoOS also answers pings
+  to its own address. Several programs can use the network at the same time.
+- `fetch [-o file] [-v] http://host[:port]/path` - download a page over HTTP (TCP through netd); the body to the
+  console or to a file, a summary with the speed to stderr. `https://` needs TLS - not supported yet.
+- `httpd [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
+  file access: `nofiles --listen httpd 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
+  port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it
+  off). Connections to 127.0.0.1 or to DeSoOS's own address stay inside (loopback).
+- `host <name>` - the IPv4 addresses of a name (DNS; answers are cached). `ifconfig dns <a.b.c.d[:port]>` uses
+  another DNS server, `ifconfig dns auto` the one from DHCP.
 - `nofiles <program> [args]` - run a program in the file sandbox: it cannot open any path, only
   use what the shell hands it (`nofiles cat < notes.txt` works, `nofiles cat notes.txt` is refused).
+  `nofiles --net <program>` - plus network connections; `nofiles --listen <program>` - plus servers. Such a
+  program reaches no other service and cannot change network settings (DNS server, DHCP).
 - Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`
   start a new one.
 - `mkfs`, disk writes (`disk write`) and `run` are available only in the kernel emergency shell.

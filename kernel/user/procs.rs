@@ -75,9 +75,18 @@ impl ChildList {
         use crate::arch::x86_64::interrupts;
         let irq = interrupts::are_enabled();
         interrupts::disable();
-        // Wait by reading, attempt to acquire only when the lock is free.
+        // Wait by reading, attempt to acquire only when the lock is free.  We wait
+        // with IF = 0, so TLB shootdown requests are acknowledged here: the holder
+        // may free heap memory (the heap shrinks -> shootdown) and wait for us –
+        // without this, both waited forever (found on TCG: exiting orphans pushing
+        // to init while the process handing them over shrank the heap).
+        let mut n: u32 = 0;
         while self.locked.load(Ordering::Relaxed) || self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
+            n = n.wrapping_add(1);
+            if n % 64 == 0 {
+                crate::arch::x86_64::tlb::poll_from_wait();
+            }
         }
         ChildGuard { owner: self, irq }
     }
@@ -228,17 +237,20 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
         orphans = take();
     }
     if heir != 0 && !orphans.is_empty() {
-        let handed = sched::with_process(heir, move |h| {
+        // `drain`, not `into_iter`: the vector's memory is freed after the zombie
+        // lock is released (less heap work inside the section).
+        let handed = sched::with_process(heir, |h| {
             let mut z = h.zombies.lock();
             if h.exiting.load(Ordering::SeqCst) {
                 return false;
             }
-            for o in orphans {
+            for o in orphans.drain(..) {
                 z.push(o);
             }
             h.child_gen.fetch_add(1, Ordering::SeqCst);
             true
         });
+        drop(orphans);
         if handed == Some(true) {
             child_q(heir).wake_all();
         }

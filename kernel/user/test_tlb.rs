@@ -109,7 +109,7 @@ pub fn self_test() {
         check!(h1 - h0 == 2 * others, "acks {} (want {})", h1 - h0, 2 * others);
         check!(f1 - f0 == 1, "full flushes {}", f1 - f0);
     }
-    serial_println!("[TLB TEST] 1/5 page + full shootdown acknowledged by {} other CPU(s) PASS", others);
+    serial_println!("[TLB TEST] 1/6 page + full shootdown acknowledged by {} other CPU(s) PASS", others);
     if n == 1 {
         serial_println!("[TLB TEST] one CPU - skipping cross-CPU tests");
         crate::selftest::pass();
@@ -154,7 +154,7 @@ pub fn self_test() {
     let moved = READER_CPU.load(Ordering::Relaxed) != rcpu;
     let reads = READS.load(Ordering::Relaxed) - r_before;
     serial_println!(
-        "[TLB TEST] 2/5 control without shootdown: reader on CPU {} {} after {} reads{} PASS",
+        "[TLB TEST] 2/6 control without shootdown: reader on CPU {} {} after {} reads{} PASS",
         rcpu,
         if stale { "still saw the OLD page (stale TLB entry - the test can detect it)" } else { "already saw the new page (CPU dropped the entry itself)" },
         reads,
@@ -172,7 +172,7 @@ pub fn self_test() {
     let (_, _, _, w1, _) = tlb::stats();
     check!(reader_sees(VAL_A, 2_000), "reader on CPU {} still sees {:#x} after shootdown B->A", READER_CPU.load(Ordering::Relaxed), SEEN.load(Ordering::Relaxed));
     serial_println!(
-        "[TLB TEST] 3/5 remap on CPU {} seen by reader on CPU {} right after shootdown ({} us for acks) PASS",
+        "[TLB TEST] 3/6 remap on CPU {} seen by reader on CPU {} right after shootdown ({} us for acks) PASS",
         me,
         READER_CPU.load(Ordering::Relaxed),
         w1 - w0
@@ -191,7 +191,7 @@ pub fn self_test() {
     check!(r1 - r0 >= k * FLUSHES_PER_TASK, "requests {} < {}", r1 - r0, k * FLUSHES_PER_TASK);
     check!(h1 - h0 == (r1 - r0) * others, "acks {} != requests {} x {} CPUs", h1 - h0, r1 - r0, others);
     serial_println!(
-        "[TLB TEST] 4/5 {} concurrent initiators x {} shootdowns, {} acks ({} while waiting with IF=0) PASS",
+        "[TLB TEST] 4/6 {} concurrent initiators x {} shootdowns, {} acks ({} while waiting with IF=0) PASS",
         k,
         FLUSHES_PER_TASK,
         h1 - h0,
@@ -229,11 +229,74 @@ pub fn self_test() {
     check!(mapped2 < mapped1 - 512 * 1024, "heap did not shrink ({} -> {} -> {} bytes)", mapped0, mapped1, mapped2);
     check!(rq1 > rq0, "heap shrink without shootdown");
     serial_println!(
-        "[TLB TEST] 5/5 heap grows to {} KiB and gives pages back ({} KiB) with {} shootdown(s) PASS",
+        "[TLB TEST] 5/6 heap grows to {} KiB and gives pages back ({} KiB) with {} shootdown(s) PASS",
         mapped1 / 1024,
         mapped2 / 1024,
         rq1 - rq0
     );
 
+    // 6. CPUs spinning with IF = 0 on a zombie-list lock answer a shootdown from
+    //    its holder (the holder shrank the heap while other CPUs waited for the
+    //    lock – a deadlock found on TCG).
+    let k = (n - 1).min(3) as u64;
+    CL_WAITING.store(0, Ordering::SeqCst);
+    CL_DONE.store(0, Ordering::SeqCst);
+    CL_GO.store(false, Ordering::SeqCst);
+    for _ in 0..k {
+        check!(crate::sched::spawn("tlb-childlist", childlist_waiter, 0).is_ok(), "spawn lock waiter");
+    }
+    let polled0 = tlb::polled();
+    let (rq0, _, _, _, _) = tlb::stats();
+    let mut on_cpus = 0u64;
+    bkl::unlocked(|| {
+        let g = CL_LIST.lock();
+        CL_GO.store(true, Ordering::SeqCst);
+        // The waiters are spinning on the lock now (IF = 0, other CPUs).
+        let t0 = crate::arch::x86_64::clock::stamp();
+        while CL_WAITING.load(Ordering::SeqCst) < k && crate::arch::x86_64::clock::elapsed_us(t0) < 2_000_000 {
+            core::hint::spin_loop();
+        }
+        let t1 = crate::arch::x86_64::clock::stamp();
+        while crate::arch::x86_64::clock::elapsed_us(t1) < 20_000 {
+            core::hint::spin_loop();
+        }
+        on_cpus = CL_CPUS.load(Ordering::SeqCst);
+        // Before the fix: waits here forever.
+        tlb::flush_kernel_all();
+        drop(g);
+    });
+    check!(wait_for(5_000, || CL_DONE.load(Ordering::SeqCst) == k), "lock waiters did not finish ({} / {})", CL_DONE.load(Ordering::SeqCst), k);
+    crate::sched::reap();
+    let (rq1, _, _, _, _) = tlb::stats();
+    let polled = tlb::polled() - polled0;
+    check!(rq1 > rq0, "no shootdown");
+    check!(CL_WAITING.load(Ordering::SeqCst) == 0 || polled >= 1, "the waiters did not acknowledge from their spin loop");
+    serial_println!(
+        "[TLB TEST] 6/6 shootdown while {} CPU(s) spin on a zombie-list lock with IF=0 (CPU mask {:#b}): acknowledged from the spin loop ({} polled) PASS",
+        k,
+        on_cpus,
+        polled
+    );
+
     crate::selftest::pass();
+}
+
+static CL_LIST: crate::user::procs::ChildList = crate::user::procs::ChildList::new();
+static CL_GO: AtomicBool = AtomicBool::new(false);
+static CL_WAITING: AtomicU64 = AtomicU64::new(0);
+static CL_DONE: AtomicU64 = AtomicU64::new(0);
+static CL_CPUS: AtomicU64 = AtomicU64::new(0);
+
+/// Waits (yielding) until the test holds the lock, then takes it – spinning with IF = 0.
+fn childlist_waiter(_: usize) {
+    bkl::unlocked(|| {
+        while !CL_GO.load(Ordering::SeqCst) {
+            crate::sched::yield_now();
+        }
+        CL_CPUS.fetch_or(1 << cpu::id(), Ordering::SeqCst);
+        CL_WAITING.fetch_add(1, Ordering::SeqCst);
+        let g = CL_LIST.lock();
+        drop(g);
+    });
+    CL_DONE.fetch_add(1, Ordering::SeqCst);
 }

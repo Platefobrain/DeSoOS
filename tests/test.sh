@@ -91,6 +91,7 @@ QEMU=(qemu-system-x86_64
   -machine q35 -m 512M -smp "$SMP"
   "${ACCEL_ARGS[@]}"
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
+  -netdev user,id=net0,hostfwd=tcp:127.0.0.1:58082-:8081 -device e1000e,netdev=net0,mac=52:54:00:12:34:56
   -device qemu-xhci,id=xhci,p2=8,p3=8
   -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on
   -device usb-storage,bus=xhci.0,port=1,drive=usbboot,bootindex=0
@@ -113,6 +114,12 @@ QEMU=(qemu-system-x86_64
 : > "$LOG"
 python3 "$T/qemu-hotplug.py" "$LOG" "$MON" &
 HOTPLUG_PID=$!
+# DNS server for NET TEST (names under .desoos; the guest asks 10.0.2.2:53530).
+python3 "$T/dns-stub.py" 53530 &
+DNS_PID=$!
+# HTTP server for NET TEST (TCP; the guest connects to 10.0.2.2:58080).
+python3 "$T/http-stub.py" 58080 &
+HTTP_PID=$!
 
 if [ "$VERBOSE" = 1 ]; then
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG"
@@ -121,8 +128,8 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-kill "$HOTPLUG_PID" 2>/dev/null
-wait "$HOTPLUG_PID" 2>/dev/null
+kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
+wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
 rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
 TIME=$(( $(date +%s) - START ))
 

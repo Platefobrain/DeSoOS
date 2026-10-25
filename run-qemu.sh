@@ -50,6 +50,16 @@ case "$ACCEL" in
 esac
 SMP="${SMP:-4}"
 
+# Network: QEMU's user network (DHCP, DNS, NAT to the host's internet).
+# HOSTFWD=port (default 18080): the host's 127.0.0.1:port reaches port 8080 of
+# DeSoOS – e.g. `httpd 8080 < /index.html` in DeSoOS, `curl http://127.0.0.1:18080/`
+# on the host.  HOSTFWD=0 – no forwarding (if the port is taken).
+HOSTFWD="${HOSTFWD:-18080}"
+NETDEV="user,id=net0"
+if [ "$HOSTFWD" != 0 ]; then
+  NETDEV="$NETDEV,hostfwd=tcp:127.0.0.1:$HOSTFWD-:8080"
+fi
+
 # USB=1 – like a laptop without PS/2: no 8042 controller, keyboard
 # and mouse only on USB (usbd -> kernel).  Typing in the QEMU window then goes through
 # the USB keyboard.  Default as before: PS/2.
@@ -79,6 +89,7 @@ exec qemu-system-x86_64 \
   -smp "$SMP" "${ACCEL_ARGS[@]}" \
   -m 512M \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+  -netdev "$NETDEV" -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
   -device qemu-xhci,id=xhci,p2=8,p3=8 \
   -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on \
   -device usb-storage,bus=xhci.0,port=1,drive=usbboot,bootindex=0 \
