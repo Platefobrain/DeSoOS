@@ -526,6 +526,17 @@ pub fn init() {
         }
     }
 
+    // Network cards: no DMA until a driver claims them.  A firmware network
+    // driver may leave the card receiving into buffers it has already freed –
+    // memory the kernel now uses.  The loader turns this off right after
+    // ExitBootServices; this is the second line of defense.
+    for d in &found {
+        if d.header_type & 0x7F == 0 && d.class == 0x02 && d.command() & CMD_BUS_MASTER != 0 {
+            d.set_command(d.command() & !CMD_BUS_MASTER);
+            serial_println!("[PCI] {} network card still had DMA on - turned off", d.address);
+        }
+    }
+
     serial_println!("[PCI] {} devices found", found.len());
     for d in &found {
         serial_println!(

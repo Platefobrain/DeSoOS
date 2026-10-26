@@ -165,10 +165,10 @@ fn main(_args: Args) -> i32 {
     // 8. Hostile segments on an open connection.
     let t = open(ISS, 4000, 1000, t0);
     let now = t0 + 1000;
-    t.on_segment(now, &seg(IRS + 1 + 1_000_000, ISS + 1, TCP_ACK, 4000, b"far away"));
+    t.on_segment(now, &seg(IRS + 1 + 5_000_000, ISS + 1, TCP_ACK, 4000, b"far away"));
     let s = drain(t, now);
     check!(n, s.n == 1 && s.o[0].ack == IRS + 1 && t.readable() == 0, "data outside the window: ACK, not taken {:?}", &s.o[..s.n]);
-    t.on_segment(now + 10, &seg(IRS + 1 + 1_000_000, ISS + 1, TCP_ACK, 4000, b"far away"));
+    t.on_segment(now + 10, &seg(IRS + 1 + 5_000_000, ISS + 1, TCP_ACK, 4000, b"far away"));
     check!(n, drain(t, now + 10).n == 0, "challenge ACKs must be rate limited");
     t.on_segment(now + 200, &seg(IRS + 1 + 50, ISS + 1, TCP_RST, 0, &[]));
     let s = drain(t, now + 200);
@@ -196,22 +196,54 @@ fn main(_args: Args) -> i32 {
     check!(n, s.n == 1 && s.o[0].ack == IRS + 1001 && s.o[0].window as usize == (RCV_BUF - 1000).min(65535), "ACK with the smaller window {:?}", &s.o[..s.n]);
     t.on_segment(now, &seg(IRS + 2001, ISS + 1, TCP_ACK, 4000, &rx[2000..3000]));
     let s = drain(t, now);
-    check!(n, t.readable() == 1000 && s.n == 1 && s.o[0].ack == IRS + 1001, "out of order: dropped, duplicate ACK {:?}", &s.o[..s.n]);
+    check!(n, t.readable() == 1000 && t.reordered == 1 && s.n == 1 && s.o[0].ack == IRS + 1001, "ahead of a gap: kept, duplicate ACK {:?}", &s.o[..s.n]);
     t.on_segment(now, &seg(IRS + 501, ISS + 1, TCP_ACK, 4000, &rx[500..2000]));
-    check!(n, t.readable() == 2000, "overlap: only the new 1000 bytes, have {}", t.readable());
-    let mut got = [0u8; 2000];
-    let k = t.recv(&mut got);
-    check!(n, k == 2000 && (0..2000).all(|i| got[i] == pattern(i)), "received bytes in order");
-    t.on_segment(now, &seg(IRS + 2001, ISS + 1, TCP_ACK | TCP_FIN, 4000, &rx[2000..2500]));
     let s = drain(t, now);
-    check!(n, t.state == State::CloseWait && t.peer_fin && t.readable() == 500 && s.o[0].ack == IRS + 2502, "data + FIN: {:?} ack {}", t.state, s.o[0].ack);
-    t.on_segment(now, &seg(IRS + 2502, ISS + 1, TCP_ACK, 4000, b"after FIN"));
+    check!(n, t.readable() == 3000 && s.n == 1 && s.o[0].ack == IRS + 3001, "gap filled (overlapping): the ACK jumps over the kept data {:?}", &s.o[..s.n]);
+    let mut got = [0u8; 3000];
+    let k = t.recv(&mut got);
+    check!(n, k == 3000 && (0..3000).all(|i| got[i] == pattern(i)), "received bytes in order");
+    t.on_segment(now, &seg(IRS + 3001, ISS + 1, TCP_ACK | TCP_FIN, 4000, &rx[3000..3500]));
+    let s = drain(t, now);
+    check!(n, t.state == State::CloseWait && t.peer_fin && t.readable() == 500 && s.o[0].ack == IRS + 3502, "data + FIN: {:?} ack {}", t.state, s.o[0].ack);
+    t.on_segment(now, &seg(IRS + 3502, ISS + 1, TCP_ACK, 4000, b"after FIN"));
     check!(n, t.readable() == 500, "data after the FIN must be ignored");
     // Passive close.
     t.close();
     let s = drain(t, now + 5);
     check!(n, s.n == 1 && s.o[0].flags == TCP_FIN | TCP_ACK && t.state == State::LastAck, "our FIN: {:?}", t.state);
-    check!(n, t.on_segment(now + 9, &seg(IRS + 2502, ISS + 2, TCP_ACK, 4000, &[])) == Event::Closed && t.end == End::Normal, "last ACK: {:?}", t.end);
+    check!(n, t.on_segment(now + 9, &seg(IRS + 3502, ISS + 2, TCP_ACK, 4000, &[])) == Event::Closed && t.end == End::Normal, "last ACK: {:?}", t.end);
+
+    // 9b. Several gaps: pieces kept in any order, joined when the gaps fill; a FIN
+    // after a gap waits; more pieces than records are dropped.
+    let t = open(ISS, 4000, 1000, t0);
+    let now = t0 + 100;
+    let mut big = [0u8; 12000];
+    for (i, b) in big.iter_mut().enumerate() {
+        *b = pattern(i);
+    }
+    for k in [5usize, 3, 1] {
+        t.on_segment(now, &seg(IRS + 1 + k as u32 * 1000, ISS + 1, TCP_ACK, 4000, &big[k * 1000..k * 1000 + 1000]));
+    }
+    t.on_segment(now, &seg(IRS + 1 + 6000, ISS + 1, TCP_ACK | TCP_FIN, 4000, &big[6000..7000]));
+    let s = drain(t, now);
+    check!(n, t.readable() == 0 && t.reordered == 4 && s.o[s.n - 1].ack == IRS + 1 && !t.peer_fin, "three gaps: nothing readable yet, ACK at the start {:?}", &s.o[..s.n]);
+    t.on_segment(now, &seg(IRS + 1, ISS + 1, TCP_ACK, 4000, &big[0..1000]));
+    check!(n, t.readable() == 2000, "first gap filled: 2000 readable, have {}", t.readable());
+    t.on_segment(now, &seg(IRS + 2001, ISS + 1, TCP_ACK, 4000, &big[2000..3000]));
+    t.on_segment(now, &seg(IRS + 4001, ISS + 1, TCP_ACK, 4000, &big[4000..5000]));
+    let s = drain(t, now);
+    check!(n, t.readable() == 7000 && s.o[s.n - 1].ack == IRS + 7001 && !t.peer_fin, "all gaps filled: 7000 readable, the FIN (it came ahead of a gap) not yet {:?}", &s.o[..s.n]);
+    t.on_segment(now, &seg(IRS + 6001, ISS + 1, TCP_ACK | TCP_FIN, 4000, &big[6000..7000]));
+    let s = drain(t, now);
+    let mut got = [0u8; 7000];
+    let k = t.recv(&mut got);
+    check!(n, k == 7000 && (0..7000).all(|i| got[i] == pattern(i)) && t.peer_fin && s.o[s.n - 1].ack == IRS + 7002, "joined in order, FIN taken {:?}", &s.o[..s.n]);
+    let t = open(ISS, 4000, 1000, t0);
+    for k in 0..(tcp::OOO_MAX + 2) {
+        t.on_segment(now, &seg(IRS + 1 + (2 * k as u32 + 1) * 100, ISS + 1, TCP_ACK, 4000, &big[..50]));
+    }
+    check!(n, t.reordered as usize == tcp::OOO_MAX && t.dropped >= 2 && t.readable() == 0, "pieces beyond {} records dropped: kept {} dropped {}", tcp::OOO_MAX, t.reordered, t.dropped);
 
     // 10. A full receive buffer: window 0, then a window update when read.
     let t = open(ISS, 4000, 1460, t0);
@@ -386,7 +418,7 @@ fn main(_args: Args) -> i32 {
     tcb().init_accept(ISS, t0, &syn);
     let t = tcb();
     drain(t, t0);
-    t.on_segment(t0 + 1, &seg(IRS + 1 + 1_000_000, ISS + 1, TCP_ACK, 3000, b"x"));
+    t.on_segment(t0 + 1, &seg(IRS + 1 + 5_000_000, ISS + 1, TCP_ACK, 3000, b"x"));
     let s = drain(t, t0 + 200);
     check!(n, t.state == State::SynReceived && s.n == 1 && s.o[0].flags == TCP_ACK, "outside the window while accepting: {:?}", &s.o[..s.n]);
     check!(n, t.on_segment(t0 + 300, &seg(IRS + 1, 0, TCP_RST, 0, &[])) == Event::Closed && t.end == End::Reset, "RST while accepting");
@@ -451,7 +483,7 @@ fn main(_args: Args) -> i32 {
     }
     n += 1;
     println!(
-        "tcptest: {} checks OK (handshake, refused, SYN resends 1/2/4/8 s, window and congestion window, window scaling, RTO and fast retransmit, zero-window probe, in-order / out-of-order / overlapping data, full buffer, all closing paths, wraparound, hostile segments, the server side (SYN+ACK, resends, half-open given up); 20 000 random segments: {} bytes read, {} new connections)",
+        "tcptest: {} checks OK (handshake, refused, SYN resends 1/2/4/8 s, window and congestion window, window scaling, RTO and fast retransmit, zero-window probe, in-order / out-of-order (kept ahead of gaps) / overlapping data, full buffer, all closing paths, wraparound, hostile segments, the server side (SYN+ACK, resends, half-open given up); 20 000 random segments: {} bytes read, {} new connections)",
         n, taken, reopened
     );
     0

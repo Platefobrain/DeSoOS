@@ -160,6 +160,40 @@ pub fn self_test() {
     );
     let r = run("/bin/hello", &["hello"], 10_000);
     check!(matches!(r, Some((ExitKind::Exit(0), _))), "a program must run normally after the limits test: {:?}", r.map(|x| x.0));
+    // ramfs files in 64 KiB chunks: 4 KiB appends, reads across chunk edges at odd
+    // offsets, truncate + extend (zeros), and the time for 10 MiB of appends (each
+    // used to copy the whole file).
+    {
+        let path = "/ramchunk.tmp";
+        let pat = |i: usize| (i * 13 + i / 4093) as u8;
+        let ram_a = crate::fs::ramfs::bytes_used();
+        check!(crate::fs::create(path).is_ok(), "create {}", path);
+        let mut piece = [0u8; 4096];
+        for k in 0..75 {
+            for (j, b) in piece.iter_mut().enumerate() {
+                *b = pat(k * 4096 + j);
+            }
+            check!(crate::fs::write(path, (k * 4096) as u64, &piece) == Ok(4096), "append {}", k);
+        }
+        let mut buf = [0u8; 5000];
+        for &off in &[0usize, 65_000, 131_071, 196_600, 302_000] {
+            let n = crate::fs::read(path, off as u64, &mut buf).unwrap_or(0);
+            let want = (300 * 1024 - off).min(5000);
+            check!(n == want && (0..n).all(|i| buf[i] == pat(off + i)), "read at {}: {} bytes, pattern {}", off, n, (0..n).all(|i| buf[i] == pat(off + i)));
+        }
+        check!(crate::fs::truncate(path, 70_000).is_ok(), "truncate");
+        check!(crate::fs::write(path, 139_999, &[7]) == Ok(1), "extend by writing");
+        let n = crate::fs::read(path, 69_000, &mut buf).unwrap_or(0);
+        check!(n == 5000 && (0..1000).all(|i| buf[i] == pat(69_000 + i)) && buf[1000..].iter().all(|&b| b == 0), "after truncate + extend: old bytes, then zeros");
+        let t0 = crate::time::ticks();
+        for k in 75..2560 {
+            check!(crate::fs::write(path, (k * 4096) as u64, &piece) == Ok(4096), "append {} (10 MiB)", k);
+        }
+        let ms = crate::time::ticks() - t0;
+        check!(crate::fs::remove(path).is_ok(), "remove");
+        check!(crate::fs::ramfs::bytes_used() == ram_a, "ramfs bytes after the chunk test: {} -> {}", ram_a, crate::fs::ramfs::bytes_used());
+        serial_println!("[FILE TEST]   ramfs chunks: 300 KiB pattern, edges, truncate + extend OK; 10 MiB of 4 KiB appends in {} ms", ms);
+    }
     serial_println!("[FILE TEST] 6/7 limits (processes, kernel memory reserve, ramfs, IPC buffers): {} PASS", out.trim());
 
     // 7. File sandbox: a child started with SPAWN_NO_FILES cannot use any path

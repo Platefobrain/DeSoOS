@@ -370,6 +370,8 @@ fn dsb() -> Status {
     // sequence for us. The returned map owns its backing buffer (LOADER_DATA)
     // and stays valid after boot services are gone.
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
+    // At once: network cards stop DMA (see `stop_network_dma`).
+    stop_network_dma();
     let map_meta = memory_map.meta();
     let map_buffer = memory_map.buffer();
 
@@ -412,6 +414,52 @@ fn dsb() -> Status {
             in("rdi") DIRECT_MAP_BASE + bootinfo_phys,
             options(noreturn)
         );
+    }
+}
+
+/// PCI configuration read / write through ports 0xCF8 / 0xCFC.
+fn pci_cfg_addr(bus: u32, dev: u32, func: u32, off: u32) {
+    let a: u32 = 0x8000_0000 | bus << 16 | dev << 11 | func << 8 | (off & 0xFC);
+    unsafe { asm!("out dx, eax", in("dx") 0xCF8u16, in("eax") a, options(nomem, nostack)) };
+}
+
+fn pci_cfg_read(bus: u32, dev: u32, func: u32, off: u32) -> u32 {
+    pci_cfg_addr(bus, dev, func, off);
+    let v: u32;
+    unsafe { asm!("in eax, dx", out("eax") v, in("dx") 0xCFCu16, options(nomem, nostack)) };
+    v
+}
+
+fn pci_cfg_write(bus: u32, dev: u32, func: u32, off: u32, v: u32) {
+    pci_cfg_addr(bus, dev, func, off);
+    unsafe { asm!("out dx, eax", in("dx") 0xCFCu16, in("eax") v, options(nomem, nostack)) };
+}
+
+/// Bus mastering off for every network card (PCI class 0x02).  A firmware
+/// network driver may leave its card receiving into buffers that were freed at
+/// ExitBootServices – memory the kernel is about to use for page tables and its
+/// heap.  One received frame there and the machine resets.  netd turns DMA on
+/// again when it takes the card.
+fn stop_network_dma() {
+    for bus in 0..256u32 {
+        for dev in 0..32u32 {
+            if pci_cfg_read(bus, dev, 0, 0) & 0xFFFF == 0xFFFF {
+                continue;
+            }
+            let multi = pci_cfg_read(bus, dev, 0, 0x0C) >> 16 & 0x80 != 0;
+            for func in 0..if multi { 8 } else { 1 } {
+                if pci_cfg_read(bus, dev, func, 0) & 0xFFFF == 0xFFFF {
+                    continue;
+                }
+                let class = pci_cfg_read(bus, dev, func, 0x08) >> 24;
+                let header = pci_cfg_read(bus, dev, func, 0x0C) >> 16 & 0x7F;
+                if class == 0x02 && header == 0 {
+                    let cmd_status = pci_cfg_read(bus, dev, func, 0x04);
+                    // Write the command register only (status bits are write-1-to-clear).
+                    pci_cfg_write(bus, dev, func, 0x04, cmd_status & 0xFFFF & !(1 << 2));
+                }
+            }
+        }
     }
 }
 

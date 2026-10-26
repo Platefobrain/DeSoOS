@@ -360,7 +360,12 @@ struct Nic {
     /// The last connection that ended while a program used it: peer, port,
     /// why; segments the connections dropped (out of order / outside the window).
     tcp_last_end: Option<([u8; 4], u16, &'static str)>,
+    /// That connection: window scale of the peer (None = not agreed), most data
+    /// waiting for the program at once.
+    tcp_last_scale: Option<u8>,
+    tcp_last_peak: usize,
     tcp_dropped: u64,
+    tcp_reordered: u64,
     /// Loopback queue: frame lengths, read / write positions; set while a
     /// looped frame is handled (only then are 127.x destinations accepted).
     loop_len: [usize; LOOPQ],
@@ -378,7 +383,7 @@ struct Nic {
     conflicts: u64,
 }
 
-/// TCP connections at once; their blocks (8 KiB send + 256 KiB receive buffers each) are static.
+/// TCP connections at once; their blocks (8 KiB send + 1 MiB receive buffers each) are static.
 const TCP_MAX: usize = 8;
 // All-zero blocks are valid (unused) ones – the table lands in .bss, not in the file.
 static mut TCBS: [Tcb; TCP_MAX] = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
@@ -405,9 +410,11 @@ struct TcpMeta {
     /// the listening connection (else NO_OWNER).
     listener: usize,
     t0: u64,
+    /// Most received data waiting for the program at once (bytes).
+    peak: usize,
 }
 
-const TCP_FREE: TcpMeta = TcpMeta { used: false, lip: [0; 4], lport: 0, rip: [0; 4], rport: 0, mac: [0; 6], owner: NO_OWNER, listener: NO_OWNER, t0: 0 };
+const TCP_FREE: TcpMeta = TcpMeta { used: false, lip: [0; 4], lport: 0, rip: [0; 4], rport: 0, mac: [0; 6], owner: NO_OWNER, listener: NO_OWNER, t0: 0, peak: 0 };
 
 /// Accepted connections waiting for the server program, per listening port.
 const BACKLOG: usize = 4;
@@ -1676,7 +1683,7 @@ impl Nic {
         let iss = self.rand32();
         tcbs()[slot].init_connect(iss, now);
         let lip = self.src_for(ip);
-        self.tcp[slot] = TcpMeta { used: true, lip, lport, rip: ip, rport: port, mac, owner: k, listener: NO_OWNER, t0 };
+        self.tcp[slot] = TcpMeta { used: true, lip, lport, rip: ip, rport: port, mac, owner: k, listener: NO_OWNER, t0, peak: 0 };
         self.tcp_made += 1;
         self.tcp_flush(slot, now);
         Op::Tcp { slot, open: false }
@@ -1751,7 +1758,7 @@ impl Nic {
         }
         let iss = self.rand32();
         tcbs()[slot].init_accept(iss, now, seg);
-        self.tcp[slot] = TcpMeta { used: true, lip: ip.dst, lport: dport, rip: ip.src, rport: sport, mac: src_mac, owner: NO_OWNER, listener: l, t0: now };
+        self.tcp[slot] = TcpMeta { used: true, lip: ip.dst, lport: dport, rip: ip.src, rport: sport, mac: src_mac, owner: NO_OWNER, listener: l, t0: now, peak: 0 };
         self.tcp_flush(slot, now);
         true
     }
@@ -1790,6 +1797,7 @@ impl Nic {
     /// Received data to the program, as far as its channel takes it (the rest
     /// waits – the TCP window closes until the program reads).
     fn tcp_deliver(&mut self, k: usize, slot: usize) {
+        self.tcp[slot].peak = self.tcp[slot].peak.max(tcbs()[slot].readable());
         let mut buf = [0u8; MSG_MAX];
         while tcbs()[slot].readable() > 0 && !self.conns[k].dead {
             let n = tcbs()[slot].peek(&mut buf);
@@ -1861,6 +1869,8 @@ impl Nic {
                             tcp::End::Aborted => "aborted by us",
                             _ => "closed",
                         };
+                        self.tcp_last_scale = tcbs()[slot].peer_shift();
+                        self.tcp_last_peak = self.tcp[slot].peak;
                         self.tcp_last_end = Some((m.rip, m.rport, why));
                     }
                     self.conns[owner].op = Op::Idle;
@@ -1872,13 +1882,16 @@ impl Nic {
                     self.conns[owner].op = Op::Idle;
                     self.tcp[slot].owner = NO_OWNER;
                     tcbs()[slot].close();
-                    self.tcp_last_end = Some((m.rip, m.rport, "closed by the peer"));
+                    self.tcp_last_scale = tcbs()[slot].peer_shift();
+                        self.tcp_last_peak = self.tcp[slot].peak;
+                        self.tcp_last_end = Some((m.rip, m.rport, "closed by the peer"));
                 }
             }
             self.tcp_flush(slot, now);
             if tcbs()[slot].state == tcp::State::Closed && self.tcp[slot].owner == NO_OWNER {
                 // (also a SynReceived block that timed out or was reset)
                 self.tcp_dropped += tcbs()[slot].dropped as u64;
+                self.tcp_reordered += tcbs()[slot].reordered as u64;
                 self.tcp[slot] = TCP_FREE;
             }
         }
@@ -2041,7 +2054,16 @@ impl Nic {
             self.tcp_resets
         );
         if let Some((ip, port, why)) = self.tcp_last_end {
-            let _ = writeln!(out, "    last ended: {}:{} {}; {} segments dropped (out of order / outside the window)", ip_text(ip), port, why, self.tcp_dropped);
+            let _ = writeln!(out, "    last ended: {}:{} {}; {} segments kept ahead of a gap, {} dropped (outside the window)", ip_text(ip), port, why, self.tcp_reordered, self.tcp_dropped);
+            match self.tcp_last_scale {
+                Some(s) => {
+                    let _ = write!(out, "      window scaling agreed (peer shift {})", s);
+                }
+                None => {
+                    let _ = write!(out, "      no window scaling (the peer did not offer it - window at most 64 KiB)");
+                }
+            }
+            let _ = writeln!(out, "; most data waiting for the program at once: {} KiB", self.tcp_last_peak / 1024);
         }
         for c in &self.conns[..self.nconns] {
             if let Op::Listen { port } = c.op {
@@ -2378,8 +2400,9 @@ impl Nic {
         }
         self.irq = irq as u64;
         let _ = self.r8(R_CHIPCMD);
-        self.w8(R_CHIPCMD, RT_CMD_RX | RT_CMD_TX);
-        self.set(R_RXCONFIG, RT_RXCFG);
+        // Transmit on now; reception only through rt_rx_restart (the sequence
+        // that makes the card forget a stale receive ring).
+        self.w8(R_CHIPCMD, RT_CMD_TX);
         self.set(R_TXCONFIG, RT_TXCFG);
         self.w16(R_INTR_STATUS, 0xFFFF);
         self.w16(R_INTR_MASK, RT_INTS);
@@ -2642,6 +2665,12 @@ fn main(args: Args) -> i32 {
         println!("{}: dev_map BAR{} failed", name, bar);
         return 2;
     };
+    if kind == Kind::Realtek {
+        // Before DMA is allowed (dma_alloc turns bus mastering on): the card may
+        // still hold the firmware's receive ring – stop reception first.
+        wr8(regs + R_CHIPCMD, 0);
+        wr32(regs + R_RXCONFIG, rd32(regs + R_RXCONFIG) & !0x3F);
+    }
     let h = dma_alloc(DEV, DMA_SIZE, 64);
     if h < 0 {
         println!("{}: dma_alloc failed: {}", name, strerror(h));
@@ -2715,7 +2744,10 @@ fn main(args: Args) -> i32 {
         tcp_resets: 0,
         tcp_accepted: 0,
         tcp_last_end: None,
+        tcp_last_scale: None,
+        tcp_last_peak: 0,
         tcp_dropped: 0,
+        tcp_reordered: 0,
         loop_len: [0; LOOPQ],
         loop_head: 0,
         loop_tail: 0,

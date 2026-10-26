@@ -2,6 +2,60 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.47.0 — 2026-10-26
+
+### Found the download brake: ramfs copied the whole file on every write
+- On the test laptop Debian downloads the same 10 MiB over the same cable at 9.78 MB/s, DeSoOS at 2.8 MiB/s.
+  The new `ifconfig` lines showed why: window scaling agreed with the server (shift 12), but up to **970 KiB of
+  received data waited for `fetch`** – the program did not keep up, the window closed, the server waited.
+- `fetch` writes to ramfs in 4 KiB pieces, and a ramfs file was one `Vec` grown by exactly the new bytes: every
+  write reallocated and copied the whole file (10 MiB of downloads = ~13 GB copied).
+- ramfs file data now lives in **64 KiB chunks**; a chunk's capacity doubles up to 64 KiB (small files stay
+  small). 10 MiB in 4 KiB appends: **19.5 s → 52 ms** in QEMU (TCG). FILE TEST 6/7 checks it: a 300 KiB pattern
+  read across chunk edges at odd offsets, truncate + extend gives zeros, the 10 MiB timing, ramfs bytes back.
+- **Confirmed on the test laptop:** the same 10 MiB in 1351 ms – **7579 KiB/s** (was 2809; Debian on the same
+  laptop and cable: 9.78 MB/s, link 100 Mb/s); at most 1 KiB waited for `fetch` (was 970 KiB); 0 resent; no
+  reset at boot.
+
+## v0.46.2 — 2026-10-26
+
+### Diagnostics: a rare test hang and the download speed
+- On the build machine 3 of 6 TCG runs hung in ALLOC TEST 4/5 (frame caches) – nothing printed for minutes,
+  the clock running, no lock report; KVM and other runs fine. Added: a **self-test stall watchdog** (automatic
+  test mode: nothing printed for 30 s while the clock runs → one report with every CPU's RIP and current task,
+  from the timer interrupt, so even a run killed by the timeout says where it stood), a start marker for ALLOC
+  TEST 4/5 and a dump of the frame workers' phase and state if they do not finish in 60 s.
+- Downloads stay at ~2.6 MiB/s whatever the window. QEMU (TCG, through netd and a channel) moves 1 MiB in
+  ~124 ms – about 8 MiB/s – so netd → program is not the limit. `ifconfig` now says, for the last TCP
+  connection, whether the server agreed to window scaling and the most received data that waited for the
+  program at once.
+
+## v0.46.1 — 2026-10-26
+
+### No stray DMA from network cards at boot
+- On the test laptop DeSoOS twice reset itself right after the shell prompt appeared (the third start was fine).
+  Likely cause: the card's firmware driver left it receiving into buffers that were freed when the loader
+  left UEFI – memory the kernel uses for page tables and its heap; a frame arriving there resets the machine.
+  (The card was already seen with a stale receive ring from the firmware.)
+- DSB now turns bus mastering off for every network card right after ExitBootServices; PCI init checks again and
+  logs a card that still had DMA on; netd stops reception before DMA is turned back on, and the Realtek receiver
+  is switched on only through the ring set-up that makes the card forget a stale ring.
+- v0.46.0 measured on the test laptop: 2668 KiB/s (unchanged – something other than the TCP window limits it;
+  the new 10 m cable linked at 100 Mb/s only).
+
+## v0.46.0 — 2026-10-26
+
+### Network: faster TCP downloads
+- **Receive window 1 MiB** (was 256 KiB), window scale shift 5. At 45 ms to a server in the UK that allows about
+  22 MiB/s instead of 5.5 MiB/s; closer servers more.
+- **Data ahead of a gap is kept.** Before, a segment that arrived after a lost one was thrown away, so one lost
+  frame made the server send the whole rest of the window again and slowed it down. Now up to 8 separate pieces
+  wait in their place in the receive ring; the duplicate ACK tells the server which part is missing, and once it
+  arrives the ACK jumps over everything kept.
+- `ifconfig`: "N segments kept ahead of a gap, M dropped" after the last TCP connection.
+- tcptest **77 checks** (+ gap kept and joined, three gaps in any order, a FIN behind a gap, more pieces than
+  records).
+
 ## v0.45.1 — 2026-10-25
 
 ### Realtek driver: interrupts no longer go silent

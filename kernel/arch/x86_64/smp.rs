@@ -132,6 +132,43 @@ pub fn watchdog_tick(rip: u64) {
     LAST_RIP[cpu::id()].store(rip, Ordering::Relaxed);
     crate::time::gap_probe();
     watchdog_poll();
+    #[cfg(selftest)]
+    stall_poll();
+}
+
+/// Self-tests (automatic mode): nothing printed for STALL_MS while the clock runs –
+/// a test is stuck somewhere other than a spinlock or the BKL (a task that never
+/// wakes, a wait loop).  One full report (RIP of every CPU, their current tasks),
+/// so the run that is killed by the timeout still says where it stood.
+#[cfg(selftest)]
+const STALL_MS: u64 = 30_000;
+#[cfg(selftest)]
+static STALL_LINES: AtomicU64 = AtomicU64::new(u64::MAX);
+#[cfg(selftest)]
+static STALL_STAMP: AtomicU64 = AtomicU64::new(0);
+#[cfg(selftest)]
+static STALL_REPORTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(selftest)]
+fn stall_poll() {
+    if !active() || !crate::selftest::autotest() || STALL_REPORTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let lines = crate::drivers::serial::LINES.load(Ordering::Relaxed);
+    let seen = STALL_LINES.load(Ordering::Relaxed);
+    if lines != seen {
+        if STALL_LINES.compare_exchange(seen, lines, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            STALL_STAMP.store(clock::stamp(), Ordering::Relaxed);
+        }
+        return;
+    }
+    if clock::elapsed_us(STALL_STAMP.load(Ordering::Relaxed)) < STALL_MS * 1000 {
+        return;
+    }
+    if STALL_REPORTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    lockup_dump(format_args!("self-test printed nothing for {} s (seen by CPU {}) - a task is stuck", STALL_MS / 1000, cpu::id()));
 }
 
 /// Checks whether the clock has stopped (called from wait loops; cheap).

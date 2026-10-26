@@ -1,6 +1,8 @@
 // ramfs – an in-memory file system (heap).  Mounted as "/".
 //
-// Node tree: directory = name -> node map, file = Vec<u8>.
+// Node tree: directory = name -> node map, file = 64 KiB chunks (appending never
+// copies the whole file – with one Vec every 4 KiB write reallocated and copied it:
+// a 10 MiB download wrote ~13 GB through memcpy).
 // Everything disappears on reboot – persistent data lives on /disk (FAT32).
 //
 // ramfs runs concurrently (the VFS calls it holding FS_LOCK for
@@ -32,9 +34,14 @@ use crate::sched::spin::RwSpinLock;
 use crate::sched::sync::Mutex;
 
 struct FileInner {
-    data: Vec<u8>,
+    /// Data in chunks: all full (CHUNK bytes) except the last; a chunk's capacity
+    /// grows by doubling up to CHUNK (small files stay small).
+    chunks: Vec<Vec<u8>>,
+    len: usize,
     modified: DateTime,
 }
+
+const CHUNK: usize = 64 * 1024;
 
 /// Limit on ramfs data.  Files live on the kernel heap (64 MiB) –
 /// without a limit a single program could fill the heap by writing files (or by `seek` far
@@ -53,28 +60,103 @@ impl FileInner {
     /// out of memory (try_reserve).  New bytes = 0.
     fn set_len(&mut self, new_len: usize) -> Result<()> {
         use core::sync::atomic::Ordering::SeqCst;
-        let old = self.data.len();
+        let old = self.len;
         if new_len > old {
             let delta = (new_len - old) as u64;
             if RAMFS_BYTES.fetch_update(SeqCst, SeqCst, |u| u.checked_add(delta).filter(|&n| n <= RAMFS_MAX)).is_err() {
                 return Err(FsError::NoSpace);
             }
-            if self.data.try_reserve_exact(new_len - old).is_err() {
+            if self.grow(new_len).is_err() {
+                self.shrink(old);
                 RAMFS_BYTES.fetch_sub(delta, SeqCst);
                 return Err(FsError::NoSpace);
             }
-            self.data.resize(new_len, 0);
         } else {
-            self.data.truncate(new_len);
+            self.shrink(new_len);
             RAMFS_BYTES.fetch_sub((old - new_len) as u64, SeqCst);
         }
         Ok(())
+    }
+
+    /// Up to `new_len` (zeros), without the accounting.  Err = out of memory (the
+    /// part already added stays; the caller shrinks back).
+    fn grow(&mut self, new_len: usize) -> core::result::Result<(), ()> {
+        while self.len < new_len {
+            if self.chunks.last().is_none_or(|c| c.len() == CHUNK) {
+                let mut c = Vec::new();
+                c.try_reserve_exact((new_len - self.len).min(CHUNK)).map_err(|_| ())?;
+                self.chunks.push(c);
+            }
+            let last = self.chunks.last_mut().unwrap();
+            let target = (last.len() + (new_len - self.len)).min(CHUNK);
+            if last.capacity() < target {
+                // Double (at most CHUNK) – appends in small pieces copy little.
+                let want = target.max(last.capacity() * 2).min(CHUNK);
+                last.try_reserve_exact(want - last.len()).map_err(|_| ())?;
+            }
+            let added = target - last.len();
+            last.resize(target, 0);
+            self.len += added;
+        }
+        Ok(())
+    }
+
+    /// Down to `new_len`, without the accounting.
+    fn shrink(&mut self, new_len: usize) {
+        if new_len >= self.len {
+            return;
+        }
+        let keep = new_len.div_ceil(CHUNK);
+        self.chunks.truncate(keep);
+        if let Some(last) = self.chunks.last_mut() {
+            last.truncate(new_len - (keep - 1) * CHUNK);
+        }
+        self.len = new_len;
+    }
+
+    /// Bytes from `offset` (within the length).
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {
+        if offset >= self.len {
+            return 0;
+        }
+        let n = buf.len().min(self.len - offset);
+        let mut done = 0;
+        while done < n {
+            let pos = offset + done;
+            let c = &self.chunks[pos / CHUNK];
+            let at = pos % CHUNK;
+            let k = (n - done).min(c.len() - at);
+            buf[done..done + k].copy_from_slice(&c[at..at + k]);
+            done += k;
+        }
+        n
+    }
+
+    /// Overwrites bytes at `offset` (the file must already be that long).
+    fn write_at(&mut self, offset: usize, bytes: &[u8]) {
+        let mut done = 0;
+        while done < bytes.len() {
+            let pos = offset + done;
+            let c = &mut self.chunks[pos / CHUNK];
+            let at = pos % CHUNK;
+            let k = (bytes.len() - done).min(c.len() - at);
+            c[at..at + k].copy_from_slice(&bytes[done..done + k]);
+            done += k;
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(self.len);
+        for c in &self.chunks {
+            v.extend_from_slice(c);
+        }
+        v
     }
 }
 
 impl Drop for FileInner {
     fn drop(&mut self) {
-        RAMFS_BYTES.fetch_sub(self.data.len() as u64, core::sync::atomic::Ordering::SeqCst);
+        RAMFS_BYTES.fetch_sub(self.len as u64, core::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -101,7 +183,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn new_file() -> Node {
-    Node::File(Arc::new(FileNode { inner: Mutex::new(FileInner { data: Vec::new(), modified: rtc::now() }) }))
+    Node::File(Arc::new(FileNode { inner: Mutex::new(FileInner { chunks: Vec::new(), len: 0, modified: rtc::now() }) }))
 }
 
 impl RamFs {
@@ -207,7 +289,7 @@ impl ConcurrentFs for RamFs {
             }
         };
         let i = f.inner.lock();
-        Ok(Metadata { kind: FileType::File, size: i.data.len() as u64, modified: Some(i.modified) })
+        Ok(Metadata { kind: FileType::File, size: i.len as u64, modified: Some(i.modified) })
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
@@ -232,7 +314,7 @@ impl ConcurrentFs for RamFs {
             .map(|(name, node)| match node {
                 Ok(f) => {
                     let i = f.inner.lock();
-                    DirEntry { name, kind: FileType::File, size: i.data.len() as u64, modified: Some(i.modified) }
+                    DirEntry { name, kind: FileType::File, size: i.len as u64, modified: Some(i.modified) }
                 }
                 Err(modified) => DirEntry { name, kind: FileType::Directory, size: 0, modified: Some(modified) },
             })
@@ -242,19 +324,16 @@ impl ConcurrentFs for RamFs {
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let f = self.file(path)?;
         let i = f.inner.lock();
-        if offset >= i.data.len() as u64 {
+        if offset >= i.len as u64 {
             return Ok(0);
         }
-        let start = offset as usize;
-        let n = buf.len().min(i.data.len() - start);
-        buf[..n].copy_from_slice(&i.data[start..start + n]);
-        Ok(n)
+        Ok(i.read_at(offset as usize, buf))
     }
 
     fn read_all(&self, path: &str) -> Result<Vec<u8>> {
         let f = self.file(path)?;
         let i = f.inner.lock();
-        Ok(i.data.clone())
+        Ok(i.to_vec())
     }
 
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
@@ -262,10 +341,10 @@ impl ConcurrentFs for RamFs {
         let mut i = f.inner.lock();
         // The offset from `seek` may be huge – no overflow, within the limit.
         let end = (offset as usize).checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
-        if i.data.len() < end {
+        if i.len < end {
             i.set_len(end)?;
         }
-        i.data[offset as usize..end].copy_from_slice(bytes);
+        i.write_at(offset as usize, bytes);
         i.modified = rtc::now();
         Ok(bytes.len())
     }
@@ -275,7 +354,7 @@ impl ConcurrentFs for RamFs {
         let mut i = f.inner.lock();
         i.set_len(0)?;
         i.set_len(bytes.len())?;
-        i.data.copy_from_slice(bytes);
+        i.write_at(0, bytes);
         i.modified = rtc::now();
         Ok(())
     }
@@ -283,9 +362,9 @@ impl ConcurrentFs for RamFs {
     fn append(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let f = self.file_or_create(path)?;
         let mut i = f.inner.lock();
-        let old = i.data.len();
+        let old = i.len;
         i.set_len(old.checked_add(bytes.len()).ok_or(FsError::NoSpace)?)?;
-        i.data[old..].copy_from_slice(bytes);
+        i.write_at(old, bytes);
         i.modified = rtc::now();
         Ok(())
     }
@@ -337,7 +416,7 @@ impl ConcurrentFs for RamFs {
             Self::collect_files(self.root(), &mut v);
             v
         };
-        let used: u64 = files.iter().map(|f| f.inner.lock().data.len() as u64).sum();
+        let used: u64 = files.iter().map(|f| f.inner.lock().len as u64).sum();
         let free = crate::memory::free_frame_count() * 4096;
         FsStats { total_bytes: used + free, free_bytes: free }
     }

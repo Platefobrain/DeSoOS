@@ -108,10 +108,14 @@ fn write_byte(b: u8) {
     }
 }
 
+/// Lines written so far (the self-test stall watchdog looks for progress).
+pub static LINES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Writes text to serial (\n -> \r\n).
 pub fn write_str(s: &str) {
     for b in s.bytes() {
         if b == b'\n' {
+            LINES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             write_byte(b'\r');
         }
         write_byte(b);

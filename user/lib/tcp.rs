@@ -21,8 +21,10 @@
 //   (window scaling, RFC 7323: we offer a shift of WSCALE in our SYN; used only
 //   when the peer offers one too – then window fields outside SYN segments are
 //   shifted both ways);
-//   only in-order data is kept (out-of-order data is dropped and the peer gets a
-//   duplicate ACK – it sends again).  Every data segment is acknowledged at once.
+//   data that arrives ahead of a gap (a lost segment) is kept in its place in the
+//   ring – up to OOO_MAX separate pieces – and the peer gets a duplicate ACK; when
+//   the gap is filled the ACK jumps over everything kept.  Every data segment is
+//   acknowledged at once.
 // - Segments are untrusted: outside the window they are dropped with an ACK; a
 //   RST counts only with exactly the next sequence number (anywhere else in the
 //   window: a "challenge ACK", RFC 5961), a SYN on an open connection likewise;
@@ -32,11 +34,13 @@
 use crate::netproto::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
 
 pub const SND_BUF: usize = 8192;
-/// Receive buffer: the window that keeps a far server sending (256 KiB at 40 ms
-/// round trip is about 6 MiB/s).
-pub const RCV_BUF: usize = 256 * 1024;
-/// Our window scale shift (65535 << 3 covers RCV_BUF).
-pub const WSCALE: u8 = 3;
+/// Receive buffer: the window that keeps a far server sending (1 MiB at 40 ms
+/// round trip is about 25 MiB/s).
+pub const RCV_BUF: usize = 1024 * 1024;
+/// Our window scale shift (65535 << 5 covers RCV_BUF).
+pub const WSCALE: u8 = 5;
+/// Pieces of data kept ahead of gaps.
+pub const OOO_MAX: usize = 8;
 /// Our MSS (Ethernet 1500 - 40).
 pub const MSS: u16 = 1460;
 /// Peer MSS when it sends none (RFC 9293).
@@ -183,6 +187,10 @@ pub struct Tcb {
     rbuf: [u8; RCV_BUF],
     r_start: usize,
     r_len: usize,
+    /// Data kept ahead of gaps: (first, end) sequence numbers, sorted, not
+    /// touching each other or rcv_nxt; the bytes are already in rbuf at their place.
+    ooo: [(u32, u32); OOO_MAX],
+    ooo_n: usize,
     fin_queued: bool,
     fin_sent: bool,
     fin_acked: bool,
@@ -214,6 +222,8 @@ pub struct Tcb {
     // Counters.
     pub retransmits: u32,
     pub dropped: u32,
+    /// Segments kept ahead of a gap.
+    pub reordered: u32,
     pub rtt_ms: u64,
 }
 
@@ -238,6 +248,7 @@ impl Tcb {
         self.s_len = 0;
         self.r_start = 0;
         self.r_len = 0;
+        self.ooo_n = 0;
         self.fin_queued = false;
         self.fin_sent = false;
         self.fin_acked = false;
@@ -265,6 +276,7 @@ impl Tcb {
         self.syn_t0 = now;
         self.retransmits = 0;
         self.dropped = 0;
+        self.reordered = 0;
         self.rtt_ms = 0;
     }
 
@@ -298,6 +310,11 @@ impl Tcb {
     /// The peer's window field of a non-SYN segment, in bytes.
     fn peer_window(&self, s: &Seg) -> u32 {
         (s.window as u32) << self.snd_shift
+    }
+
+    /// Window scaling agreed with the peer: its shift (None = not agreed).
+    pub fn peer_shift(&self) -> Option<u8> {
+        if self.rcv_shift != 0 { Some(self.snd_shift) } else { None }
     }
 
     pub fn rto(&self) -> u64 {
@@ -714,6 +731,70 @@ impl Tcb {
         Event::Connected
     }
 
+    /// Data at `seq` ahead of rcv_nxt: copied into its place in the ring (only the
+    /// part inside the window) and recorded.  False when nothing could be kept
+    /// (outside the window, or no free record and it touches no kept piece).
+    fn keep_ahead(&mut self, seq: u32, data: &[u8]) -> bool {
+        let off = seq.wrapping_sub(self.rcv_nxt) as usize;
+        let room = RCV_BUF - self.r_len;
+        if off >= room {
+            return false;
+        }
+        let len = data.len().min(room - off);
+        if len == 0 {
+            return false;
+        }
+        let (a, b) = (seq, seq.wrapping_add(len as u32));
+        // Merge with every kept piece it overlaps or touches.
+        let (mut lo, mut hi) = (a, b);
+        let mut keep = [(0u32, 0u32); OOO_MAX];
+        let mut n = 0;
+        for &(x, y) in &self.ooo[..self.ooo_n] {
+            if le(x, hi) && le(lo, y) {
+                if lt(x, lo) {
+                    lo = x;
+                }
+                if lt(hi, y) {
+                    hi = y;
+                }
+            } else {
+                keep[n] = (x, y);
+                n += 1;
+            }
+        }
+        if n == OOO_MAX {
+            return false;
+        }
+        let base = self.r_start + self.r_len + off;
+        for (k, &v) in data[..len].iter().enumerate() {
+            self.rbuf[(base + k) % RCV_BUF] = v;
+        }
+        // Insert sorted.
+        let mut i = n;
+        while i > 0 && lt(lo, keep[i - 1].0) {
+            keep[i] = keep[i - 1];
+            i -= 1;
+        }
+        keep[i] = (lo, hi);
+        self.ooo = keep;
+        self.ooo_n = n + 1;
+        true
+    }
+
+    /// rcv_nxt moved: kept pieces it reached become readable.
+    fn join_kept(&mut self) {
+        while self.ooo_n > 0 && le(self.ooo[0].0, self.rcv_nxt) {
+            let end = self.ooo[0].1;
+            if lt(self.rcv_nxt, end) {
+                let extra = end.wrapping_sub(self.rcv_nxt) as usize;
+                self.r_len += extra;
+                self.rcv_nxt = end;
+            }
+            self.ooo.copy_within(1..self.ooo_n, 0);
+            self.ooo_n -= 1;
+        }
+    }
+
     fn acceptable(&self, s: &Seg, len: u32) -> bool {
         let wnd = self.rcv_wnd();
         let in_wnd = |x: u32| le(self.rcv_nxt, x) && lt(x, self.rcv_nxt.wrapping_add(wnd));
@@ -841,9 +922,14 @@ impl Tcb {
                 seq = self.rcv_nxt;
             }
             if seq != self.rcv_nxt {
-                // Out of order: the peer sends again; a duplicate ACK says from where.
+                // Ahead of a gap: keep it in its place; a duplicate ACK says where
+                // the gap starts (the peer sends that part again).
                 self.need_ack = true;
-                self.dropped += 1;
+                if self.keep_ahead(seq, data) {
+                    self.reordered += 1;
+                } else {
+                    self.dropped += 1;
+                }
                 return ev;
             }
             let take = data.len().min(RCV_BUF - self.r_len);
@@ -855,9 +941,14 @@ impl Tcb {
             self.need_ack = true;
             if take > 0 {
                 ev = Event::Data;
+                self.join_kept();
             }
             if take < data.len() {
                 // Beyond the window: the rest (and a FIN after it) comes again.
+                return ev;
+            }
+            if self.ooo_n > 0 {
+                // A gap remains after this data: a FIN on it comes again too.
                 return ev;
             }
         }

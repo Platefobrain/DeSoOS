@@ -687,6 +687,8 @@ stack in a user-space service `/bin/netd` (like usbd) and network access as a ca
       and re-armed. On the test laptop: DHCP from the home router, ping < 1 ms, fetch from the internet; 10 MiB from
       the UK in 3.9 s (**2643 KiB/s**, was 178 KiB/s with an 8 KiB window) after TCP window scaling, a 256 KiB
       receive ring and 256-descriptor card rings; no loss, no resends.
+      v0.46.0: 1 MiB window, data ahead of a gap kept (up to 8 pieces). v0.47.0: the real brake was ramfs copying
+      the whole file on every write – fixed (64 KiB chunks): 7579 KiB/s on a 100 Mb/s link (Debian: 9.78 MB/s).
 - Later: packet fuzzer extensions, IPv6, TLS (needs cryptography), USB Ethernet, Wi-Fi (maybe never).
 
 ### Permissions – DCP (before networking, 2026-10-18)

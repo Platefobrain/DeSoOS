@@ -54,7 +54,7 @@ syscalls + handles ────────── boundary ───────
 | PCI, disks (virtio, NVMe), GPT | kernel | on the path of every file read |
 | VFS, page cache, FAT32, a future native FS | **kernel, permanently** | every `open`/`read`/`write` |
 | init, shell, tools | user space | |
-| networking | user space (future) | only with queues (like virtio/io_uring), never one IPC per packet |
+| networking | user space (`/bin/netd`, one per card) | card driver + ARP/IPv4/ICMP/UDP/TCP/DHCP/DNS in one process; programs talk to it over channels |
 | USB + HID + USB storage | user space (`/bin/usbd`) | keyboard events go to the kernel via `input_inject`, disk sectors via `ublk`; a crashed usbd is restarted by init |
 | audio, GUI, exotic filesystems | user space (future) | ring buffers / surfaces in shared memory; FS through the VFS (like FUSE) |
 
@@ -418,7 +418,9 @@ execute `hlt`.
   on USB storage (read-only).
 - `FS_LOCK` is a readers–writer lock. Filesystems with their own locking (`ConcurrentFs`) run concurrently under
   the read side. ramfs: the tree under a `RwSpinLock`, each file's contents under its own mutex (a deleted file
-  lives as long as someone reads it).
+  lives as long as someone reads it). File data is kept in 64 KiB chunks (a chunk's capacity doubles up to 64 KiB,
+  so small files stay small): appending never copies the whole file – with one `Vec` per file, 10 MiB written in
+  4 KiB pieces took 19.5 s in QEMU, now 52 ms.
 - `fs::Locked<F>` wraps a filesystem without its own locks in one sleeping `Mutex` and implements
   `ConcurrentFs`, so it also runs under the read side of `FS_LOCK`. Used for FAT32 on USB disks: waiting for a
   slow pendrive blocks only that filesystem. `kind` / `source` / `read_only` are copied at mount time (so `mount`
@@ -885,6 +887,11 @@ parser kills netd, not the kernel; init restarts it and its clients get `EPIPE`.
 | Later | USB Ethernet adapters (ASIX, RTL8153) | through `usbd`, which already exists |
 | Not planned | Wi-Fi | needs vendor firmware, 802.11 and WPA2/3 – months of work |
 
+**No DMA from network cards until netd takes them.** A firmware network driver may leave its card receiving
+into buffers it freed at ExitBootServices – memory the kernel then uses (one frame there can reset the machine).
+DSB turns bus mastering off for every network card right after ExitBootServices, PCI init checks again, and netd
+stops reception before `dma_alloc` turns DMA back on.
+
 init finds cards with `dev_find(HW_ROOT, 0x020000, n)` (class Ethernet controller) and starts a `netd` for each
 (`net0`, `net1`, like `usbN`). netd checks the chip itself: no driver → a message and exit code 78, which init
 records as **"no driver"** (no restarts). netd gets the same slots as other services: 1 console,
@@ -1014,14 +1021,15 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 ### TCP (N6)
 
 - **Connection** (`user/lib/tcp.rs`, pure – the time is passed in, segments come out): client side of RFC 9293.
-  SYN with our MSS (1460) and window scale (shift 3, RFC 7323 – used only when the peer offers one too); the peer's
-  MSS bounded to 64–1460 (536 when it sends none); window = free space of a 256 KiB receive ring (one 8 KiB ring
+  SYN with our MSS (1460) and window scale (shift 5, RFC 7323 – used only when the peer offers one too); the peer's
+  MSS bounded to 64–1460 (536 when it sends none); window = free space of a 1 MiB receive ring (an 8 KiB ring
   would cap a download at window / round trip – 178 KiB/s at 45 ms on the test laptop); an 8 KiB send ring. Sending stays within the peer's window and the congestion window (RFC
   3390 initial window, slow start, congestion avoidance, fast retransmit after 3 duplicate ACKs). Retransmission
   timer from measured RTT (RFC 6298, 200 ms – 60 s, doubled per loss, Karn's rule); after a timeout everything
   from the first unacknowledged byte is sent again; 8 timeouts in a row end the connection; SYN resent after 1, 2,
-  4, 8 s, then "timed out". A zero window is probed. Only in-order data is kept (out-of-order: dropped, a
-  duplicate ACK; the peer resends); overlapping resends are trimmed. Closing: FIN after the queued data; all
+  4, 8 s, then "timed out". A zero window is probed. Data ahead of a gap (a lost segment) is kept in its place
+  in the ring – up to 8 separate pieces – with a duplicate ACK for the gap; when the gap fills, the ACK jumps over
+  everything kept (one loss no longer means resending the whole window); overlapping resends are trimmed. Closing: FIN after the queued data; all
   RFC paths (FIN-WAIT-1/2, CLOSING, TIME-WAIT 2 s, CLOSE-WAIT, LAST-ACK); FIN-WAIT-2 gives up after 10 s.
 - **Untrusted segments:** checksum and header/option lengths checked by the parser; outside the window → dropped
   with an ACK; RST only with exactly the next sequence number, anywhere else in the window a challenge ACK

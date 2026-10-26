@@ -484,10 +484,26 @@ pub fn self_test() {
     F_READY.store(0, Ordering::SeqCst);
     F_PUSHED.store(0, Ordering::SeqCst);
     F_TASKS.store(k as u64, Ordering::SeqCst);
+    serial_println!("[ALLOC TEST]   4/5 starting {} frame workers ({} free frames)", k, fr0);
     for i in 0..k {
         check!(crate::sched::spawn("alloc-frames", f_worker, i).is_ok(), "spawn frame worker");
     }
-    check!(wait_for(120_000, || DONE.load(Ordering::SeqCst) == k as u64), "frame workers did not finish ({} / {})", DONE.load(Ordering::SeqCst), k);
+    if !wait_for(60_000, || DONE.load(Ordering::SeqCst) == k as u64) {
+        // Where they are stuck: the phase counters, the pool, each worker's state.
+        serial_println!(
+            "[ALLOC TEST] frame workers stuck: ready {} pushed {} done {} of {}, pool {} frames, free frames {}",
+            F_READY.load(Ordering::SeqCst),
+            F_PUSHED.load(Ordering::SeqCst),
+            DONE.load(Ordering::SeqCst),
+            k,
+            F_POOL.lock().len(),
+            crate::memory::free_frame_count()
+        );
+        for t in crate::sched::tasks().iter().filter(|t| t.name == "alloc-frames") {
+            serial_println!("[ALLOC TEST]   task {} {:?} cpu {:?} (last {}), {} switches, {} ticks", t.id, t.state, t.cpu, t.last_cpu, t.switches, t.cpu_ticks);
+        }
+    }
+    check!(DONE.load(Ordering::SeqCst) == k as u64, "frame workers did not finish ({} / {})", DONE.load(Ordering::SeqCst), k);
     let bad = BAD.load(Ordering::SeqCst);
     check!(bad == 0, "frame caches: {}", bad_text(bad));
     *F_POOL.lock() = Vec::new();
