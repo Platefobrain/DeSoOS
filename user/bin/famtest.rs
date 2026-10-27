@@ -3,7 +3,7 @@
 // `init test /bin/famtest` (registered as init – orphans go to
 // it) on several CPUs:
 //   1. 200 children exit at once – wait(ANY) reaps each exactly once,
-//      with the right code; then ECHILD (also with WNOHANG),
+//      with the right code; then ERROR_NO_CHILD (also with WNOHANG),
 //   2. wait for a specific pid in reverse order,
 //   3. WNOHANG with a live child -> (0, 0), then a plain wait,
 //   4. 8 "middle" processes (each with 25 grandchildren: half exit immediately, half
@@ -26,7 +26,6 @@ use desoos::*;
 
 entry!(main);
 
-const ECHILD: i64 = -10;
 
 macro_rules! check {
     ($n:ident, $cond:expr, $($msg:tt)*) => {
@@ -115,7 +114,7 @@ fn parent(n: u64) -> i32 {
             _ => return 21,
         }
     }
-    if wait(WAIT_ANY, 0) != Err(ECHILD) {
+    if wait(WAIT_ANY, 0) != Err(ERROR_NO_CHILD) {
         return 22;
     }
     if got == want { 0 } else { 23 }
@@ -155,7 +154,7 @@ fn main(args: Args) -> i32 {
         }
     }
     check!(n, ok && seen.iter().all(|&s| s), "200 statuses, each once with its own code");
-    check!(n, wait(WAIT_ANY, 0) == Err(ECHILD) && wait(WAIT_ANY, WNOHANG) == Err(ECHILD), "no children left -> ECHILD");
+    check!(n, wait(WAIT_ANY, 0) == Err(ERROR_NO_CHILD) && wait(WAIT_ANY, WNOHANG) == Err(ERROR_NO_CHILD), "no children left -> ERROR_NO_CHILD");
 
     // 2. Specific pids in reverse order.
     let mut few = [0u64; 20];
@@ -167,7 +166,7 @@ fn main(args: Args) -> i32 {
         ok &= wait(few[i], 0) == Ok((few[i], 100 + i as u64));
     }
     check!(n, ok, "wait(pid) in reverse order");
-    check!(n, wait(few[0], 0) == Err(ECHILD), "wait on a reaped pid -> ECHILD");
+    check!(n, wait(few[0], 0) == Err(ERROR_NO_CHILD), "wait on a reaped pid -> ERROR_NO_CHILD");
 
     // 3. WNOHANG with a live child.
     let s = child(&["famtest", "sleep", "50", "9"]).max(0) as u64;
@@ -187,7 +186,7 @@ fn main(args: Args) -> i32 {
         }
     }
     check!(n, ok, "8 middle processes reaped (exit 7), grandchildren not ours");
-    check!(n, wait(WAIT_ANY, WNOHANG) == Err(ECHILD), "orphans went to init, not to us");
+    check!(n, wait(WAIT_ANY, WNOHANG) == Err(ERROR_NO_CHILD), "orphans went to init, not to us");
 
     // 5. 4 parents with 50 children each, in parallel.
     let mut ps = [0u64; 4];

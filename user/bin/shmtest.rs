@@ -1,6 +1,6 @@
 // Shared memory test – an object seen through two mappings and
 // two processes (the same pages), data from the child + a "doorbell" over a channel,
-// read-only mapping (without MAP_WRITE – EACCES, write = #PF), never
+// read-only mapping (without MAP_WRITE – ERROR_ACCESS_DENIED, write = #PF), never
 // executable (jump = #PF), munmap only as a whole, the object lives after
 // its handle is closed as long as it is mapped.  Result: "shmtest: N checks
 // OK" and code 0, or a description of the first error and code 1.  Run by IPC TEST.
@@ -116,8 +116,8 @@ fn main(args: Args) -> i32 {
     let mut buf = [0u8; 16];
     let mut info = RecvInfo::default();
 
-    // 1. Creation: size rounded up, rights, size errors, read / write – EBADF.
-    check!(n, shm_create(0) == -22 && shm_create(16 * 1024 * 1024 + 1) == -22, "bad sizes must be EINVAL");
+    // 1. Creation: size rounded up, rights, size errors, read / write – ERROR_INVALID_HANDLE.
+    check!(n, shm_create(0) == ERROR_INVALID_ARGUMENT && shm_create(16 * 1024 * 1024 + 1) == ERROR_INVALID_ARGUMENT, "bad sizes must be ERROR_INVALID_ARGUMENT");
     let odd = shm_create(5000);
     check!(n, odd >= 0 && shm_size(odd as u64) == 8192, "5000 bytes -> {}", shm_size(odd as u64));
     close(odd as u64);
@@ -125,8 +125,8 @@ fn main(args: Args) -> i32 {
     check!(n, h >= 0, "shm_create: {}", strerror(h));
     let h = h as u64;
     check!(n, handle_info(h) == Ok((KIND_SHM, R_MAP_READ | R_MAP_WRITE | R_DUP | R_TRANSFER)), "rights: {:?}", handle_info(h));
-    check!(n, read(h, &mut buf) == -9 && write(h, b"x") == -9, "read / write on shm must be EBADF");
-    check!(n, shm_size(1) == -9, "shm_size on the console must be EBADF");
+    check!(n, read(h, &mut buf) == ERROR_INVALID_HANDLE && write(h, b"x") == ERROR_INVALID_HANDLE, "read / write on shm must be ERROR_INVALID_HANDLE");
+    check!(n, shm_size(1) == ERROR_INVALID_HANDLE, "shm_size on the console must be ERROR_INVALID_HANDLE");
 
     // 2. Two mappings in one process – the same pages; new memory is zeroed.
     let rw = match shm_map(h, PROT_READ | PROT_WRITE) {
@@ -141,17 +141,17 @@ fn main(args: Args) -> i32 {
     check!(n, ro != 0 && ro != rw, "second mapping: {:#x}", ro);
     mem(rw, SIZE)[12345] = 0x5A;
     check!(n, mem(ro, SIZE)[12345] == 0x5A, "write through one mapping must be visible through the other");
-    check!(n, shm_map(h, 4) == Err(-22), "bad prot must be EINVAL");
+    check!(n, shm_map(h, 4) == Err(ERROR_INVALID_ARGUMENT), "bad prot must be ERROR_INVALID_ARGUMENT");
 
-    // 3. Handle without MAP_WRITE: read mapping yes, write mapping – EACCES.
+    // 3. Handle without MAP_WRITE: read mapping yes, write mapping – ERROR_ACCESS_DENIED.
     let rh = handle_dup(h, R_MAP_READ | R_DUP | R_TRANSFER) as u64;
-    check!(n, shm_map(rh, PROT_READ | PROT_WRITE) == Err(-13), "write mapping without R_MAP_WRITE must be EACCES");
+    check!(n, shm_map(rh, PROT_READ | PROT_WRITE) == Err(ERROR_ACCESS_DENIED), "write mapping without R_MAP_WRITE must be ERROR_ACCESS_DENIED");
     let r2 = shm_map(rh, PROT_READ);
     check!(n, r2.is_ok() && mem(r2.unwrap_or(0), SIZE)[12345] == 0x5A, "read mapping via read-only handle");
     check!(n, munmap(r2.unwrap_or(0), SIZE) == 0, "munmap read-only mapping");
 
-    // 4. munmap only as a whole: a part – EINVAL; the whole – OK.
-    check!(n, munmap(ro, 4096) == -22 && munmap(ro + 4096, 4096) == -22, "partial munmap must be EINVAL");
+    // 4. munmap only as a whole: a part – ERROR_INVALID_ARGUMENT; the whole – OK.
+    check!(n, munmap(ro, 4096) == ERROR_INVALID_ARGUMENT && munmap(ro + 4096, 4096) == ERROR_INVALID_ARGUMENT, "partial munmap must be ERROR_INVALID_ARGUMENT");
     check!(n, munmap(ro, SIZE) == 0, "full munmap");
 
     // 5. Writer child: RW handle over the channel, pattern in memory, doorbell over the channel.

@@ -145,10 +145,10 @@ exit 7\n";
         "hello world\n",
         "\n/\n",
         "\n/bin\n",
-        "cd: /nope: no such file or directory",
+        "cd: /nope: not found",
         "text\nmore\n",
         "a\n",
-        "stat: /m16/a: no such file or directory",
+        "stat: /m16/a: not found",
         "sh: nosuchcmd: command not found",
         "argc = 3\nargv[0] = args\nargv[1] = one two\nargv[2] = three\n",
         "\naXbc\n",
@@ -197,13 +197,13 @@ exit 7\n";
     procs::set_init_pid(init);
     let adopted = wait_for(3_000, || task_named("sleep").map(|t| t.ppid) == Some(init));
     check!(adopted, "sleep not adopted by init {} ({:?})", init, task_named("sleep").map(|t| t.ppid));
-    check!(syscalls::sys_kill(init) == Err(syscalls::EPERM), "kill(init) allowed");
+    check!(syscalls::sys_kill(init) == Err(syscalls::ERROR_NOT_PERMITTED), "kill(init) allowed");
     let r = finish(init, 5_000);
     procs::set_init_pid(0);
     check!(matches!(r, Some((ExitKind::Exit(3), _))), "init shell: {:?}", r);
     check!(task_named("sleep").is_none(), "adopted sleep still running");
     check!(procs::zombies().is_empty(), "zombies after init: {:?}", procs::zombies());
-    serial_println!("[INIT TEST] 7/9 orphan adopted and reaped by init, kill(init) = EPERM PASS");
+    serial_println!("[INIT TEST] 7/9 orphan adopted and reaped by init, kill(init) = ERROR_NOT_PERMITTED PASS");
 
     // 8. Ctrl+C (kill) of the foreground program ends the program, not the shell.
     let sh = start("/bin/sh", &["sh"], b"primes 50000000\necho after\n");

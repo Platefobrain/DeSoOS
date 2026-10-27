@@ -2,7 +2,7 @@
 // channel queues and data in pipes.  They live on the kernel heap (64 MiB): without
 // a budget a few processes could fill the heap with queues (64 messages × 4 KiB per
 // queue, 64 handles per process) and the kernel would crash on the next allocation.
-// Over budget: chan_send / pipe write – ENOMEM (nothing is lost, the process
+// Over budget: chan_send / pipe write – ERROR_OUT_OF_MEMORY (nothing is lost, the process
 // can try again later).
 
 use core::sync::atomic::{AtomicU64, Ordering::SeqCst};

@@ -12,7 +12,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::syscalls::{EINVAL, ENOMEM};
+use super::syscalls::{ERROR_INVALID_ARGUMENT, ERROR_OUT_OF_MEMORY};
 use crate::memory::{alloc_frame_user, alloc_frames_below, free_frame, phys_to_virt};
 
 /// Largest object (bytes).
@@ -29,18 +29,18 @@ impl ShmObj {
     /// New object of `size` bytes (rounded up to a page), zeroed.
     pub fn new(size: u64) -> Result<Arc<ShmObj>, i64> {
         if size == 0 || size > SHM_MAX {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let pages = size.div_ceil(PAGE) as usize;
         let mut frames = Vec::new();
-        frames.try_reserve_exact(pages).map_err(|_| ENOMEM)?;
+        frames.try_reserve_exact(pages).map_err(|_| ERROR_OUT_OF_MEMORY)?;
         for _ in 0..pages {
             // Beyond the kernel's reserve.
             let Some(f) = alloc_frame_user() else {
                 for &f in frames.iter() {
                     free_frame(f);
                 }
-                return Err(ENOMEM);
+                return Err(ERROR_OUT_OF_MEMORY);
             };
             unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE as usize) };
             frames.push(f);
@@ -52,12 +52,12 @@ impl ShmObj {
     /// below `limit` (the device's address bus), zeroed.
     pub fn new_dma(size: u64, limit: u64) -> Result<Arc<ShmObj>, i64> {
         if size == 0 || size > SHM_MAX {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let pages = size.div_ceil(PAGE) as usize;
         let mut frames = Vec::new();
-        frames.try_reserve_exact(pages).map_err(|_| ENOMEM)?;
-        let first = alloc_frames_below(pages, 1, limit).ok_or(ENOMEM)?;
+        frames.try_reserve_exact(pages).map_err(|_| ERROR_OUT_OF_MEMORY)?;
+        let first = alloc_frames_below(pages, 1, limit).ok_or(ERROR_OUT_OF_MEMORY)?;
         for i in 0..pages as u64 {
             let f = first + i * PAGE;
             unsafe { core::ptr::write_bytes(phys_to_virt(f) as *mut u8, 0, PAGE as usize) };

@@ -1,8 +1,8 @@
 // USB controller (xHCI) and usbd service test – the kernel's USB TEST self-test.
 //
 // With HW_ROOT in slot 3 (USB TEST 1/2):
-//   - dev_find: HW_ROOT only (EBADF), class > 24 bits (EINVAL), xHCI
-//     controllers by class 0C0330, ENOENT past the last one and for a class that does not exist,
+//   - dev_find: HW_ROOT only (ERROR_INVALID_HANDLE), class > 24 bits (ERROR_INVALID_ARGUMENT), xHCI
+//     controllers by class 0C0330, ERROR_NOT_FOUND past the last one and for a class that does not exist,
 //   - usbd on the first controller: start (reset, rings, interrupt),
 //     "status" (No-Op completed, ports, the QEMU boot flash drive attached),
 //     "noop 2000", an invalid request,
@@ -23,7 +23,6 @@ use desoos::*;
 
 entry!(main);
 
-const EINVAL: i64 = -22;
 
 macro_rules! check {
     ($n:ident, $cond:expr, $($msg:tt)*) => {
@@ -55,7 +54,7 @@ fn ask<'a>(c: u64, req: &str, out: &'a mut [u8]) -> Option<&'a str> {
     core::str::from_utf8(&out[..r as usize]).ok()
 }
 
-/// usbd on device `bdf`: (pid, connection channel).  EBUSY (the previous
+/// usbd on device `bdf`: (pid, connection channel).  ERROR_BUSY (the previous
 /// instance is still exiting) – retries for up to 2 s.
 fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
     let t0 = uptime_ms();
@@ -64,7 +63,7 @@ fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
         if d >= 0 {
             break d as u64;
         }
-        if d != EBUSY || uptime_ms() - t0 > 2000 {
+        if d != ERROR_BUSY || uptime_ms() - t0 > 2000 {
             return None;
         }
         sleep_ms(5);
@@ -194,11 +193,11 @@ fn via_init() -> i32 {
     check!(n, field(text, "noops").unwrap_or(0) >= 203 && field(text, "errors") == Some(0), "usb0 status: {:?}", text);
     check!(n, field(text, "connected").unwrap_or(0) >= 1, "usb0 sees no connected device: {:?}", text);
     check!(n, field(text, "devices") == Some(5) && field(text, "hubs") == Some(1), "usb0 devices (want 5, 1 hub): {:?}", text);
-    // lsusb over the svc channel (as from the shell).
+    // usblist over the svc channel (as from the shell).
     let mut l = [0u8; 4096];
     let mut len = 0;
     if let Ok((r, w)) = pipe() {
-        let pid = spawn_ex("/bin/lsusb", &["lsusb"], &[(w, 1), (w, 2), (SVC, 3)], 0);
+        let pid = spawn_ex("/bin/usblist", &["usblist"], &[(w, 1), (w, 2), (SVC, 3)], 0);
         close(w);
         while pid > 0 && len < l.len() {
             let k = read(r, &mut l[len..]);
@@ -213,7 +212,7 @@ fn via_init() -> i32 {
         }
     }
     let lt = core::str::from_utf8(&l[..len]).unwrap_or("");
-    check!(n, lt.contains("usb0 port") && lt.contains("03/01/01") && lt.contains("08/06/50"), "lsusb output: {:?}", lt);
+    check!(n, lt.contains("usb0 port") && lt.contains("03/01/01") && lt.contains("08/06/50"), "usblist output: {:?}", lt);
     check!(n, lt.contains("keyboard ready (input to kernel)"), "init did not give usbd the INPUT handle: {:?}", lt);
 
     // Test flash drive (FAT32 image from test.sh) – the kernel mounted it
@@ -222,7 +221,7 @@ fn via_init() -> i32 {
     check!(n, disk.is_some(), "test USB disk (DESOOS.TST) not mounted in /usb0..3");
     let (u, mount_ms) = disk.unwrap();
     let l2 = ask_lsusb(&mut l);
-    check!(n, l2.matches("disk sd").count() == 2 && l2.contains("read-only"), "lsusb: 2 disks ready, read-only: {:?}", l2);
+    check!(n, l2.matches("disk sd").count() == 2 && l2.contains("read-only"), "usblist: 2 disks ready, read-only: {:?}", l2);
     // Files identical to /bin (the same programs copied into the image).
     // Buffers on the heap (the process stack is small).
     let (Ok(av), Ok(bv)) = (mmap(131072, PROT_READ | PROT_WRITE), mmap(131072, PROT_READ | PROT_WRITE)) else { return 2 };
@@ -265,7 +264,7 @@ fn via_init() -> i32 {
     if w >= 0 {
         close(w as u64);
     }
-    check!(n, w == -30, "create on the USB disk must be EROFS: {}", w);
+    check!(n, w == ERROR_READ_ONLY, "create on the USB disk must be ERROR_READ_ONLY: {}", w);
     check!(n, stat(newf).is_err(), "NEW.TXT appeared on a read-only disk");
     let mut p = [0u8; 20];
     let w = open(usb_path(&mut p, u, "SH"), O_WRITE);
@@ -274,21 +273,21 @@ fn via_init() -> i32 {
     }
     check!(n, w < 0, "open for writing on the USB disk must fail: {}", w);
     let mut p = [0u8; 20];
-    check!(n, unlink(usb_path(&mut p, u, "CAT")) == -30, "unlink on the USB disk must be EROFS");
+    check!(n, unlink(usb_path(&mut p, u, "CAT")) == ERROR_READ_ONLY, "unlink on the USB disk must be ERROR_READ_ONLY");
     let mut p = [0u8; 20];
-    check!(n, mkdir(usb_path(&mut p, u, "DIR")) == -30, "mkdir on the USB disk must be EROFS");
+    check!(n, mkdir(usb_path(&mut p, u, "DIR")) == ERROR_READ_ONLY, "mkdir on the USB disk must be ERROR_READ_ONLY");
     let mut p = [0u8; 20];
     check!(n, stat(usb_path(&mut p, u, "CAT")).map(|s| s.size) == stat("/bin/cat").map(|s| s.size), "CAT changed after the refused unlink");
-    println!("usbtest: {} checks OK, usb0 started by init (found by class), 5 devices (hub), keyboard -> kernel, lsusb via svc, /usb{} mounted in {} ms, files = /bin, 4 MiB pattern at {} KiB/s, writes refused", n, u, mount_ms, kbs);
+    println!("usbtest: {} checks OK, usb0 started by init (found by class), 5 devices (hub), keyboard -> kernel, usblist via svc, /usb{} mounted in {} ms, files = /bin, 4 MiB pattern at {} KiB/s, writes refused", n, u, mount_ms, kbs);
     println!("usbtest-disk mount_ms={} read_kbs={}", mount_ms, kbs);
     0
 }
 
-/// lsusb (over the svc channel) into a buffer.
+/// usblist (over the svc channel) into a buffer.
 fn ask_lsusb(l: &mut [u8; 4096]) -> &str {
     let mut len = 0;
     if let Ok((r, w)) = pipe() {
-        let pid = spawn_ex("/bin/lsusb", &["lsusb"], &[(w, 1), (w, 2), (SVC, 3)], 0);
+        let pid = spawn_ex("/bin/usblist", &["usblist"], &[(w, 1), (w, 2), (SVC, 3)], 0);
         close(w);
         while pid > 0 && len < l.len() {
             let k = read(r, &mut l[len..]);
@@ -346,7 +345,7 @@ fn hotplug() -> i32 {
     check!(n, stat[2] >= 2, "hub change reports: {} (want >= 2)", stat[2]);
     let mut l = [0u8; 4096];
     let lt = ask_lsusb(&mut l);
-    check!(n, !lt.contains("hub") && !lt.contains("mouse") && lt.contains("keyboard"), "lsusb after unplugging the hub: {:?}", lt);
+    check!(n, !lt.contains("hub") && !lt.contains("mouse") && lt.contains("keyboard"), "usblist after unplugging the hub: {:?}", lt);
     close(c);
     println!("usbtest: {} checks OK, hot-plug behind the hub: disk out / in, hub out (hub + mouse + disk gone), {} hub change reports", n, stat[2]);
     0
@@ -512,16 +511,16 @@ fn main(args: Args) -> i32 {
     let mut out = [0u8; 2048];
 
     // dev_find.
-    check!(n, dev_find(1, CLASS_XHCI, 0) == EBADF, "dev_find without HW_ROOT: {}", dev_find(1, CLASS_XHCI, 0));
-    check!(n, dev_find(HW_ROOT, 0x0100_0000, 0) == EINVAL, "dev_find class > 24 bits");
-    check!(n, dev_find(HW_ROOT, 0xFF_FFFF, 0) == ENOENT, "dev_find of a class nobody has");
+    check!(n, dev_find(1, CLASS_XHCI, 0) == ERROR_INVALID_HANDLE, "dev_find without HW_ROOT: {}", dev_find(1, CLASS_XHCI, 0));
+    check!(n, dev_find(HW_ROOT, 0x0100_0000, 0) == ERROR_INVALID_ARGUMENT, "dev_find class > 24 bits");
+    check!(n, dev_find(HW_ROOT, 0xFF_FFFF, 0) == ERROR_NOT_FOUND, "dev_find of a class nobody has");
     let bdf = dev_find(HW_ROOT, CLASS_XHCI, 0);
     check!(n, bdf >= 0, "no xHCI controller found by class 0C0330: {}", bdf);
     let mut count = 0u64;
     while dev_find(HW_ROOT, CLASS_XHCI, count) >= 0 && count < 64 {
         count += 1;
     }
-    check!(n, count >= 1 && dev_find(HW_ROOT, CLASS_XHCI, count) == ENOENT, "ENOENT after the last controller ({})", count);
+    check!(n, count >= 1 && dev_find(HW_ROOT, CLASS_XHCI, count) == ERROR_NOT_FOUND, "ERROR_NOT_FOUND after the last controller ({})", count);
     let bdf = bdf as u64;
 
     // usbd: start, status, No-Op.

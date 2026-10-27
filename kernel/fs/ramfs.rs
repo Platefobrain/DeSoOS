@@ -46,7 +46,7 @@ const CHUNK: usize = 64 * 1024;
 /// Limit on ramfs data.  Files live on the kernel heap (64 MiB) –
 /// without a limit a single program could fill the heap by writing files (or by `seek` far
 /// + writing 1 byte) and the kernel would crash on the next allocation.  Above the limit:
-/// ENOSPC.
+/// ERROR_NO_SPACE.
 pub const RAMFS_MAX: u64 = 24 * 1024 * 1024;
 static RAMFS_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 

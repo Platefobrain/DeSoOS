@@ -300,8 +300,8 @@ pub fn has_process_parent(p: &super::Process) -> bool {
 
 /// wait(pid, flags): Ok((pid, status)), Ok((0, 0)) with WNOHANG and no result.
 pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
-    use super::syscalls::{ECHILD, EINTR};
-    let Some(p) = sched::current_process() else { return Err(ECHILD) };
+    use super::syscalls::{ERROR_NO_CHILD, ERROR_INTERRUPTED};
+    let Some(p) = sched::current_process() else { return Err(ERROR_NO_CHILD) };
     let p: &super::Process = p;
     loop {
         let seen = p.child_gen.load(Ordering::SeqCst);
@@ -322,14 +322,14 @@ pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
             if p.child_gen.load(Ordering::SeqCst) != seen {
                 continue;
             }
-            return Err(ECHILD);
+            return Err(ERROR_NO_CHILD);
         }
         if flags & WNOHANG != 0 {
             return Ok((0, 0));
         }
         child_q(me).wait_until(|| p.child_gen.load(Ordering::SeqCst) != seen || sched::should_exit(), None);
         if sched::should_exit() {
-            return Err(EINTR);
+            return Err(ERROR_INTERRUPTED);
         }
     }
 }

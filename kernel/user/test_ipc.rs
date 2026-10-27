@@ -45,25 +45,25 @@ pub fn self_test() {
     let frames0 = crate::selftest::settled_free_frames();
 
     // 1. Handles with rights – handle_dup only reduces, read / write
-    // without the right = EBADF, copies without DUP = EACCES, the child inherits rights,
+    // without the right = ERROR_ACCESS_DENIED, copies without DUP = ERROR_ACCESS_DENIED, the child inherits rights,
     // limit 64.
     let r = run("/bin/handletest", &["handletest"], 10_000);
     check!(r.is_some(), "handletest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "handletest: {:?} {:?}", kind, out.trim());
-    serial_println!("[IPC TEST] 1/5 handle rights: reduce only, EBADF / EACCES, inherited by a child, 64 per process, dcp view follows every change, only own and children: {} PASS", out.trim());
+    serial_println!("[IPC TEST] 1/5 handle rights: reduce only, ERROR_ACCESS_DENIED without the right, inherited by a child, 64 per process, dcp view follows every change, only own and children: {} PASS", out.trim());
 
-    // 2. Channels – both ends, sender from the kernel, EAGAIN, EMSGSIZE,
-    // SEND / RECV rights, EPIPE after close, ping-pong with a child, kill
+    // 2. Channels – both ends, sender from the kernel, ERROR_WOULD_BLOCK, ERROR_MESSAGE_TOO_LARGE,
+    // SEND / RECV rights, ERROR_CLOSED after close, ping-pong with a child, kill
     // of a child waiting in recv.
     let r = run("/bin/chantest", &["chantest"], 60_000);
     check!(r.is_some(), "chantest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "chantest: {:?} {:?}", kind, out.trim());
-    serial_println!("[IPC TEST] 2/5 channels: both ways, sender from the kernel, EAGAIN, EMSGSIZE, rights, EPIPE, kill while waiting: {} PASS", out.trim());
+    serial_println!("[IPC TEST] 2/5 channels: both ways, sender from the kernel, ERROR_WOULD_BLOCK, ERROR_MESSAGE_TOO_LARGE, rights, ERROR_CLOSED, kill while waiting: {} PASS", out.trim());
 
     // 3. Handles in messages (transfer, rights, TRANSFER, own
-    // channel, EMSGSIZE / EMFILE without loss), release from a closed queue,
+    // channel, ERROR_MESSAGE_TOO_LARGE / ERROR_TOO_MANY_HANDLES without loss), release from a closed queue,
     // spawn_ex – a child with a single handle receives a file over the channel.
     let live0 = super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
     let r = run("/bin/xfertest", &["xfertest"], 20_000);
@@ -73,7 +73,7 @@ pub fn self_test() {
     // All channels from the test (including those in in-flight messages) are freed.
     let live = || super::channel::LIVE_CHANNELS.load(core::sync::atomic::Ordering::Relaxed);
     check!(wait_for(2_000, || live() <= live0), "channels leaked: {} live before xfertest, {} after", live0, live());
-    serial_println!("[IPC TEST] 3/5 handles in messages + spawn_ex: moved with rights, TRANSFER, own channel refused, nothing lost on EMSGSIZE / EMFILE, child with one handle, no channel cycles (EBUSY), no channel leaked: {} PASS", out.trim());
+    serial_println!("[IPC TEST] 3/5 handles in messages + spawn_ex: moved with rights, TRANSFER, own channel refused, nothing lost on ERROR_MESSAGE_TOO_LARGE / ERROR_TOO_MANY_HANDLES, child with one handle, no channel cycles (ERROR_BUSY), no channel leaked: {} PASS", out.trim());
 
     // 4. Shared memory – two mappings and two processes on the same
     // pages, data + doorbell over a channel, read-only, NX,

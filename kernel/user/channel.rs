@@ -7,14 +7,14 @@
 // * One lock per queue (SpinLock, level PROCESS – like a pipe); only queue
 //   operations happen under it.  Copying from / to the process – in the syscall, outside the lock.
 // * Waiting as in pipes: the condition is on atomics (`len`, `closed`), wakeup
-//   after a change – no lost wakeups; interrupted by kill / Ctrl+C (EINTR).
+//   after a change – no lost wakeups; interrupted by kill / Ctrl+C (ERROR_INTERRUPTED).
 // * An end is reference-counted by Arc (handles in tables and in messages in flight);
 //   when the last one goes away – Drop: the end is closed, its queue drained
-//   (handles in messages released), the other side woken (EPIPE).
+//   (handles in messages released), the other side woken (ERROR_CLOSED).
 // * Each queue also has a list of `wait_many` watchers – woken
 //   on every change (message, free space, close).
 // * No cycles.  A channel end whose queue holds a message carrying
-//   another channel end cannot itself travel in a message (EBUSY).
+//   another channel end cannot itself travel in a message (ERROR_BUSY).
 //   Without this rule: end A in queue B, end B in queue A, the process closes
 //   the rest – the channels keep each other alive and the memory never comes back.  Proof
 //   that a cycle is impossible: the last insertion closing the cycle would insert
@@ -29,7 +29,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::process::Handle;
 use super::waitset::Observers;
-use super::syscalls::{EAGAIN, EBUSY, EINTR, ENOMEM, EPIPE};
+use super::syscalls::{ERROR_WOULD_BLOCK, ERROR_BUSY, ERROR_INTERRUPTED, ERROR_OUT_OF_MEMORY, ERROR_CLOSED};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
 
@@ -168,7 +168,7 @@ impl ChanEnd {
         let mut msg = Some(msg);
         loop {
             if peer.closed.load(Ordering::SeqCst) {
-                return Err((EPIPE, msg.take().unwrap()));
+                return Err((ERROR_CLOSED, msg.take().unwrap()));
             }
             {
                 // A message with channel ends – none of them may have a message
@@ -176,7 +176,7 @@ impl ChanEnd {
                 let carries = msg.as_ref().unwrap().carries_channel();
                 let _x = if carries { Some(XFER.lock()) } else { None };
                 if carries && msg.as_ref().unwrap().channel_ends().any(|e| e.mine().chans.load(Ordering::SeqCst) > 0) {
-                    return Err((EBUSY, msg.take().unwrap()));
+                    return Err((ERROR_BUSY, msg.take().unwrap()));
                 }
                 let mut q = peer.q.lock();
                 // Again under the queue lock: the receiver may have closed after
@@ -185,13 +185,13 @@ impl ChanEnd {
                 // `closed`, or its draining will take our message.
                 if peer.closed.load(Ordering::SeqCst) {
                     drop(q);
-                    return Err((EPIPE, msg.take().unwrap()));
+                    return Err((ERROR_CLOSED, msg.take().unwrap()));
                 }
                 if q.len() < QUEUE_MAX {
-                    // Kernel buffer budget – above it ENOMEM, the message comes back.
+                    // Kernel buffer budget – above it ERROR_OUT_OF_MEMORY, the message comes back.
                     if !super::kbuf::try_take(msg.as_ref().unwrap().cost()) {
                         drop(q);
-                        return Err((ENOMEM, msg.take().unwrap()));
+                        return Err((ERROR_OUT_OF_MEMORY, msg.take().unwrap()));
                     }
                     if carries {
                         peer.chans.fetch_add(1, Ordering::SeqCst);
@@ -204,7 +204,7 @@ impl ChanEnd {
                 }
             }
             if nonblock {
-                return Err((EAGAIN, msg.take().unwrap()));
+                return Err((ERROR_WOULD_BLOCK, msg.take().unwrap()));
             }
             peer.writable.wait_until(
                 || {
@@ -215,15 +215,15 @@ impl ChanEnd {
                 None,
             );
             if crate::sched::should_exit() {
-                return Err((EINTR, msg.take().unwrap()));
+                return Err((ERROR_INTERRUPTED, msg.take().unwrap()));
             }
         }
     }
 
     /// Removes the first message if it fits in `cap` bytes and `hcap`
-    /// handles.  Empty queue and the other side closed – EPIPE.
+    /// handles.  Empty queue and the other side closed – ERROR_CLOSED.
     /// `room` – free slots in the receiver's handle table: more handles in the
-    /// message = EMFILE, the message stays.
+    /// message = ERROR_TOO_MANY_HANDLES, the message stays.
     pub fn recv(&self, cap: usize, hcap: usize, room: usize, nonblock: bool) -> Result<Message, RecvError> {
         let mine = self.mine();
         loop {
@@ -234,7 +234,7 @@ impl ChanEnd {
                         return Err(RecvError::TooSmall(front.data.len(), front.handles.len()));
                     }
                     if front.handles.len() > room {
-                        return Err(RecvError::Code(super::syscalls::EMFILE));
+                        return Err(RecvError::Code(super::syscalls::ERROR_TOO_MANY_HANDLES));
                     }
                     let m = q.pop_front().unwrap();
                     super::kbuf::give(m.cost());
@@ -250,12 +250,12 @@ impl ChanEnd {
             if self.peer().closed.load(Ordering::SeqCst) {
                 // The other side may have sent just before closing.
                 if mine.len.load(Ordering::SeqCst) == 0 {
-                    return Err(RecvError::Code(EPIPE));
+                    return Err(RecvError::Code(ERROR_CLOSED));
                 }
                 continue;
             }
             if nonblock {
-                return Err(RecvError::Code(EAGAIN));
+                return Err(RecvError::Code(ERROR_WOULD_BLOCK));
             }
             let peer = self.peer();
             mine.readable.wait_until(
@@ -263,7 +263,7 @@ impl ChanEnd {
                 None,
             );
             if crate::sched::should_exit() {
-                return Err(RecvError::Code(EINTR));
+                return Err(RecvError::Code(ERROR_INTERRUPTED));
             }
         }
     }
@@ -273,8 +273,8 @@ impl ChanEnd {
 impl ChanEnd {
     /// Removes the first message (any size; the kernel releases the handles in
     /// it – the caller only reads the data).  Waits at most `timeout_ms`.
-    /// Errors: ETIMEDOUT, EPIPE (other side closed, queue empty),
-    /// EINTR (the task we wait in was killed).
+    /// Errors: ERROR_TIMED_OUT, ERROR_CLOSED (other side closed, queue empty),
+    /// ERROR_INTERRUPTED (the task we wait in was killed).
     pub fn recv_timeout(&self, timeout_ms: u64) -> Result<Message, i64> {
         let mine = self.mine();
         let deadline = crate::time::ticks() + crate::time::ms_to_ticks(timeout_ms);
@@ -294,16 +294,16 @@ impl ChanEnd {
             }
             if self.peer().closed.load(Ordering::SeqCst) {
                 if mine.len.load(Ordering::SeqCst) == 0 {
-                    return Err(EPIPE);
+                    return Err(ERROR_CLOSED);
                 }
                 continue;
             }
             if crate::sched::should_exit() {
-                return Err(EINTR);
+                return Err(ERROR_INTERRUPTED);
             }
             let now = crate::time::ticks();
             if now >= deadline {
-                return Err(super::syscalls::ETIMEDOUT);
+                return Err(super::syscalls::ERROR_TIMED_OUT);
             }
             let peer = self.peer();
             mine.readable.wait_until(
@@ -354,7 +354,7 @@ impl Drop for ChanEnd {
             v
         };
         drop(left);
-        // Senders to this end get EPIPE; the receiver on the other side gets EPIPE
+        // Senders to this end get ERROR_CLOSED; the receiver on the other side gets ERROR_CLOSED
         // when its queue is empty.
         mine.wake_writers();
         self.peer().wake_readers();

@@ -1,4 +1,4 @@
-// Pipe test – read / write, end of data, EPIPE, data larger
+// Pipe test – read / write, end of data, ERROR_CLOSED, data larger
 // than the buffer (64 KiB) through `cat` in a child, child output through a pipe.
 // Result: "pipetest: N checks OK" and exit code 0, or an error description and code 1.
 #![no_std]
@@ -53,18 +53,18 @@ fn main(_args: Args) -> i32 {
     check!(n, write(w, b"abc") == 3, "write");
     let got = read(r, &mut buf);
     check!(n, got == 3 && &buf[..3] == b"abc", "read: {}", got);
-    check!(n, read(w, &mut buf) == -9 && write(r, b"x") == -9, "wrong direction must be EBADF");
-    check!(n, seek(r, 0, SEEK_SET) == -29, "seek on a pipe must be ESPIPE");
+    check!(n, read(w, &mut buf) == ERROR_ACCESS_DENIED && write(r, b"x") == ERROR_ACCESS_DENIED, "wrong direction must be ERROR_ACCESS_DENIED (the end has no such right)");
+    check!(n, seek(r, 0, SEEK_SET) == ERROR_NOT_SEEKABLE, "seek on a pipe must be ERROR_NOT_SEEKABLE");
     check!(n, write(w, b"tail") == 4 && close(w) == 0, "write + close");
     let got = read(r, &mut buf);
     check!(n, got == 4, "data written before close must arrive: {}", got);
     check!(n, read(r, &mut buf) == 0, "end of data after the writer closed");
     close(r);
 
-    // 2. Nobody reads: EPIPE.
+    // 2. Nobody reads: ERROR_CLOSED.
     let (r, w) = pipe().unwrap();
     close(r);
-    check!(n, write(w, b"lost") == -32, "write without readers must be EPIPE");
+    check!(n, write(w, b"lost") == ERROR_CLOSED, "write without readers must be ERROR_CLOSED");
     close(w);
 
     // 3. 200 KiB (more than the buffer) through `cat` in a child into a file: the writer

@@ -52,7 +52,7 @@ SMP="${SMP:-4}"
 
 # Network: QEMU's user network (DHCP, DNS, NAT to the host's internet).
 # HOSTFWD=port (default 18080): the host's 127.0.0.1:port reaches port 8080 of
-# DeSoOS – e.g. `httpd 8080 < /index.html` in DeSoOS, `curl http://127.0.0.1:18080/`
+# DeSoOS – e.g. `netweb 8080 < /index.html` in DeSoOS, `curl http://127.0.0.1:18080/`
 # on the host.  HOSTFWD=0 – no forwarding (if the port is taken).
 HOSTFWD="${HOSTFWD:-18080}"
 NETDEV="user,id=net0"

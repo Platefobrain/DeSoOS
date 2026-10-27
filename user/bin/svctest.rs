@@ -3,7 +3,7 @@
 // channel in slot 3).  Checks: svc channel rights, the service list (edu and echo
 // are running), talking to echo by name, restart after a crash (new pid, restart
 // counter), edu through the manager (PING, factorial), restarting edud after kill,
-// unknown service -> EPIPE, a bad request does not break init, the shell passes
+// unknown service -> ERROR_CLOSED, a bad request does not break init, the shell passes
 // slot 3 to programs (`sh -c services`), 5 crashes in 30 s -> "broken".
 // Result: "svctest: N checks OK, ..." and exit code 0.
 #![no_std]
@@ -140,7 +140,7 @@ fn main(_args: Args) -> i32 {
     // 1. svc channel: send only (+ duplicate), receiving is forbidden.
     check!(n, handle_info(SVC) == Ok((KIND_CHANNEL, R_SEND | R_DUP)), "slot 3 rights: {:?}", handle_info(SVC));
     let mut info = RecvInfo::default();
-    check!(n, chan_recv(SVC, &mut out, CHAN_NONBLOCK, &mut info) == -13, "recv on the svc channel must be EACCES");
+    check!(n, chan_recv(SVC, &mut out, CHAN_NONBLOCK, &mut info) == ERROR_ACCESS_DENIED, "recv on the svc channel must be ERROR_ACCESS_DENIED");
 
     // 2. List: edu and echo are running.
     let edu0 = wait_state("edu", "running", 3000, |p, _| p != 0);
@@ -159,10 +159,10 @@ fn main(_args: Args) -> i32 {
     let pid_txt = r.map(|l| core::str::from_utf8(&out[..l]).unwrap_or("").parse::<u64>().unwrap_or(0));
     check!(n, pid_txt == Ok(echo_pid), "echo pid {:?} vs list {}", pid_txt, echo_pid);
 
-    // 4. Service crash: the client gets EPIPE, init restarts it (new pid, restarts+1).
+    // 4. Service crash: the client gets ERROR_CLOSED, init restarts it (new pid, restarts+1).
     check!(n, chan_send(c, b"crash", 0) == 0, "send crash");
     let r = chan_recv(c, &mut out, 0, &mut info);
-    check!(n, r == EPIPE, "client of a crashed service must get EPIPE: {}", r);
+    check!(n, r == ERROR_CLOSED, "client of a crashed service must get ERROR_CLOSED: {}", r);
     close(c);
     let echo1 = wait_state("echo", "running", 3000, |p, r| p != echo_pid && p != 0 && r == echo_r0 + 1);
     check!(n, echo1.is_some(), "echo not restarted after crash: {:?}", status("echo").map(|s| (s.2, s.3)));
@@ -181,7 +181,7 @@ fn main(_args: Args) -> i32 {
 
     // 6. edud killed – restart (the device comes back and the new instance claims it).
     check!(n, kill(edu_pid) == 0, "kill edud");
-    check!(n, matches!(edu_call(e, OP_PING, 0), Err(EPIPE)), "client of killed edud must get EPIPE");
+    check!(n, matches!(edu_call(e, OP_PING, 0), Err(ERROR_CLOSED)), "client of killed edud must get ERROR_CLOSED");
     close(e);
     let edu1 = wait_state("edu", "running", 3000, |p, r| p != edu_pid && p != 0 && r == 1);
     check!(n, edu1.is_some(), "edud not restarted after kill: {:?}", status("edu").map(|s| (s.2, s.3)));
@@ -192,12 +192,12 @@ fn main(_args: Args) -> i32 {
 
     // 7. Unknown service -> channel closed; bad requests do not break init.
     let c = svc_connect("nope").unwrap_or(0);
-    check!(n, chan_recv(c, &mut out, 0, &mut info) == EPIPE, "unknown service must give EPIPE");
+    check!(n, chan_recv(c, &mut out, 0, &mut info) == ERROR_CLOSED, "unknown service must give ERROR_CLOSED");
     close(c);
     check!(n, chan_send(SVC, b"list", 0) == 0, "request without a handle is accepted (and ignored)");
     let (a, b) = channel_create().unwrap_or((0, 0));
     check!(n, chan_send_h(SVC, b"bogus", &[b], 0) == 0, "unknown request");
-    check!(n, chan_recv(a, &mut out, 0, &mut info) == EPIPE, "unknown request: handle closed by init");
+    check!(n, chan_recv(a, &mut out, 0, &mut info) == ERROR_CLOSED, "unknown request: handle closed by init");
     close(a);
     check!(n, state_is("echo", "running").is_some(), "init still answers after bad requests");
 
@@ -216,15 +216,15 @@ fn main(_args: Args) -> i32 {
     check!(n, mem_ok, "sysinfo mem: {:?}", r);
     let r = sysinfo("lspci", &mut big);
     check!(n, matches!(r, Ok(l) if core::str::from_utf8(&big[..l]).unwrap_or("").contains("1234:11e8")), "sysinfo lspci: {:?}", r);
-    check!(n, sysinfo("mem", &mut big[..4]) == Err(ERANGE), "sysinfo with a small buffer must be ERANGE");
-    check!(n, sysinfo("mkfs 0", &mut big) == Err(ENOENT) && sysinfo("disk read 0 0", &mut big) == Err(ENOENT), "sysinfo must refuse mkfs / disk read");
-    check!(n, syscall3(21, 0, 0, 0) == -38, "old kcmd (syscall 21) must be ENOSYS");
+    check!(n, sysinfo("mem", &mut big[..4]) == Err(ERROR_BUFFER_TOO_SMALL), "sysinfo with a small buffer must be ERROR_BUFFER_TOO_SMALL");
+    check!(n, sysinfo("mkfs 0", &mut big) == Err(ERROR_NOT_FOUND) && sysinfo("disk read 0 0", &mut big) == Err(ERROR_NOT_FOUND), "sysinfo must refuse mkfs / disk read");
+    check!(n, syscall3(21, 0, 0, 0) == ERROR_NOT_IMPLEMENTED, "old kcmd (syscall 21) must be ERROR_NOT_IMPLEMENTED");
     check!(n, handle_info(SYSCTL) == Ok((KIND_SYSCTL, R_DUP)), "slot 4 SYSCTL from init: {:?}", handle_info(SYSCTL));
     check!(n, sysctl(SYSCTL, SYSCTL_SYNC, 0, 1) == 0, "sysctl sync");
-    check!(n, sysctl(SYSCTL, 99, 0, 1) == -22 && sysctl(SYSCTL, SYSCTL_STRESS, 601, 1) == -22, "sysctl: bad action / stress > 600 s must be EINVAL");
-    check!(n, sysctl(SVC, SYSCTL_SYNC, 0, 1) == -9 && sysctl(60, SYSCTL_SYNC, 0, 1) == -9, "sysctl without the SYSCTL handle must be EBADF");
+    check!(n, sysctl(SYSCTL, 99, 0, 1) == ERROR_INVALID_ARGUMENT && sysctl(SYSCTL, SYSCTL_STRESS, 601, 1) == ERROR_INVALID_ARGUMENT, "sysctl: bad action / stress > 600 s must be ERROR_INVALID_ARGUMENT");
+    check!(n, sysctl(SVC, SYSCTL_SYNC, 0, 1) == ERROR_INVALID_HANDLE && sysctl(60, SYSCTL_SYNC, 0, 1) == ERROR_INVALID_HANDLE, "sysctl without the SYSCTL handle must be ERROR_INVALID_HANDLE");
     let (a, b) = channel_create().unwrap_or((0, 0));
-    check!(n, chan_send_h(a, b"x", &[SYSCTL], 0) == -13 && handle_info(SYSCTL).is_ok(), "SYSCTL cannot be sent in a message");
+    check!(n, chan_send_h(a, b"x", &[SYSCTL], 0) == ERROR_ACCESS_DENIED && handle_info(SYSCTL).is_ok(), "SYSCTL cannot be sent in a message");
     close(a);
     close(b);
     let (_st, l) = shell_cmd("sync", true, &mut out);
@@ -237,7 +237,7 @@ fn main(_args: Args) -> i32 {
     let t = core::str::from_utf8(&out[..l]).unwrap_or("");
     check!(n, t.contains("free frames"), "sh -c mem via sysinfo: {:?}", t);
 
-    // 9. 5 crashes in 30 s -> "broken", no restarts; connecting -> EPIPE.
+    // 9. 5 crashes in 30 s -> "broken", no restarts; connecting -> ERROR_CLOSED.
     //    (echo has already had 1 crash; intervals 200, 400, 800 ms.)
     let mut last = echo1.map(|x| x.0).unwrap_or(0);
     let mut crashes = 1;
@@ -262,7 +262,7 @@ fn main(_args: Args) -> i32 {
     sleep_ms(300);
     check!(n, state_is("echo", "broken").is_some(), "broken service must not be restarted");
     let c = svc_connect("echo").unwrap_or(0);
-    check!(n, chan_recv(c, &mut out, 0, &mut info) == EPIPE, "connect to a broken service must give EPIPE");
+    check!(n, chan_recv(c, &mut out, 0, &mut info) == ERROR_CLOSED, "connect to a broken service must give ERROR_CLOSED");
     close(c);
 
     println!(

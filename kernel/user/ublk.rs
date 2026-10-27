@@ -9,16 +9,16 @@
 // Protocol (channel – control, buffer – data):
 //   kernel -> usbd (32 B): id u32, op u32 (1 = READ, there are no others), lba u64
 //                         (device blocks), blocks u32, slot u32, 8 B zero
-//   usbd -> kernel (≥ 12 B): id u32, status i32 (0, EIO, ENODEV), blocks u32
+//   usbd -> kernel (≥ 12 B): id u32, status i32 (0, ERROR_IO, ERROR_NO_DEVICE), blocks u32
 // * The buffer is split into 64 KiB slots (1..8), one slot per request.  Slot:
 //   free -> owned by usbd (request sent) -> free after a reply with this `id`,
 //   status 0 and the requested block count (only then does the kernel copy the data).
 //   Any other reply (someone else's / unknown `id`, wrong block count, message too
 //   short) – rejected, protocol error counter incremented.
-// * Timeout (5 s; a test may set a shorter one): EIO for the reader, slot in
+// * Timeout (5 s; a test may set a shorter one): ERROR_IO for the reader, slot in
 //   QUARANTINE – the device may still write to it.  It returns to the pool after a
 //   late reply with this `id` or never (the disk disappears along with the buffer).
-// * 3 timeouts in a row, a closed channel (usbd exit) or status ENODEV
+// * 3 timeouts in a row, a closed channel (usbd exit) or status ERROR_NO_DEVICE
 //   (flash drive removed) = the disk DISAPPEARS: further reads – NoDevice.
 // * Kernel task `usb-disks` (monitor): new disk -> GPT partitions, FAT32 ->
 //   /usb0, /usb1, … (read-only); disk gone -> unmount, remove the
@@ -36,7 +36,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering}
 
 use super::channel::{ChanEnd, Message};
 use super::shm::ShmObj;
-use super::syscalls::{EINTR, ENODEV, ENOSPC, EPIPE, ETIMEDOUT};
+use super::syscalls::{ERROR_INTERRUPTED, ERROR_NO_DEVICE, ERROR_NO_SPACE, ERROR_CLOSED, ERROR_TIMED_OUT};
 use crate::block::{self, check_range, BlockDevice, BlockError, SECTOR_SIZE};
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
@@ -198,7 +198,7 @@ impl Ublk {
         data[16..20].copy_from_slice(&n.to_le_bytes());
         data[20..24].copy_from_slice(&(slot as u32).to_le_bytes());
         if let Err((e, _)) = self.sh.chan.send(Message { data, handles: Vec::new(), sender: 0 }, true) {
-            if e == EPIPE {
+            if e == ERROR_CLOSED {
                 self.sh.set_gone();
                 return Err(BlockError::NoDevice);
             }
@@ -252,7 +252,7 @@ impl Ublk {
                 return Err(BlockError::Io);
             }
             let left = deadline.saturating_sub(crate::time::ticks());
-            let r = if left == 0 { Err(ETIMEDOUT) } else { self.sh.chan.recv_timeout(left * 1000 / crate::time::HZ as u64) };
+            let r = if left == 0 { Err(ERROR_TIMED_OUT) } else { self.sh.chan.recv_timeout(left * 1000 / crate::time::HZ as u64) };
             match r {
                 Ok(m) => {
                     if m.data.len() < 12 {
@@ -279,7 +279,7 @@ impl Ublk {
                             continue;
                         }
                         self.slots[slot] = Slot::Free;
-                        if status == ENODEV {
+                        if status == ERROR_NO_DEVICE {
                             self.sh.set_gone();
                             return Err(BlockError::NoDevice);
                         }
@@ -294,13 +294,13 @@ impl Ublk {
                     }
                     self.sh.proto_errors.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) if e == ETIMEDOUT || e == EINTR => {
+                Err(e) if e == ERROR_TIMED_OUT || e == ERROR_INTERRUPTED => {
                     for (slot, x) in fl.iter().enumerate() {
                         if let Some(x) = x {
                             self.slots[slot] = Slot::Quarantine(x.id);
                         }
                     }
-                    if e == ETIMEDOUT {
+                    if e == ERROR_TIMED_OUT {
                         self.sh.timeouts.fetch_add(1, Ordering::Relaxed);
                         self.timeouts_row += 1;
                         if self.timeouts_row >= TIMEOUTS_GONE {
@@ -363,10 +363,10 @@ impl BlockDevice for Ublk {
     }
 }
 
-/// blk_attach: new USB disk.  Result: number (0 = sda).  ENOSPC – 8 disks.
+/// blk_attach: new USB disk.  Result: number (0 = sda).  ERROR_NO_SPACE – 8 disks.
 pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots: usize, timeout_ms: u64, desc: String) -> Result<u64, i64> {
     if count() >= DISKS_MAX {
-        return Err(ENOSPC);
+        return Err(ERROR_NO_SPACE);
     }
     let num = NEXT_NUM.fetch_add(1, Ordering::SeqCst);
     let sh = Arc::new(Shared {

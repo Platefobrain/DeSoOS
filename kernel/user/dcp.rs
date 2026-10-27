@@ -6,7 +6,7 @@
 //
 //   dcp                 every visible process: devices, system powers, files
 //   dcp inspect <pid>   every capability of one process with its rights
-//   dcp audit           the last refusals (sandbox, missing rights, EACCES)
+//   dcp audit           the last refusals (sandbox, missing rights, ERROR_ACCESS_DENIED)
 //
 // Read-only: it shows the model, it does not change it.
 //
@@ -376,7 +376,7 @@ pub enum Reason {
     Sandbox,
     /// read / write on a handle without the READ / WRITE right.
     NoRight(u32),
-    /// EACCES – a capability without the needed right, or a forbidden object.
+    /// ERROR_ACCESS_DENIED – a capability without the needed right, or a forbidden object.
     Denied,
 }
 
@@ -494,7 +494,7 @@ fn audit(viewer: Option<Viewer>) -> String {
         let why = match e.reason {
             Reason::Sandbox => String::from("no files (sandbox)"),
             Reason::NoRight(r) => alloc::format!("capability has no {} right", rights_text(r)),
-            Reason::Denied => String::from("permission (EACCES)"),
+            Reason::Denied => String::from("permission (ERROR_ACCESS_DENIED)"),
         };
         let what = alloc::format!("{} {}", syscall_name(e.syscall), what);
         let who = alloc::format!("{} ({})", name, e.pid);

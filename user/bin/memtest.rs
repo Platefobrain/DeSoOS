@@ -84,11 +84,11 @@ fn main(args: Args) -> i32 {
         check!(n, core::ptr::read_volatile(big as *const u64) == 0xdead, "rest of the region after partial munmap");
     }
     check!(n, munmap(big, 64 << 20) == 0, "munmap all");
-    check!(n, mmap(0, PROT_READ).is_err() && munmap(big + 1, 4096) == -22, "bad mmap / munmap arguments");
+    check!(n, mmap(0, PROT_READ).is_err() && munmap(big + 1, 4096) == ERROR_INVALID_ARGUMENT, "bad mmap / munmap arguments");
     check!(n, mmap(16 << 30, PROT_READ | PROT_WRITE).is_err(), "16 GiB mmap must fail (limit)");
     // Lengths close to 2^64: an error, not an overflow when rounding (kernel with overflow-checks).
     check!(n, mmap(u64::MAX, PROT_READ).is_err() && mmap(u64::MAX - 4094, PROT_READ).is_err(), "mmap near 2^64 must fail");
-    check!(n, munmap(0x4000_0000_0000 - 4096, u64::MAX) == -22 && munmap(big, u64::MAX - 4094) == -22, "munmap near 2^64 must fail");
+    check!(n, munmap(0x4000_0000_0000 - 4096, u64::MAX) == ERROR_INVALID_ARGUMENT && munmap(big, u64::MAX - 4094) == ERROR_INVALID_ARGUMENT, "munmap near 2^64 must fail");
 
     // 3. The kernel copies into untouched pages (read into a fresh buffer).
     let buf = mmap(8192, PROT_READ | PROT_WRITE).unwrap_or(0);

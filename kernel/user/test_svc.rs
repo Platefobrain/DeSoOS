@@ -60,7 +60,7 @@ pub fn self_test() {
     serial_println!("[SVC TEST] 1/7 wait_many: errors, timeout, channels + pipes, wake-up, 4-client server, full queue, kill while waiting: {} PASS", out.trim());
 
     // 2. HW_ROOT (kernel-only, no copy right), dev_claim –
-    // refused for kernel devices / disks / graphics / bridges, EBUSY; dev_map
+    // refused for kernel devices / disks / graphics / bridges, ERROR_BUSY; dev_map
     // of the `edu` registers (UC, NX), rights, claim held by the mapping,
     // kill of a process with a mapped device.
     use crate::drivers::pci;
@@ -73,9 +73,9 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "devtest: {:?} {:?}", kind, out.trim());
     check!(pci::owner(edu.unwrap()) == pci::OWNER_FREE, "edu still claimed after devtest");
-    serial_println!("[SVC TEST] 2/7 devices: HW_ROOT only from the kernel, dev_claim refuses kernel/disk/display/bridge devices, EBUSY, edu registers via dev_map (UC, NX), claim held by the mapping, released on kill: {} PASS", out.trim());
+    serial_println!("[SVC TEST] 2/7 devices: HW_ROOT only from the kernel, dev_claim refuses kernel/disk/display/bridge devices, ERROR_BUSY, edu registers via dev_map (UC, NX), claim held by the mapping, released on kill: {} PASS", out.trim());
 
-    // 3. Interrupts – irq_bind (rights, EBUSY), an edu interrupt wakes
+    // 3. Interrupts – irq_bind (rights, ERROR_BUSY), an edu interrupt wakes
     // wait_many, counter, 10 interrupts = one wakeup with a counter, factorial
     // completed by an interrupt, a list with a channel, vector released (20 times),
     // kill of a process with a bound interrupt.
@@ -89,7 +89,7 @@ pub fn self_test() {
     check!(vectors1 == vectors0, "MSI vectors leaked ({} free before, {} after)", vectors0, vectors1);
     let d = &pci::devices()[edu.unwrap()];
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after the service ended");
-    serial_println!("[SVC TEST] 3/7 interrupts: irq_bind rights + EBUSY, edu MSI wakes wait_many, counter, coalescing, factorial by interrupt, mixed list, vectors freed ({} free), bus mastering off after kill: {} PASS", vectors1, out.trim());
+    serial_println!("[SVC TEST] 3/7 interrupts: irq_bind rights + ERROR_BUSY, edu MSI wakes wait_many, counter, coalescing, factorial by interrupt, mixed list, vectors freed ({} free), bus mastering off after kill: {} PASS", vectors1, out.trim());
 
     // 4. DMA – dma_alloc (rights, sizes, 28-bit bus, 16 MiB limit
     // per device), dma_phys, edu reads and writes the service buffer, end

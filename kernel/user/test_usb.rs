@@ -118,7 +118,7 @@ fn ublk_protocol_test() -> bool {
     // A late reply releases the slot from quarantine.
     ck!(block::read(idx, 201, &mut s1).is_ok() && pat_ok(201, &s1), "read lba 201 (after the late answer)");
     ck!(sh.late.load(Ordering::SeqCst) == 1 && sh.timeouts.load(Ordering::SeqCst) == 1, "late {} timeouts {}", sh.late.load(Ordering::SeqCst), sh.timeouts.load(Ordering::SeqCst));
-    ck!(block::read(idx, 300, &mut s1) == Err(BlockError::Io), "status EIO must give Io");
+    ck!(block::read(idx, 300, &mut s1) == Err(BlockError::Io), "status ERROR_IO must give Io");
     // Write: both the block layer and the driver itself refuse.
     ck!(block::write(idx, 0, &s1) == Err(BlockError::ReadOnly), "block write must be ReadOnly");
     ck!(block::with_device(idx, |d| d.write(0, &s1)) == Ok(Err(BlockError::ReadOnly)), "ublk write must be ReadOnly");
@@ -142,7 +142,7 @@ fn ublk_protocol_test() -> bool {
     let free1 = crate::selftest::settled_free_frames();
     ck!(free1 >= free0, "frames leaked ({} -> {})", free0, free1);
     serial_println!(
-        "[USB TEST] 3/7 ublk protocol (fake device): blk_attach errors, reads (1 and 2 requests), foreign id + wrong count rejected, timeout {} ms -> quarantine, other disk not blocked ({} ms), late answer frees the slot, EIO, writes refused, 3 timeouts -> disk gone + removed: {} PASS",
+        "[USB TEST] 3/7 ublk protocol (fake device): blk_attach errors, reads (1 and 2 requests), foreign id + wrong count rejected, timeout {} ms -> quarantine, other disk not blocked ({} ms), late answer frees the slot, ERROR_IO, writes refused, 3 timeouts -> disk gone + removed: {} PASS",
         waited,
         om,
         line
@@ -510,7 +510,7 @@ pub fn self_test() {
     check!(qs == 1, "killed source: 'q' must appear once and not repeat ({} times, {:?})", qs, text);
     let m = crate::input::modifiers();
     check!(!m.shift() && !m.caps_lock(), "Shift / Caps Lock left on after the source was killed");
-    serial_println!("[USB TEST] 4/7 input_inject: rights, EINVAL, \"hiA\", autorepeat ({} x b), Caps Lock LED, keys of a killed source released ({} events): {} PASS", bs, ev1 - ev0, line);
+    serial_println!("[USB TEST] 4/7 input_inject: rights, ERROR_INVALID_ARGUMENT, \"hiA\", autorepeat ({} x b), Caps Lock LED, keys of a killed source released ({} events): {} PASS", bs, ev1 - ev0, line);
     crate::input::reset();
 
     // 4. The real init (`init test /bin/usbtest`): init finds the controller by
@@ -531,7 +531,7 @@ pub fn self_test() {
     let free1 = crate::selftest::settled_free_frames();
     check!(free1 >= free0, "frames leaked by usb0 ({} -> {})", free0, free1);
     let res2 = out.lines().find(|l| l.starts_with("usbtest-disk ")).unwrap_or("").trim();
-    serial_println!("[USB TEST] 5/7 init finds xHCI by class and starts usb0 (INPUT + BLK), lsusb via svc, pendrive mounted by the kernel: files identical to /bin, 4 MiB pattern, writes refused (3 locks), service stopped cleanly: {} PASS", line);
+    serial_println!("[USB TEST] 5/7 init finds xHCI by class and starts usb0 (INPUT + BLK), usblist via svc, pendrive mounted by the kernel: files identical to /bin, 4 MiB pattern, writes refused (3 locks), service stopped cleanly: {} PASS", line);
 
     // 6. Hot-plugging behind a hub.  The „[HOTPLUG] …” lines are read by
     // qemu-hotplug.py (test.sh) and sent to the QEMU monitor; the kernel watches

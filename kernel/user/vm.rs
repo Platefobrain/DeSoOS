@@ -16,7 +16,7 @@
 //   on task switch).
 // * Limit: the process's areas together (excluding the stack) at most MAX_MAPPED – this protects
 //   the page tables; frames are only allocated on access anyway.  No frame on
-//   #PF = process terminated (#PF), during a copy – EFAULT.
+//   #PF = process terminated (#PF), during a copy – ERROR_INVALID_ADDRESS.
 
 use alloc::vec::Vec;
 
@@ -220,17 +220,17 @@ impl ProcMem {
 
     /// mmap(len, prot) – address of the new area or an error (-errno).
     pub fn mmap(&mut self, len: u64, prot: u64) -> Result<u64, i64> {
-        use super::syscalls::{EINVAL, ENOMEM};
+        use super::syscalls::{ERROR_INVALID_ARGUMENT, ERROR_OUT_OF_MEMORY};
         if len == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         // Length from the process: limit first, then rounding (no overflows).
         if len > MAX_MAPPED {
-            return Err(ENOMEM);
+            return Err(ERROR_OUT_OF_MEMORY);
         }
         let len = page_up(len);
         if self.mapped_total() + len > MAX_MAPPED {
-            return Err(ENOMEM);
+            return Err(ERROR_OUT_OF_MEMORY);
         }
         let start = self.mmap_next;
         // A gap page between areas – a buffer overflow hits a #PF.
@@ -272,10 +272,10 @@ impl ProcMem {
         extra: u64,
         keep: SharedRef,
     ) -> Result<u64, i64> {
-        use super::syscalls::ENOMEM;
+        use super::syscalls::ERROR_OUT_OF_MEMORY;
         let len = pages.len() as u64 * PAGE;
         if self.mapped_total() + len > MAX_MAPPED {
-            return Err(ENOMEM);
+            return Err(ERROR_OUT_OF_MEMORY);
         }
         let start = self.mmap_next;
         let flags = USER | if write { WRITABLE } else { 0 } | crate::memory::nx_flag() | extra;
@@ -283,7 +283,7 @@ impl ProcMem {
             let Some(f) = *page else { continue };
             if !space.map(start + i as u64 * PAGE, f, flags) {
                 unmap_keep(space, start, start + i as u64 * PAGE);
-                return Err(ENOMEM);
+                return Err(ERROR_OUT_OF_MEMORY);
             }
         }
         self.mmap_next += len + PAGE;
@@ -304,16 +304,16 @@ impl ProcMem {
 
     /// munmap(addr, len): removes [addr, addr+len) from mmap areas (splitting them),
     /// releases faulted-in pages.  A shared area only as a whole
-    /// (the range covers it) – partially: EINVAL.
+    /// (the range covers it) – partially: ERROR_INVALID_ARGUMENT.
     pub fn munmap(&mut self, space: &mut AddressSpace, addr: u64, len: u64) -> Result<(), i64> {
-        use super::syscalls::EINVAL;
+        use super::syscalls::ERROR_INVALID_ARGUMENT;
         if addr % PAGE != 0 || len == 0 || addr < MMAP_BASE {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
-        let end = page_up_user(len).and_then(|l| addr.checked_add(l)).ok_or(EINVAL)?;
+        let end = page_up_user(len).and_then(|l| addr.checked_add(l)).ok_or(ERROR_INVALID_ARGUMENT)?;
         let shared_hit = |v: &Vma| v.kind == VmaKind::Shared && v.end > addr && v.start < end;
         if self.vmas.iter().any(|v| shared_hit(v) && (v.start < addr || v.end > end)) {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         for v in self.vmas.iter().filter(|v| shared_hit(v)) {
             unmap_keep(space, v.start, v.end);

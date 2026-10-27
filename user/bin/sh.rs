@@ -33,7 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use desoos::{
-    ECHILD, ENOENT, ERANGE, Key, O_APPEND, O_CREATE, O_READ, O_TRUNC, O_WRITE, SPAWN_FOREGROUND, WAIT_ANY, WNOHANG,
+    ERROR_NO_CHILD, ERROR_NOT_FOUND, ERROR_BUFFER_TOO_SMALL, Key, O_APPEND, O_CREATE, O_READ, O_TRUNC, O_WRITE, SPAWN_FOREGROUND, WAIT_ANY, WNOHANG,
     close, describe_status, fds, open, readkey, spawn, strerror, wait, write,
 };
 
@@ -412,7 +412,7 @@ fn bin_programs() -> Vec<String> {
     let mut buf = vec![0u8; 4096];
     loop {
         let n = desoos::readdir("/bin", &mut buf);
-        if n == ERANGE && buf.len() < 64 * 1024 {
+        if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
             buf.resize(buf.len() * 2, 0);
             continue;
         }
@@ -520,8 +520,11 @@ fn close_redirects(fin: u64, fout: u64) {
 // ------------------------------------------------------------
 
 /// A shell started by init has a channel to the service manager in slot 3 –
-/// programs get it in slot 3 too (`services`, `svc_connect`).
+/// programs get the program channel (slot 5) in their slot 3, netconfig the
+/// shell's own (`services`, `svc_connect`).
 static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The program channel in slot 5 (from init) – what programs get in slot 3.
+static PROG_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The SYSCTL handle in slot 4 (from init) – shell only, children do not get it.
 static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -531,7 +534,10 @@ fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i6
         return desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2)], flags);
     }
     if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
-        desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (desoos::SVC, desoos::SVC)], flags)
+        // Network administration only for netconfig; the rest gets the program channel.
+        let admin = path.rsplit('/').next() == Some("netconfig");
+        let svc = if !admin && PROG_SLOT.load(core::sync::atomic::Ordering::Relaxed) { desoos::PROG_SVC } else { desoos::SVC };
+        desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (svc, desoos::SVC)], flags)
     } else {
         spawn(path, args, flags, fds(fin, fout, 2))
     }
@@ -601,7 +607,7 @@ impl Shell {
                 cmd.args.remove(0);
             }
             let Some(name) = cmd.args.first().cloned() else {
-                eprintln!("usage: nofiles [--net | --listen] <program> [args]   (e.g. nofiles cat < file, nofiles --listen httpd 8080 < page.html)");
+                eprintln!("usage: nofiles [--net | --listen] <program> [args]   (e.g. nofiles cat < file, nofiles --listen netweb 8080 < page.html)");
                 return;
             };
             let svc = match net {
@@ -855,7 +861,7 @@ impl Shell {
         let mut buf = vec![0u8; 16 * 1024];
         let r = loop {
             match desoos::sysinfo(&line, &mut buf) {
-                Err(ERANGE) if buf.len() < 1024 * 1024 => buf.resize(buf.len() * 4, 0),
+                Err(ERROR_BUFFER_TOO_SMALL) if buf.len() < 1024 * 1024 => buf.resize(buf.len() * 4, 0),
                 r => break r,
             }
         };
@@ -863,10 +869,10 @@ impl Shell {
             Ok(n) => {
                 write(fout, &buf[..n]);
             }
-            Err(ENOENT) if cmd.args[0] == "disk" && cmd.args.len() > 1 => {
+            Err(ERROR_NOT_FOUND) if cmd.args[0] == "disk" && cmd.args.len() > 1 => {
                 eprintln!("disk: only the list here; read / write only in the kernel emergency shell")
             }
-            Err(ENOENT) => eprintln!("{}: unsupported arguments", cmd.args[0]),
+            Err(ERROR_NOT_FOUND) => eprintln!("{}: unsupported arguments", cmd.args[0]),
             Err(e) => eprintln!("{}: {}", cmd.args[0], strerror(e)),
         }
         close_redirects(fin, fout);
@@ -942,7 +948,7 @@ impl Shell {
                 loop {
                     match wait(WAIT_ANY, 0) {
                         Ok((pid, status)) => self.report_done(pid, status),
-                        Err(ECHILD) => break,
+                        Err(ERROR_NO_CHILD) => break,
                         Err(e) => {
                             eprintln!("wait: {}", strerror(e));
                             break;
@@ -1007,6 +1013,9 @@ fn main(args: desoos::Args) -> i32 {
     // Slot 3 is checked at startup – later a redirection file could take it.
     if desoos::handle_info(desoos::SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
         SVC_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    if desoos::handle_info(desoos::PROG_SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
+        PROG_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     if desoos::handle_info(desoos::SYSCTL).map(|(k, _)| k) == Ok(desoos::KIND_SYSCTL) {
         SYSCTL_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);

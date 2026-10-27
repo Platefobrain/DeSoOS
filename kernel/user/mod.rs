@@ -25,6 +25,7 @@ pub mod procs;
 pub mod programs;
 pub mod space;
 pub mod syscalls;
+pub mod sysrights;
 #[cfg(selftest)]
 mod test;
 #[cfg(selftest)]
@@ -62,6 +63,9 @@ pub mod vm;
 mod test_files;
 #[cfg(selftest)]
 mod test_ipc;
+// The syscall rights table.
+#[cfg(selftest)]
+mod test_rights;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -285,7 +289,7 @@ pub enum ExecError {
     Fs(crate::fs::FsError),
     TooBig,
     Load(elf_loader::LoadError),
-    /// Process limit reached (EAGAIN).
+    /// Process limit reached (ERROR_WOULD_BLOCK).
     TooManyProcesses,
 }
 
@@ -579,7 +583,7 @@ pub(crate) fn exit_current() -> ! {
         p.fds.clear();
         // Shared mappings (shared memory, device registers) are also released
         // immediately – a claimed device is returned before the parent gets the status from
-        // wait (otherwise only at reap; a service restart would get EBUSY).
+        // wait (otherwise only at reap; a service restart would get ERROR_BUSY).
         p.mem.release_shared(&mut p.space);
         if let Some(out) = p.stdout.take() {
             // Only the buffer's creator (or its last owner) – children
@@ -741,6 +745,8 @@ pub use test_init::self_test as init_self_test;
 pub use test_files::self_test as files_self_test;
 #[cfg(selftest)]
 pub use test_ipc::self_test as ipc_self_test;
+#[cfg(selftest)]
+pub use test_rights::self_test as rights_self_test;
 #[cfg(selftest)]
 pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]

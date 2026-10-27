@@ -4,13 +4,13 @@
 //   byte copying and allocation), the length is also kept in an atomic – the
 //   wait condition (checked under the scheduler lock) takes no locks.
 // * read: waits until there is data; an empty pipe with no writers = end (0).
-// * write: writes everything, waiting for space; with no readers – EPIPE
+// * write: writes everything, waiting for space; with no readers – ERROR_CLOSED
 //   (if nothing was written; otherwise the number of bytes written).
 // * Ends (PipeEnd) are reference-counted with Arc: descriptors from dup / spawn share
 //   one end; when the last one goes away the end closes (Drop) and wakes the
 //   other side.  A process closes its descriptors already in exit_current (not
 //   only at reap) – the reader sees end of data immediately.
-// * Waiting is interrupted by kill / Ctrl+C (EINTR).
+// * Waiting is interrupted by kill / Ctrl+C (ERROR_INTERRUPTED).
 // * A list of `wait_many` observers – woken on every change.
 
 use alloc::collections::VecDeque;
@@ -18,7 +18,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use super::syscalls::{EINTR, ENOMEM, EPIPE};
+use super::syscalls::{ERROR_INTERRUPTED, ERROR_OUT_OF_MEMORY, ERROR_CLOSED};
 use super::waitset::Observers;
 use crate::sched::spin::{level, SpinLock};
 use crate::sched::sync::WaitQueue;
@@ -144,18 +144,18 @@ impl PipeEnd {
                 None,
             );
             if crate::sched::should_exit() {
-                return Err(EINTR);
+                return Err(ERROR_INTERRUPTED);
             }
         }
     }
 
-    /// All of `data` (waits for space); EPIPE when nobody is reading.
+    /// All of `data` (waits for space); ERROR_CLOSED when nobody is reading.
     pub fn write(&self, data: &[u8]) -> Result<usize, i64> {
         let p = &self.pipe;
         let mut done = 0;
         while done < data.len() {
             if p.readers.load(Ordering::SeqCst) == 0 {
-                return if done > 0 { Ok(done) } else { Err(EPIPE) };
+                return if done > 0 { Ok(done) } else { Err(ERROR_CLOSED) };
             }
             let wrote = {
                 let mut b = p.buf.lock();
@@ -165,7 +165,7 @@ impl PipeEnd {
                 let n = super::kbuf::take_upto(want as u64) as usize;
                 if want > 0 && n == 0 {
                     drop(b);
-                    return if done > 0 { Ok(done) } else { Err(ENOMEM) };
+                    return if done > 0 { Ok(done) } else { Err(ERROR_OUT_OF_MEMORY) };
                 }
                 b.extend(&data[done..done + n]);
                 p.len.store(b.len(), Ordering::SeqCst);
@@ -181,7 +181,7 @@ impl PipeEnd {
                 None,
             );
             if crate::sched::should_exit() {
-                return if done > 0 { Ok(done) } else { Err(EINTR) };
+                return if done > 0 { Ok(done) } else { Err(ERROR_INTERRUPTED) };
             }
         }
         Ok(done)

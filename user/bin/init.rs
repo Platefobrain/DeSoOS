@@ -3,7 +3,7 @@
 //   * reaps finished processes (wait) – including orphans, which the kernel
 //     hands over to it when their parent exits,
 //   * when the shell exits (exit, kill, error), starts it again.
-// Init does not read the keyboard and cannot be killed from user space (kill -> EPERM).
+// Init does not read the keyboard and cannot be killed from user space (kill -> ERROR_NOT_PERMITTED).
 //
 // Service manager (variant A – inside init; variant B, a separate /bin/svcmgr,
 // is described in ARCHITECTURE.md for later).
@@ -12,12 +12,12 @@
 //     4 connection channel.
 //   * Restart after exit with a 100 ms delay, doubled up to 5 s (after 10 s of running –
 //     back to 100 ms); 5 failures within 30 s -> service broken (no more restarts).
-//     No device (ENODEV) -> "no device", no restarts.
+//     No device (ERROR_NO_DEVICE) -> "no device", no restarts.
 //   * The `svc` channel: the shell and its programs hold a send-only end in slot 3
 //     (SEND | DUP).  A request = a message with one handle (the client's channel
 //     end): "connect <name>" – init forwards the handle to the service's connection
 //     channel; "list" – init replies with the service list and closes the handle.
-//     Unknown / non-running service – handle closed (client: EPIPE).
+//     Unknown / non-running service – handle closed (client: ERROR_CLOSED).
 //   * Init waits on the svc channel (wait_many, 100 ms) and reaps children (WNOHANG).
 //
 // USB xHCI controllers are found by class (dev_find 0C0330), and for
@@ -138,13 +138,13 @@ fn start_service(d: &Def, s: &mut Svc) {
     let mut dev = 0u64;
     if let Some((b, dv, f)) = d.dev {
         let h = dev_claim(HW_ROOT, bdf(b, dv, f));
-        if h == ENODEV {
+        if h == ERROR_NO_DEVICE {
             s.state = State::NoDevice;
             println!("init: service {}: no device {:02x}:{:02x}.{} - not started", d.name, b, dv, f);
             return;
         }
         if h < 0 {
-            // EBUSY: the previous instance is still exiting – try again shortly.
+            // ERROR_BUSY: the previous instance is still exiting – try again shortly.
             s.state = State::Waiting;
             s.next_start = uptime_ms() + 100;
             return;
@@ -257,12 +257,18 @@ fn state_name(s: State) -> &'static str {
     }
 }
 
-/// Requests on the svc channel (non-blocking – all that are pending).
-/// What a service channel may do: the shell's channel everything; a narrowed
-/// one (for sandboxed programs, `svc_narrow`) only network connections.
+/// What a service channel may do.  The shell's own channel: everything.  The
+/// program channel (slot 5 of the shell, for the programs it starts): everything
+/// but network administration – only netconfig gets the shell's own channel.
+/// A narrowed one (sandboxed programs, `svc_narrow`): network connections only.
 const G_ALL: u8 = 0xFF;
 const G_NET: u8 = 1;
 const G_LISTEN: u8 = 2;
+/// Services other than the network ones.
+const G_OTHER: u8 = 4;
+/// Network administration (addresses, DNS servers, DHCP).
+const G_NETADMIN: u8 = 8;
+const G_PROGRAMS: u8 = G_NET | G_LISTEN | G_OTHER;
 /// Narrowed channels at once.
 const NARROW_MAX: usize = 12;
 
@@ -288,13 +294,9 @@ fn net_kind(name: &str, grants: u8, out: &mut [u8; 64]) -> usize {
         n += k;
     };
     put(name.as_bytes(), out);
-    if grants == G_ALL {
-        put(b" admin listen", out);
-    } else {
-        put(b" client", out);
-        if grants & G_LISTEN != 0 {
-            put(b" listen", out);
-        }
+    put(if grants & G_NETADMIN != 0 { b" admin" } else { b" client" }, out);
+    if grants & G_LISTEN != 0 {
+        put(b" listen", out);
     }
     n
 }
@@ -307,7 +309,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
     loop {
         let r = chan_recv_h(svc, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
         if r < 0 {
-            if r == EMSGSIZE {
+            if r == ERROR_MESSAGE_TOO_LARGE {
                 // Too long / with too many handles – dequeue and reject.
                 let mut big = [0u8; MSG_MAX];
                 let mut many = [0u64; MSG_HANDLES];
@@ -318,7 +320,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
                 }
                 continue;
             }
-            return r == EPIPE;
+            return r == ERROR_CLOSED;
         }
         if info.handles != 1 {
             continue;
@@ -328,8 +330,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
         if let Some(name) = text.strip_prefix("connect ") {
             let found = defs.iter().position(|d| d.name == name);
             let net = name.starts_with("net");
-            // A narrowed channel reaches network services only.
-            let allowed = grants == G_ALL || (net && grants & G_NET != 0);
+            let allowed = grants & if net { G_NET } else { G_OTHER } != 0;
             match found {
                 Some(i) if allowed && svcs[i].state == State::Running && svcs[i].listen != 0 => {
                     let mut kind = [0u8; 64];
@@ -421,13 +422,21 @@ impl core::fmt::Write for Out2<'_> {
     }
 }
 
-/// Shell (or test program) with the svc channel in slot 3 and SYSCTL in slot 4.
-fn start_shell(path: &str, extra: Option<&str>, svc_client: u64) -> u64 {
+/// Shell (or test program) with the svc channel in slot 3, SYSCTL in slot 4
+/// and the program channel (for the programs it starts) in slot 5.
+fn start_shell(path: &str, extra: Option<&str>, svc_client: u64, prog_client: u64) -> u64 {
     loop {
         let name = path.rsplit('/').next().unwrap_or(path);
         // The shell also gets the SYSCTL handle (slot 4) – reboot, halt, sync, stress.
-        let map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (SYSCTL, 4)];
-        let n = if handle_info(SYSCTL).map(|(k, _)| k) == Ok(KIND_SYSCTL) { 5 } else { 4 };
+        let mut map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (prog_client, 5), (0, 0)];
+        let mut n = 4;
+        if prog_client != 0 {
+            n += 1;
+        }
+        if handle_info(SYSCTL).map(|(k, _)| k) == Ok(KIND_SYSCTL) {
+            map[n] = (SYSCTL, 4);
+            n += 1;
+        }
         // Test mode – one argument for the program (`init test /bin/x arg`).
         let pid = match extra {
             Some(a) => spawn_ex(path, &[name, a], &map[..n], 0),
@@ -451,6 +460,10 @@ fn main(args: Args) -> i32 {
     let (svc, svc_any) = channel_create().unwrap_or((0, 0));
     let svc_client = handle_dup(svc_any, R_SEND | R_DUP) as u64;
     close(svc_any);
+    // The program channel: what the shell hands to the programs it starts.
+    let (psvc, psvc_any) = channel_create().unwrap_or((0, 0));
+    let prog_client = if psvc_any != 0 { handle_dup(psvc_any, R_SEND | R_DUP) as u64 } else { 0 };
+    close(psvc_any);
 
     let mut table = [SERVICES[0]; MAX_SERVICES];
     let nsvc = service_table(&mut table);
@@ -462,7 +475,7 @@ fn main(args: Args) -> i32 {
     }
 
     let mut narrowed = Narrowed::new();
-    let mut shell = start_shell(shell_path, test_arg, svc_client);
+    let mut shell = start_shell(shell_path, test_arg, svc_client, prog_client);
     let mut started_at = uptime_ms();
     let mut orphans = 0u64;
     loop {
@@ -478,10 +491,11 @@ fn main(args: Args) -> i32 {
                 }
             }
         }
-        // The shell's service channel and the narrowed ones.
-        let mut list = [(svc, W_READABLE); 1 + NARROW_MAX];
-        let mut which = [usize::MAX; 1 + NARROW_MAX];
-        let mut k = 1;
+        // The shell's service channel, the program channel and the narrowed ones.
+        let mut list = [(svc, W_READABLE); 2 + NARROW_MAX];
+        let mut which = [usize::MAX; 2 + NARROW_MAX];
+        list[1] = (psvc, W_READABLE);
+        let mut k = 2;
         for (i, c) in narrowed.ch.iter().enumerate() {
             if c.0 != 0 {
                 list[k] = (c.0, W_READABLE);
@@ -493,7 +507,10 @@ fn main(args: Args) -> i32 {
         if ready & 1 != 0 {
             serve_svc(svc, G_ALL, defs, svcs, &mut narrowed);
         }
-        for e in 1..k {
+        if ready & 2 != 0 {
+            serve_svc(psvc, G_PROGRAMS, defs, svcs, &mut narrowed);
+        }
+        for e in 2..k {
             if ready & (1 << e) != 0 {
                 let i = which[e];
                 let (ch, grants) = narrowed.ch[i];
@@ -544,7 +561,7 @@ fn main(args: Args) -> i32 {
                     sleep_ms(1000);
                 }
                 println!("init: shell {} {} - starting a new one", pid, describe_status(status));
-                shell = start_shell(shell_path, test_arg, svc_client);
+                shell = start_shell(shell_path, test_arg, svc_client, prog_client);
                 started_at = uptime_ms();
                 continue;
             }

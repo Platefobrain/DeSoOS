@@ -110,7 +110,7 @@ part. Protection: NX, SMEP, SMAP, CR0.WP, W^X for programs.
 
 Processes may use every frame except the **kernel reserve: 1/16 of RAM, clamped to 16–256 MiB**. The check is
 lock-free (a copy of the free-frame counter plus the per-CPU caches) and happens on every process page
-fault. Over the limit: the faulting process is killed, `shm_create` returns `ENOMEM`. The kernel itself can
+fault. Over the limit: the faulting process is killed, `shm_create` returns `ERROR_OUT_OF_MEMORY`. The kernel itself can
 always allocate (see "Resource limits").
 
 ### Task stacks
@@ -139,7 +139,7 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
 
 - The kernel starts only `/bin/init`. If init dies it is restarted; 3 deaths within 10 s → the kernel
   emergency shell. Init starts the shell and services (it contains the service manager) and reaps orphans;
-  `kill(init)` → `EPERM`.
+  `kill(init)` → `ERROR_NOT_PERMITTED`.
 - **`spawn` instead of `fork`/`exec`** – a new ELF image, a copy of the cwd, selected handles. `spawn_ex` gives
   the child **only** the listed handles (the basis of sandboxing).
 - **Zombies.** A finished process stays a zombie (only its exit code) until the parent calls `wait`. Status:
@@ -160,8 +160,8 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
 
 ## Syscalls and handles
 
-`SYSCALL`/`SYSRET`; number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9; result in RAX (negative = errno,
-Linux-style). Process memory is accessed only via `copy_from_user`/`copy_to_user` (page check + SMAP). Almost
+`SYSCALL`/`SYSRET`; number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9; result in RAX (negative = an error, see
+"Errors" below). Process memory is accessed only via `copy_from_user`/`copy_to_user` (page check + SMAP). Almost
 all syscalls run without the Big Kernel Lock (99% of calls under stress).
 
 | No. | Calls |
@@ -170,7 +170,7 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 9–12 | `spawn`, `wait`, `getppid`, `kill` |
 | 13–18 | `chdir`, `getcwd`, `readdir`, `stat`, `mkdir`, `unlink` |
 | 19–20 | `readkey` (line editor), `tasks` (ps) |
-| 21 | unused (`ENOSYS`) |
+| 21 | unused (`ERROR_NOT_IMPLEMENTED`) |
 | 22–25 | `dup`, `dup2`, `seek`, `pipe` |
 | 26–28 | `brk`, `mmap`, `munmap` |
 | 29–30 | `handle_dup`, `handle_info` |
@@ -186,12 +186,51 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 49 | `input_inject` |
 | 50 | `blk_attach` |
 
-The syscall profiler (`prof.rs`) tracks all 51 numbers. Error codes are Linux-compatible, including `EBUSY`
-(-16) and `ENODEV` (-19).
+The syscall profiler (`prof.rs`) tracks all 51 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
+
+### Errors
+
+One set of error names for the kernel and for programs (`kernel/user/syscalls.rs`, `user/lib/desoos.rs`;
+`strerror` gives the text, `error_name` the name). A syscall returns the negative number. The numbers are the
+Unix ones, so a future Linux compatibility layer needs no translation; the names are DeSoOS's – readable, with
+one prefix, `ERROR_`.
+
+| Name | No. | Text | Typical cause |
+|---|---|---|---|
+| `ERROR_NOT_PERMITTED` | -1 | operation not permitted | killing init |
+| `ERROR_NOT_FOUND` | -2 | not found | no such file, service, topic or device |
+| `ERROR_NO_PROCESS` | -3 | no such process | kill / wait on a process that does not exist |
+| `ERROR_INTERRUPTED` | -4 | interrupted | Ctrl+C or kill while waiting |
+| `ERROR_IO` | -5 | input / output error | the disk or the device failed |
+| `ERROR_TOO_MANY_ARGUMENTS` | -7 | too many arguments | spawn with too many arguments |
+| `ERROR_NOT_EXECUTABLE` | -8 | not an executable (bad ELF file) | spawn of a file that is not a valid ELF |
+| `ERROR_INVALID_HANDLE` | -9 | invalid handle | no such handle, or a handle of the wrong kind |
+| `ERROR_NO_CHILD` | -10 | no child processes | wait with no children left |
+| `ERROR_WOULD_BLOCK` | -11 | would have to wait | non-blocking send / receive that would wait |
+| `ERROR_OUT_OF_MEMORY` | -12 | out of memory | no free memory, a limit reached |
+| `ERROR_ACCESS_DENIED` | -13 | access denied | a handle without a right from the rights table; the file sandbox |
+| `ERROR_INVALID_ADDRESS` | -14 | invalid memory address | a pointer outside the process memory |
+| `ERROR_BUSY` | -16 | already in use | a device another service owns |
+| `ERROR_ALREADY_EXISTS` | -17 | already exists | mkdir of an existing name |
+| `ERROR_NO_DEVICE` | -19 | no such device | no device at that address |
+| `ERROR_NOT_DIRECTORY` | -20 | not a directory | a path through a file |
+| `ERROR_IS_DIRECTORY` | -21 | is a directory | open of a directory |
+| `ERROR_INVALID_ARGUMENT` | -22 | invalid argument | a bad flag, size or number |
+| `ERROR_TOO_MANY_HANDLES` | -24 | too many handles | 64 handles in use |
+| `ERROR_NO_SPACE` | -28 | no space left | the disk or a table is full |
+| `ERROR_NOT_SEEKABLE` | -29 | not seekable | seek on the console or a pipe |
+| `ERROR_READ_ONLY` | -30 | read-only | writing to a read-only disk |
+| `ERROR_CLOSED` | -32 | the other end is closed | the other end of a pipe or channel is gone |
+| `ERROR_BUFFER_TOO_SMALL` | -34 | buffer too small | the text does not fit (nothing is cut) |
+| `ERROR_NOT_IMPLEMENTED` | -38 | no such system call | a syscall number without a row in the rights table |
+| `ERROR_NOT_EMPTY` | -39 | directory not empty | removing a directory that has files |
+| `ERROR_MESSAGE_TOO_LARGE` | -90 | message too large | a message over 4 KiB / the receive buffer too small |
+| `ERROR_TIMED_OUT` | -110 | timed out | a service did not answer in time |
 
 ### Handles
 
 Each process has a handle table (64 entries; 0/1/2 = stdin/stdout/stderr). Each entry is an object + rights.
+
 Objects are reference-counted with `Arc` – they live as long as someone can see them.
 
 | Kind | Object |
@@ -207,13 +246,27 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 
 | Right | For | Meaning |
 |---|---|---|
-| `READ`, `WRITE` | console, file, pipe, `INPUT`/`BLK` (`WRITE`) | missing → `EBADF` (as in POSIX) |
-| `SEND`, `RECV` | channel; `IRQ` (`RECV`) | missing → `EACCES` |
-| `MAP_READ`, `MAP_WRITE` | shared memory, device | missing → `EACCES` |
+| `READ`, `WRITE` | console, file, pipe, `INPUT`/`BLK` (`WRITE`) | missing → `ERROR_ACCESS_DENIED` |
+| `SEND`, `RECV` | channel; `IRQ` (`RECV`) | missing → `ERROR_ACCESS_DENIED` |
+| `MAP_READ`, `MAP_WRITE` | shared memory, device | missing → `ERROR_ACCESS_DENIED` |
 | `DUP` | all | may be copied (`dup`, `handle_dup`, handle for a child) |
 | `TRANSFER` | all | may be passed in a message |
 
 **Rights can only be reduced** (`handle_dup(h, mask)`); no operation adds them.
+
+**The rights table** (`kernel/user/sysrights.rs`): one row per syscall – which arguments are handles, of which
+kinds, and which rights each needs (a mapping needs `MAP_WRITE` only when it asks for writing). `syscall_dispatch`
+asks the table before the call is decoded – one gate for every syscall; the syscall functions only use the
+objects. A handle that does not exist or is of the wrong kind → `ERROR_INVALID_HANDLE`; a handle without a right → `ERROR_ACCESS_DENIED`
+(the same for every syscall, `read` / `write` included – unlike POSIX, where a read-only descriptor gives
+`ERROR_INVALID_HANDLE`); a number without a row → `ERROR_NOT_IMPLEMENTED`. Handles passed in a list in memory (the handles in a message:
+`TRANSFER`; the `wait_many` list; `spawn` / `spawn_ex`: `DUP`; the `sysctl` output handle: `WRITE`) are checked
+by the call itself, and the row says so. The table also has the `path` column (file sandbox, below). It is
+readable as text (`sysinfo rights`): `nr name path|- reg:kinds:need:write_if …`.
+RIGHTS TEST checks it three ways: the gate alone against every row (every right of every handle argument taken
+away in turn), `/bin/rightstest` through real syscalls with a real object of every kind (it reads the table from
+the kernel, so a new row is tested without changing it), and the gate's cost (~20–40 ns per syscall in QEMU TCG;
+`[RESULT-RIGHTS]`).
 
 **This is the whole permission model (capabilities).** A process has no user or group; what it may do is exactly
 the handles it holds. Unlike Linux (UID/GID + `rwx` bits, root may do everything), a program started from the shell
@@ -221,17 +274,18 @@ gets only the handles its parent passes; `usbd` holds one claimed controller, `I
 Files are the exception: by default a process may open any path.
 
 **File sandbox:** `spawn` / `spawn_ex` with `SPAWN_NO_FILES` starts a process with no file system access by
-path. `open` (every mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `EACCES`,
-refused in one place before the call is decoded (`is_path_call` in syscalls.rs; a new path syscall must be added
-there). File handles it was given keep working with their rights. The flag is inherited by every child and can
+path. `open` (every mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `ERROR_ACCESS_DENIED`,
+refused in one place before the call is decoded (the `path` column of the rights table; a new path syscall
+must be marked there). File handles it was given keep working with their rights. The flag is inherited by every child and can
 never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
-passes the handle), `nofiles cat file` gets "permission denied". Half of the `sysfuzz` children run in it.
+passes the handle), `nofiles cat file` gets "access denied". Half of the `sysfuzz` children run in it.
 
 **DCP (DeSoOS Capability Permissions)** is the name of this model, and `dcp` the command that shows it:
 `dcp` (every visible process: devices, system powers, file access), `dcp inspect <pid>` (every capability with
 its rights and a detail such as the PCI device, MSI vector, shared memory size, or who holds the other end of a
 channel / pipe) and `dcp audit` (the last 64
-refusals: sandbox path calls, read / write on a handle without the right, `EACCES`). DCP names: kinds `CONSOLE`,
+refusals: sandbox path calls, a handle without a right from the table – with the missing right named, other
+`ERROR_ACCESS_DENIED`). DCP names: kinds `CONSOLE`,
 `FILE`, `PIPE`, `IPC`, `MEM_SHARE`, `DEVICE_CLAIM` (HW_ROOT), `DEVICE_CONTROL`, `DEVICE_IRQ`, `SYS_POWER` (SYSCTL),
 `INPUT_SEND`, `DISK_ATTACH` (BLK); rights `READ`, `WRITE`, `SEND`, `RECEIVE`, `MAP_READ`, `MAP_WRITE`, `COPY` (DUP),
 `SHARE` (TRANSFER). **Who sees what:** a process sees itself and its descendants (and audit entries of itself and
@@ -254,14 +308,14 @@ A pair of ends, bidirectional; each end has its own queue.
 - **Handle transfer:** handles in a message are **moved** (they disappear from the sender and require
   `TRANSFER`). The whole list is validated before anything is removed; on error everything is put back.
 - **No-cycle rule:** a channel end cannot travel through its own channel. Also, a channel end whose queue holds
-  a message carrying another channel end cannot itself be sent in a message (`EBUSY`). This makes a cycle of
+  a message carrying another channel end cannot itself be sent in a message (`ERROR_BUSY`). This makes a cycle of
   ends inside queues impossible – the insertion that would close the cycle would have to send an end whose
   queue already holds the previous element. Why: such a cycle would never be freed. The check and the insertion
   happen under one `chan-xfer` lock (level 35, before the queue lock); only messages carrying channel ends take
   it.
-- Full queue / empty queue: block, or `EAGAIN` with `CHAN_NONBLOCK`. Buffer too small (`EMSGSIZE`) or no room
-  for handles (`EMFILE`) – the message **stays** in the queue and `info` reports the required size. Other side
-  closed: `EPIPE`. Kill / Ctrl+C interrupts the wait.
+- Full queue / empty queue: block, or `ERROR_WOULD_BLOCK` with `CHAN_NONBLOCK`. Buffer too small (`ERROR_MESSAGE_TOO_LARGE`) or no room
+  for handles (`ERROR_TOO_MANY_HANDLES`) – the message **stays** in the queue and `info` reports the required size. Other side
+  closed: `ERROR_CLOSED`. Kill / Ctrl+C interrupts the wait.
 - Closing the last handle to an end frees the messages in its queue (including handles inside) and wakes the
   other side.
 - The kernel can also wait on a channel with a deadline (`ChanEnd::recv` with timeout; used by `ublk`).
@@ -280,7 +334,7 @@ An object of up to 16 MiB; frames are allocated eagerly and zeroed.
 ### Kernel buffer budget
 
 Channel queues and pipe buffers live on the kernel heap; together they are limited to **16 MiB** (`kbuf`).
-Over the budget, `chan_send` / a pipe write returns `ENOMEM`, so no process can exhaust the kernel heap
+Over the budget, `chan_send` / a pipe write returns `ERROR_OUT_OF_MEMORY`, so no process can exhaust the kernel heap
 through IPC.
 
 ### Locking rules in IPC code
@@ -434,7 +488,7 @@ execute `hlt`.
   - 64 KiB read-ahead for small reads,
   - remembered position in the cluster chain (sequential reads do not walk the chain from the start; `fat_set`
     invalidates it).
-- **Read-only disks:** FAT32 on a read-only disk rejects changes immediately (`open` for writing → `EROFS`).
+- **Read-only disks:** FAT32 on a read-only disk rejects changes immediately (`open` for writing → `ERROR_READ_ONLY`).
   `df` on a read-only disk counts free clusters from the FAT itself (once, in 64 KiB blocks), because FSInfo may
   be stale.
 - **Block layer:** disks in a `Vec<Option<Arc<Disk>>>` under a `block list` SpinLock (level `BLOCK`) used only
@@ -456,7 +510,7 @@ execute `hlt`.
 **Data protection on real hardware** – independent barriers:
 
 1. the NVMe driver writes only to a controller emulated by QEMU; a real SSD is read-only,
-2. the block layer rejects every write to a read-only disk (partitions, `mkfs`, files → `EROFS`),
+2. the block layer rejects every write to a read-only disk (partitions, `mkfs`, files → `ERROR_READ_ONLY`),
 3. FAT32 on a read-only disk rejects changes up front,
 4. USB storage is read-only end to end (see "USB").
 
@@ -487,7 +541,7 @@ A service waits at once for requests from many clients (each with its own channe
 | `WRITABLE` | channel / pipe: there is room or the other side closed |
 | `IRQ` | interrupt object: counter > 0 |
 
-Requires `RECV` / `SEND` / `READ` (as for the operation being waited for). Kill / Ctrl+C interrupts (`EINTR`).
+Requires `RECV` / `SEND` / `READ` (as for the operation being waited for). Kill / Ctrl+C interrupts (`ERROR_INTERRUPTED`).
 
 **How it works:** every waitable object (channel end, pipe, IRQ) has an observer list (up to 16 tasks) under its
 own lock. `wait_many` registers the task with each object, checks the conditions and sleeps on its own
@@ -502,9 +556,9 @@ list lock. Code: `kernel/user/waitset.rs` (`Observers`, `IrqSpinLock` at level `
 - **`HW_ROOT`** (kind 6) – the only object a device can be taken from. The kernel creates it once and gives it
   **only** to `/bin/init` (slot 3). Init does not pass it on; services get single devices.
 - **`dev_find(root, class, n)`** (48) → the BDF of the `n`-th device with a given class (24 bits: class, subclass,
-  prog-if); `ENOENT` when there are no more, `EBADF`. Requires `HW_ROOT`.
+  prog-if); `ERROR_NOT_FOUND` when there are no more, `ERROR_INVALID_HANDLE`. Requires `HW_ROOT`.
 - **`dev_claim(root, PCI address)`** → a `DEVICE` handle (kind 7; rights `MAP_READ|MAP_WRITE|DUP|TRANSFER`).
-  One device – one owner at a time (`EBUSY`). Refused (`EACCES`):
+  One device – one owner at a time (`ERROR_BUSY`). Refused (`ERROR_ACCESS_DENIED`):
   - the device has an in-kernel driver (virtio disk, NVMe, the graphics card with the framebuffer),
   - mass storage class (0x01) – **always**, even without a driver (protects disks on real hardware),
   - bridges (0x06) and the interrupt controller – changing their settings breaks the whole system.
@@ -566,17 +620,17 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
 - Init has a service table (`SERVICES` in init's code), e.g. `edu` → `/bin/edud` with device 00:06.0, `echo` →
   `/bin/echod` without a device, `usbN` → `/bin/usbd` for each xHCI controller found with `dev_find` (class
   0C0330, at most 4). For each: `dev_claim` from `HW_ROOT` → `spawn_ex` (slot 1 console, 3 device, 4 connection
-  channel; usbd also gets 4 `INPUT` and 5 `BLK`). No device (`ENODEV`) → state "no device", no attempts.
+  channel; usbd also gets 4 `INPUT` and 5 `BLK`). No device (`ERROR_NO_DEVICE`) → state "no device", no attempts.
 - **Restart:** after the process ends, a 100 ms delay, doubled up to 5 s (back to 100 ms after 10 s of stable
-  running); 5 failures within 30 s → "broken", no more restarts. `EBUSY` at start (the old instance is still
+  running); 5 failures within 30 s → "broken", no more restarts. `ERROR_BUSY` at start (the old instance is still
   being cleaned up) → retry in 100 ms.
 - **Connecting by name:** the shell and its programs have, in slot 3 (`SVC`), a channel end to init with only
   `SEND | DUP` rights (only init can receive). A client creates its own channel and sends `"connect edu"` + one
   end; init forwards that end to the service's connection channel (without waiting); afterwards the client and
-  the service talk directly. Unknown / not running service → init closes the end and the client gets `EPIPE`.
+  the service talk directly. Unknown / not running service → init closes the end and the client gets `ERROR_CLOSED`.
   `"list"` + an end → init replies with lines "name state pid N restarts N (program)" and closes. Library:
   `svc_connect("edu")`, `svc_list(buf)`; command `services`.
-- Service crashed → its clients get `EPIPE` and reconnect (after the restart).
+- Service crashed → its clients get `ERROR_CLOSED` and reconnect (after the restart).
 - The shell checks at startup whether slot 3 is a channel; if so, it starts programs with `spawn_ex` and
   `[(in,0), (out,1), (2,2), (3,3)]`, otherwise with `spawn`.
 - Init loop: restarts whose time has come → `wait_many` on the svc channel (at most 100 ms) → reaping children
@@ -585,7 +639,7 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   connection channels, kills the services, waits for them and exits with the program's code.
 - **Future: a separate `/bin/svcmgr`.** Init would stay minimal (shell, `svcmgr`, orphans). Benefit: a bug in the
   manager would not restart init and the shell. Cost: after a manager crash the services run unsupervised and a
-  new manager must find them (their devices are still claimed – `EBUSY`). Currently everything is in init because
+  new manager must find them (their devices are still claimed – `ERROR_BUSY`). Currently everything is in init because
   it is simpler; the move is a user-space code change only, with no kernel changes – to be done when the manager
   grows or its crashes become a problem.
 
@@ -617,8 +671,8 @@ the manager, restarts and `wait_many`.
   device), replies sent without waiting (a client that does not receive cannot stall the service); completion is
   decided by device status, the interrupt only wakes,
 - protocol `user/lib/edu_proto.rs`: a 16 B header (`op`, `arg` / `status`, `value`) + data; `PING`, `FACT`, `COPY`
-  (DMA, up to 4000 B), `STATS`; a bad request → `EINVAL`, the service keeps running,
-- service killed → clients get `EPIPE`, the device is released immediately, a new instance can claim it,
+  (DMA, up to 4000 B), `STATS`; a bad request → `ERROR_INVALID_ARGUMENT`, the service keeps running,
+- service killed → clients get `ERROR_CLOSED`, the device is released immediately, a new instance can claim it,
 - exit: connection channel closed and no clients – code 0.
 
 **Measured cost** (same work on `edu` in the kernel and in user space, QEMU KVM, 4 CPUs): interrupt → driver
@@ -641,7 +695,7 @@ per xHCI controller), built on the service mechanisms above. The kernel receives
  PCI table, MSI-X, DMA frames   ◄──────── dev_claim / irq_bind / dma_alloc ── xHCI rings, TRBs, contexts
  kernel/input.rs ◄── input_inject(INPUT, events) ──────────────────────────── HID reports → events
  ublk (BlockDevice) ◄─ channel: request / reply, data in DMA buffer ───────── BOT + SCSI READ(10)
- FAT32 /usbN (read-only)                                       client ── "usb0" ──► init ──► lsusb, status
+ FAT32 /usbN (read-only)                                       client ── "usb0" ──► init ──► usblist, status
 ```
 
 ### Security boundary – DMA without an IOMMU
@@ -663,22 +717,22 @@ usbd can make the controller write anywhere in RAM, including the kernel.
 
 | No. | Call | Handle / rights | Result, errors |
 |---|---|---|---|
-| 48 | `dev_find(root, class, n)` | `HW_ROOT` | BDF of the `n`-th device of the class (24 bits: class, subclass, prog-if); `ENOENT` – no more, `EBADF` |
-| 49 | `input_inject(h, events, n)` | `INPUT`, `WRITE` | LED state (bit 0 Num, 1 Caps, 2 Scroll) – usbd sets them on the keyboard; `EINVAL` (n > 64, bad kind), `EFAULT`, `EBADF` |
-| 50 | `blk_attach(h, channel, buffer, info)` | `BLK`, `WRITE`; channel `SEND`+`RECV`+`TRANSFER`; buffer `MAP_READ` | USB disk number (0 = sda); `EINVAL` (block ≠ 512/4096, 0 blocks, slots outside 1..8, buffer < slots × 64 KiB), `ENOSPC` (8 USB disks), `EACCES`, `EBADF`, `EFAULT` |
+| 48 | `dev_find(root, class, n)` | `HW_ROOT` | BDF of the `n`-th device of the class (24 bits: class, subclass, prog-if); `ERROR_NOT_FOUND` – no more, `ERROR_INVALID_HANDLE` |
+| 49 | `input_inject(h, events, n)` | `INPUT`, `WRITE` | LED state (bit 0 Num, 1 Caps, 2 Scroll) – usbd sets them on the keyboard; `ERROR_INVALID_ARGUMENT` (n > 64, bad kind), `ERROR_INVALID_ADDRESS`, `ERROR_INVALID_HANDLE` |
+| 50 | `blk_attach(h, channel, buffer, info)` | `BLK`, `WRITE`; channel `SEND`+`RECV`+`TRANSFER`; buffer `MAP_READ` | USB disk number (0 = sda); `ERROR_INVALID_ARGUMENT` (block ≠ 512/4096, 0 blocks, slots outside 1..8, buffer < slots × 64 KiB), `ERROR_NO_SPACE` (8 USB disks), `ERROR_ACCESS_DENIED`, `ERROR_INVALID_HANDLE`, `ERROR_INVALID_ADDRESS` |
 
 Handle kinds **10 `INPUT`** (rights `WRITE` + `DUP`, no `TRANSFER`) and **11 `BLK`**. The kernel gives them to
 init at startup (slots 5 and 6); init passes each usbd a copy **without `DUP`** (usbd cannot pass them on); the
 shell does not get them. `INPUT` is effectively the system keyboard (it can type into the shell) – hence the
-narrow distribution. No new error codes were needed (`EIO`, `ENODEV`, `EBUSY`, `ENOSPC`, `EINVAL`, `EBADF`,
-`EROFS`).
+narrow distribution. No new error codes were needed (`ERROR_IO`, `ERROR_NO_DEVICE`, `ERROR_BUSY`, `ERROR_NO_SPACE`, `ERROR_INVALID_ARGUMENT`, `ERROR_INVALID_HANDLE`,
+`ERROR_READ_ONLY`).
 
 ### Input – `input_inject`
 
 An 8 B event: `kind u8`, `pressed u8`, `code u16` (HID usage, page 7 – keyboard), `dx i16`, `dy i16` (mouse: kind
 2, `code` = buttons, `pressed` = wheel as i8). At most 64 events per call.
 
-- All events are validated first (bad kind → `EINVAL`, nothing is applied). The kernel translates HID usage →
+- All events are validated first (bad kind → `ERROR_INVALID_ARGUMENT`, nothing is applied). The kernel translates HID usage →
   `KeyCode` (table in `kernel/input.rs`, next to the PS/2 translation) and continues as for PS/2: modifiers,
   Caps/Num, Polish layout, console, `readkey`, `keys`. Mouse wheel → `mouse::add_wheel` (console scrolling);
   cursor – together with the GUI (Future).
@@ -710,7 +764,7 @@ Messages (32 B over the channel – control; data in the buffer):
 | Direction | Fields |
 |---|---|
 | kernel → usbd | `id u32`, `op u32` (1 = READ; nothing else), `lba u64`, `blocks u32`, `slot u32` |
-| usbd → kernel | `id u32`, `status i32` (0, `EIO`, `ENODEV` – medium removed), `blocks u32` (reply ≥ 12 B) |
+| usbd → kernel | `id u32`, `status i32` (0, `ERROR_IO`, `ERROR_NO_DEVICE` – medium removed), `blocks u32` (reply ≥ 12 B) |
 
 - "Blocks" are **device blocks** (512 or 4096 B); the kernel converts from 512 B sectors, reads whole blocks and
   copies the needed part.
@@ -722,11 +776,11 @@ Messages (32 B over the channel – control; data in the buffer):
 - **Slot ownership at every moment:** `free` (kernel) → `at usbd` (from sending the request) → `free` after a reply
   with the same `id`, `blocks` = requested and `status` = 0 (only then does the kernel copy the data). Any other
   reply (unknown `id`, wrong block count, oversized message) is **rejected** and counted as a protocol error.
-- **Timeout:** 5 s per request (a pendrive may take seconds to wake). After a timeout: `EIO` for the caller, and the
+- **Timeout:** 5 s per request (a pendrive may take seconds to wake). After a timeout: `ERROR_IO` for the caller, and the
   slot goes into **quarantine** – it does not return to the pool, because the device may still write into it. It
   returns only after the late reply with that `id` (which the kernel discards) or after usbd dies.
 - **3 consecutive timeouts or a closed channel** (usbd died) = the disk **disappears**: further operations return
-  `ENODEV`/`EIO`, a filesystem mounted on it returns `EIO`. The `usb-disks` kernel task (running from boot)
+  `ERROR_NO_DEVICE`/`ERROR_IO`, a filesystem mounted on it returns `ERROR_IO`. The `usb-disks` kernel task (running from boot)
   mounts new disks (`scan_partitions` → FAT32 on partitions, the whole disk or the first MBR partition →
   `/usbN`), checks every 200 ms for closed channels while disks exist, and on loss unmounts without writing
   (`unmount_lost`), removes partitions and the disk, and releases the buffer and channel.
@@ -739,8 +793,8 @@ Messages (32 B over the channel – control; data in the buffer):
 
 **Read-only, enforced four times:** usbd contains no SCSI write command (WRITE(6/10/12/16), FORMAT, MODE SELECT,
 SYNCHRONIZE CACHE – a test checks these opcodes are absent from the binary); the ublk protocol has no write
-operation; the `ublk` disk reports `read_only` and the block layer rejects writes (`EROFS`); FAT32 on a read-only
-disk refuses `open` for writing (`EROFS`).
+operation; the `ublk` disk reports `read_only` and the block layer rejects writes (`ERROR_READ_ONLY`); FAT32 on a read-only
+disk refuses `open` for writing (`ERROR_READ_ONLY`).
 
 ### Controller start and shutdown
 
@@ -778,7 +832,7 @@ new instance performs a full controller reset.
 - **Limits:** 32 devices per controller (and no more than MaxSlots), configuration descriptor ≤ 4 KiB, ≤ 8 stored
   interfaces (alternate setting 0; more are skipped, not an error), ≤ 64 interface descriptors including alternate
   settings (cameras have dozens), ≤ 16 endpoints per device, hub depth ≤ 5, MaxPacketSize consistent with speed.
-- Unknown class: the device is visible in `lsusb`, with no driver.
+- Unknown class: the device is visible in `usblist`, with no driver.
 - Enumeration time (port reset → class driver ready) is reported per device ("ready in N ms") and in the status
   (`enum_count`, `enum_avg_ms`, `enum_max_ms`).
 - Per-device pages (input/output context, EP0 ring) return to a pool on disconnect; descriptor data lives in one
@@ -825,7 +879,7 @@ new instance performs a full controller reset.
 - Detach: detaching a hub first (recursively) detaches the devices on its ports – their disks disappear in the
   kernel as when a pendrive is pulled. A hub at level 5 gets no ports (the route string has 5 levels).
 - A bulk transfer behind a hub is aborted when the parent hub reports a change on that port
-  (`XferError::Interrupted` → `EIO` for the kernel; `needs_recovery` – reset recovery before the next command if the
+  (`XferError::Interrupted` → `ERROR_IO` for the kernel; `needs_recovery` – reset recovery before the next command if the
   device is still there).
 
 ### Descriptor parser and hardware-free tests
@@ -845,7 +899,7 @@ panics; every case ends in an error or a valid result within limits.
 - 5 failures within 30 s → `broken`: "USB controller usbN disabled after 5 failures – its USB keyboard and disks are
   unavailable until reboot (PS/2 still works)". A system restart is required; a manual `services restart` – Not
   implemented yet.
-- usbd clients (via init, name `usbN`): `status`, `list` (`lsusb`), `noop N`, `idle MS` (interrupt pipeline test).
+- usbd clients (via init, name `usbN`): `status`, `list` (`usblist`), `noop N`, `idle MS` (interrupt pipeline test).
 
 ### USB testing
 
@@ -865,7 +919,7 @@ panics; every case ends in an error or a valid result within limits.
 
 Same shape as USB: the driver **and the whole protocol stack** run in a user-space service, `/bin/netd`, one per
 network card. The kernel gets no network code (at most small helpers if the driver needs them). A bug in a packet
-parser kills netd, not the kernel; init restarts it and its clients get `EPIPE`.
+parser kills netd, not the kernel; init restarts it and its clients get `ERROR_CLOSED`.
 
 ```
  kernel                       init (HW_ROOT)                       netd (one per NIC)                 programs
@@ -883,7 +937,7 @@ parser kills netd, not the kernel; init restarts it and its clients get `EPIPE`.
 | Where | Card | Notes |
 |---|---|---|
 | QEMU (tests) | Intel 82574L (**e1000e**, `8086:10d3`; QEMU's default card on q35) and 82540EM (e1000, `8086:100e`) – same legacy descriptors | **driver done (N2).** QEMU `-netdev user` provides a gateway (10.0.2.2), DHCP and DNS without a real network |
-| Real hardware | Realtek **RTL8111/8168** (`10ec:8168`), typical laptop/desktop Ethernet – the test laptop has an RTL8168h (version 541) | **driver done (N8)**, confirmed on the test laptop (DHCP, ping, fetch, 10 MiB at 2.6 MiB/s) – QEMU has no model of this chip. Registers in memory BAR 2 (BAR 0 is I/O ports); 16-byte descriptors (OWN / end-of-ring / first / last, length with the 4-byte CRC); bring-up: leave the firmware's out-of-band mode, gate reception during the reset, rings, open the gate, MSI before rx/tx on, PHY through GPHY_OCP (advertise, restart auto-negotiation). Written for the 8168g/8168h generation; other versions get a warning. `ifconfig` shows the chip version, key registers and any start-up wait that ran out |
+| Real hardware | Realtek **RTL8111/8168** (`10ec:8168`), typical laptop/desktop Ethernet – the test laptop has an RTL8168h (version 541) | **driver done (N8)**, confirmed on the test laptop (DHCP, ping, netget, 10 MiB at 2.6 MiB/s) – QEMU has no model of this chip. Registers in memory BAR 2 (BAR 0 is I/O ports); 16-byte descriptors (OWN / end-of-ring / first / last, length with the 4-byte CRC); bring-up: leave the firmware's out-of-band mode, gate reception during the reset, rings, open the gate, MSI before rx/tx on, PHY through GPHY_OCP (advertise, restart auto-negotiation). Written for the 8168g/8168h generation; other versions get a warning. `netconfig` shows the chip version, key registers and any start-up wait that ran out |
 | Later | USB Ethernet adapters (ASIX, RTL8153) | through `usbd`, which already exists |
 | Not planned | Wi-Fi | needs vendor firmware, 802.11 and WPA2/3 – months of work |
 
@@ -916,14 +970,14 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   0 when interrupts work).
 - Received frames are counted by EtherType (ARP / IPv4 / IPv6 / other) and handed to the protocol code (N3, below).
 - Client requests (text, like usbd): `status` (card, MAC, link and speed, IPv4, counters, plus a `netd-status k=v`
-  line for tests), `arp a.b.c.d` and `ping a.b.c.d [count]`. Tools: `ifconfig` (every `netN`), `arping <ip>`,
+  line for tests), `arp a.b.c.d` and `ping a.b.c.d [count]`. Tools: `netconfig` (every `netN`), `netarp <ip>`,
   `ping <ip>`.
 ### ARP, IPv4 and ping (N3)
 
 - **Parsers** (`user/lib/netproto.rs`): pure functions, no allocation, no panics – Ethernet II, ARP (Ethernet/IPv4
   only), IPv4 (header checksum, header and total length checked against the frame, Ethernet padding cut off,
   fragments refused – not reassembled), ICMP (checksum). Every malformed frame ends in an error and is counted
-  (`malformed packets dropped` in `ifconfig`). The same file builds the frames netd sends, so the test program
+  (`malformed packets dropped` in `netconfig`). The same file builds the frames netd sends, so the test program
   checks both directions. `/bin/netparse` (NET TEST 1/5): RFC 1071 checksum, valid frames, 20 malicious frames with
   the expected error, 20 000 mutations of valid frames.
 - **Address:** from DHCP (N4, below); until then netd has none and `ping` / `arp` say so.
@@ -961,7 +1015,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   it accepts DHCP answers sent to the offered address too) and reports
   `net0: address 10.0.2.15/24 from DHCP server 10.0.2.2 in 5 ms, gateway 10.0.2.2, DNS 10.0.2.3`.
   A changed address flushes the ARP cache; a lost one stops ARP and ping until a new lease. Request `renew`
-  (`ifconfig renew`) renews at once. Checking the address, DECLINE, RELEASE and an address by hand: see below.
+  (`netconfig renew`) renews at once. Checking the address, DECLINE, RELEASE and an address by hand: see below.
 - Tests: `/bin/dhcptest` (NET TEST 2/5) drives the state machine through a simulated day: unusable answers,
   resend timing, renewal, rebinding with another server, lease end, NAK, a changed address, odd leases, and that
   a dead server gets fewer than 30 messages from T1 to the lease end. `/bin/netparse` adds UDP and DHCP cases and
@@ -988,9 +1042,9 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 - **Cache:** 16 names; an answer lives for its TTL, at most 1 h; "no such name" / "no IPv4 address" 30 s; TTL 0
   and server errors are not kept. Changing the DNS server clears it.
 - **Server:** the first DNS server from DHCP (QEMU: 10.0.2.3, which forwards to the host's resolver), 3 queries
-  (1, 1, 2 s), then "no answer". `ifconfig dns a.b.c.d[:port]` sets one by hand (shown as "set by hand"),
-  `ifconfig dns auto` goes back to DHCP's. **Known gap:** any program connected to netd can change the server
-  today; with the client kinds from init (N7) this becomes an administrator request.
+  (1, 1, 2 s), then "no answer". `netconfig dns a.b.c.d[:port]` sets one by hand (shown as "set by hand"),
+  `netconfig dns auto` goes back to DHCP's. Changing the server is an administrator request – only `netconfig`
+  has that right (see "Network access is a capability").
 - Tools: `host <name>` (all addresses), `ping <name>` (resolves, then pings the first address).
 - Tests: `/bin/dnstest` (NET TEST 3/5): names, the query byte for byte, valid answers (CNAME chain through
   pointers, other types / classes skipped, six addresses → four), 19 malicious answers with the expected error,
@@ -1010,9 +1064,9 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   ("address conflict", counted; again every 100th time) – not answered or fought over.
 - **RELEASE:** the lease goes back to the server when an address is set by hand and when netd ends (init stops the
   service); a killed netd cannot – the lease simply expires.
-- **By hand:** `ifconfig set a.b.c.d/nn [gw a.b.c.d] [dns a.b.c.d]` (admin): checked the same way first (two
+- **By hand:** `netconfig set a.b.c.d/nn [gw a.b.c.d] [dns a.b.c.d]` (admin): checked the same way first (two
   probes; "already used by xx:xx:..." and nothing changes), then the DHCP lease is released, the client stops
-  (`State::Off`), the address is announced. The gateway must be another address on the subnet. `ifconfig dhcp`
+  (`State::Off`), the address is announced. The gateway must be another address on the subnet. `netconfig dhcp`
   starts DHCP again from 0.0.0.0. Not kept across a restart of netd (no configuration file yet).
 - Tests: dhcptest 68 checks (+ Checking with its timing, DECLINE and the 10 s wait, RELEASE, stop/start); nettest
   96 (+ QEMU's router answering for 10.0.2.2 – refused, bad input, a free address with the lease released and a
@@ -1041,9 +1095,9 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   message fits (otherwise netd does not read – the program's `chan_send` waits: flow control from TCP back to the
   program); received data goes to the program without blocking – when its channel is full, the data stays in the
   ring and the TCP window closes until the program reads. Peer closed + everything delivered → netd closes its end
-  of the channel (the program sees `EPIPE`) and finishes the closing. The program closes its end → FIN, or a RST if
+  of the channel (the program sees `ERROR_CLOSED`) and finishes the closing. The program closes its end → FIN, or a RST if
   received data was never read; data arriving for a program that is gone → RST.
-- **`fetch [-o file] [-v] http://host[:port]/path`:** HTTP/1.0 GET, the body to the console or a file, a summary to
+- **`netget [-o file] [-v] http://host[:port]/path`:** HTTP/1.0 GET, the body to the console or a file, a summary to
   stderr; exit 0 complete, 2 no connection, 3 cut short (fewer bytes than Content-Length), 4 HTTP error.
   `https://` is refused – TLS needs cryptography (later).
 - Tests: `/bin/tcptest` (NET TEST 4/6) – 57 checks against a simulated peer: handshake, refused, SYN resend times,
@@ -1071,16 +1125,16 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   queue that the event loop feeds back into the receive path (127.x is accepted only from that queue, never from
   the cable). Connections to 127.0.0.1 use 127.0.0.1 as their own address. Ping to ourselves is answered the
   same way (the first time our echo answering is tested at all). No ARP for our own addresses.
-- **`httpd [-n count] port < page`**: a minimal server – the page from stdin (≤ 64 KiB), GET `/` or `/index.html`,
-  else 404, one request at a time with 5 s to send it. `nofiles --listen httpd 8080 < /index.html` runs it with no
+- **`netweb [-n count] port < page`**: a minimal server – the page from stdin (≤ 64 KiB), GET `/` or `/index.html`,
+  else 404, one request at a time with 5 s to send it. `nofiles --listen netweb 8080 < /index.html` runs it with no
   file access at all.
 - **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 of DeSoOS (`HOSTFWD=port`,
   `HOSTFWD=0` – off); `tests/test.sh` forwards 127.0.0.1:58082 to port 8081.
 - Tests: tcptest + 10 server-side checks (67); nettest 85 checks: narrowed rights (no listen, no DNS change, no
   other service, no widening), listening + loopback to 127.0.0.1 and to our address (200 KiB and 100 KiB both
-  ways, the close seen by the server, a refused port), ping to ourselves, and a sandboxed `httpd` reached over
+  ways, the close seen by the server, a refused port), ping to ourselves, and a sandboxed `netweb` reached over
   loopback and **from the host**: `tests/http-stub.py /connect?port=58082` connects from the host through QEMU's
-  forwarding into DeSoOS and returns what httpd answered.
+  forwarding into DeSoOS and returns what netweb answered.
 
 - The test laptop also has an **AMD IOMMU** (00:00.2) – a future way to confine the DMA of usbd and netd to their own
   buffers (Future).
@@ -1090,8 +1144,15 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 There is no "every program may use the network". A program can reach the network only through a channel to netd,
 and it gets one only through init's service channel (`SVC`, slot 3). As built in N7:
 
-- **The shell's programs** use the shell's service channel: `svc_connect("net0")` – init hands the connection to
-  netd as `net0 admin listen`: connections, servers, and the administrator requests (DNS server, DHCP renew).
+- **The shell's programs** get the **program channel** in their slot 3: init gives the shell two service channels –
+  its own (slot 3, everything) and the program channel (slot 5: every service, network connections and servers, but
+  no network administration; the name is about programs, not user accounts, which DeSoOS does not have).
+  `svc_connect("net0")` through the program channel reaches netd as `net0 client
+  listen`. Only **`netconfig`** gets the shell's own channel and reaches netd as `net0 admin listen`: the
+  administrator requests (address, DNS server, DHCP on / renew, receive-ring restart). A shell started from the
+  shell has only the program channel, so `netconfig` started from it is not an administrator either.
+  The choice is made by the shell from the program's name; with a file system that has owners and write
+  rights, a program could replace `/bin/netconfig` – today only the initrd provides it.
 - **A narrowed service channel** (`svc_narrow("net")` / `svc_narrow("net listen")`): init creates a new service
   channel that can only open network connections – `connect` to any other service is refused, there is no admin
   right, and it can only be narrowed further, never widened. init hands such connections to netd as
@@ -1100,10 +1161,11 @@ and it gets one only through init's service channel (`SVC`, slot 3). As built in
   **`nofiles --listen <program>`** – plus servers. A compromised server can neither read the disk, nor reach
   another service, nor redirect DNS.
 - A program without `SVC` (plain `nofiles`, the `sysfuzz` children) has no way to send a single packet.
-- netd checks the rights per connection: `listen` needs listen, `dns` and `renew` need admin ("not allowed for
-  this program"). Accepted sockets have no rights of their own – they only carry data.
-- Remaining gap: every unsandboxed program of the shell has admin (could change the DNS server). A per-program
-  manifest in init would narrow that further (later).
+- netd checks the rights per connection: `listen` needs listen, `dns`, `set`, `dhcp`, `renew` and `rxrestart`
+  need admin ("not allowed for this program"); a connection with no rights in init's text gets neither.
+  Accepted sockets have no rights of their own – they only carry data.
+- Tests (nettest): the program channel reaches netd and echo, may listen, is refused a DNS change; through `sh -c`
+  a program is refused and `netconfig` is allowed.
 
 ### Sockets as handles
 
@@ -1120,7 +1182,7 @@ below passed a separate channel end in an `open` request; one connection per soc
 - `wait_many` already waits on many channels, so a program can wait for several sockets, a pipe and a timeout at
   once – no new kernel mechanism.
 - closing the end = closing the socket (netd sees the closed channel and sends FIN / frees the port). netd dies
-  → every socket gets `EPIPE`.
+  → every socket gets `ERROR_CLOSED`.
 
 ### Messages (draft, binary, little-endian)
 
@@ -1130,17 +1192,17 @@ Every message starts with a 16-byte header: `op u16`, `flags u16`, `len u32` (by
 |---|---|---|
 | program → netd (control) | `OPEN_TCP` | + socket end, `arg` = IPv4 address and port – connect |
 | | `OPEN_UDP` | + socket end, `arg` = local port (0 = any) |
-| | `LISTEN_TCP` | + socket end, `arg` = port – only on a `listen` connection, else `EACCES` |
+| | `LISTEN_TCP` | + socket end, `arg` = port – only on a `listen` connection, else `ERROR_ACCESS_DENIED` |
 | | `RESOLVE` | data = host name → reply with addresses |
-| | `STATUS` | → text: address, gateway, DNS, MAC, counters (`ifconfig`) |
-| netd → program (control) | `REPLY` | `arg` = result (≥ 0 or -errno), data = payload |
+| | `STATUS` | → text: address, gateway, DNS, MAC, counters (`netconfig`) |
+| netd → program (control) | `REPLY` | `arg` = result (≥ 0 or a negative `ERROR_*`), data = payload |
 | socket, both ways | `DATA` | TCP payload / one UDP datagram (UDP: `arg` = peer address and port) |
-| netd → program (socket) | `CONNECTED`, `EOF`, `ERROR` | `ERROR` `arg` = `ECONNREFUSED`, `ETIMEDOUT`, `EHOSTUNREACH`, `ECONNRESET` |
+| netd → program (socket) | `CONNECTED`, `EOF`, `ERROR` | `ERROR` `arg` = `ECONNREFUSED`, `ERROR_TIMED_OUT`, `EHOSTUNREACH`, `ECONNRESET` |
 | netd → program (listening socket) | `ACCEPT` | + a new socket end for the accepted connection, `arg` = peer |
 
-New error codes live only in the user library and netd (the kernel already has `EPIPE`, `EACCES`, `EAGAIN`).
+New error codes live only in the user library and netd (the kernel already has `ERROR_CLOSED`, `ERROR_ACCESS_DENIED`, `ERROR_WOULD_BLOCK`).
 Flow control: netd stops reading a socket's channel when the TCP send window is full; the program's `chan_send`
-then blocks (queue of 64 messages) or gets `EAGAIN` with `CHAN_NONBLOCK`.
+then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLOCK`.
 
 ### Inside netd
 
@@ -1159,7 +1221,7 @@ then blocks (queue of 64 messages) or gets `EAGAIN` with `CHAN_NONBLOCK`.
 
 ### Tools
 
-- `ifconfig` (netd `STATUS`), `ping <host>`, `fetch http://host/path` (HTTP/1.0 GET to stdout), a small
+- `netconfig` (netd `STATUS`), `ping <host>`, `netget http://host/path` (HTTP/1.0 GET to stdout), a small
   `nc`-like tool for TCP / UDP tests.
 
 ### Testing
@@ -1168,7 +1230,7 @@ then blocks (queue of 64 messages) or gets `EAGAIN` with `CHAN_NONBLOCK`.
   loopback TCP for client/server tests; `hostfwd` to reach a DeSoOS server from the host.
 - A fuzzer sends netd random and malformed frames (bad lengths, checksums, options, TCP flags) – netd must neither
   crash nor leak; the kernel is not involved.
-- Real hardware (N8): ping and fetch on the test laptop over a cable; throughput measured like the USB stick.
+- Real hardware (N8): ping and netget on the test laptop over a cable; throughput measured like the USB stick.
 - netd never writes to disk; it only sends packets the user asked for (plus DHCP, ARP and TCP control packets).
   Nothing listens unless a `net-listen` program was started.
 
@@ -1178,18 +1240,18 @@ No program can take resources the kernel depends on – it gets an error or dies
 
 | Resource | Limit | Over the limit |
 |---|---|---|
-| processes | 1024 (the last 64 only for init and its children: shell, services) | `spawn` → `EAGAIN` |
-| frames for processes (pages, page tables, shared memory) | everything except the kernel reserve: 1/16 of RAM, 16–256 MiB | #PF → process killed, `shm_create` → `ENOMEM` |
-| IPC buffers on the heap (channel queues + pipes) | 16 MiB total (`kbuf`) | `chan_send` / pipe write → `ENOMEM` |
-| ramfs file data (heap) | 24 MiB | `ENOSPC` |
-| handles per process | 64 | `EMFILE` |
-| mappings per process | 4 GiB (`brk` ≤ 1 GiB) | `ENOMEM` |
-| channel queue | 64 messages, 4 KiB + 8 handles each | `EAGAIN` / blocking |
+| processes | 1024 (the last 64 only for init and its children: shell, services) | `spawn` → `ERROR_WOULD_BLOCK` |
+| frames for processes (pages, page tables, shared memory) | everything except the kernel reserve: 1/16 of RAM, 16–256 MiB | #PF → process killed, `shm_create` → `ERROR_OUT_OF_MEMORY` |
+| IPC buffers on the heap (channel queues + pipes) | 16 MiB total (`kbuf`) | `chan_send` / pipe write → `ERROR_OUT_OF_MEMORY` |
+| ramfs file data (heap) | 24 MiB | `ERROR_NO_SPACE` |
+| handles per process | 64 | `ERROR_TOO_MANY_HANDLES` |
+| mappings per process | 4 GiB (`brk` ≤ 1 GiB) | `ERROR_OUT_OF_MEMORY` |
+| channel queue | 64 messages, 4 KiB + 8 handles each | `ERROR_WOULD_BLOCK` / blocking |
 | stack per process | 8 MiB | #PF → process killed |
 | shared memory object | 16 MiB | error |
 | DMA | 2 MiB per buffer, 16 MiB per device | error |
 | `wait_many` | 16 entries; 16 observers per object | error |
-| USB disks | 8 | `ENOSPC` |
+| USB disks | 8 | `ERROR_NO_SPACE` |
 
 Limits are global (there are no users yet). Test: `/bin/limtest`.
 
@@ -1204,7 +1266,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   (without waiting for `on_cpu` the test must fail).
 - **Syscall fuzzer:** `/bin/sysfuzz [children] [calls]` – children (8 in parallel) call random syscalls with random
   and extreme arguments (0, -1, 2^64−1, kernel addresses, near-overflows, a real buffer with a wrong length, random
-  handle numbers, nonexistent numbers → `ENOSYS`). Children start with no handles (`spawn_ex` with an empty map), so
+  handle numbers, nonexistent numbers → `ERROR_NOT_IMPLEMENTED`). Children start with no handles (`spawn_ex` with an empty map), so
   they can only harm themselves; `exit`, `spawn`/`spawn_ex` and `kill` are skipped. A child stuck in a blocking call
   is killed after 4 s, which also exercises cleanup of a process in the middle of a syscall. Requirement: the kernel
   survives, and no frames leak.

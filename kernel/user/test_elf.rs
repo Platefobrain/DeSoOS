@@ -196,7 +196,7 @@ pub fn self_test() {
     );
     serial_println!("[ELF TEST] 5/9 exec /bin/hello, /bin/args (argv passed) PASS");
 
-    // 6. Files: save (path relative to cwd /tmp) + cat; ENOENT error.
+    // 6. Files: save (path relative to cwd /tmp) + cat; ERROR_NOT_FOUND error.
     let _ = crate::fs::remove("/tmp/elf.txt");
     let r = run("/bin/save", &["save", "elf.txt", "written", "by", "save"], None);
     check!(r == Ok((ExitKind::Exit(0), String::from("saved elf.txt\n"))), "save: {:?}", r);
@@ -208,7 +208,7 @@ pub fn self_test() {
     check!(r == Ok((ExitKind::Exit(0), String::from("written by save\n"))), "cat file: {:?}", r);
     let r = run("/bin/cat", &["cat", "/nope.txt"], None);
     check!(
-        r == Ok((ExitKind::Exit(1), String::from("cat: /nope.txt: no such file or directory\n"))),
+        r == Ok((ExitKind::Exit(1), String::from("cat: /nope.txt: not found\n"))),
         "cat missing: {:?}",
         r
     );
@@ -217,7 +217,7 @@ pub fn self_test() {
     let r = run("/bin/save", &["save"], None);
     check!(matches!(&r, Ok((ExitKind::Exit(2), o)) if o.starts_with("usage")), "save usage: {:?}", r);
     let _ = crate::fs::remove("/tmp/elf.txt");
-    serial_println!("[ELF TEST] 6/9 save + cat (relative path, cwd), ENOENT, stdin, exit codes PASS");
+    serial_println!("[ELF TEST] 6/9 save + cat (relative path, cwd), ERROR_NOT_FOUND, stdin, exit codes PASS");
 
     // 7. Computation in Rust in ring 3.
     let r = run("/bin/primes", &["primes", "10000"], None);

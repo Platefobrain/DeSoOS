@@ -50,13 +50,13 @@ impl DevClaim {
     /// or not aligned (registers of another device could lie on the same
     /// page), larger than MAX_BAR.
     pub fn bar_pages(&self, bar: usize) -> Result<Vec<Option<u64>>, i64> {
-        use super::syscalls::EINVAL;
+        use super::syscalls::ERROR_INVALID_ARGUMENT;
         const PAGE: u64 = 4096;
         const MAX_BAR: u64 = 256 * 1024 * 1024;
         let d = self.dev();
-        let Some(&Bar::Memory { base, size, .. }) = d.bars.get(bar) else { return Err(EINVAL) };
+        let Some(&Bar::Memory { base, size, .. }) = d.bars.get(bar) else { return Err(ERROR_INVALID_ARGUMENT) };
         if size < PAGE || base % PAGE != 0 || size > MAX_BAR {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let holes = d.msix_regions(bar);
         let pages = size.div_ceil(PAGE);
@@ -76,18 +76,18 @@ pub const DMA_DEV_MAX: u64 = 16 * 1024 * 1024;
 
 impl DevClaim {
     /// dma_alloc: a buffer of contiguous frames below `2^bits` (24..=64), enables
-    /// bus mastering for the device.  EINVAL: size 0 / > 2 MiB, bad `bits`;
-    /// ENOMEM: the 16 MiB per-device limit or no contiguous memory.
+    /// bus mastering for the device.  ERROR_INVALID_ARGUMENT: size 0 / > 2 MiB, bad `bits`;
+    /// ERROR_OUT_OF_MEMORY: the 16 MiB per-device limit or no contiguous memory.
     pub fn dma_alloc(&self, size: u64, bits: u64) -> Result<Arc<super::shm::ShmObj>, i64> {
-        use super::syscalls::{EINVAL, ENOMEM};
+        use super::syscalls::{ERROR_INVALID_ARGUMENT, ERROR_OUT_OF_MEMORY};
         if size == 0 || size > DMA_BUF_MAX || !(24..=64).contains(&bits) {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let len = size.div_ceil(4096) * 4096;
         let limit = if bits >= 64 { u64::MAX } else { 1u64 << bits };
         let mut dma = self.dma.lock();
         if dma.1 + len > DMA_DEV_MAX {
-            return Err(ENOMEM);
+            return Err(ERROR_OUT_OF_MEMORY);
         }
         let buf = super::shm::ShmObj::new_dma(len, limit)?;
         dma.0.push(buf.clone());
@@ -160,22 +160,22 @@ pub struct IrqObj {
 
 impl IrqObj {
     /// irq_bind: MSI vector (or MSI-X entry 0), bus mastering (MSI is the device
-    /// writing to memory).  EBUSY – interrupt already bound or no
-    /// free vectors; ENODEV – device without MSI / MSI-X.
+    /// writing to memory).  ERROR_BUSY – interrupt already bound or no
+    /// free vectors; ERROR_NO_DEVICE – device without MSI / MSI-X.
     pub fn bind(claim: Arc<DevClaim>) -> Result<IrqObj, i64> {
-        use super::syscalls::{EBUSY, ENODEV};
+        use super::syscalls::{ERROR_BUSY, ERROR_NO_DEVICE};
         use crate::drivers::pci::{CAP_MSI, CAP_MSIX};
         let d = claim.dev();
         let has_msi = d.find_capability(CAP_MSI).is_some();
         if !has_msi && d.find_capability(CAP_MSIX).is_none() {
-            return Err(ENODEV);
+            return Err(ERROR_NO_DEVICE);
         }
         if claim.irq.swap(true, Ordering::SeqCst) {
-            return Err(EBUSY);
+            return Err(ERROR_BUSY);
         }
         let Some(vector) = msi::alloc(user_irq) else {
             claim.irq.store(false, Ordering::SeqCst);
-            return Err(EBUSY);
+            return Err(ERROR_BUSY);
         };
         let slot = &SLOTS[vector as usize - msi::MSI_BASE];
         slot.count.store(0, Ordering::SeqCst);
@@ -187,7 +187,7 @@ impl IrqObj {
             d.disable_msi();
             msi::free(vector);
             claim.irq.store(false, Ordering::SeqCst);
-            return Err(ENODEV);
+            return Err(ERROR_NO_DEVICE);
         }
         Ok(IrqObj { vector, claim })
     }

@@ -53,10 +53,10 @@
 //   Device behind a hub: route string (hub port at each level), controller
 //   port of the top-level hub, speed from the hub port, TT (slot and port
 //   of the nearest high-speed hub) for low / full speed keyboards / mice behind a
-//   USB 2 hub.  Disconnecting a hub = disconnecting everything behind it.  lsusb: "port 3.2"
+//   USB 2 hub.  Disconnecting a hub = disconnecting everything behind it.  usblist: "port 3.2"
 //   (controller port . hub port).
 // Clients (channel "usbN" via init): "status" – description + a "usbd-status k=v" line;
-// "list" – devices (lsusb); "noop N" – N No-Op commands, "noop N <ns>";
+// "list" – devices (usblist); "noop N" – N No-Op commands, "noop N <ns>";
 // "idle MS" – HID reports every MS ms even without changes (interrupt pipeline test in QEMU).
 //
 // DMA without an IOMMU (ARCHITECTURE.md): usbd itself writes physical addresses into the
@@ -84,7 +84,6 @@ entry!(main);
 const DEV: u64 = 3;
 const LISTEN: u64 = 4;
 const MAX_CLIENTS: usize = WAIT_MAX - 2 - STOR_MAX;
-const EIO: i64 = -5;
 
 /// Time limit for each controller operation (reset, command, transfer).
 const TIMEOUT_MS: u64 = 1000;
@@ -425,7 +424,7 @@ struct Loc {
     route: u32,
     /// 0 – directly on a controller port; 1 – behind one hub, etc.
     depth: u32,
-    /// Hub ports in order (lsusb: "3.2.1").
+    /// Hub ports in order (usblist: "3.2.1").
     path: [u8; 5],
     /// Parent hub (index into `devs`) and its port – a change on that port
     /// interrupts the bulk transfer (stick pulled out of the hub).
@@ -475,7 +474,7 @@ struct Dev {
     product: [u8; NAME_MAX],
     plen: usize,
     hid: Option<Hid>,
-    /// HID configuration failed – reason (lsusb).
+    /// HID configuration failed – reason (usblist).
     hid_error: &'static str,
     /// Mass storage (or the reason it does not work).
     stor: Option<Storage>,
@@ -728,12 +727,12 @@ impl Hc {
                 }
             }
             if self.failed() {
-                return Err(EIO);
+                return Err(ERROR_IO);
             }
             let spent = uptime_ms() - t0;
             if spent >= TIMEOUT_MS {
                 self.errors += 1;
-                return Err(EIO);
+                return Err(ERROR_IO);
             }
             by_poll = !self.wait_irq(TIMEOUT_MS - spent);
         }
@@ -747,7 +746,7 @@ impl Hc {
             }
             _ => {
                 self.errors += 1;
-                Err(EIO)
+                Err(ERROR_IO)
             }
         }
     }
@@ -998,13 +997,13 @@ impl Hc {
                 if let Err(e) = self.setup_hid(d) {
                     self.devs[d].as_mut().unwrap().hid_error = e;
                 }
-                // USB stick – an error does not disconnect the device (it is visible in lsusb).
+                // USB stick – an error does not disconnect the device (it is visible in usblist).
                 if let Err(e) = self.setup_storage(d) {
                     if let Some(dev) = self.devs[d].as_mut() {
                         dev.stor_error = e;
                     }
                 }
-                // Hub – on error: the hub is visible in lsusb, ports behind it are not handled.
+                // Hub – on error: the hub is visible in usblist, ports behind it are not handled.
                 if let Err(e) = self.setup_hub(d) {
                     if let Some(dev) = self.devs[d].as_mut() {
                         dev.hub_error = e;
@@ -1823,13 +1822,13 @@ impl Hc {
         loop {
             let Some(chan) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| s.chan).filter(|&c| c != 0) else { return };
             let r = chan_recv(chan, &mut msg, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE || r == EMSGSIZE {
+            if r == ERROR_CLOSED || r == ERROR_MESSAGE_TOO_LARGE {
                 // The kernel detached the disk (3 timeouts) – no re-registration.
                 if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
                     close(st.chan);
                     st.chan = 0;
                     st.disk = None;
-                    st.attach_error = EPIPE;
+                    st.attach_error = ERROR_CLOSED;
                 }
                 return;
             }
@@ -2297,7 +2296,7 @@ impl Hc {
         self.devs.iter().filter(|x| matches!(x, Some(d) if d.hub.is_some())).count()
     }
 
-    /// Ports of hub `d` in lsusb (recursively – hubs behind hubs).
+    /// Ports of hub `d` in usblist (recursively – hubs behind hubs).
     fn list_hub(&self, out: &mut Text, d: usize) {
         use core::fmt::Write;
         let Some(dev) = self.devs[d].as_ref() else { return };
@@ -2455,7 +2454,7 @@ impl Hc {
         let _ = wait_until(|| self.op_rd(USBSTS) & STS_HCH != 0);
     }
 
-    /// Device line (lsusb and console).
+    /// Device line (usblist and console).
     fn device_line(&self, out: &mut Text, d: usize) {
         use core::fmt::Write;
         let Some(dev) = self.devs[d].as_ref() else { return };
@@ -2999,7 +2998,7 @@ fn handle(hc: &mut Hc, c: u64, req: &[u8]) -> Result<(), i64> {
     }
     chan_send(c, out.as_bytes(), CHAN_NONBLOCK);
     if hc.failed() {
-        return Err(EIO);
+        return Err(ERROR_IO);
     }
     Ok(())
 }
@@ -3105,7 +3104,7 @@ fn main(args: Args) -> i32 {
         if listening && ready & 1 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 listening = false;
             } else if r >= 0 && info.handles == 1 {
                 if nclients < MAX_CLIENTS {
@@ -3122,7 +3121,7 @@ fn main(args: Args) -> i32 {
             }
             let c = clients[j];
             let r = chan_recv(c, &mut msg, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE || r == EMSGSIZE {
+            if r == ERROR_CLOSED || r == ERROR_MESSAGE_TOO_LARGE {
                 close(c);
                 clients[j] = clients[nclients - 1];
                 nclients -= 1;

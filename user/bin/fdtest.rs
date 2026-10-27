@@ -61,10 +61,10 @@ fn main(_args: Args) -> i32 {
     check!(n, seek(fd, -5, SEEK_CUR) == 6, "seek cur -5");
     let r = read(d, &mut buf[..5]);
     check!(n, r == 5 && &buf[..5] == b"world", "read after seek: {}", r);
-    check!(n, seek(fd, -1, SEEK_SET) == -22, "negative seek must be EINVAL");
-    check!(n, seek(fd, 0, 7) == -22, "bad whence must be EINVAL");
-    check!(n, seek(0, 0, SEEK_SET) == -29, "seek on console must be ESPIPE: {}", seek(0, 0, SEEK_SET));
-    check!(n, dup(99) == -9 && seek(99, 0, SEEK_SET) == -9, "bad fd must be EBADF");
+    check!(n, seek(fd, -1, SEEK_SET) == ERROR_INVALID_ARGUMENT, "negative seek must be ERROR_INVALID_ARGUMENT");
+    check!(n, seek(fd, 0, 7) == ERROR_INVALID_ARGUMENT, "bad whence must be ERROR_INVALID_ARGUMENT");
+    check!(n, seek(0, 0, SEEK_SET) == ERROR_NOT_SEEKABLE, "seek on console must be ERROR_NOT_SEEKABLE: {}", seek(0, 0, SEEK_SET));
+    check!(n, dup(99) == ERROR_INVALID_HANDLE && seek(99, 0, SEEK_SET) == ERROR_INVALID_HANDLE, "bad fd must be ERROR_INVALID_HANDLE");
 
     // 3. dup2: stdout to a file and back.
     let saved = dup(1);
@@ -90,7 +90,7 @@ fn main(_args: Args) -> i32 {
     check!(n, after > before && after == size, "position after child {} (before {}, size {})", after, before, size);
 
     // 5. close: a closed descriptor no longer works, the copy keeps working.
-    check!(n, close(fd) == 0 && write(fd, b"x") == -9, "closed fd must be EBADF");
+    check!(n, close(fd) == 0 && write(fd, b"x") == ERROR_INVALID_HANDLE, "closed fd must be ERROR_INVALID_HANDLE");
     check!(n, write(d, b"!") == 1, "dup must survive close of the original");
     close(d);
     check!(n, unlink(PATH) == 0, "unlink");

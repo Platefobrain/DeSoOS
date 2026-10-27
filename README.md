@@ -173,7 +173,7 @@ Yes. On real hardware DeSoOS **does not write to any disk**:
    including `mkfs`, `disk write` and writing files on `/esp`.
 3. **USB sticks are read-only**, with four independent locks: `usbd` contains no SCSI write
    command (checked at compile time), the kernel-`usbd` protocol has no write operation, the
-   USB disk is read-only in the block layer, and FAT32 / `open` refuse writes (`EROFS`).
+   USB disk is read-only in the block layer, and FAT32 / `open` refuse writes (`ERROR_READ_ONLY`).
 4. Verified in QEMU on a copy of a typical Linux disk layout (GPT: ESP + swap + ext4) with a
    controller posing as a real SSD and NVMe command tracing: **0 write commands** after boot,
    despite attempts such as `echo > /esp/...`, `rm`, `mkfs` and `disk write`.
@@ -219,7 +219,7 @@ vendor logo) and choose the USB stick (`EFI USB Device`). You will see boot logs
 - `ls /esp` - the disk's EFI partition (read-only), e.g. `ls /esp/EFI`
 - `ls /usb0` - the boot USB stick (read-only)
 - `cpus` - CPUs online (a 16-thread CPU should show 16)
-- `lspci`, `acpi`, `mem`, `ps`, `lsusb`, `services`
+- `lspci`, `acpi`, `mem`, `ps`, `usblist`, `services`
 - Shift+PgUp - scroll back through the boot log
 
 Most laptops have no serial port, so everything is visible only on screen (take a photo if
@@ -240,7 +240,7 @@ from `/usb0` (a `usb:` line with MiB, KiB/s, per-pass checksums and errors), and
 
 `cpus` also lists long gaps between clock (PIT) interrupts as `clock gap N: from X ms, Y us, ...`.
 A few during boot are expected on laptops: when `usbd` takes each xHCI controller over from the
-firmware (`lsusb -v` shows `BIOS: handed over (from X ms, Y ms; ...)`), the firmware stops the
+firmware (`usblist -v` shows `BIOS: handed over (from X ms, Y ms; ...)`), the firmware stops the
 machine for tens of milliseconds (SMI). Lost ticks are caught up from the HPET, so time stays
 correct; an occasional ~2 ms gap later on is also firmware.
 
@@ -258,30 +258,31 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   `date`, `ver`, `uptime`.
 - `services` - state of services started by `init`, including USB controllers (`usb0`,
   `usb1`, ...).
-- `lsusb` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
+- `usblist` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
   (keyboard, mouse, mass storage, hub, ...), interface classes, manufacturer and product.
-  `lsusb -v` also prints each controller (version, ports, BIOS handoff and its timing).
+  `usblist -v` also prints each controller (version, ports, BIOS handoff and its timing).
 - `dcp` - permissions (DCP, DeSoOS Capability Permissions): what every process may do (devices,
   system powers, files). `dcp inspect <pid>` - every capability of one process with its rights;
   `dcp audit` - the last refused attempts. DeSoOS has no users or `rwx` bits: a program may do
   exactly what its capabilities allow (see ARCHITECTURE.md, "Syscalls and handles").
-- `ifconfig` - network cards: driver, MAC address, link, IPv4 address, gateway and DNS servers (from
-  DHCP), lease time, frame counters. `ifconfig renew` - renew the DHCP lease now. `ifconfig set
+- `netconfig` - network cards: driver, MAC address, link, IPv4 address, gateway and DNS servers (from
+  DHCP), lease time, frame counters. `netconfig renew` - renew the DHCP lease now. `netconfig set
   192.168.1.50/24 gw 192.168.1.1 dns 192.168.1.1` - an address by hand (for a cable without a DHCP server;
-  checked first - an address another machine uses is refused); `ifconfig dhcp` - back to DHCP. The address comes from the
+  checked first - an address another machine uses is refused); `netconfig dhcp` - back to DHCP. The address comes from the
   network's DHCP server a few milliseconds after the card starts (in QEMU: 10.0.2.15/24, gateway 10.0.2.2,
-  DNS 10.0.2.3). `arping <a.b.c.d>` - send one ARP request and show who answered.
+  DNS 10.0.2.3). Only `netconfig` may change network settings; other programs started from the shell can use
+  the network but not reconfigure it. `netarp <a.b.c.d>` - send one ARP request and show who answered.
 - `ping <address or name> [count]` - ICMP echo, one per second (default 4), each answer with its time, then a
   summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSoOS also answers pings
   to its own address. Several programs can use the network at the same time.
-- `fetch [-o file] [-v] http://host[:port]/path` - download a page over HTTP (TCP through netd); the body to the
+- `netget [-o file] [-v] http://host[:port]/path` - download a page over HTTP (TCP through netd); the body to the
   console or to a file, a summary with the speed to stderr. `https://` needs TLS - not supported yet.
-- `httpd [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
-  file access: `nofiles --listen httpd 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
+- `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
+  file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
   port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it
   off). Connections to 127.0.0.1 or to DeSoOS's own address stay inside (loopback).
-- `host <name>` - the IPv4 addresses of a name (DNS; answers are cached). `ifconfig dns <a.b.c.d[:port]>` uses
-  another DNS server, `ifconfig dns auto` the one from DHCP.
+- `host <name>` - the IPv4 addresses of a name (DNS; answers are cached). `netconfig dns <a.b.c.d[:port]>` uses
+  another DNS server, `netconfig dns auto` the one from DHCP.
 - `nofiles <program> [args]` - run a program in the file sandbox: it cannot open any path, only
   use what the shell hands it (`nofiles cat < notes.txt` works, `nofiles cat notes.txt` is refused).
   `nofiles --net <program>` - plus network connections; `nofiles --listen <program>` - plus servers. Such a

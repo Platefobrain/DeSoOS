@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::space::AddressSpace;
-use super::syscalls::EBADF;
+use super::syscalls::ERROR_INVALID_HANDLE;
 use crate::console::SerialDecoder;
 use crate::sched::sync::Mutex;
 use crate::sched::TaskId;
@@ -40,8 +40,8 @@ pub struct OpenFile {
 }
 
 /// Handle rights (bits).  Rights can only be reduced (handle_dup);
-/// missing READ / WRITE on read / write = EBADF (as in POSIX), missing
-/// others = EACCES.  Design: ARCHITECTURE.md, "IPC".
+/// missing READ / WRITE on read / write = ERROR_INVALID_HANDLE (as in POSIX), missing
+/// others = ERROR_ACCESS_DENIED.  Design: ARCHITECTURE.md, "IPC".
 pub mod rights {
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;
@@ -293,7 +293,7 @@ pub struct Process {
 /// – the address space's Drop frees every mapped frame, but the object's frames
 /// belong to the object (other processes may still be using it).
 /// Limit on the number of processes.  Above MAX_PROCS − PROC_RESERVE spawn gets
-/// EAGAIN; the last PROC_RESERVE slots are only for init and its direct
+/// ERROR_WOULD_BLOCK; the last PROC_RESERVE slots are only for init and its direct
 /// children (shell, services) – after a `spawn` bomb the shell can still run `ps`/`kill`,
 /// and init can restart a service.  There are 4096 task stacks – the limit leaves room for
 /// kernel tasks.
@@ -361,7 +361,7 @@ impl Process {
 
     /// Handle (object + rights).
     pub(super) fn handle(&self, fd: u64) -> Result<&Handle, i64> {
-        self.fds.get(fd as usize).and_then(|f| f.as_ref()).ok_or(EBADF)
+        self.fds.get(fd as usize).and_then(|f| f.as_ref()).ok_or(ERROR_INVALID_HANDLE)
     }
 
     pub(super) fn is_console(&self, fd: u64) -> bool {

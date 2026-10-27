@@ -40,7 +40,6 @@ const IRQ_FACT: u32 = 0x1;
 const IRQ_DMA: u32 = 0x100;
 const EDU_BUF: u64 = 0x40000;
 const EDU_BITS: u64 = 28;
-const EIO: i64 = -5;
 
 struct Edu {
     regs: u64,
@@ -70,7 +69,7 @@ impl Edu {
         while self.rd(REG_IRQ_STATUS) & bit == 0 {
             let left = 1000u64.saturating_sub(uptime_ms() - t0);
             if left == 0 {
-                return Err(EIO);
+                return Err(ERROR_IO);
             }
             if wait_many(&[(self.irq, W_IRQ)], left) == Ok(1) {
                 self.irqs += irq_read(self.irq) as u64;
@@ -167,14 +166,14 @@ fn main(_args: Args) -> i32 {
         if listening && ready & 1 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 listening = false;
             } else if r >= 0 && info.handles == 1 {
                 if nclients < MAX_CLIENTS {
                     clients[nclients] = hs[0];
                     nclients += 1;
                 } else {
-                    close(hs[0]); // too many clients – the client will get EPIPE
+                    close(hs[0]); // too many clients – the client will get ERROR_CLOSED
                 }
             }
         }
@@ -185,7 +184,7 @@ fn main(_args: Args) -> i32 {
             }
             let c = clients[j];
             let r = chan_recv(c, &mut msg, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 close(c);
                 clients[j] = clients[nclients - 1];
                 nclients -= 1;

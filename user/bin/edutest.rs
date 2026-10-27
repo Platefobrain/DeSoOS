@@ -2,7 +2,7 @@
 // device via HW_ROOT, spawn_ex with handles 3 = device, 4 = connection channel),
 // connects as a client: PING, factorial, DMA copy, bad request,
 // 4 clients at once (separate processes), statistics; then kills the service while
-// a client is working – the client gets EPIPE, the device comes back, a new service instance
+// a client is working – the client gets ERROR_CLOSED, the device comes back, a new service instance
 // works and the client reconnects; finally shutdown – the service exits
 // by itself (code 0).  Result: "edutest: N checks OK, ..." and code 0.
 // Started by SVC TEST with the HW_ROOT handle (QEMU with `-device edu,addr=06`).
@@ -114,7 +114,7 @@ fn main(args: Args) -> i32 {
             return 1;
         }
     };
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device must belong to the service");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "device must belong to the service");
 
     // 2. Client: PING, factorial, DMA copy, bad request.
     let c = connect(listen);
@@ -126,18 +126,18 @@ fn main(args: Args) -> i32 {
         facts_ok &= matches!(call(c, OP_FACT, k, &[], &mut out), Ok((0, v, 0)) if v == FACTS[k as usize]);
     }
     check!(n, facts_ok, "factorials 0..12 by the device");
-    check!(n, matches!(call(c, OP_FACT, 13, &[], &mut out), Ok((-22, _, _))), "13! must be EINVAL (does not fit)");
+    check!(n, matches!(call(c, OP_FACT, 13, &[], &mut out), Ok((-22, _, _))), "13! must be ERROR_INVALID_ARGUMENT (does not fit)");
     let mut data = [0u8; COPY_MAX];
     for (i, b) in data.iter_mut().enumerate() {
         *b = (i as u32).wrapping_mul(31).wrapping_add(3) as u8;
     }
     let r = call(c, OP_COPY, 0, &data, &mut out);
     check!(n, matches!(r, Ok((0, v, l)) if v == COPY_MAX as u64 && l == COPY_MAX) && out[..COPY_MAX] == data[..], "COPY {} B via DMA: {:?}", COPY_MAX, r);
-    check!(n, matches!(call(c, 99, 0, &[], &mut out), Ok((-22, 0, _))), "unknown op must be EINVAL");
+    check!(n, matches!(call(c, 99, 0, &[], &mut out), Ok((-22, 0, _))), "unknown op must be ERROR_INVALID_ARGUMENT");
     check!(n, chan_send(c, b"x", 0) == 0, "short request");
     let mut info = RecvInfo::default();
     let r = chan_recv(c, &mut out, 0, &mut info);
-    check!(n, r == HDR as i64 && u32_at(&out, 0) as i32 == -22, "short request must be answered with EINVAL");
+    check!(n, r == HDR as i64 && u32_at(&out, 0) as i32 == -22, "short request must be answered with ERROR_INVALID_ARGUMENT");
 
     // 3. 4 clients at once (separate processes) – 50 factorials each.
     let mut pids = [0i64; CLIENTS];
@@ -153,11 +153,11 @@ fn main(args: Args) -> i32 {
     let served = r.map(|(_, v, _)| v).unwrap_or(0);
     check!(n, served >= 18 + CLIENTS as u64 * CLIENT_ROUNDS, "stats: {} requests served", served);
 
-    // 4. Service killed – the client gets EPIPE, the device comes back; a new instance
+    // 4. Service killed – the client gets ERROR_CLOSED, the device comes back; a new instance
     //    (as on a restart by the service manager) works, the client reconnects.
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill edud");
     let r = call(c, OP_PING, 0, &[], &mut out);
-    check!(n, r == Err(EPIPE), "client of a killed service must get EPIPE: {:?}", r);
+    check!(n, r == Err(ERROR_CLOSED), "client of a killed service must get ERROR_CLOSED: {:?}", r);
     close(c);
     close(listen);
     let (pid, listen) = match start_edud() {

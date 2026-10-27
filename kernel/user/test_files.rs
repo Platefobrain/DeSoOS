@@ -64,13 +64,13 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "fdtest: {:?} {:?}", kind, out.trim());
     serial_println!("[FILE TEST] 1/7 dup, dup2, seek, shared position (also with a spawned child): {} PASS", out.trim());
 
-    // 2. Pipes: read / write, end of data, EPIPE, 200 KiB through cat,
+    // 2. Pipes: read / write, end of data, ERROR_CLOSED, 200 KiB through cat,
     // child output through a pipe, a waiting reader.
     let r = run("/bin/pipetest", &["pipetest"], 20_000);
     check!(r.is_some(), "pipetest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "pipetest: {:?} {:?}", kind, out.trim());
-    serial_println!("[FILE TEST] 2/7 pipes: EOF, EPIPE, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 2/7 pipes: EOF, ERROR_CLOSED, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
 
     // 3. Pipes in the shell: program | program, builtin | program,
     // three stages with redirection, syntax errors.

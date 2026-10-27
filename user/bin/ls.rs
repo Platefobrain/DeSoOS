@@ -10,7 +10,7 @@ mod desoos;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use desoos::{ERANGE, readdir, stat, strerror};
+use desoos::{ERROR_BUFFER_TOO_SMALL, readdir, stat, strerror};
 
 entry!(main);
 
@@ -39,7 +39,7 @@ fn list(path: &str, header: bool) -> i32 {
     let mut buf = vec![0u8; 4096];
     let n = loop {
         let n = readdir(path, &mut buf);
-        if n == ERANGE && buf.len() < 64 * 1024 {
+        if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
             buf.resize(buf.len() * 2, 0);
             continue;
         }

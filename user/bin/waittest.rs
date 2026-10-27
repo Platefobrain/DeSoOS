@@ -1,5 +1,5 @@
 // wait_many test – waiting on many handles at once: list errors
-// (EINVAL / EBADF / EACCES), check only (timeout 0), timeout,
+// (ERROR_INVALID_ARGUMENT / ERROR_INVALID_HANDLE / ERROR_ACCESS_DENIED), check only (timeout 0), timeout,
 // channel and pipe readiness for read / write, closing the other side,
 // wakeup by a message from a child, a server handling 4 clients at once
 // (the user-space service pattern), full queue, kill of a process waiting in wait_many.
@@ -96,7 +96,7 @@ fn main(args: Args) -> i32 {
     //    signal, console, IRQ on a channel, missing RECV / SEND right.
     let (a, b) = channel_create().unwrap_or((0, 0));
     let r = syscall3(SYS_WAIT_MANY, 0, 0, 0);
-    check!(n, r == -22, "n = 0 must be EINVAL ({})", r);
+    check!(n, r == ERROR_INVALID_ARGUMENT, "n = 0 must be ERROR_INVALID_ARGUMENT ({})", r);
     let big = [(a, W_READABLE); WAIT_MAX + 1];
     let mut flat = [0u64; 2 * (WAIT_MAX + 1)];
     for (i, &(h, s)) in big.iter().enumerate() {
@@ -104,16 +104,16 @@ fn main(args: Args) -> i32 {
         flat[2 * i + 1] = s;
     }
     let r = syscall3(SYS_WAIT_MANY, flat.as_ptr() as u64, (WAIT_MAX + 1) as u64, 0);
-    check!(n, r == -22, "n = 17 must be EINVAL ({})", r);
-    check!(n, wait_many(&[(a, W_READABLE), (60, W_READABLE)], 0) == Err(-9), "bad handle must be EBADF");
-    check!(n, wait_many(&[(a, 0)], 0) == Err(-22) && wait_many(&[(a, 64)], 0) == Err(-22), "no / unknown signal must be EINVAL");
-    check!(n, wait_many(&[(1, W_WRITABLE)], 0) == Err(-22), "console must be EINVAL");
-    check!(n, wait_many(&[(a, W_IRQ)], 0) == Err(-22), "IRQ on a channel must be EINVAL");
+    check!(n, r == ERROR_INVALID_ARGUMENT, "n = 17 must be ERROR_INVALID_ARGUMENT ({})", r);
+    check!(n, wait_many(&[(a, W_READABLE), (60, W_READABLE)], 0) == Err(ERROR_INVALID_HANDLE), "bad handle must be ERROR_INVALID_HANDLE");
+    check!(n, wait_many(&[(a, 0)], 0) == Err(ERROR_INVALID_ARGUMENT) && wait_many(&[(a, 64)], 0) == Err(ERROR_INVALID_ARGUMENT), "no / unknown signal must be ERROR_INVALID_ARGUMENT");
+    check!(n, wait_many(&[(1, W_WRITABLE)], 0) == Err(ERROR_INVALID_ARGUMENT), "console must be ERROR_INVALID_ARGUMENT");
+    check!(n, wait_many(&[(a, W_IRQ)], 0) == Err(ERROR_INVALID_ARGUMENT), "IRQ on a channel must be ERROR_INVALID_ARGUMENT");
     let send_only = handle_dup(a, R_SEND | R_DUP) as u64;
     let recv_only = handle_dup(a, R_RECV | R_DUP) as u64;
-    check!(n, wait_many(&[(send_only, W_READABLE)], 0) == Err(-13), "READABLE without R_RECV must be EACCES");
-    check!(n, wait_many(&[(recv_only, W_WRITABLE)], 0) == Err(-13), "WRITABLE without R_SEND must be EACCES");
-    check!(n, syscall3(SYS_WAIT_MANY, 8, 1, 0) == -14, "bad list pointer must be EFAULT");
+    check!(n, wait_many(&[(send_only, W_READABLE)], 0) == Err(ERROR_ACCESS_DENIED), "READABLE without R_RECV must be ERROR_ACCESS_DENIED");
+    check!(n, wait_many(&[(recv_only, W_WRITABLE)], 0) == Err(ERROR_ACCESS_DENIED), "WRITABLE without R_SEND must be ERROR_ACCESS_DENIED");
+    check!(n, syscall3(SYS_WAIT_MANY, 8, 1, 0) == ERROR_INVALID_ADDRESS, "bad list pointer must be ERROR_INVALID_ADDRESS");
 
     // 2. Check only and timeout; an empty channel for writing – ready immediately.
     check!(n, wait_many(&[(a, W_READABLE)], 0) == Ok(0), "empty channel must not be readable");
@@ -132,10 +132,10 @@ fn main(args: Args) -> i32 {
     chan_recv(c, &mut buf, 0, &mut info);
     check!(n, wait_many(&[(c, W_READABLE)], 0) == Ok(0), "after recv: not readable");
 
-    // 4. Other side closed – ready for read (recv gives EPIPE) and for write (EPIPE).
+    // 4. Other side closed – ready for read (recv gives ERROR_CLOSED) and for write (ERROR_CLOSED).
     close(d);
     check!(n, wait_many(&[(c, W_READABLE), (c, W_WRITABLE)], FOREVER) == Ok(0b11), "closed peer: readable + writable");
-    check!(n, chan_recv(c, &mut buf, CHAN_NONBLOCK, &mut info) == EPIPE, "closed peer: recv EPIPE");
+    check!(n, chan_recv(c, &mut buf, CHAN_NONBLOCK, &mut info) == ERROR_CLOSED, "closed peer: recv ERROR_CLOSED");
     close(c);
 
     // 5. Wakeup: after 40 ms a child sends on the second of three channels.
@@ -205,7 +205,7 @@ fn main(args: Args) -> i32 {
                 let v = u64::from_le_bytes(buf[..8].try_into().unwrap()) + 1;
                 chan_send(ends[i], &v.to_le_bytes(), 0);
                 served += 1;
-            } else if r == EPIPE {
+            } else if r == ERROR_CLOSED {
                 close(ends[i]);
                 ends[i] = 0;
                 open -= 1;
@@ -222,10 +222,10 @@ fn main(args: Args) -> i32 {
     check!(n, bad == 0 && served == CLIENTS as u64 * ROUNDS && clients_ok, "server: served {} of {}, bad {}, clients ok {}", served, CLIENTS as u64 * ROUNDS, bad, clients_ok);
 
     // 7. Pipe: read ready after a write, write ready immediately, read ready after
-    //    the writer closes; wrong direction – EINVAL.
+    //    the writer closes; wrong direction – ERROR_INVALID_ARGUMENT.
     let (pr, pw) = pipe().unwrap_or((0, 0));
     check!(n, wait_many(&[(pr, W_READABLE)], 0) == Ok(0) && wait_many(&[(pw, W_WRITABLE)], 0) == Ok(1), "empty pipe");
-    check!(n, wait_many(&[(pr, W_WRITABLE)], 0) == Err(-22) && wait_many(&[(pw, W_READABLE)], 0) == Err(-22), "wrong pipe direction must be EINVAL");
+    check!(n, wait_many(&[(pr, W_WRITABLE)], 0) == Err(ERROR_INVALID_ARGUMENT) && wait_many(&[(pw, W_READABLE)], 0) == Err(ERROR_INVALID_ARGUMENT), "wrong pipe direction must be ERROR_INVALID_ARGUMENT");
     write(pw, b"abc");
     check!(n, wait_many(&[(a, W_READABLE), (pr, W_READABLE)], FOREVER) == Ok(0b10), "pipe readable after write");
     read(pr, &mut buf);

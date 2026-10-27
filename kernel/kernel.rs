@@ -213,6 +213,9 @@ pub extern "sysv64" fn kernel_main(
     // IPC – handles with rights, channels, shared memory.
     #[cfg(selftest)]
     user::ipc_self_test();
+    // The syscall rights table – every right taken away in turn.
+    #[cfg(selftest)]
+    user::rights_self_test();
     // User-space services.
     #[cfg(selftest)]
     user::svc_self_test();

@@ -1,4 +1,4 @@
-// Test of device interrupts in user space – irq_bind (rights, EBUSY),
+// Test of device interrupts in user space – irq_bind (rights, ERROR_BUSY),
 // an interrupt from `edu` wakes wait_many (W_IRQ), the irq_read counter, several
 // interrupts before handling = one wakeup with a counter, factorial completed
 // by an interrupt, an interrupt together with a channel on one list, closing
@@ -77,19 +77,19 @@ fn main(args: Args) -> i32 {
         }
     };
 
-    // 1. irq_bind: rights, handle kind, a second bind – EBUSY.
+    // 1. irq_bind: rights, handle kind, a second bind – ERROR_BUSY.
     let ro = handle_dup(dev, R_MAP_READ | R_DUP) as u64;
-    check!(n, irq_bind(ro) == -13, "irq_bind without R_MAP_WRITE must be EACCES");
-    check!(n, irq_bind(1) == -9, "irq_bind on the console must be EBADF");
+    check!(n, irq_bind(ro) == ERROR_ACCESS_DENIED, "irq_bind without R_MAP_WRITE must be ERROR_ACCESS_DENIED");
+    check!(n, irq_bind(1) == ERROR_INVALID_HANDLE, "irq_bind on the console must be ERROR_INVALID_HANDLE");
     close(ro);
     let irq = irq_bind(dev);
     check!(n, irq >= 0, "irq_bind: {}", strerror(irq));
     let irq = irq as u64;
     check!(n, handle_info(irq) == Ok((KIND_IRQ, R_RECV | R_DUP | R_TRANSFER)), "rights: {:?}", handle_info(irq));
-    check!(n, irq_bind(dev) == EBUSY, "second irq_bind must be EBUSY");
+    check!(n, irq_bind(dev) == ERROR_BUSY, "second irq_bind must be ERROR_BUSY");
     check!(n, irq_read(irq) == 0 && wait_many(&[(irq, W_IRQ)], 0) == Ok(0), "no interrupt yet");
-    check!(n, wait_many(&[(irq, W_READABLE)], 0) == Err(-22), "READABLE on an IRQ must be EINVAL");
-    check!(n, irq_read(dev) == -9, "irq_read on a device must be EBADF");
+    check!(n, wait_many(&[(irq, W_READABLE)], 0) == Err(ERROR_INVALID_ARGUMENT), "READABLE on an IRQ must be ERROR_INVALID_ARGUMENT");
+    check!(n, irq_read(dev) == ERROR_INVALID_HANDLE, "irq_read on a device must be ERROR_INVALID_HANDLE");
 
     // 2. Interrupt on demand: write to the "raise" register – wakeup, counter,
     //    status in the device; acknowledgement (ack).
@@ -178,7 +178,7 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0, "spawn holder: {}", strerror(pid));
     close(dev);
     sleep_ms(30);
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device busy while the holder runs");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "device busy while the holder runs");
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill holder");
     let dev = dev_claim(HW_ROOT, EDU);
     check!(n, dev >= 0, "device free after kill: {}", strerror(dev));

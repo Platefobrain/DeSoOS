@@ -2,6 +2,61 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.51.0 — 2026-10-27
+
+### Program names: the network and USB families
+- `lsusb` is now **`usblist`** (next to `usbd`, `usb0`), `arping` is now **`netarp`** and `httpd` is now
+  **`netweb`** (next to `netd`, `netconfig`, `netget`). No old names kept.
+- `ping` and `host` keep their names, and so do the file and process tools (`ls`, `cat`, `cp`, `mv`, `rm`,
+  `mkdir`, `touch`, `stat`, `ps`, `kill`, `sleep`, `sh`) – known everywhere.
+- 30/30 suites.
+
+## v0.50.0 — 2026-10-27
+
+### DeSoOS error names
+- The Unix error names (`EACCES`, `EBADF`, `ENOENT`...) are replaced by **one readable set with the `ERROR_`
+  prefix**, the same in the kernel and in programs: `ERROR_ACCESS_DENIED`, `ERROR_INVALID_HANDLE`,
+  `ERROR_NOT_FOUND`, `ERROR_INVALID_ARGUMENT`, `ERROR_CLOSED`, `ERROR_WOULD_BLOCK`, `ERROR_NOT_IMPLEMENTED`... (29;
+  table in ARCHITECTURE, "Errors"). The **numbers stay the Unix ones** (a future Linux compatibility layer needs
+  no translation).
+- `user/lib/desoos.rs` has all of them in one place (programs had their own copies of some), `strerror` gives
+  new texts ("access denied", "invalid handle", "not found", "the other end is closed"...) and `error_name` the
+  name. The tests compare with names instead of bare numbers (`== ERROR_INVALID_HANDLE`, not `== -9`).
+- Visible change: `cat /nope.txt` says `not found` (was `no such file or directory`). 30/30 suites.
+
+## v0.49.0 — 2026-10-27
+
+### One rights table for every syscall
+- Rights were checked inside each syscall function, in about fifteen places, each a little differently. Now
+  `kernel/user/sysrights.rs` has **one row per syscall**: which arguments are handles, of which kinds, which rights
+  each needs (a mapping needs `MAP_WRITE` only when it asks for writing), and whether the call takes a path (file
+  sandbox). `syscall_dispatch` asks the table before the call is decoded – **one gate**; the functions only use
+  the objects. A number without a row is `ENOSYS`. Handles in a list in memory (message handles, `wait_many`,
+  `spawn` / `spawn_ex`, the `sysctl` output handle) are still checked by the call, and the row says so.
+- **`read` / `write` without the right now give `EACCES`** like every other syscall (was `EBADF`, as in POSIX).
+  `EBADF` means only "no such handle / wrong kind". `dcp audit` names the missing right for every refusal by the
+  gate.
+- The table is readable as text: `sysinfo rights`.
+- New suite **RIGHTS TEST**: the gate alone against every row (every right of every handle argument taken away
+  in turn), `/bin/rightstest` through real syscalls with a real object of every kind (it reads the table from the
+  kernel, so new rows are tested automatically), and the gate's cost: ~20–40 ns per syscall in QEMU TCG;
+  `[RESULT-SVC]` unchanged. 30/30 suites.
+
+## v0.48.0 — 2026-10-27
+
+### Network tools renamed; only netconfig may change network settings
+- `ifconfig` is now **`netconfig`** and `fetch` is now **`netget`** (no old names kept): the network tools share
+  one `net` prefix.
+- Until now every program started from the shell reached netd as an administrator – any of them could change the
+  address or the DNS server. init now gives the shell two service channels: its own (everything) and a **program
+  channel** (every service, network connections and servers, no network administration; not a user account –
+  DeSoOS has none). The shell hands the
+  program channel to the programs it starts; only `netconfig` gets the shell's own channel. A shell started from the
+  shell has only the program channel.
+- netd: a connection whose text from init names no rights gets none (was: all).
+- nettest: the program channel reaches netd and another service, may listen, is refused a DNS change; through
+  `sh -c` a program is refused and `netconfig` is allowed. 29/29 suites in QEMU.
+
 ## v0.47.0 — 2026-10-26
 
 ### Found the download brake: ramfs copied the whole file on every write

@@ -1,7 +1,7 @@
 // System calls.
 //
 // Number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9, result in RAX;
-// error = negative code (like -errno in Linux).
+// error = a negative code (ERROR_* below; the numbers are the Unix ones).
 //
 //   0  exit(code)                       terminates the process
 //   1  write(fd, buf, len) -> n         fd 1/2 = console, 3+ = file
@@ -45,9 +45,9 @@
 //  22  dup(fd) -> new fd                 lowest free one
 //  23  dup2(old, new) -> new             new is closed and points to old's object
 //  24  seek(fd, offset, whence) -> pos   whence 0 SET, 1 CUR, 2 END;
-//        console – ESPIPE
+//        console – ERROR_NOT_SEEKABLE
 //  25  pipe(out) -> 0                    out = [read fd, write fd]; read waits
-//        for data (0 = nobody writes any more), write – for space (EPIPE when
+//        for data (0 = nobody writes any more), write – for space (ERROR_CLOSED when
 //        nobody reads); 64 KiB buffer
 //
 // Process memory (pages allocated on first access):
@@ -118,7 +118,7 @@ pub const SYS_CHAN_SEND: u64 = 32;
 /// chan_recv(h, buffer, cap, handles, hcap | flags << 32, info) -> len;
 /// info = [len, n_handles, sender] (3 × u64).
 pub const SYS_CHAN_RECV: u64 = 33;
-/// Do not wait (full / empty queue – EAGAIN).
+/// Do not wait (full / empty queue – ERROR_WOULD_BLOCK).
 pub const CHAN_NONBLOCK: u64 = 1;
 /// spawn_ex(path, len, argv, len, map, n | flags << 32) – the child
 /// gets ONLY the handles from the map [(parent handle, number in child)] (2 × u64).
@@ -140,70 +140,57 @@ pub const W_READABLE: u64 = 1;
 pub const W_WRITABLE: u64 = 2;
 /// Interrupt (IRQ object): counter > 0.
 pub const W_IRQ: u64 = 4;
-/// Interrupt from a handle (RECV right).
+/// Interrupt from a handle (rights: the table, sysrights.rs).
 fn irq_obj(p: &Process, h: u64) -> Result<Arc<super::device::IrqObj>, i64> {
-    let hd = p.handle(h)?;
-    let Fd::Irq(q) = &hd.obj else { return Err(EBADF) };
-    if hd.rights & rights::RECV == 0 {
-        return Err(EACCES);
-    }
+    let Fd::Irq(q) = p.fd(h)? else { return Err(ERROR_INVALID_HANDLE) };
     Ok(q.clone())
 }
 
 /// dev_claim(hw_root, bdf) -> DEVICE handle; bdf = bus << 8 | dev << 3 | fn.
 pub const SYS_DEV_CLAIM: u64 = 39;
 /// dev_find(hw_root, class, nr) – init looks devices up by class (e.g.
-/// xHCI controllers 0C0330), not by a fixed address.  Only from HW_ROOT (EBADF);
-/// EINVAL – class > 24 bits; ENOENT – fewer than nr + 1 matches.  Finding a
+/// xHCI controllers 0C0330), not by a fixed address.  Only from HW_ROOT (ERROR_INVALID_HANDLE);
+/// ERROR_INVALID_ARGUMENT – class > 24 bits; ERROR_NOT_FOUND – fewer than nr + 1 matches.  Finding a
 /// device claims nothing – access is decided by dev_claim.
 fn sys_dev_find(p: &mut Process, root: u64, class: u64, nr: u64) -> SysResult {
     if !matches!(p.fd(root)?, Fd::HwRoot) {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_HANDLE);
     }
     if class > 0xFF_FFFF {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let d = crate::drivers::pci::devices()
         .iter()
         .filter(|d| ((d.class as u64) << 16 | (d.subclass as u64) << 8 | d.prog_if as u64) == class)
         .nth(nr.min(usize::MAX as u64) as usize)
-        .ok_or(ENOENT)?;
+        .ok_or(ERROR_NOT_FOUND)?;
     let a = d.address;
     Ok((a.bus as u64) << 8 | (a.device as u64) << 3 | a.function as u64)
 }
 
 /// blk_attach – usbd registers a USB stick as a kernel disk (ublk.rs).
-/// EBADF – not BLK / not a channel / not SHM; EACCES – BLK without WRITE, channel without
-/// SEND + RECV + TRANSFER, buffer without MAP_READ; EINVAL – bad block size,
-/// 0 blocks, slots outside 1..8, buffer smaller than slots × 64 KiB; ENOSPC –
-/// 8 USB disks at once; EFAULT.  The kernel takes its own references to the channel and
+/// ERROR_INVALID_HANDLE – not BLK / not a channel / not SHM; ERROR_ACCESS_DENIED – BLK without WRITE, channel without
+/// SEND + RECV + TRANSFER, buffer without MAP_READ; ERROR_INVALID_ARGUMENT – bad block size,
+/// 0 blocks, slots outside 1..8, buffer smaller than slots × 64 KiB; ERROR_NO_SPACE –
+/// 8 USB disks at once; ERROR_INVALID_ADDRESS.  The kernel takes its own references to the channel and
 /// the buffer (usbd may close its handles).
 fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysResult {
-    let hd = p.handle(h)?;
-    if !matches!(hd.obj, Fd::Blk) {
-        return Err(EBADF);
+    // Kinds and rights of all three handles: the table (sysrights.rs).
+    if !matches!(p.fd(h)?, Fd::Blk) {
+        return Err(ERROR_INVALID_HANDLE);
     }
-    if hd.rights & rights::WRITE == 0 {
-        return Err(EACCES);
-    }
-    let hc = p.handle(ch)?;
-    let Fd::Channel(c) = &hc.obj else { return Err(EBADF) };
-    let need = rights::SEND | rights::RECV | rights::TRANSFER;
-    if hc.rights & need != need {
-        return Err(EACCES);
-    }
-    let c = c.clone();
-    let b = shm_obj(p, buf, rights::MAP_READ)?;
+    let c = chan_end(p, ch)?;
+    let b = shm_obj(p, buf)?;
     let raw = copy_from_user(p, info, 64)?;
     let blocks = u64::from_le_bytes(raw[0..8].try_into().unwrap());
     let bs = u32::from_le_bytes(raw[8..12].try_into().unwrap());
     let slots = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
     let timeout = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
     if !matches!(bs, 512 | 4096) || blocks == 0 || blocks.checked_mul(bs as u64).is_none() {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     if slots == 0 || slots > super::ublk::SLOTS_MAX || b.len() < (slots * super::ublk::SLOT_BYTES) as u64 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let timeout = if timeout == 0 { super::ublk::TIMEOUT_MS } else { timeout.clamp(100, 30_000) };
     let desc: String = raw[24..64]
@@ -216,30 +203,24 @@ fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysR
 
 /// input_inject – keyboard / mouse events from a service (usbd) into the
 /// kernel input subsystem (console, shell, readkey – unchanged for everything else).
-/// EBADF – not INPUT; EACCES – no WRITE; EINVAL – n = 0 / > 64 or a bad
-/// kind (then no event goes through); EFAULT – bad pointer.
+/// ERROR_INVALID_HANDLE – not INPUT; ERROR_ACCESS_DENIED – no WRITE; ERROR_INVALID_ARGUMENT – n = 0 / > 64 or a bad
+/// kind (then no event goes through); ERROR_INVALID_ADDRESS – bad pointer.
 fn sys_input_inject(p: &mut Process, h: u64, ptr: u64, n: u64) -> SysResult {
-    {
-        let hd = p.handle(h)?;
-        if !matches!(hd.obj, Fd::Input(_)) {
-            return Err(EBADF);
-        }
-        if hd.rights & rights::WRITE == 0 {
-            return Err(EACCES);
-        }
+    if !matches!(p.fd(h)?, Fd::Input(_)) {
+        return Err(ERROR_INVALID_HANDLE);
     }
     if n == 0 || n > 64 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let data = copy_from_user(p, ptr, n * 8)?;
     if data.chunks(8).any(|e| !matches!(e[0], 1 | 2)) {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     // Latency "controller interrupt -> character in the kernel" – measured from
     // the last device interrupt of this process (usbd has one: xHCI).
     let irq_t = p.fds.iter().flatten().filter_map(|h| if let Fd::Irq(o) = &h.obj { Some(o.last_stamp()) } else { None }).max().unwrap_or(0);
     let hd = p.handle(h)?;
-    let Fd::Input(src) = &hd.obj else { return Err(EBADF) };
+    let Fd::Input(src) = &hd.obj else { return Err(ERROR_INVALID_HANDLE) };
     let now = crate::time::ticks();
     let mut measured = false;
     for e in data.chunks(8) {
@@ -272,21 +253,21 @@ pub const SYS_DEV_INFO: u64 = 40;
 /// dev_map(dev, bar, prot) -> register address (UC, NX); munmap as a whole.
 pub const SYS_DEV_MAP: u64 = 41;
 /// irq_bind(dev) -> IRQ handle (MSI / MSI-X vector, bus mastering);
-/// requires MAP_WRITE on the device.  EBUSY – already bound / no vectors left.
+/// requires MAP_WRITE on the device.  ERROR_BUSY – already bound / no vectors left.
 pub const SYS_IRQ_BIND: u64 = 42;
 /// irq_read(irq) -> interrupts since the last read (resets the counter).
 pub const SYS_IRQ_READ: u64 = 43;
 /// dma_alloc(dev, size, addr_bits) -> SHM handle (contiguous frames below
 /// 2^bits, ≤ 2 MiB, ≤ 16 MiB per device; bus mastering); requires MAP_WRITE.
 pub const SYS_DMA_ALLOC: u64 = 44;
-/// dma_phys(shm) -> physical address of a DMA buffer (EINVAL – ordinary memory).
+/// dma_phys(shm) -> physical address of a DMA buffer (ERROR_INVALID_ARGUMENT – ordinary memory).
 pub const SYS_DMA_PHYS: u64 = 45;
 /// sysinfo(topic, len, buffer, cap) -> text length (read-only).
 pub const SYS_SYSINFO: u64 = 46;
 /// sysctl(SYSCTL handle, action, arg, fd) – 1 reboot, 2 halt, 3 sync, 4 stress.
 pub const SYS_SYSCTL: u64 = 47;
 /// dev_find(hw_root, class, nr) -> bdf of the `nr`-th PCI device with the class
-/// (24 bits: class << 16 | subclass << 8 | prog_if); ENOENT – no more devices.
+/// (24 bits: class << 16 | subclass << 8 | prog_if); ERROR_NOT_FOUND – no more devices.
 pub const SYS_DEV_FIND: u64 = 48;
 /// input_inject(INPUT, events, n) -> LED state (bit 0 Num, 1 Caps,
 /// 2 Scroll); 8-byte event: kind (1 key, 2 mouse), pressed / wheel,
@@ -313,39 +294,42 @@ pub const O_CREATE: u64 = 4;
 pub const O_TRUNC: u64 = 8;
 pub const O_APPEND: u64 = 16;
 
-pub const EPERM: i64 = -1;
-pub const ENOENT: i64 = -2;
-pub const ESRCH: i64 = -3;
-pub const EINTR: i64 = -4;
-pub const EIO: i64 = -5;
-pub const EBADF: i64 = -9;
-pub const EAGAIN: i64 = -11;
+// DeSoOS errors – negative syscall results, the same names and numbers in
+// programs (user/lib/desoos.rs).  The numbers are the Unix ones (a future Linux
+// compatibility layer needs no translation); the names are DeSoOS's.
+pub const ERROR_NOT_PERMITTED: i64 = -1;
+pub const ERROR_NOT_FOUND: i64 = -2;
+pub const ERROR_NO_PROCESS: i64 = -3;
+pub const ERROR_INTERRUPTED: i64 = -4;
+pub const ERROR_IO: i64 = -5;
+pub const ERROR_INVALID_HANDLE: i64 = -9;
+pub const ERROR_WOULD_BLOCK: i64 = -11;
 /// Message too large / receiver buffer too small.
-pub const EMSGSIZE: i64 = -90;
+pub const ERROR_MESSAGE_TOO_LARGE: i64 = -90;
 /// Device already has an owner / no device at that address.
-pub const EBUSY: i64 = -16;
-pub const ENODEV: i64 = -19;
-pub const ECHILD: i64 = -10;
-pub const E2BIG: i64 = -7;
-pub const ENOEXEC: i64 = -8;
-pub const ENOMEM: i64 = -12;
+pub const ERROR_BUSY: i64 = -16;
+pub const ERROR_NO_DEVICE: i64 = -19;
+pub const ERROR_NO_CHILD: i64 = -10;
+pub const ERROR_TOO_MANY_ARGUMENTS: i64 = -7;
+pub const ERROR_NOT_EXECUTABLE: i64 = -8;
+pub const ERROR_OUT_OF_MEMORY: i64 = -12;
 #[allow(dead_code)]
-pub const EACCES: i64 = -13;
-pub const EFAULT: i64 = -14;
-pub const EEXIST: i64 = -17;
-pub const ENOTDIR: i64 = -20;
-pub const EISDIR: i64 = -21;
-pub const EINVAL: i64 = -22;
-pub const EMFILE: i64 = -24;
-pub const ENOSPC: i64 = -28;
-pub const ESPIPE: i64 = -29;
-pub const EPIPE: i64 = -32;
-pub const EROFS: i64 = -30;
-pub const ERANGE: i64 = -34;
-pub const ENOTEMPTY: i64 = -39;
-pub const ENOSYS: i64 = -38;
+pub const ERROR_ACCESS_DENIED: i64 = -13;
+pub const ERROR_INVALID_ADDRESS: i64 = -14;
+pub const ERROR_ALREADY_EXISTS: i64 = -17;
+pub const ERROR_NOT_DIRECTORY: i64 = -20;
+pub const ERROR_IS_DIRECTORY: i64 = -21;
+pub const ERROR_INVALID_ARGUMENT: i64 = -22;
+pub const ERROR_TOO_MANY_HANDLES: i64 = -24;
+pub const ERROR_NO_SPACE: i64 = -28;
+pub const ERROR_NOT_SEEKABLE: i64 = -29;
+pub const ERROR_CLOSED: i64 = -32;
+pub const ERROR_READ_ONLY: i64 = -30;
+pub const ERROR_BUFFER_TOO_SMALL: i64 = -34;
+pub const ERROR_NOT_EMPTY: i64 = -39;
+pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
 /// No reply in time (ublk – usbd did not respond).
-pub const ETIMEDOUT: i64 = -110;
+pub const ERROR_TIMED_OUT: i64 = -110;
 
 /// Largest single write/read (longer ones – several calls).
 const MAX_IO: u64 = 64 * 1024;
@@ -356,15 +340,15 @@ type SysResult = Result<u64, i64>;
 
 fn fs_error(e: FsError) -> i64 {
     match e {
-        FsError::NotFound => ENOENT,
-        FsError::NotADirectory => ENOTDIR,
-        FsError::IsADirectory => EISDIR,
-        FsError::AlreadyExists => EEXIST,
-        FsError::NoSpace => ENOSPC,
-        FsError::InvalidName => EINVAL,
-        FsError::NotEmpty => ENOTEMPTY,
-        FsError::ReadOnly => EROFS,
-        _ => EIO,
+        FsError::NotFound => ERROR_NOT_FOUND,
+        FsError::NotADirectory => ERROR_NOT_DIRECTORY,
+        FsError::IsADirectory => ERROR_IS_DIRECTORY,
+        FsError::AlreadyExists => ERROR_ALREADY_EXISTS,
+        FsError::NoSpace => ERROR_NO_SPACE,
+        FsError::InvalidName => ERROR_INVALID_ARGUMENT,
+        FsError::NotEmpty => ERROR_NOT_EMPTY,
+        FsError::ReadOnly => ERROR_READ_ONLY,
+        _ => ERROR_IO,
     }
 }
 
@@ -421,7 +405,7 @@ fn with_user_access<R>(f: impl FnOnce() -> R) -> R {
 
 pub fn copy_from_user(p: &mut Process, ptr: u64, len: u64) -> Result<Vec<u8>, i64> {
     if !user_range_ok(p, ptr, len, false) {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     let mut buf = vec![0u8; len as usize];
     with_user_access(|| unsafe {
@@ -432,7 +416,7 @@ pub fn copy_from_user(p: &mut Process, ptr: u64, len: u64) -> Result<Vec<u8>, i6
 
 pub fn copy_to_user(p: &mut Process, ptr: u64, data: &[u8]) -> Result<(), i64> {
     if !user_range_ok(p, ptr, data.len() as u64, true) {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     with_user_access(|| unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len())
@@ -452,13 +436,9 @@ fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
 
 /// Writes ready data to a process descriptor (write, kcmd).
 fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
-    // Without the WRITE right – EBADF (like a read-only descriptor in POSIX).
-    if p.handle(fd)?.rights & rights::WRITE == 0 {
-        return Err(EBADF);
-    }
     if p.is_console(fd) {
         if fd == 0 {
-            return Err(EBADF);
+            return Err(ERROR_INVALID_HANDLE);
         }
         if let Some(out) = p.stdout.as_ref() {
             out.lock().extend_from_slice(data);
@@ -469,17 +449,17 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
     match p.fd(fd)? {
         // A channel has no READ / WRITE (messages – chan_send / chan_recv).
-        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => Err(EBADF),
+        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => Err(ERROR_INVALID_HANDLE),
         Fd::Pipe(e) => {
             if !e.write {
-                return Err(EBADF);
+                return Err(ERROR_INVALID_HANDLE);
             }
             let e = e.clone();
             e.write(data).map(|n| n as u64)
         }
         Fd::File(f) => {
             if !f.write {
-                return Err(EBADF);
+                return Err(ERROR_INVALID_HANDLE);
             }
             let f = f.clone();
             let mut offset = f.offset.lock();
@@ -493,13 +473,13 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
 }
 
-/// A line from the console (echo, Backspace, Enter finishes).  Ctrl+C / kill -> EINTR.
+/// A line from the console (echo, Backspace, Enter finishes).  Ctrl+C / kill -> ERROR_INTERRUPTED.
 fn read_console_line(max: usize) -> Result<Vec<u8>, i64> {
     use crate::console::{self, Key};
     let mut line = String::new();
     loop {
         if sched::should_exit() {
-            return Err(EINTR);
+            return Err(ERROR_INTERRUPTED);
         }
         match console::poll_key() {
             Some(Key::Char(c)) => {
@@ -523,7 +503,7 @@ fn read_console_line(max: usize) -> Result<Vec<u8>, i64> {
             Some(Key::Ctrl('c')) => {
                 console::write_str("^C\n");
                 sched::request_exit(sched::current_id());
-                return Err(EINTR);
+                return Err(ERROR_INTERRUPTED);
             }
             Some(_) => {}
             None => {
@@ -536,15 +516,11 @@ fn read_console_line(max: usize) -> Result<Vec<u8>, i64> {
 fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     let len = len.min(MAX_IO);
     if !user_range_ok(p, ptr, len, true) {
-        return Err(EFAULT);
-    }
-    // Without the READ right – EBADF.
-    if p.handle(fd)?.rights & rights::READ == 0 {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     let data = if p.is_console(fd) {
         if fd != 0 {
-            return Err(EBADF);
+            return Err(ERROR_INVALID_HANDLE);
         }
         match p.stdin.as_ref() {
             Some(input) => {
@@ -556,17 +532,17 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
         }
     } else {
         match p.fd(fd)? {
-            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => return Err(EBADF),
+            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => return Err(ERROR_INVALID_HANDLE),
             Fd::Pipe(e) => {
                 if e.write {
-                    return Err(EBADF);
+                    return Err(ERROR_INVALID_HANDLE);
                 }
                 let e = e.clone();
                 e.read(len as usize)?
             }
             Fd::File(f) => {
                 if !f.read {
-                    return Err(EBADF);
+                    return Err(ERROR_INVALID_HANDLE);
                 }
                 let f = f.clone();
                 let mut offset = f.offset.lock();
@@ -584,21 +560,21 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
 
 fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
     if len == 0 || len > 255 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     if flags & (O_READ | O_WRITE) == 0 || flags & !(O_READ | O_WRITE | O_CREATE | O_TRUNC | O_APPEND) != 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let raw = copy_from_user(p, ptr, len)?;
-    let name = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
     let path = fs::normalize(&p.cwd, name);
     let write = flags & O_WRITE != 0;
     // Writes to a read-only file system (USB stick, SSD) fail immediately.
     if write && fs::is_read_only(&path) {
-        return Err(EROFS);
+        return Err(ERROR_READ_ONLY);
     }
     match fs::stat(&path) {
-        Ok(m) if m.kind == FileType::Directory => return Err(EISDIR),
+        Ok(m) if m.kind == FileType::Directory => return Err(ERROR_IS_DIRECTORY),
         Ok(_) => {
             if write && flags & O_TRUNC != 0 {
                 fs::truncate(&path, 0).map_err(fs_error)?;
@@ -626,16 +602,16 @@ fn install_fd(p: &mut Process, from: usize, fd: Fd) -> SysResult {
 
 /// The lowest free number >= `from` gets handle `h` (with its rights).
 fn install_handle(p: &mut Process, from: usize, h: Handle) -> SysResult {
-    let slot = (from..MAX_FDS).find(|&i| p.fds.get(i).map_or(true, |f| f.is_none())).ok_or(EMFILE)?;
+    let slot = (from..MAX_FDS).find(|&i| p.fds.get(i).map_or(true, |f| f.is_none())).ok_or(ERROR_TOO_MANY_HANDLES)?;
     p.fds.set(slot, Some(h));
     Ok(slot as u64)
 }
 
-/// Handle to copy (dup, dup2, spawn, handle_dup) – requires DUP.
+/// Handle a child gets (spawn, spawn_ex – a list, not in the table) – requires DUP.
 fn handle_for_copy(p: &Process, fd: u64) -> Result<Handle, i64> {
     let h = p.handle(fd)?;
     if h.rights & rights::DUP == 0 {
-        return Err(EACCES);
+        return Err(ERROR_ACCESS_DENIED);
     }
     Ok(h.clone())
 }
@@ -643,19 +619,14 @@ fn handle_for_copy(p: &Process, fd: u64) -> Result<Handle, i64> {
 /// handle_dup(h, mask) – a new handle (lowest free) to the same
 /// object with rights `old & mask`.  Rights never grow.
 fn sys_handle_dup(p: &mut Process, fd: u64, mask: u64) -> SysResult {
-    let mut h = handle_for_copy(p, fd)?;
+    let mut h = p.handle(fd)?.clone();
     h.rights &= mask as u32 & rights::ALL;
     install_handle(p, 0, h)
 }
 
-/// Channel end from a handle with right `right` (EACCES without the right,
-/// EBADF – not a channel).
-fn chan_end(p: &Process, h: u64, right: u32) -> Result<Arc<super::channel::ChanEnd>, i64> {
-    let hd = p.handle(h)?;
-    let Fd::Channel(e) = &hd.obj else { return Err(EBADF) };
-    if hd.rights & right == 0 {
-        return Err(EACCES);
-    }
+/// Channel end from a handle (ERROR_INVALID_HANDLE – not a channel; rights: the table).
+fn chan_end(p: &Process, h: u64) -> Result<Arc<super::channel::ChanEnd>, i64> {
+    let Fd::Channel(e) = p.fd(h)? else { return Err(ERROR_INVALID_HANDLE) };
     Ok(e.clone())
 }
 
@@ -688,11 +659,11 @@ impl Waitable {
 }
 
 /// wait_many – waits until one of the handles is ready.  The whole list is
-/// checked before waiting (EBADF / EACCES / EINVAL for the first bad
+/// checked before waiting (ERROR_INVALID_HANDLE / ERROR_ACCESS_DENIED / ERROR_INVALID_ARGUMENT for the first bad
 /// entry).  A READABLE | WRITABLE entry on a channel – two objects, one bit.
 fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult {
     if n == 0 || n > WAIT_MAX {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let raw = copy_from_user(p, list, n * 16)?;
     // (bit, object) – up to 2 objects per entry.
@@ -701,23 +672,23 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
         let h = u64::from_le_bytes(raw[i * 16..i * 16 + 8].try_into().unwrap());
         let sig = u64::from_le_bytes(raw[i * 16 + 8..i * 16 + 16].try_into().unwrap());
         if sig == 0 || sig & !(W_READABLE | W_WRITABLE | W_IRQ) != 0 {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let hd = p.handle(h)?;
         match &hd.obj {
             Fd::Channel(e) => {
                 if sig & W_IRQ != 0 {
-                    return Err(EINVAL);
+                    return Err(ERROR_INVALID_ARGUMENT);
                 }
                 if sig & W_READABLE != 0 {
                     if hd.rights & rights::RECV == 0 {
-                        return Err(EACCES);
+                        return Err(ERROR_ACCESS_DENIED);
                     }
                     objs.push((i as u32, Waitable::Chan(e.clone(), false)));
                 }
                 if sig & W_WRITABLE != 0 {
                     if hd.rights & rights::SEND == 0 {
-                        return Err(EACCES);
+                        return Err(ERROR_ACCESS_DENIED);
                     }
                     objs.push((i as u32, Waitable::Chan(e.clone(), true)));
                 }
@@ -726,24 +697,24 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
                 // A pipe end has one direction: read – READABLE, write – WRITABLE.
                 let want = if e.write { W_WRITABLE } else { W_READABLE };
                 if sig != want {
-                    return Err(EINVAL);
+                    return Err(ERROR_INVALID_ARGUMENT);
                 }
                 let need = if e.write { rights::WRITE } else { rights::READ };
                 if hd.rights & need == 0 {
-                    return Err(EBADF);
+                    return Err(ERROR_ACCESS_DENIED);
                 }
                 objs.push((i as u32, Waitable::Pipe(e.clone())));
             }
             Fd::Irq(q) => {
                 if sig != W_IRQ {
-                    return Err(EINVAL);
+                    return Err(ERROR_INVALID_ARGUMENT);
                 }
                 if hd.rights & rights::RECV == 0 {
-                    return Err(EACCES);
+                    return Err(ERROR_ACCESS_DENIED);
                 }
                 objs.push((i as u32, Waitable::Irq(q.clone())));
             }
-            _ => return Err(EINVAL),
+            _ => return Err(ERROR_INVALID_ARGUMENT),
         }
     }
     let mask = |objs: &[(u32, Waitable)]| objs.iter().filter(|(_, o)| o.ready()).fold(0u64, |m, (b, _)| m | 1 << b);
@@ -765,7 +736,7 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
         o.observers().remove(ch);
     }
     if sched::should_exit() {
-        return Err(EINTR);
+        return Err(ERROR_INTERRUPTED);
     }
     Ok(mask(&objs))
 }
@@ -773,7 +744,7 @@ fn sys_wait_many(p: &mut Process, list: u64, n: u64, timeout: u64) -> SysResult 
 /// channel_create(out) – two channel ends (lowest free numbers).
 fn sys_channel_create(p: &mut Process, out: u64) -> SysResult {
     if !user_range_ok(p, out, 16, true) {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     let (a, b) = super::channel::new();
     let ha = install_fd(p, 0, Fd::Channel(a))?;
@@ -798,12 +769,12 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use super::channel::MSG_HANDLES;
     let (h, buf, len, hptr, nh, flags) = (f.rdi, f.rsi, f.rdx, f.r10, f.r8, f.r9);
     if flags & !CHAN_NONBLOCK != 0 || nh as usize > MSG_HANDLES {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     if len as usize > super::channel::MSG_MAX {
-        return Err(EMSGSIZE);
+        return Err(ERROR_MESSAGE_TOO_LARGE);
     }
-    let end = chan_end(p, h, rights::SEND)?;
+    let end = chan_end(p, h)?;
     let data = copy_from_user(p, buf, len)?;
     // Handle list: they exist, have TRANSFER, no duplicates, none is
     // an end of this channel.  The whole list is checked before removing anything.
@@ -814,15 +785,15 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
             let n = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
             let hd = p.handle(n)?;
             if hd.rights & rights::TRANSFER == 0 {
-                return Err(EACCES);
+                return Err(ERROR_ACCESS_DENIED);
             }
             if let Fd::Channel(e) = &hd.obj {
                 if e.same_channel(&end) {
-                    return Err(EINVAL);
+                    return Err(ERROR_INVALID_ARGUMENT);
                 }
             }
             if nums.contains(&(n as usize)) {
-                return Err(EINVAL);
+                return Err(ERROR_INVALID_ARGUMENT);
             }
             nums.push(n as usize);
         }
@@ -842,7 +813,7 @@ fn sys_chan_send(p: &mut Process, f: &SyscallFrame) -> SysResult {
 }
 
 /// chan_recv – the message is taken under the channel lock and copied to
-/// the process after the lock is released.  Buffer too small: EMSGSIZE, info = required
+/// the process after the lock is released.  Buffer too small: ERROR_MESSAGE_TOO_LARGE, info = required
 /// size, the message stays.
 fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use super::channel::RecvError;
@@ -850,7 +821,7 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let hcap = (hcap_flags & 0xFFFF) as usize;
     let flags = hcap_flags >> 32;
     if flags & !CHAN_NONBLOCK != 0 || hcap_flags & 0xFFFF_0000 != 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let cap = cap.min(super::channel::MSG_MAX as u64);
     let hcap = hcap.min(super::channel::MSG_HANDLES);
@@ -858,12 +829,12 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
         || (info != 0 && !user_range_ok(p, info, 24, true))
         || (hcap > 0 && !user_range_ok(p, hptr, hcap as u64 * 8, true))
     {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     // Free slots in the table – a message with more handles
-    // stays in the queue (EMFILE), nothing is lost.
+    // stays in the queue (ERROR_TOO_MANY_HANDLES), nothing is lost.
     let room = (0..MAX_FDS).filter(|&i| p.fds.get(i).map_or(true, |x| x.is_none())).count();
-    let end = chan_end(p, h, rights::RECV)?;
+    let end = chan_end(p, h)?;
     let write_info = |p: &mut Process, len: u64, nh: u64, sender: u64| -> Result<(), i64> {
         if info == 0 {
             return Ok(());
@@ -892,19 +863,15 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
         }
         Err(RecvError::TooSmall(len, nh)) => {
             write_info(p, len as u64, nh as u64, 0)?;
-            Err(EMSGSIZE)
+            Err(ERROR_MESSAGE_TOO_LARGE)
         }
         Err(RecvError::Code(e)) => Err(e),
     }
 }
 
-/// Shared memory object from a handle with right `right`.
-fn shm_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::shm::ShmObj>, i64> {
-    let hd = p.handle(h)?;
-    let Fd::Shm(o) = &hd.obj else { return Err(EBADF) };
-    if hd.rights & right != right {
-        return Err(EACCES);
-    }
+/// Shared memory object from a handle (rights: the table).
+fn shm_obj(p: &Process, h: u64) -> Result<Arc<super::shm::ShmObj>, i64> {
+    let Fd::Shm(o) = p.fd(h)? else { return Err(ERROR_INVALID_HANDLE) };
     Ok(o.clone())
 }
 
@@ -920,37 +887,32 @@ fn sys_shm_create(p: &mut Process, size: u64) -> SysResult {
 fn sys_shm_map(p: &mut Process, h: u64, prot: u64) -> SysResult {
     use super::vm::{PROT_READ, PROT_WRITE};
     if prot & !(PROT_READ | PROT_WRITE) != 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let write = prot & PROT_WRITE != 0;
-    let need = rights::MAP_READ | if write { rights::MAP_WRITE } else { 0 };
-    let obj = shm_obj(p, h, need)?;
+    let obj = shm_obj(p, h)?;
     super::vm::count_call();
     p.mem.map_shared(&mut p.space, obj, write)
 }
 
-/// Claimed device from a handle (EBADF – not a device).
-fn dev_obj(p: &Process, h: u64, right: u32) -> Result<Arc<super::device::DevClaim>, i64> {
-    let hd = p.handle(h)?;
-    let Fd::Device(d) = &hd.obj else { return Err(EBADF) };
-    if hd.rights & right != right {
-        return Err(EACCES);
-    }
+/// Claimed device from a handle (ERROR_INVALID_HANDLE – not a device; rights: the table).
+fn dev_obj(p: &Process, h: u64) -> Result<Arc<super::device::DevClaim>, i64> {
+    let Fd::Device(d) = p.fd(h)? else { return Err(ERROR_INVALID_HANDLE) };
     Ok(d.clone())
 }
 
-/// dev_claim(hw_root, bdf) – a PCI device for a service.  EACCES:
-/// in-kernel driver, disk, graphics, bridge, system device; EBUSY:
-/// another service owns it; ENODEV: no device at that address.
+/// dev_claim(hw_root, bdf) – a PCI device for a service.  ERROR_ACCESS_DENIED:
+/// in-kernel driver, disk, graphics, bridge, system device; ERROR_BUSY:
+/// another service owns it; ERROR_NO_DEVICE: no device at that address.
 fn sys_dev_claim(p: &mut Process, root: u64, bdf: u64) -> SysResult {
     if !matches!(p.fd(root)?, Fd::HwRoot) {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_HANDLE);
     }
-    let addr = super::device::address(bdf).ok_or(EINVAL)?;
+    let addr = super::device::address(bdf).ok_or(ERROR_INVALID_ARGUMENT)?;
     let claim = super::device::DevClaim::claim(addr).map_err(|e| match e {
-        crate::drivers::pci::ClaimError::NoDevice => ENODEV,
-        crate::drivers::pci::ClaimError::Busy => EBUSY,
-        crate::drivers::pci::ClaimError::Forbidden => EACCES,
+        crate::drivers::pci::ClaimError::NoDevice => ERROR_NO_DEVICE,
+        crate::drivers::pci::ClaimError::Busy => ERROR_BUSY,
+        crate::drivers::pci::ClaimError::Forbidden => ERROR_ACCESS_DENIED,
     })?;
     install_fd(p, 0, Fd::Device(Arc::new(claim)))
 }
@@ -958,7 +920,7 @@ fn sys_dev_claim(p: &mut Process, root: u64, bdf: u64) -> SysResult {
 /// dev_info(dev, out) – device description (10 × u64, see SYS_DEV_INFO).
 fn sys_dev_info(p: &mut Process, h: u64, out: u64) -> SysResult {
     use crate::drivers::pci::{Bar, CAP_MSI, CAP_MSIX};
-    let claim = dev_obj(p, h, 0)?;
+    let claim = dev_obj(p, h)?;
     let d = claim.dev();
     let mut v = [0u64; 10];
     v[0] = d.vendor as u64 | (d.device as u64) << 16;
@@ -988,11 +950,10 @@ fn sys_dev_info(p: &mut Process, h: u64, out: u64) -> SysResult {
 fn sys_dev_map(p: &mut Process, h: u64, bar: u64, prot: u64) -> SysResult {
     use super::vm::{PROT_READ, PROT_WRITE};
     if prot & PROT_READ == 0 || prot & !(PROT_READ | PROT_WRITE) != 0 || bar > 5 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let write = prot & PROT_WRITE != 0;
-    let need = rights::MAP_READ | if write { rights::MAP_WRITE } else { 0 };
-    let claim = dev_obj(p, h, need)?;
+    let claim = dev_obj(p, h)?;
     let pages = claim.bar_pages(bar as usize)?;
     super::vm::count_call();
     p.mem.map_mmio(&mut p.space, &pages, write, claim)
@@ -1007,7 +968,7 @@ fn sys_handle_info(p: &mut Process, fd: u64) -> SysResult {
 /// pipe(out) – out = [read fd, write fd] (2 × u64).
 fn sys_pipe(p: &mut Process, out: u64) -> SysResult {
     if !user_range_ok(p, out, 16, true) {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     let (r, w) = super::pipe::new();
     let rfd = install_fd(p, 0, Fd::Pipe(r))?;
@@ -1027,17 +988,17 @@ fn sys_pipe(p: &mut Process, out: u64) -> SysResult {
 
 /// dup(fd) – a new descriptor (lowest free) to the same object.
 fn sys_dup(p: &mut Process, fd: u64) -> SysResult {
-    let h = handle_for_copy(p, fd)?;
+    let h = p.handle(fd)?.clone();
     install_handle(p, 0, h)
 }
 
 /// dup2(old, new) – `new` points to the object of `old` (the previous object of
 /// `new` is closed).  old == new – nothing (as long as old is open).
 fn sys_dup2(p: &mut Process, old: u64, new: u64) -> SysResult {
-    let f = handle_for_copy(p, old)?;
+    let f = p.handle(old)?.clone();
     let new = new as usize;
     if new >= MAX_FDS {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_HANDLE);
     }
     if old as usize != new {
         p.fds.set(new, Some(f));
@@ -1049,20 +1010,20 @@ pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
-/// seek(fd, offset, whence) -> new position.  Console – ESPIPE.
+/// seek(fd, offset, whence) -> new position.  Console – ERROR_NOT_SEEKABLE.
 fn sys_seek(p: &mut Process, fd: u64, offset: u64, whence: u64) -> SysResult {
-    let Fd::File(f) = p.fd(fd)? else { return Err(ESPIPE) };
+    let Fd::File(f) = p.fd(fd)? else { return Err(ERROR_NOT_SEEKABLE) };
     let f = f.clone();
     let mut pos = f.offset.lock();
     let base: i64 = match whence {
         SEEK_SET => 0,
         SEEK_CUR => *pos as i64,
         SEEK_END => fs::stat(&f.path).map_err(fs_error)?.size as i64,
-        _ => return Err(EINVAL),
+        _ => return Err(ERROR_INVALID_ARGUMENT),
     };
-    let new = base.checked_add(offset as i64).ok_or(EINVAL)?;
+    let new = base.checked_add(offset as i64).ok_or(ERROR_INVALID_ARGUMENT)?;
     if new < 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     *pos = new as u64;
     Ok(new as u64)
@@ -1071,7 +1032,7 @@ fn sys_seek(p: &mut Process, fd: u64, offset: u64, whence: u64) -> SysResult {
 fn sys_close(p: &mut Process, fd: u64) -> SysResult {
     match p.fds.take(fd as usize) {
         Some(_) => Ok(0),
-        None => Err(EBADF),
+        None => Err(ERROR_INVALID_HANDLE),
     }
 }
 
@@ -1083,10 +1044,10 @@ fn sys_close(p: &mut Process, fd: u64) -> SysResult {
 /// relative to the current directory.
 fn user_path(p: &mut Process, ptr: u64, len: u64) -> Result<String, i64> {
     if len == 0 || len > 255 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let raw = copy_from_user(p, ptr, len)?;
-    let name = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
     Ok(fs::normalize(&p.cwd, name))
 }
 
@@ -1094,18 +1055,18 @@ fn exec_error(e: super::ExecError) -> i64 {
     use super::elf_loader::LoadError;
     match e {
         super::ExecError::Fs(e) => fs_error(e),
-        super::ExecError::TooBig => E2BIG,
-        super::ExecError::TooManyProcesses => EAGAIN,
-        super::ExecError::Load(LoadError::NoMemory) => ENOMEM,
-        super::ExecError::Load(LoadError::TooManyArgs) => E2BIG,
-        super::ExecError::Load(_) => ENOEXEC,
+        super::ExecError::TooBig => ERROR_TOO_MANY_ARGUMENTS,
+        super::ExecError::TooManyProcesses => ERROR_WOULD_BLOCK,
+        super::ExecError::Load(LoadError::NoMemory) => ERROR_OUT_OF_MEMORY,
+        super::ExecError::Load(LoadError::TooManyArgs) => ERROR_TOO_MANY_ARGUMENTS,
+        super::ExecError::Load(_) => ERROR_NOT_EXECUTABLE,
     }
 }
 
 fn sys_spawn(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let (flags, fds) = (f.r8, f.r9);
     if flags & !SPAWN_FLAGS != 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     // The child gets copies of the handles with their rights (requires DUP).
     let child_fd = |shift: u32| -> Result<Option<Handle>, i64> { handle_for_copy(p, (fds >> shift) & 0xFFFF).map(Some) };
@@ -1119,7 +1080,7 @@ fn sys_spawn(p: &mut Process, f: &SyscallFrame) -> SysResult {
 fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
     let (map, n, flags) = (f.r8, f.r9 & 0xFFFF_FFFF, f.r9 >> 32);
     if flags & !SPAWN_FLAGS != 0 || n > SPAWN_EX_MAX {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let raw = if n > 0 { copy_from_user(p, map, n * 16)? } else { Vec::new() };
     let mut child_fds: Vec<Option<Handle>> = Vec::new();
@@ -1127,7 +1088,7 @@ fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
         let word = |i: usize| u64::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3], c[i + 4], c[i + 5], c[i + 6], c[i + 7]]);
         let (from, to) = (word(0), word(8) as usize);
         if to >= MAX_FDS || child_fds.get(to).map_or(false, |x| x.is_some()) {
-            return Err(EINVAL);
+            return Err(ERROR_INVALID_ARGUMENT);
         }
         let hd = handle_for_copy(p, from)?;
         if child_fds.len() <= to {
@@ -1142,11 +1103,11 @@ fn sys_spawn_ex(p: &mut Process, f: &SyscallFrame) -> SysResult {
 fn spawn_common(p: &mut Process, f: &SyscallFrame, flags: u64, child_fds: Vec<Option<Handle>>) -> SysResult {
     let (path_ptr, path_len, argv_ptr, argv_len) = (f.rdi, f.rsi, f.rdx, f.r10);
     if argv_len > 4096 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let path = user_path(p, path_ptr, path_len)?;
     let raw = copy_from_user(p, argv_ptr, argv_len)?;
-    let text = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let text = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
     let mut args: Vec<&str> = text.split('\0').collect();
     if text.ends_with('\0') {
         args.pop();
@@ -1164,10 +1125,10 @@ fn spawn_common(p: &mut Process, f: &SyscallFrame, flags: u64, child_fds: Vec<Op
 
 fn sys_wait(p: &mut Process, pid: u64, status_ptr: u64, flags: u64) -> SysResult {
     if flags & !super::procs::WNOHANG != 0 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     if status_ptr != 0 && !user_range_ok(p, status_ptr, 8, true) {
-        return Err(EFAULT);
+        return Err(ERROR_INVALID_ADDRESS);
     }
     let (child, status) = super::procs::wait(sched::current_id(), pid, flags)?;
     if child != 0 {
@@ -1181,12 +1142,12 @@ fn sys_wait(p: &mut Process, pid: u64, status_ptr: u64, flags: u64) -> SysResult
 
 pub(super) fn sys_kill(pid: u64) -> SysResult {
     if !sched::with_process(pid, |_| ()).is_some() {
-        return Err(ESRCH); // no such process (kill from a process does not touch kernel tasks)
+        return Err(ERROR_NO_PROCESS); // no such process (kill from a process does not touch kernel tasks)
     }
     if pid == super::procs::init_pid() {
-        return Err(EPERM);
+        return Err(ERROR_NOT_PERMITTED);
     }
-    if sched::request_exit(pid) { Ok(0) } else { Err(ESRCH) }
+    if sched::request_exit(pid) { Ok(0) } else { Err(ERROR_NO_PROCESS) }
 }
 
 fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
@@ -1196,15 +1157,15 @@ fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
             p.cwd = path;
             Ok(0)
         }
-        Ok(_) => Err(ENOTDIR),
+        Ok(_) => Err(ERROR_NOT_DIRECTORY),
         Err(e) => Err(fs_error(e)),
     }
 }
 
-/// Text into a process buffer: all of it or ERANGE (nothing is truncated).
+/// Text into a process buffer: all of it or ERROR_BUFFER_TOO_SMALL (nothing is truncated).
 fn text_to_user(p: &mut Process, ptr: u64, len: u64, text: &str) -> SysResult {
     if text.len() as u64 > len.min(MAX_IO) {
-        return Err(ERANGE);
+        return Err(ERROR_BUFFER_TOO_SMALL);
     }
     copy_to_user(p, ptr, text.as_bytes())?;
     Ok(text.len() as u64)
@@ -1258,9 +1219,9 @@ pub fn encode_key(k: crate::console::Key) -> u64 {
 fn sys_readkey(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     use crate::console;
     // Keyboard only for a process whose handle 0 is the console with the READ right
-    // (like `read(0)`); e.g. a process with a file or pipe on 0 – EBADF.
+    // (like `read(0)`); e.g. a process with a file or pipe on 0 – ERROR_INVALID_HANDLE.
     if !p.is_console(0) || p.handle(0)?.rights & rights::READ == 0 {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_HANDLE);
     }
     // Tests: keys from the buffer (bytes as from a terminal).
     if let Some(input) = p.stdin.clone() {
@@ -1282,7 +1243,7 @@ fn sys_readkey(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     // (e.g. a background process finishing) – as in the kernel shell.
     loop {
         if sched::should_exit() {
-            return Err(EINTR);
+            return Err(ERROR_INTERRUPTED);
         }
         if let Some(k) = console::poll_key() {
             return Ok(encode_key(k));
@@ -1318,34 +1279,41 @@ fn sys_tasks(p: &mut Process, ptr: u64, len: u64) -> SysResult {
 }
 
 /// sysinfo(topic, len, buffer, cap) – read-only text (mem, lspci,
-/// cpus, disk...; list: shell::SYSINFO_TOPICS).  ENOENT: unknown topic or
-/// disallowed arguments; ERANGE: buffer too small (nothing is truncated).
+/// cpus, disk...; list: shell::SYSINFO_TOPICS).  ERROR_NOT_FOUND: unknown topic or
+/// disallowed arguments; ERROR_BUFFER_TOO_SMALL: buffer too small (nothing is truncated).
 fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysResult {
     if len == 0 || len > 64 {
-        return Err(EINVAL);
+        return Err(ERROR_INVALID_ARGUMENT);
     }
     let raw = copy_from_user(p, ptr, len)?;
-    let topic = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let topic = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
     // `dcp` – what the caller may see depends on the caller (dcp.rs).
+    if topic.trim() == "rights" {
+        return text_to_user(p, buf, cap, &super::sysrights::text());
+    }
     let text = match topic.trim().strip_prefix("dcp") {
         Some(rest) if rest.is_empty() || rest.starts_with(' ') => {
             let all = p.fds.iter().flatten().any(|h| matches!(h.obj, Fd::Sysctl));
             let viewer = super::dcp::Viewer { pid: sched::current_id(), all };
-            super::dcp::dcp(rest, Some(viewer)).ok_or(ENOENT)?
+            super::dcp::dcp(rest, Some(viewer)).ok_or(ERROR_NOT_FOUND)?
         }
-        _ => crate::shell::sysinfo(topic).ok_or(ENOENT)?,
+        _ => crate::shell::sysinfo(topic).ok_or(ERROR_NOT_FOUND)?,
     };
     text_to_user(p, buf, cap, &text)
 }
 
 /// sysctl(SYSCTL handle, action, arg, fd) – reboot / halt / sync /
-/// stress; result text goes to `fd`.  EBADF: not a SYSCTL handle; EINVAL: bad action.
+/// stress; result text goes to `fd`.  ERROR_INVALID_HANDLE: not a SYSCTL handle; ERROR_INVALID_ARGUMENT: bad action.
 fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult {
     if !matches!(p.fd(h)?, Fd::Sysctl) {
-        return Err(EBADF);
+        return Err(ERROR_INVALID_HANDLE);
     }
-    let out = crate::shell::sysctl(op, arg).ok_or(EINVAL)?;
+    let out = crate::shell::sysctl(op, arg).ok_or(ERROR_INVALID_ARGUMENT)?;
     if !out.is_empty() {
+        // The output handle is not in the table (only used when there is text).
+        if p.handle(fd)?.rights & rights::WRITE == 0 {
+            return Err(ERROR_ACCESS_DENIED);
+        }
         write_fd(p, fd, out.as_bytes())?;
     }
     Ok(0)
@@ -1415,29 +1383,21 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
     }
 }
 
-/// System calls that take a path – refused in the file sandbox.
-pub fn is_path_call(nr: u64) -> bool {
-    matches!(nr, SYS_OPEN | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_SPAWN | SYS_SPAWN_EX)
-}
 
 /// Path calls refused in the file sandbox (tests).
 pub static SANDBOX_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Records a refused call in the DCP audit log (dcp.rs).  Only on errors.
 #[cold]
-fn audit_refusal(p: &mut Process, frame: &SyscallFrame, sandboxed: bool, e: i64) {
+fn audit_refusal(p: &mut Process, frame: &SyscallFrame, sandboxed: bool) {
     use super::dcp::Reason;
     let (reason, what): (Reason, Vec<u8>) = if sandboxed {
         // The path (best effort, at most 40 bytes).
         let path = if (1..=255).contains(&frame.rsi) { copy_from_user(p, frame.rdi, frame.rsi.min(40)).unwrap_or_default() } else { Vec::new() };
         (Reason::Sandbox, path)
-    } else if e == EBADF {
-        // read / write on an existing handle without the right (not a bad number).
-        let need = if frame.rax == SYS_READ { rights::READ } else { rights::WRITE };
-        match p.handle(frame.rdi) {
-            Ok(h) if h.rights & need == 0 => (Reason::NoRight(need), alloc::format!("handle {}", frame.rdi).into_bytes()),
-            _ => return,
-        }
+    } else if let r @ 1.. = super::sysrights::missing(p, frame) {
+        // The gate refused: the handle exists but lacks a right from the table.
+        (Reason::NoRight(r), alloc::format!("handle {}", frame.rdi).into_bytes())
     } else {
         (Reason::Denied, alloc::format!("handle {}", frame.rdi).into_bytes())
     };
@@ -1469,13 +1429,17 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
     };
     let (a0, a1, a2) = (frame.rdi, frame.rsi, frame.rdx);
     // File sandbox: every call that names a path is refused before it is
-    // decoded (one place – a new path syscall must be added to `is_path_call`).
-    let sandboxed = p.no_files && is_path_call(frame.rax);
+    // decoded (the `path` column of the rights table, sysrights.rs).
+    let sandboxed = p.no_files && super::sysrights::is_path_call(frame.rax);
+    // The rights gate: every handle argument exists, has the right kind and the
+    // rights from the table – before the call is decoded.
+    let gate = if sandboxed { Ok(()) } else { super::sysrights::check(p, frame) };
     let result: SysResult = match frame.rax {
         _ if sandboxed => {
             SANDBOX_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            Err(EACCES)
+            Err(ERROR_ACCESS_DENIED)
         }
+        _ if gate.is_err() => gate.map(|_| 0),
         SYS_EXIT => {
             record_exit(ExitKind::Exit(a0 as i64), frame.rip, frame.rax, frame.rbx);
             exit_current();
@@ -1528,17 +1492,17 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_INPUT_INJECT => sys_input_inject(p, a0, a1, a2),
         SYS_BLK_ATTACH => sys_blk_attach(p, a0, a1, a2, frame.r10),
         SYS_DEV_MAP => sys_dev_map(p, a0, a1, a2),
-        SYS_IRQ_BIND => dev_obj(p, a0, rights::MAP_WRITE)
+        SYS_IRQ_BIND => dev_obj(p, a0)
             .and_then(super::device::IrqObj::bind)
             .and_then(|q| install_fd(p, 0, Fd::Irq(Arc::new(q)))),
         SYS_IRQ_READ => irq_obj(p, a0).map(|q| q.take()),
-        SYS_DMA_ALLOC => dev_obj(p, a0, rights::MAP_WRITE)
+        SYS_DMA_ALLOC => dev_obj(p, a0)
             .and_then(|d| d.dma_alloc(a1, a2))
             .and_then(|b| install_fd(p, 0, Fd::Shm(b))),
-        SYS_DMA_PHYS => shm_obj(p, a0, 0).and_then(|o| o.dma_phys().ok_or(EINVAL)),
+        SYS_DMA_PHYS => shm_obj(p, a0).and_then(|o| o.dma_phys().ok_or(ERROR_INVALID_ARGUMENT)),
         SYS_SHM_CREATE => sys_shm_create(p, a0),
         SYS_SHM_MAP => sys_shm_map(p, a0, a1),
-        SYS_SHM_SIZE => shm_obj(p, a0, 0).map(|o| o.len()),
+        SYS_SHM_SIZE => shm_obj(p, a0).map(|o| o.len()),
         SYS_BRK => {
             super::vm::count_call();
             Ok(p.mem.set_brk(&mut p.space, a0))
@@ -1548,12 +1512,12 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
             p.mem.mmap(a0, a1)
         }
         SYS_MUNMAP => p.mem.munmap(&mut p.space, a0, a1).map(|_| 0),
-        _ => Err(ENOSYS),
+        _ => Err(ERROR_NOT_IMPLEMENTED),
     };
-    // DCP audit: refusals (sandbox, a handle without the right, EACCES).
+    // DCP audit: refusals (sandbox, a handle without the right, ERROR_ACCESS_DENIED).
     if let Err(e) = result {
-        if sandboxed || e == EACCES || (e == EBADF && matches!(frame.rax, SYS_READ | SYS_WRITE)) {
-            audit_refusal(p, frame, sandboxed, e);
+        if sandboxed || e == ERROR_ACCESS_DENIED {
+            audit_refusal(p, frame, sandboxed);
         }
     }
     frame.rax = match result {

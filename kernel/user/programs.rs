@@ -157,7 +157,7 @@ global_asm!(r#"
 
     .global up_badptr
     .global up_badptr_end
-    // write with a kernel address -> -EFAULT (-14) as the exit code
+    // write with a kernel address -> -ERROR_INVALID_ADDRESS (-14) as the exit code
     up_badptr:
         mov eax, 1
         mov edi, 1
@@ -171,7 +171,7 @@ global_asm!(r#"
 
     .global up_badsys
     .global up_badsys_end
-    // unknown syscall -> -ENOSYS (-38) as the exit code
+    // unknown syscall -> -ERROR_NOT_IMPLEMENTED (-38) as the exit code
     up_badsys:
         mov eax, 999
         syscall
@@ -513,8 +513,8 @@ programs! {
     "pid"       => up_pid, up_pid_end, "exit(getpid())";
     "sleeper"   => up_sleeper, up_sleeper_end, "sleep(100) -> exit code = measured ms";
     "regs"      => up_regs, up_regs_end, "100k syscalls, checks registers survive (exit 0)";
-    "badptr"    => up_badptr, up_badptr_end, "write() with a kernel address -> exit(-14 EFAULT)";
-    "badsys"    => up_badsys, up_badsys_end, "unknown syscall -> exit(-38 ENOSYS)";
+    "badptr"    => up_badptr, up_badptr_end, "write() with a kernel address -> exit(-14 ERROR_INVALID_ADDRESS)";
+    "badsys"    => up_badsys, up_badsys_end, "unknown syscall -> exit(-38 ERROR_NOT_IMPLEMENTED)";
     "sum"       => up_sum, up_sum_end, "sum 1..100 via the stack, ends with int3 (rax = 5050)";
     "counter"   => up_counter, up_counter_end, "3M increments of its own data page (isolation)";
     "loop"      => up_loop, up_loop_end, "infinite loop (preemption; stop with Ctrl+C / kill)";

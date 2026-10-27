@@ -1,6 +1,6 @@
 // Device claiming test – HW_ROOT (slot 3, without copy rights),
-// dev_claim (refusals: in-kernel driver, disk, graphics, bridge; EBUSY;
-// ENODEV), dev_info, dev_map of the registers of QEMU's `edu` device (identification,
+// dev_claim (refusals: in-kernel driver, disk, graphics, bridge; ERROR_BUSY;
+// ERROR_NO_DEVICE), dev_info, dev_map of the registers of QEMU's `edu` device (identification,
 // "liveness" register, factorial), mapping rights, munmap as a whole, the claim
 // held by a mapping, writing through a read-only mapping (#PF),
 // killing a process with a mapped device – the device comes back.
@@ -74,22 +74,22 @@ fn main(args: Args) -> i32 {
     let mut n = 0;
 
     // 1. HW_ROOT in slot 3: no rights – it cannot be copied, passed to a
-    //    child or sent; read / write – EBADF.
+    //    child or sent; read / write – ERROR_INVALID_HANDLE.
     check!(n, handle_info(HW_ROOT) == Ok((KIND_HW_ROOT, 0)), "slot 3: {:?}", handle_info(HW_ROOT));
-    check!(n, handle_dup(HW_ROOT, R_ALL) == -13, "handle_dup(HW_ROOT) must be EACCES");
+    check!(n, handle_dup(HW_ROOT, R_ALL) == ERROR_ACCESS_DENIED, "handle_dup(HW_ROOT) must be ERROR_ACCESS_DENIED");
     let (a, b) = channel_create().unwrap_or((0, 0));
-    check!(n, chan_send_h(a, b"", &[HW_ROOT], 0) == -13, "sending HW_ROOT must be EACCES");
-    check!(n, spawn_ex("/bin/hello", &["hello"], &[(HW_ROOT, 3)], 0) == -13, "giving HW_ROOT to a child must be EACCES");
+    check!(n, chan_send_h(a, b"", &[HW_ROOT], 0) == ERROR_ACCESS_DENIED, "sending HW_ROOT must be ERROR_ACCESS_DENIED");
+    check!(n, spawn_ex("/bin/hello", &["hello"], &[(HW_ROOT, 3)], 0) == ERROR_ACCESS_DENIED, "giving HW_ROOT to a child must be ERROR_ACCESS_DENIED");
     let mut buf = [0u8; 4];
-    check!(n, read(HW_ROOT, &mut buf) == -9 && write(HW_ROOT, b"x") == -9, "read / write on HW_ROOT must be EBADF");
+    check!(n, read(HW_ROOT, &mut buf) == ERROR_INVALID_HANDLE && write(HW_ROOT, b"x") == ERROR_INVALID_HANDLE, "read / write on HW_ROOT must be ERROR_INVALID_HANDLE");
     close(a);
     close(b);
 
     // 2. dev_claim: only with HW_ROOT, bad address, no device; devices
     //    a service must not get (q35 topology from test.sh).
-    check!(n, dev_claim(1, EDU) == -9, "dev_claim from the console must be EBADF");
-    check!(n, dev_claim(HW_ROOT, 0x10000) == -22, "bad address must be EINVAL");
-    check!(n, dev_claim(HW_ROOT, bdf(0, 0x1e, 0)) == ENODEV, "no device must be ENODEV");
+    check!(n, dev_claim(1, EDU) == ERROR_INVALID_HANDLE, "dev_claim from the console must be ERROR_INVALID_HANDLE");
+    check!(n, dev_claim(HW_ROOT, 0x10000) == ERROR_INVALID_ARGUMENT, "bad address must be ERROR_INVALID_ARGUMENT");
+    check!(n, dev_claim(HW_ROOT, bdf(0, 0x1e, 0)) == ERROR_NO_DEVICE, "no device must be ERROR_NO_DEVICE");
     let forbidden = [
         (bdf(0, 0, 0), "host bridge"),
         (bdf(0, 1, 0), "VGA (console framebuffer)"),
@@ -100,19 +100,19 @@ fn main(args: Args) -> i32 {
     ];
     for (addr, what) in forbidden {
         let r = dev_claim(HW_ROOT, addr);
-        check!(n, r == -13, "{} must be EACCES ({})", what, r);
+        check!(n, r == ERROR_ACCESS_DENIED, "{} must be ERROR_ACCESS_DENIED ({})", what, r);
     }
 
-    // 3. edu: claim, rights, second claim – EBUSY, description.
+    // 3. edu: claim, rights, second claim – ERROR_BUSY, description.
     let h = dev_claim(HW_ROOT, EDU);
-    if h == ENODEV {
+    if h == ERROR_NO_DEVICE {
         println!("devtest: FAIL no edu device at 00:06.0 (QEMU needs -device edu,addr=06)");
         return 1;
     }
     check!(n, h >= 0, "claim edu: {}", strerror(h));
     let h = h as u64;
     check!(n, handle_info(h) == Ok((KIND_DEVICE, R_MAP_READ | R_MAP_WRITE | R_DUP | R_TRANSFER)), "rights: {:?}", handle_info(h));
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "second claim must be EBUSY");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "second claim must be ERROR_BUSY");
     let info = dev_info(h);
     check!(
         n,
@@ -120,7 +120,7 @@ fn main(args: Args) -> i32 {
         "dev_info: {:?}",
         info
     );
-    check!(n, dev_info(1).is_err_and(|e| e == -9), "dev_info on the console must be EBADF");
+    check!(n, dev_info(1).is_err_and(|e| e == ERROR_INVALID_HANDLE), "dev_info on the console must be ERROR_INVALID_HANDLE");
 
     // 4. Registers: identification, "liveness" (the device inverts bits), factorial.
     let m = match dev_map(h, 0, PROT_READ | PROT_WRITE) {
@@ -139,14 +139,14 @@ fn main(args: Args) -> i32 {
     check!(n, rd(m, REG_FACT) == 3_628_800, "10! = {}", rd(m, REG_FACT));
 
     // 5. Mapping errors and rights.
-    check!(n, dev_map(h, 1, PROT_READ) == Err(-22), "BAR 1 (none) must be EINVAL");
-    check!(n, dev_map(h, 0, PROT_WRITE) == Err(-22) && dev_map(h, 9, PROT_READ) == Err(-22), "bad prot / BAR must be EINVAL");
+    check!(n, dev_map(h, 1, PROT_READ) == Err(ERROR_INVALID_ARGUMENT), "BAR 1 (none) must be ERROR_INVALID_ARGUMENT");
+    check!(n, dev_map(h, 0, PROT_WRITE) == Err(ERROR_INVALID_ARGUMENT) && dev_map(h, 9, PROT_READ) == Err(ERROR_INVALID_ARGUMENT), "bad prot / BAR must be ERROR_INVALID_ARGUMENT");
     let ro = handle_dup(h, R_MAP_READ | R_DUP) as u64;
-    check!(n, dev_map(ro, 0, PROT_READ | PROT_WRITE) == Err(-13), "write mapping without R_MAP_WRITE must be EACCES");
+    check!(n, dev_map(ro, 0, PROT_READ | PROT_WRITE) == Err(ERROR_ACCESS_DENIED), "write mapping without R_MAP_WRITE must be ERROR_ACCESS_DENIED");
     let rm = dev_map(ro, 0, PROT_READ);
     check!(n, rm.is_ok() && rd(rm.unwrap_or(m), REG_ID) == EDU_ID, "read-only mapping");
     check!(n, munmap(rm.unwrap_or(0), BAR0) == 0, "munmap read-only mapping");
-    check!(n, munmap(m, 4096) == -22, "partial munmap must be EINVAL");
+    check!(n, munmap(m, 4096) == ERROR_INVALID_ARGUMENT, "partial munmap must be ERROR_INVALID_ARGUMENT");
 
     // 6. Writing through a read-only mapping – #PF terminates the child.
     let pid = spawn_ex("/bin/devtest", &["devtest", "rowrite"], &[(ro, 0), (1, 1)], 0);
@@ -157,7 +157,7 @@ fn main(args: Args) -> i32 {
     // 7. A mapping holds the claim: after closing the handle the device is still
     //    taken; after munmap – free.
     close(h);
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "mapping must keep the claim");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "mapping must keep the claim");
     check!(n, munmap(m, BAR0) == 0, "munmap");
     let h = dev_claim(HW_ROOT, EDU);
     check!(n, h >= 0, "claim after the last mapping is gone: {}", strerror(h));
@@ -167,7 +167,7 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0, "spawn holder: {}", strerror(pid));
     close(h as u64);
     sleep_ms(30);
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device busy while the holder runs");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "device busy while the holder runs");
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill holder");
     let h = dev_claim(HW_ROOT, EDU);
     check!(n, h >= 0, "device free after the holder was killed: {}", strerror(h));

@@ -26,7 +26,7 @@ use desoos::*;
 
 entry!(main);
 
-/// Highest syscall number + a few nonexistent ones (ENOSYS).
+/// Highest syscall number + a few nonexistent ones (ERROR_NOT_IMPLEMENTED).
 const MAX_SYS: u64 = 56;
 /// How many children at once (SMP: several CPUs in the kernel at the same time).
 const PARALLEL: usize = 8;

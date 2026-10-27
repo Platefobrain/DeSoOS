@@ -2,7 +2,7 @@
 // memory) exchange data: the parent writes a 4 KiB pattern
 // into the shared memory and signals over the channel, the child sums it and replies.
 // Finally the child waits for a message and the parent kills it (kill while
-// waiting, with shared memory mapped) – the child's end disappears (EPIPE).
+// waiting, with shared memory mapped) – the child's end disappears (ERROR_CLOSED).
 // Result: "ipcload: OK <n> round trips" and exit code 0; on error – a description and code 1.
 //
 // `ipcload child` – 0 = channel, 1 = memory (read-only).
@@ -32,7 +32,7 @@ fn child() -> i32 {
     let mut info = RecvInfo::default();
     loop {
         let r = chan_recv(0, &mut buf, 0, &mut info);
-        if r == EPIPE {
+        if r == ERROR_CLOSED {
             return 0;
         }
         if r != 8 {
@@ -96,7 +96,7 @@ fn main(args: Args) -> i32 {
         Ok((x, s)) if x == pid as u64 && (s == KILLED || s == 0) => {}
         _ => return fail("child status after kill"),
     }
-    if chan_send(p, b"x", 0) != EPIPE {
+    if chan_send(p, b"x", 0) != ERROR_CLOSED {
         return fail("killed child's channel end must be closed");
     }
     println!("ipcload: OK {} round trips", ROUNDS);

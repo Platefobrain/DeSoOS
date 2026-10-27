@@ -7,12 +7,12 @@
 //             (the kernel must reject them), finally a correct one,
 //   lba 200 – no reply (timeout, slot quarantined); the late
 //             reply arrives before lba 201 is served (the slot comes back),
-//   lba 300 – status EIO,
+//   lba 300 – status ERROR_IO,
 //   lba 400..402 – no reply (3 timeouts = the disk disappears),
 //   the rest – pattern data (the kernel checks every byte).
 // First the blk_attach errors: bad handle, missing rights, bad block size,
 // 0 blocks / slots, buffer too small.  End: the kernel closes the channel (the disk
-// disappeared) -> EPIPE -> exit code 0 and "blktest: N checks OK".
+// disappeared) -> ERROR_CLOSED -> exit code 0 and "blktest: N checks OK".
 #![no_std]
 #![no_main]
 
@@ -24,8 +24,6 @@ use desoos::*;
 
 entry!(main);
 
-const EINVAL: i64 = -22;
-const EACCES: i64 = -13;
 const SLOT: u64 = 64 * 1024;
 
 macro_rules! check {
@@ -69,18 +67,18 @@ fn main(_args: Args) -> i32 {
     let (small, buf) = (small as u64, buf as u64);
 
     // Registration errors.
-    check!(n, blk_attach(1, theirs, buf, &info(1024, 512, 4)) == EBADF, "blk_attach with the console handle must be EBADF");
-    check!(n, blk_attach(blk, buf, buf, &info(1024, 512, 4)) == EBADF, "blk_attach with SHM as the channel must be EBADF");
-    check!(n, blk_attach(blk, theirs, small, &info(1024, 512, 4)) == EINVAL, "buffer smaller than 4 slots must be EINVAL");
-    check!(n, blk_attach(blk, theirs, buf, &info(1024, 1000, 4)) == EINVAL, "block size 1000 must be EINVAL");
-    check!(n, blk_attach(blk, theirs, buf, &info(0, 512, 4)) == EINVAL, "0 blocks must be EINVAL");
-    check!(n, blk_attach(blk, theirs, buf, &info(1024, 512, 0)) == EINVAL, "0 slots must be EINVAL");
-    check!(n, blk_attach(blk, theirs, buf, &info(1024, 512, 9)) == EINVAL, "9 slots must be EINVAL");
+    check!(n, blk_attach(1, theirs, buf, &info(1024, 512, 4)) == ERROR_INVALID_HANDLE, "blk_attach with the console handle must be ERROR_INVALID_HANDLE");
+    check!(n, blk_attach(blk, buf, buf, &info(1024, 512, 4)) == ERROR_INVALID_HANDLE, "blk_attach with SHM as the channel must be ERROR_INVALID_HANDLE");
+    check!(n, blk_attach(blk, theirs, small, &info(1024, 512, 4)) == ERROR_INVALID_ARGUMENT, "buffer smaller than 4 slots must be ERROR_INVALID_ARGUMENT");
+    check!(n, blk_attach(blk, theirs, buf, &info(1024, 1000, 4)) == ERROR_INVALID_ARGUMENT, "block size 1000 must be ERROR_INVALID_ARGUMENT");
+    check!(n, blk_attach(blk, theirs, buf, &info(0, 512, 4)) == ERROR_INVALID_ARGUMENT, "0 blocks must be ERROR_INVALID_ARGUMENT");
+    check!(n, blk_attach(blk, theirs, buf, &info(1024, 512, 0)) == ERROR_INVALID_ARGUMENT, "0 slots must be ERROR_INVALID_ARGUMENT");
+    check!(n, blk_attach(blk, theirs, buf, &info(1024, 512, 9)) == ERROR_INVALID_ARGUMENT, "9 slots must be ERROR_INVALID_ARGUMENT");
     let weak = handle_dup(theirs, R_SEND | R_RECV);
-    check!(n, weak >= 0 && blk_attach(blk, weak as u64, buf, &info(1024, 512, 4)) == EACCES, "channel without TRANSFER must be EACCES");
+    check!(n, weak >= 0 && blk_attach(blk, weak as u64, buf, &info(1024, 512, 4)) == ERROR_ACCESS_DENIED, "channel without TRANSFER must be ERROR_ACCESS_DENIED");
     close(weak as u64);
     let nodup = handle_dup(blk, R_DUP);
-    check!(n, nodup >= 0 && blk_attach(nodup as u64, theirs, buf, &info(1024, 512, 4)) == EACCES, "BLK without WRITE must be EACCES");
+    check!(n, nodup >= 0 && blk_attach(nodup as u64, theirs, buf, &info(1024, 512, 4)) == ERROR_ACCESS_DENIED, "BLK without WRITE must be ERROR_ACCESS_DENIED");
     close(nodup as u64);
     close(small);
 
@@ -100,7 +98,7 @@ fn main(_args: Args) -> i32 {
     let mut bad = 0u64;
     loop {
         let r = chan_recv(mine, &mut msg, 0, &mut ri);
-        if r == EPIPE {
+        if r == ERROR_CLOSED {
             break;
         }
         if r < 32 {

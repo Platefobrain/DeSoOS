@@ -106,7 +106,7 @@ pub fn self_test() {
     check!(pid.is_some() && wait_for(2000, || sched::task_info(pid.unwrap()).is_none()), "pid did not end");
     let pid = pid.unwrap();
     check!(exit_info(pid).map(|e| e.kind) == Some(ExitKind::Exit(pid as i64)), "getpid: {:?}", exit_info(pid).map(|e| e.kind));
-    serial_println!("[SYSCALL TEST] 5/10 kernel pointer -> EFAULT, unknown syscall -> ENOSYS, getpid PASS");
+    serial_println!("[SYSCALL TEST] 5/10 kernel pointer -> ERROR_INVALID_ADDRESS, unknown syscall -> ERROR_NOT_IMPLEMENTED, getpid PASS");
 
     // 6. Registers after 100 000 syscalls, 3 processes at once (switching in between).
     let ids: Vec<TaskId> = (0..3).filter_map(|_| start("regs", None)).collect();

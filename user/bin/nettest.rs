@@ -10,13 +10,15 @@
 //     a pointer loop, a forged answer, TTL 0, a silent server; ping by name,
 //   - TCP against tests/http-stub.py (10.0.2.2:58080): a page, 1 MiB with a
 //     pattern, two slow downloads at once, a page cut short, a server reset,
-//     refused / unreachable / unknown, a program leaving mid-download; /bin/fetch
+//     refused / unreachable / unknown, a program leaving mid-download; /bin/netget
 //     to a file, an error status, a cut page, https refused,
-//   - rights: a narrowed service channel (nofiles --net) – no listen, no DNS
+//   - rights: the shell's program channel – no DNS change, other services and listen
+//     allowed; through the shell a program is refused admin, netconfig is not;
+//     a narrowed service channel (nofiles --net) – no listen, no DNS
 //     change, no other services, cannot widen itself,
 //   - listening + loopback: 127.0.0.1 and our own address, 200 KiB / 100 KiB
 //     both ways, close seen by the server, refused port, ping to ourselves,
-//   - a sandboxed httpd (nofiles --listen, page through stdin) reached over
+//   - a sandboxed netweb (nofiles --listen, page through stdin) reached over
 //     loopback and from the host through QEMU's port forwarding,
 //   - an address by hand: the router's address refused (ARP answer), bad input,
 //     a free one (lease released, ping works), not for narrowed programs, back
@@ -102,7 +104,7 @@ fn open_req(req: &str) -> i64 {
 static mut ALL_A: [u8; 4096] = [0; 4096];
 static mut ALL_B: [u8; 4096] = [0; 4096];
 
-/// Reads a socket to its end (EPIPE); the number of bytes.
+/// Reads a socket to its end (ERROR_CLOSED); the number of bytes.
 fn drain_socket(c: u64) -> u64 {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
     let mut info = RecvInfo::default();
@@ -151,7 +153,7 @@ struct Got {
     ms: u64,
 }
 
-/// HTTP GET over netd's TCP (the socket protocol, without /bin/fetch).
+/// HTTP GET over netd's TCP (the socket protocol, without /bin/netget).
 /// Err = netd's reply instead of "connected".  `leave_after` > 0: close the
 /// socket after that many messages (a program leaving mid-download).
 fn tcp_get(host: &str, port: &str, path: &str, leave_after: u32) -> Result<Got, &'static str> {
@@ -224,9 +226,9 @@ fn tcp_get(host: &str, port: &str, path: &str, leave_after: u32) -> Result<Got, 
     Ok(g)
 }
 
-/// Runs /bin/fetch with the arguments; its exit code.
-fn run_fetch(args: &[&str]) -> u64 {
-    let pid = spawn_ex("/bin/fetch", args, &[(1, 1), (1, 2), (SVC, SVC)], 0);
+/// Runs /bin/netget with the arguments; its exit code.
+fn run_netget(args: &[&str]) -> u64 {
+    let pid = spawn_ex("/bin/netget", args, &[(1, 1), (1, 2), (SVC, SVC)], 0);
     if pid <= 0 {
         return 999;
     }
@@ -238,6 +240,33 @@ fn req_on(c: u64, req: &str) -> &'static str {
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
     let mut info = RecvInfo::default();
     let r = if chan_send(c, req.as_bytes(), 0) == 0 { chan_recv(c, buf, 0, &mut info) } else { -1 };
+    if r < 0 { "" } else { core::str::from_utf8(&buf[..r as usize]).unwrap_or("") }
+}
+
+/// `/bin/sh -c "<line> > <file>"` with the service channels init gives a shell;
+/// what the line printed.
+fn sh_output(line: &str, file: &str) -> &'static str {
+    unlink(file);
+    let mut cmd = [0u8; 128];
+    let mut k = 0;
+    for b in [line.as_bytes(), b" > ", file.as_bytes()] {
+        let m = b.len().min(cmd.len() - k);
+        cmd[k..k + m].copy_from_slice(&b[..m]);
+        k += m;
+    }
+    let cmd = core::str::from_utf8(&cmd[..k]).unwrap_or("");
+    let pid = spawn_ex("/bin/sh", &["sh", "-c", cmd], &[(0, 0), (1, 1), (1, 2), (SVC, SVC), (PROG_SVC, PROG_SVC)], 0);
+    if pid <= 0 {
+        return "";
+    }
+    let _ = wait(pid as u64, 0);
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let fd = open(file, O_READ);
+    let r = if fd >= 0 { read(fd as u64, buf) } else { -1 };
+    if fd >= 0 {
+        close(fd as u64);
+    }
+    unlink(file);
     if r < 0 { "" } else { core::str::from_utf8(&buf[..r as usize]).unwrap_or("") }
 }
 
@@ -271,7 +300,7 @@ fn pump(a: u64, b: u64, len: usize) -> bool {
             let r = chan_send(a, &chunk[..k], CHAN_NONBLOCK);
             if r == 0 {
                 sent += k;
-            } else if r != EAGAIN {
+            } else if r != ERROR_WOULD_BLOCK {
                 return false;
             }
         }
@@ -281,7 +310,7 @@ fn pump(a: u64, b: u64, len: usize) -> bool {
                 return false;
             }
             got += r as usize;
-        } else if r == EAGAIN {
+        } else if r == ERROR_WOULD_BLOCK {
             if sent < len {
                 let _ = wait_many(&[(a, W_WRITABLE), (b, W_READABLE)], 100);
             } else {
@@ -356,7 +385,13 @@ fn wait_bound() -> &'static str {
     }
 }
 
-fn main(_args: Args) -> i32 {
+fn main(args: Args) -> i32 {
+    // `nettest admin`: an administrator request through slot 3, the answer
+    // printed (the rights check starts this program from a shell).
+    if args.get(1) == Some("admin") {
+        println!("{}", ask("dns auto").trim());
+        return 0;
+    }
     let mut n = 0;
     // init starts services right before this program – give net0 a moment.
     let t = uptime_ms();
@@ -375,7 +410,7 @@ fn main(_args: Args) -> i32 {
     check!(n, field(st, "ip") == "10.0.2.15" && field(st, "prefix") == "24", "DHCP address: {:?}/{:?}", field(st, "ip"), field(st, "prefix"));
     check!(n, field(st, "gw") == "10.0.2.2" && field(st, "dns") == "10.0.2.3", "DHCP gateway / DNS: {:?} {:?}", field(st, "gw"), field(st, "dns"));
     check!(n, num(st, "lease") == 86400, "DHCP lease: {:?} s", field(st, "lease"));
-    check!(n, st.contains("from DHCP server 10.0.2.2, lease 24 h (renew in "), "ifconfig text: {:?}", st.lines().nth(3));
+    check!(n, st.contains("from DHCP server 10.0.2.2, lease 24 h (renew in "), "netconfig text: {:?}", st.lines().nth(3));
     // Renewal (normally after 12 h): a REQUEST to the server, the same address back.
     let r = ask("renew");
     check!(n, r.starts_with("renewed 10.0.2.15 for 24 h from 10.0.2.2"), "DHCP renew: {:?}", r.trim());
@@ -493,20 +528,20 @@ fn main(_args: Args) -> i32 {
     }
     let st = ask("status");
     check!(n, num(st, "tcp") == 0 && num(st, "tcpmade") == 8, "connections left after the downloads: {:?} (made {:?})", field(st, "tcp"), field(st, "tcpmade"));
-    // The fetch tool: a file, an error status, a page cut short.
-    unlink("/fetch.out");
-    let code = run_fetch(&["fetch", "-o", "/fetch.out", "http://router.desoos:58080/hello"]);
+    // The netget tool: a file, an error status, a page cut short.
+    unlink("/netget.out");
+    let code = run_netget(&["netget", "-o", "/netget.out", "http://router.desoos:58080/hello"]);
     let mut fb = [0u8; 64];
-    let fd = open("/fetch.out", O_READ);
+    let fd = open("/netget.out", O_READ);
     let k = if fd >= 0 { read(fd as u64, &mut fb) } else { -1 };
     if fd >= 0 {
         close(fd as u64);
     }
-    unlink("/fetch.out");
-    check!(n, code == 0 && k == 20 && &fb[..20] == b"Hello from the host\n", "fetch -o: code {}, {} bytes", code, k);
-    check!(n, run_fetch(&["fetch", "http://10.0.2.2:58080/missing"]) == 4, "fetch of a missing page must exit 4");
-    check!(n, run_fetch(&["fetch", "http://10.0.2.2:58080/short"]) == 3, "fetch of a cut page must exit 3");
-    check!(n, run_fetch(&["fetch", "https://example.com/"]) == 1, "fetch https must be refused");
+    unlink("/netget.out");
+    check!(n, code == 0 && k == 20 && &fb[..20] == b"Hello from the host\n", "netget -o: code {}, {} bytes", code, k);
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/missing"]) == 4, "netget of a missing page must exit 4");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/short"]) == 3, "netget of a cut page must exit 3");
+    check!(n, run_netget(&["netget", "https://example.com/"]) == 1, "netget https must be refused");
 
     let r = ask("dns auto");
     check!(n, r.starts_with("DNS server 10.0.2.3 (from DHCP)"), "dns auto: {:?}", r.trim());
@@ -535,7 +570,7 @@ fn main(_args: Args) -> i32 {
             let _ = wait_many(&[(c, W_READABLE)], 2000);
             let r = chan_recv(c, buf, CHAN_NONBLOCK, &mut info);
             close(c);
-            r != EPIPE
+            r != ERROR_CLOSED
         }
         Err(_) => false,
     };
@@ -550,6 +585,30 @@ fn main(_args: Args) -> i32 {
     };
     check!(n, r.contains("not allowed") || r == "refused", "a narrowed channel widened itself: {:?}", r.trim());
     close(net_only);
+
+    // Rights: the program channel – what the shell gives the programs it starts.
+    let r = ask_via(PROG_SVC, "status");
+    check!(n, field(r, "ip") == "10.0.2.15", "status through the program channel: {:?}", r.lines().last());
+    let r = ask_via(PROG_SVC, "dns auto");
+    check!(n, r.contains("administrator request"), "DNS change through the program channel: {:?}", r.trim());
+    let r = ask_via(PROG_SVC, "listen 9002");
+    check!(n, !r.is_empty() && !r.contains("not allowed"), "listen through the program channel: {:?}", r.trim());
+    let reached = match svc_connect_via(PROG_SVC, "echo") {
+        Ok(c) => {
+            let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+            let mut info = RecvInfo::default();
+            let ok = chan_send(c, b"ping", 0) == 0 && wait_many(&[(c, W_READABLE)], 2000).is_ok() && chan_recv(c, buf, CHAN_NONBLOCK, &mut info) > 0;
+            close(c);
+            ok
+        }
+        Err(_) => false,
+    };
+    check!(n, reached, "the program channel did not reach another service (echo)");
+    // Through the shell: a program is refused, netconfig is not.
+    let r = sh_output("/bin/nettest admin", "/rights.out");
+    check!(n, r.contains("administrator request"), "a program started by the shell changed DNS: {:?}", r.trim());
+    let r = sh_output("netconfig dns auto", "/rights.out");
+    check!(n, r.starts_with("DNS server "), "netconfig from the shell: {:?}", r.trim());
 
     // Listening and loopback: client and server inside this machine.
     let l = svc_connect("net0").unwrap_or(0);
@@ -585,7 +644,7 @@ fn main(_args: Args) -> i32 {
         let mut eof = false;
         while uptime_ms() - t < 3000 {
             let r = chan_recv(sock, buf, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 eof = true;
                 break;
             }
@@ -604,29 +663,29 @@ fn main(_args: Args) -> i32 {
     let st = ask("status");
     check!(n, num(st, "echo") == 3 && num(st, "tcpacc") >= 2 && num(st, "loop") > 0, "loopback counters: {:?}", st.lines().last());
 
-    // A sandboxed server: httpd with no file access and a narrowed channel with
+    // A sandboxed server: netweb with no file access and a narrowed channel with
     // the listen right, its page through stdin; reached over loopback and from
     // the host (tests/http-stub.py connects to 127.0.0.1:58082, which QEMU
     // forwards to port 8081 of this machine).
-    const PAGE: &[u8] = b"<h1>DeSoOS sandboxed httpd</h1>\n";
+    const PAGE: &[u8] = b"<h1>DeSoOS sandboxed netweb</h1>\n";
     let h = svc_narrow("net listen").unwrap_or(0);
     let (pr, pw) = pipe().unwrap_or((0, 0));
     write(pw, PAGE);
     close(pw);
-    let pid = spawn_ex("/bin/httpd", &["httpd", "-n", "2", "8081"], &[(pr, 0), (1, 1), (1, 2), (h, SVC)], SPAWN_NO_FILES);
+    let pid = spawn_ex("/bin/netweb", &["netweb", "-n", "2", "8081"], &[(pr, 0), (1, 1), (1, 2), (h, SVC)], SPAWN_NO_FILES);
     close(pr);
     close(h);
-    check!(n, pid > 0, "spawn sandboxed httpd: {}", pid);
+    check!(n, pid > 0, "spawn sandboxed netweb: {}", pid);
     let t = uptime_ms();
     while !ask("status").contains("listening on port 8081") && uptime_ms() - t < 3000 {
         sleep_ms(20);
     }
     let g = tcp_get("127.0.0.1", "8081", "/", 0);
-    check!(n, matches!(&g, Ok(g) if g.status == 200 && g.body == PAGE.len() as u64 && g.head[..] == PAGE[..32]), "sandboxed httpd over loopback: {:?}", g.as_ref().map(|g| (g.status, g.body)));
+    check!(n, matches!(&g, Ok(g) if g.status == 200 && g.body == PAGE.len() as u64 && g.head[..] == PAGE[..32]), "sandboxed netweb over loopback: {:?}", g.as_ref().map(|g| (g.status, g.body)));
     let g = tcp_get("10.0.2.2", "58080", "/connect?port=58082&path=/", 0);
     check!(n, matches!(&g, Ok(g) if g.status == 200 && g.head.starts_with(b"HTTP/1.0 200 OK")), "from the host into DeSoOS (hostfwd 58082 -> 8081): {:?}", g.as_ref().map(|g| (g.status, g.body, core::str::from_utf8(&g.head).unwrap_or("?"))));
     let code = wait(pid as u64, 0).map(|(_, c)| c).unwrap_or(999);
-    check!(n, code == 0, "httpd exit code {}", code);
+    check!(n, code == 0, "netweb exit code {}", code);
 
     // An address by hand: checked with ARP first (QEMU's router answers for
     // 10.0.2.2 – refused), then a free one (the DHCP lease is released), back
@@ -642,7 +701,7 @@ fn main(_args: Args) -> i32 {
     check!(n, r.starts_with("address 10.0.2.20/24 set by hand, gateway 10.0.2.2, DNS 10.0.2.3"), "set 10.0.2.20: {:?}", r.trim());
     let st = ask("status");
     check!(n, field(st, "ip") == "10.0.2.20" && field(st, "dhcp") == "off" && num(st, "byhand") == 1 && num(st, "released") == 1, "after set: {:?}", st.lines().last());
-    check!(n, st.contains("IPv4 10.0.2.20/24 set by hand (DHCP off)"), "ifconfig text after set");
+    check!(n, st.contains("IPv4 10.0.2.20/24 set by hand (DHCP off)"), "netconfig text after set");
     let p = ask_stream("ping 10.0.2.2 1");
     check!(n, p.contains("1 sent, 1 received"), "ping from the address set by hand: {:?}", p.trim());
     let narrowed = svc_narrow("net").unwrap_or(0);
@@ -674,7 +733,7 @@ fn main(_args: Args) -> i32 {
     check!(n, num(st, "tx") < tx1 && num(st, "rx") >= 1, "the restarted netd must start from zero: {:?}", st.lines().last());
 
     println!(
-        "nettest: {} checks OK, card 52:54:00:12:34:56 link up, DHCP 10.0.2.15/24 (renewed), DNS (13 kinds of answers), TCP (1 MiB in {} ms), narrowed rights, loopback ({} KiB), sandboxed httpd reached from the host, concurrent pings, ARP and ping to 10.0.2.2 answered ({} frames out, {} in), netd killed and restarted (pid {} -> {})",
+        "nettest: {} checks OK, card 52:54:00:12:34:56 link up, DHCP 10.0.2.15/24 (renewed), DNS (13 kinds of answers), TCP (1 MiB in {} ms), user and narrowed rights, loopback ({} KiB), sandboxed netweb reached from the host, concurrent pings, ARP and ping to 10.0.2.2 answered ({} frames out, {} in), netd killed and restarted (pid {} -> {})",
         n, big_ms, moved / 1024, tx1, rx1, pid1, pid2
     );
     0

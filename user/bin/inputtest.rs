@@ -1,8 +1,8 @@
 // Test of the INPUT handle and the input_inject syscall (USB TEST 3/4) – the
 // usbd -> kernel path without hardware.  The kernel runs it with an INPUT handle; after the
 // test the kernel reads the input queue and checks characters, autorepeat and modifiers.
-//   1. errors: non-INPUT (EBADF), no WRITE (EACCES), n = 0 / 65, bad kind
-//      (EINVAL – no event gets through), releasing a key that is not pressed,
+//   1. errors: non-INPUT (ERROR_INVALID_HANDLE), no WRITE (ERROR_ACCESS_DENIED), n = 0 / 65, bad kind
+//      (ERROR_INVALID_ARGUMENT – no event gets through), releasing a key that is not pressed,
 //   2. "hi" + Shift+a -> kernel: "hiA",
 //   3. 'b' held for 700 ms -> kernel autorepeat (500 ms, then ~30/s),
 //   4. Caps Lock -> LED state (bit 1), a second time -> off,
@@ -20,8 +20,6 @@ use desoos::*;
 
 entry!(main);
 
-const EINVAL: i64 = -22;
-const EACCES: i64 = -13;
 const SHIFT: u8 = 0xE1;
 const CAPS: u8 = 0x39;
 
@@ -58,14 +56,14 @@ fn main(args: Args) -> i32 {
     let h = h.unwrap();
 
     // 1. Errors.
-    check!(n, input_inject(1, &[key_event(4, true)]) == EBADF, "console handle -> EBADF");
+    check!(n, input_inject(1, &[key_event(4, true)]) == ERROR_INVALID_HANDLE, "console handle -> ERROR_INVALID_HANDLE");
     let ro = handle_dup(h, 0);
-    check!(n, ro >= 0 && input_inject(ro as u64, &[key_event(4, true)]) == EACCES, "INPUT without WRITE -> EACCES");
+    check!(n, ro >= 0 && input_inject(ro as u64, &[key_event(4, true)]) == ERROR_ACCESS_DENIED, "INPUT without WRITE -> ERROR_ACCESS_DENIED");
     close(ro as u64);
-    check!(n, input_inject(h, &[]) == EINVAL, "n = 0 -> EINVAL");
+    check!(n, input_inject(h, &[]) == ERROR_INVALID_ARGUMENT, "n = 0 -> ERROR_INVALID_ARGUMENT");
     let many = [key_event(4, false); 65];
-    check!(n, input_inject(h, &many) == EINVAL, "n = 65 -> EINVAL");
-    check!(n, input_inject(h, &[key_event(0x07, true), [9, 0, 0, 0, 0, 0, 0, 0]]) == EINVAL, "bad kind -> EINVAL, nothing applied");
+    check!(n, input_inject(h, &many) == ERROR_INVALID_ARGUMENT, "n = 65 -> ERROR_INVALID_ARGUMENT");
+    check!(n, input_inject(h, &[key_event(0x07, true), [9, 0, 0, 0, 0, 0, 0, 0]]) == ERROR_INVALID_ARGUMENT, "bad kind -> ERROR_INVALID_ARGUMENT, nothing applied");
     check!(n, input_inject(h, &[key_event(0x08, false)]) >= 0, "release of a key never pressed is ignored");
 
     // 2. "hi" + Shift+a.

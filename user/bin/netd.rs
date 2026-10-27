@@ -36,10 +36,11 @@
 //                  "connected a.b.c.d:port from ..." the connection is the
 //                  socket: every message is data to send, every message from netd
 //                  is received data, and closing it closes the connection (the
-//                  program sees the end as EPIPE when the peer closes).
+//                  program sees the end as ERROR_CLOSED when the peer closes).
 // Rights per connection come from init with the connection ("net0 admin listen"
-// for the shell's programs, "net0 client [listen]" for sandboxed ones with a
-// narrowed service channel): "dns", "renew", "set" and "dhcp" need admin,
+// for netconfig, "net0 client listen" for the shell's other programs, "net0
+// client [listen]" for sandboxed ones with a narrowed service channel): "dns",
+// "renew", "set", "dhcp" and "rxrestart" need admin,
 // "listen" needs listen.  Addresses are checked before use (ARP probes, RFC 5227);
 // another machine claiming our address later is reported.
 // Loopback: frames to 127.0.0.1 or to our own address never reach the card – they
@@ -177,7 +178,7 @@ const RT_LS: u32 = 1 << 28;
 const RT_RX_ERR: u32 = 1 << 21;
 /// PHY registers through GPHY_OCP: standard registers start here, 2 bytes each.
 const RT_PHY_BASE: u32 = 0xA400;
-// Waits that ran out during start (shown in `ifconfig`).
+// Waits that ran out during start (shown in `netconfig`).
 const RT_NOTE_TXCFG: u32 = 1 << 0;
 const RT_NOTE_RXTX: u32 = 1 << 1;
 const RT_NOTE_LLRDY: u32 = 1 << 2;
@@ -522,21 +523,17 @@ const K_ADMIN: u8 = 1;
 const K_LISTEN: u8 = 2;
 
 /// Rights from init's text: "net0 admin listen" / "net0 client [listen]".
-/// A bare name (an older init) gets both.
+/// A bare name gets neither (connections only).
 fn kind_of(text: &str) -> u8 {
-    let mut w = text.split_whitespace();
-    let _name = w.next();
     let mut k = 0;
-    let mut any = false;
-    for t in w {
-        any = true;
+    for t in text.split_whitespace().skip(1) {
         match t {
             "admin" => k |= K_ADMIN,
             "listen" => k |= K_LISTEN,
             _ => {}
         }
     }
-    if any { k } else { K_ADMIN | K_LISTEN }
+    k
 }
 
 const ARP_CACHE: usize = 16;
@@ -1030,7 +1027,7 @@ impl Nic {
         if c.dead {
             return;
         }
-        if chan_send(c.chan, t.as_bytes(), CHAN_NONBLOCK) == EPIPE {
+        if chan_send(c.chan, t.as_bytes(), CHAN_NONBLOCK) == ERROR_CLOSED {
             c.dead = true;
             c.op = Op::Idle;
         }
@@ -1364,7 +1361,7 @@ impl Nic {
                     self.arp_announce();
                     let _ = writeln!(
                         t,
-                        "address {}/{} set by hand, gateway {}, DNS {} - DHCP off ('ifconfig dhcp' turns it back on)",
+                        "address {}/{} set by hand, gateway {}, DNS {} - DHCP off ('netconfig dhcp' turns it back on)",
                         ip_text(ip),
                         prefix,
                         GwText(gw),
@@ -1802,7 +1799,7 @@ impl Nic {
         while tcbs()[slot].readable() > 0 && !self.conns[k].dead {
             let n = tcbs()[slot].peek(&mut buf);
             let r = chan_send(self.conns[k].chan, &buf[..n], CHAN_NONBLOCK);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 self.conns[k].dead = true;
                 break;
             }
@@ -1861,7 +1858,7 @@ impl Nic {
                         let _ = writeln!(t, "tcp: {}:{}: {}", ip_text(m.rip), m.rport, why);
                         self.tell(owner, &t);
                     } else {
-                        // The program sees the end of the data (EPIPE).
+                        // The program sees the end of the data (ERROR_CLOSED).
                         self.conns[owner].dead = true;
                         let why = match tcbs()[slot].end {
                             tcp::End::Reset => "reset by the peer",
@@ -2527,7 +2524,7 @@ impl Nic {
         Ok(())
     }
 
-    /// Registers for diagnosis (`ifconfig`): chip version, command / interrupt
+    /// Registers for diagnosis (`netconfig`): chip version, command / interrupt
     /// state, filters, PHY, waits that ran out during start.
     fn rt_regs(&self, out: &mut Text) {
         let _ = writeln!(
@@ -2765,7 +2762,7 @@ fn main(args: Args) -> i32 {
     }
     let mut t = Text::new();
     nic.status(&mut t);
-    // The first line only (the rest is for `ifconfig`).
+    // The first line only (the rest is for `netconfig`).
     let first = t.as_bytes().split(|&b| b == b'\n').next().unwrap_or(b"");
     write(1, first);
     write(1, b"\n");
@@ -2840,7 +2837,7 @@ fn main(args: Args) -> i32 {
         if listening && ready & 2 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 listening = false;
             } else if r >= 0 && info.handles == 1 {
                 if nic.nconns < MAX_CONNS {
@@ -2869,7 +2866,7 @@ fn main(args: Args) -> i32 {
                     continue;
                 }
                 let r = chan_recv(nic.conns[j].chan, &mut msg, CHAN_NONBLOCK, &mut info);
-                if r == EPIPE {
+                if r == ERROR_CLOSED {
                     nic.conns[j].dead = true;
                 } else if r > 0 {
                     tcbs()[slot].send(&msg[..r as usize]);
@@ -2878,7 +2875,7 @@ fn main(args: Args) -> i32 {
                 continue;
             }
             let r = chan_recv(nic.conns[j].chan, &mut msg, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 nic.conns[j].dead = true;
                 continue;
             }

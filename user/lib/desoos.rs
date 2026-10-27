@@ -82,13 +82,10 @@ pub const WAIT_MAX: usize = 16;
 pub const FOREVER: u64 = u64::MAX;
 /// Maximum number of handles in a message.
 pub const MSG_HANDLES: usize = 8;
-/// Do not wait for space / a message (EAGAIN).
+/// Do not wait for space / a message (ERROR_WOULD_BLOCK).
 pub const CHAN_NONBLOCK: u64 = 1;
 /// Largest message (bytes).
 pub const MSG_MAX: usize = 4096;
-pub const EAGAIN: i64 = -11;
-pub const EPIPE: i64 = -32;
-pub const EMSGSIZE: i64 = -90;
 
 /// Handle rights (bits) – rights can only be reduced (`handle_dup`).
 pub const R_READ: u64 = 1;
@@ -120,16 +117,12 @@ pub const INPUT: u64 = 5;
 /// BLK handle (USB disk registration) – held by init and usbd in slot 6.
 pub const KIND_BLK: u64 = 11;
 pub const BLK: u64 = 6;
-pub const ETIMEDOUT: i64 = -110;
 pub const HW_ROOT: u64 = 3;
 pub const SYSCTL: u64 = 4;
 pub const SYSCTL_REBOOT: u64 = 1;
 pub const SYSCTL_HALT: u64 = 2;
 pub const SYSCTL_SYNC: u64 = 3;
 pub const SYSCTL_STRESS: u64 = 4;
-/// dev_claim errors.
-pub const EBUSY: i64 = -16;
-pub const ENODEV: i64 = -19;
 
 /// mmap: region protection.
 pub const PROT_READ: u64 = 1;
@@ -143,7 +136,7 @@ pub const SEEK_END: u64 = 2;
 /// spawn: Ctrl+C terminates the child (foreground process).
 pub const SPAWN_FOREGROUND: u64 = 1;
 /// File sandbox: the child (and its descendants) cannot use paths (open, stat,
-/// readdir, mkdir, unlink, chdir, spawn give EACCES) – only the handles passed in.
+/// readdir, mkdir, unlink, chdir, spawn give ERROR_ACCESS_DENIED) – only the handles passed in.
 pub const SPAWN_NO_FILES: u64 = 2;
 /// spawn: the child gets the parent's 0, 1, 2.
 pub const STDIO: u64 = fds(0, 1, 2);
@@ -153,12 +146,39 @@ pub const WNOHANG: u64 = 1;
 /// Status from wait: terminated by the kernel (kill, exception) + reason in bits 0..7.
 pub const STATUS_SIGNALED: u64 = 0x100;
 
-pub const ENOENT: i64 = -2;
-pub const EBADF: i64 = -9;
-pub const ECHILD: i64 = -10;
-pub const ERANGE: i64 = -34;
-pub const ENOMEM: i64 = -12;
-pub const ENOSPC: i64 = -28;
+
+/// DeSoOS errors – the same numbers in the kernel and in programs (negative
+/// results of syscalls; the numbers are the Unix ones, the names are DeSoOS's).
+/// `strerror` gives the text, `error_name` the name.
+pub const ERROR_NOT_PERMITTED: i64 = -1;
+pub const ERROR_NOT_FOUND: i64 = -2;
+pub const ERROR_NO_PROCESS: i64 = -3;
+pub const ERROR_INTERRUPTED: i64 = -4;
+pub const ERROR_IO: i64 = -5;
+pub const ERROR_TOO_MANY_ARGUMENTS: i64 = -7;
+pub const ERROR_NOT_EXECUTABLE: i64 = -8;
+pub const ERROR_INVALID_HANDLE: i64 = -9;
+pub const ERROR_NO_CHILD: i64 = -10;
+pub const ERROR_WOULD_BLOCK: i64 = -11;
+pub const ERROR_OUT_OF_MEMORY: i64 = -12;
+pub const ERROR_ACCESS_DENIED: i64 = -13;
+pub const ERROR_INVALID_ADDRESS: i64 = -14;
+pub const ERROR_BUSY: i64 = -16;
+pub const ERROR_ALREADY_EXISTS: i64 = -17;
+pub const ERROR_NO_DEVICE: i64 = -19;
+pub const ERROR_NOT_DIRECTORY: i64 = -20;
+pub const ERROR_IS_DIRECTORY: i64 = -21;
+pub const ERROR_INVALID_ARGUMENT: i64 = -22;
+pub const ERROR_TOO_MANY_HANDLES: i64 = -24;
+pub const ERROR_NO_SPACE: i64 = -28;
+pub const ERROR_NOT_SEEKABLE: i64 = -29;
+pub const ERROR_READ_ONLY: i64 = -30;
+pub const ERROR_CLOSED: i64 = -32;
+pub const ERROR_BUFFER_TOO_SMALL: i64 = -34;
+pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
+pub const ERROR_NOT_EMPTY: i64 = -39;
+pub const ERROR_MESSAGE_TOO_LARGE: i64 = -90;
+pub const ERROR_TIMED_OUT: i64 = -110;
 
 /// Parent descriptors the child will get as 0, 1, 2.
 pub const fn fds(stdin: u64, stdout: u64, stderr: u64) -> u64 {
@@ -273,7 +293,7 @@ pub struct RecvInfo {
     pub sender: u64,
 }
 
-/// Receives a message into `buf`.  Err(EMSGSIZE) – buffer too small, `info` holds
+/// Receives a message into `buf`.  Err(ERROR_MESSAGE_TOO_LARGE) – buffer too small, `info` holds
 /// the required size, the message stays in the queue.
 pub fn chan_recv(h: u64, buf: &mut [u8], flags: u64, info: &mut RecvInfo) -> i64 {
     let mut raw = [0u64; 3];
@@ -283,7 +303,7 @@ pub fn chan_recv(h: u64, buf: &mut [u8], flags: u64, info: &mut RecvInfo) -> i64
 }
 
 /// Receives a message with handles – numbers of the new handles go to `handles`
-/// (info.handles of them).  EMSGSIZE – `buf` or `handles` too small; EMFILE –
+/// (info.handles of them).  ERROR_MESSAGE_TOO_LARGE – `buf` or `handles` too small; ERROR_TOO_MANY_HANDLES –
 /// no room in the handle table; in both cases the message stays queued.
 pub fn chan_recv_h(h: u64, buf: &mut [u8], handles: &mut [u64], flags: u64, info: &mut RecvInfo) -> i64 {
     let mut raw = [0u64; 3];
@@ -301,7 +321,7 @@ pub fn spawn_ex(path: &str, args: &[&str], map: &[(u64, u64)], flags: u64) -> i6
     for a in args {
         let b = a.as_bytes();
         if n + b.len() + 1 > buf.len() {
-            return -7; // E2BIG
+            return -7; // ERROR_TOO_MANY_ARGUMENTS
         }
         buf[n..n + b.len()].copy_from_slice(b);
         n += b.len() + 1;
@@ -358,8 +378,8 @@ pub const fn bdf(bus: u64, dev: u64, func: u64) -> u64 {
 }
 
 /// Claims a PCI device (via the HW_ROOT handle) – a DEVICE handle or
-/// -errno (EACCES: in-kernel driver / disk / graphics / bridge; EBUSY: owned by
-/// another service; ENODEV: no such device).
+/// -errno (ERROR_ACCESS_DENIED: in-kernel driver / disk / graphics / bridge; ERROR_BUSY: owned by
+/// another service; ERROR_NO_DEVICE: no such device).
 pub fn dev_claim(root: u64, bdf: u64) -> i64 {
     syscall3(SYS_DEV_CLAIM, root, bdf, 0)
 }
@@ -370,8 +390,8 @@ pub const CLASS_XHCI: u64 = 0x0C_03_30;
 pub const CLASS_ETHERNET: u64 = 0x02_00_00;
 
 /// Address (bdf) of the `nr`-th PCI device of class `class` (24 bits:
-/// class << 16 | subclass << 8 | prog_if) – HW_ROOT only.  ENOENT: no
-/// more devices; EBADF: the handle is not HW_ROOT.  Does not claim the device.
+/// class << 16 | subclass << 8 | prog_if) – HW_ROOT only.  ERROR_NOT_FOUND: no
+/// more devices; ERROR_INVALID_HANDLE: the handle is not HW_ROOT.  Does not claim the device.
 pub fn dev_find(root: u64, class: u64, nr: u64) -> i64 {
     syscall3(SYS_DEV_FIND, root, class, nr)
 }
@@ -387,7 +407,7 @@ pub fn mouse_event(buttons: u8, wheel: i8) -> [u8; 8] {
 }
 
 /// Events for the kernel input subsystem (≤ 64) – LED state (bit 0
-/// Num, 1 Caps, 2 Scroll) or -errno (EBADF / EACCES / EINVAL).
+/// Num, 1 Caps, 2 Scroll) or -errno (ERROR_INVALID_HANDLE / ERROR_ACCESS_DENIED / ERROR_INVALID_ARGUMENT).
 pub fn input_inject(h: u64, events: &[[u8; 8]]) -> i64 {
     syscall3(SYS_INPUT_INJECT, h, events.as_ptr() as u64, events.len() as u64)
 }
@@ -506,10 +526,13 @@ pub fn dma_phys(buf: u64) -> Result<u64, i64> {
 /// Channel to the service manager (init) – programs started from the shell have
 /// it in slot 3 (send only).  Init has HW_ROOT in slot 3.
 pub const SVC: u64 = 3;
+/// The shell's program channel (slot 5, from init): what the shell hands to the
+/// programs it starts in their slot 3 – no network administration.
+pub const PROG_SVC: u64 = 5;
 
 /// Connects to a service by name (e.g. "edu") – returns a channel end for
 /// talking to the service.  Unknown / not running service: the channel is closed by
-/// init, the first operation on it gives EPIPE.
+/// init, the first operation on it gives ERROR_CLOSED.
 pub fn svc_connect(name: &str) -> Result<u64, i64> {
     svc_connect_via(SVC, name)
 }
@@ -649,7 +672,7 @@ pub fn spawn(path: &str, args: &[&str], flags: u64, fds: u64) -> i64 {
     for a in args {
         let b = a.as_bytes();
         if n + b.len() + 1 > buf.len() {
-            return -7; // E2BIG
+            return -7; // ERROR_TOO_MANY_ARGUMENTS
         }
         buf[n..n + b.len()].copy_from_slice(b);
         n += b.len() + 1; // byte 0 is already there
@@ -686,7 +709,7 @@ pub fn getcwd(buf: &mut [u8]) -> &str {
     core::str::from_utf8(&buf[..n as usize]).unwrap_or("/")
 }
 
-/// Directory contents: lines "d|f\t<size>\t<name>\n".  ERANGE = buffer too small.
+/// Directory contents: lines "d|f\t<size>\t<name>\n".  ERROR_BUFFER_TOO_SMALL = buffer too small.
 pub fn readdir(path: &str, buf: &mut [u8]) -> i64 {
     syscall6(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0)
 }
@@ -717,7 +740,7 @@ pub fn tasks(buf: &mut [u8]) -> i64 {
 }
 
 /// Read-only text from the kernel ("mem", "lspci -v", "cpus", "disk"...)
-/// into `buf`.  Err(ENOENT) – unknown topic; Err(ERANGE) – buffer too small.
+/// into `buf`.  Err(ERROR_NOT_FOUND) – unknown topic; Err(ERROR_BUFFER_TOO_SMALL) – buffer too small.
 pub fn sysinfo(topic: &str, buf: &mut [u8]) -> Result<usize, i64> {
     let r = syscall6(SYS_SYSINFO, topic.as_ptr() as u64, topic.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
     if r < 0 { Err(r) } else { Ok(r as usize) }
@@ -892,38 +915,75 @@ unsafe impl core::alloc::GlobalAlloc for ArenaAlloc {
 #[global_allocator]
 static ALLOCATOR: ArenaAlloc = ArenaAlloc;
 
-/// Description of an error code (-errno).
+/// Description of an error (a negative syscall result).
 pub fn strerror(e: i64) -> &'static str {
     match e {
-        -1 => "operation not permitted",
-        -2 => "no such file or directory",
-        -3 => "no such process",
-        -7 => "argument list too long",
-        -8 => "not an executable (bad ELF file)",
-        -10 => "no child processes",
-        -12 => "out of memory",
-        -4 => "interrupted",
-        -5 => "I/O error",
-        -9 => "bad file descriptor",
-        -13 => "permission denied",
-        -14 => "bad address",
-        -17 => "already exists",
-        -20 => "not a directory",
-        -21 => "is a directory",
-        -22 => "invalid argument",
-        -24 => "too many open files",
-        -28 => "no space left",
-        -29 => "illegal seek",
-        -32 => "broken pipe",
-        -30 => "read-only file system",
-        -34 => "buffer too small",
-        -11 => "try again (would block)",
-        -90 => "message too long",
-        -16 => "device or resource busy",
-        -19 => "no such device",
-        -38 => "unknown syscall",
-        -39 => "directory not empty",
+        ERROR_NOT_PERMITTED => "operation not permitted",
+        ERROR_NOT_FOUND => "not found",
+        ERROR_NO_PROCESS => "no such process",
+        ERROR_INTERRUPTED => "interrupted",
+        ERROR_IO => "input / output error",
+        ERROR_TOO_MANY_ARGUMENTS => "too many arguments",
+        ERROR_NOT_EXECUTABLE => "not an executable (bad ELF file)",
+        ERROR_INVALID_HANDLE => "invalid handle",
+        ERROR_NO_CHILD => "no child processes",
+        ERROR_WOULD_BLOCK => "would have to wait",
+        ERROR_OUT_OF_MEMORY => "out of memory",
+        ERROR_ACCESS_DENIED => "access denied",
+        ERROR_INVALID_ADDRESS => "invalid memory address",
+        ERROR_BUSY => "already in use",
+        ERROR_ALREADY_EXISTS => "already exists",
+        ERROR_NO_DEVICE => "no such device",
+        ERROR_NOT_DIRECTORY => "not a directory",
+        ERROR_IS_DIRECTORY => "is a directory",
+        ERROR_INVALID_ARGUMENT => "invalid argument",
+        ERROR_TOO_MANY_HANDLES => "too many handles",
+        ERROR_NO_SPACE => "no space left",
+        ERROR_NOT_SEEKABLE => "not seekable",
+        ERROR_READ_ONLY => "read-only",
+        ERROR_CLOSED => "the other end is closed",
+        ERROR_BUFFER_TOO_SMALL => "buffer too small",
+        ERROR_NOT_IMPLEMENTED => "no such system call",
+        ERROR_NOT_EMPTY => "directory not empty",
+        ERROR_MESSAGE_TOO_LARGE => "message too large",
+        ERROR_TIMED_OUT => "timed out",
         _ => "error",
+    }
+}
+
+/// The name of an error ("ERROR_ACCESS_DENIED"); "ERROR" for an unknown number.
+pub fn error_name(e: i64) -> &'static str {
+    match e {
+        ERROR_NOT_PERMITTED => "ERROR_NOT_PERMITTED",
+        ERROR_NOT_FOUND => "ERROR_NOT_FOUND",
+        ERROR_NO_PROCESS => "ERROR_NO_PROCESS",
+        ERROR_INTERRUPTED => "ERROR_INTERRUPTED",
+        ERROR_IO => "ERROR_IO",
+        ERROR_TOO_MANY_ARGUMENTS => "ERROR_TOO_MANY_ARGUMENTS",
+        ERROR_NOT_EXECUTABLE => "ERROR_NOT_EXECUTABLE",
+        ERROR_INVALID_HANDLE => "ERROR_INVALID_HANDLE",
+        ERROR_NO_CHILD => "ERROR_NO_CHILD",
+        ERROR_WOULD_BLOCK => "ERROR_WOULD_BLOCK",
+        ERROR_OUT_OF_MEMORY => "ERROR_OUT_OF_MEMORY",
+        ERROR_ACCESS_DENIED => "ERROR_ACCESS_DENIED",
+        ERROR_INVALID_ADDRESS => "ERROR_INVALID_ADDRESS",
+        ERROR_BUSY => "ERROR_BUSY",
+        ERROR_ALREADY_EXISTS => "ERROR_ALREADY_EXISTS",
+        ERROR_NO_DEVICE => "ERROR_NO_DEVICE",
+        ERROR_NOT_DIRECTORY => "ERROR_NOT_DIRECTORY",
+        ERROR_IS_DIRECTORY => "ERROR_IS_DIRECTORY",
+        ERROR_INVALID_ARGUMENT => "ERROR_INVALID_ARGUMENT",
+        ERROR_TOO_MANY_HANDLES => "ERROR_TOO_MANY_HANDLES",
+        ERROR_NO_SPACE => "ERROR_NO_SPACE",
+        ERROR_NOT_SEEKABLE => "ERROR_NOT_SEEKABLE",
+        ERROR_READ_ONLY => "ERROR_READ_ONLY",
+        ERROR_CLOSED => "ERROR_CLOSED",
+        ERROR_BUFFER_TOO_SMALL => "ERROR_BUFFER_TOO_SMALL",
+        ERROR_NOT_IMPLEMENTED => "ERROR_NOT_IMPLEMENTED",
+        ERROR_NOT_EMPTY => "ERROR_NOT_EMPTY",
+        ERROR_MESSAGE_TOO_LARGE => "ERROR_MESSAGE_TOO_LARGE",
+        ERROR_TIMED_OUT => "ERROR_TIMED_OUT",
+        _ => "ERROR",
     }
 }
 

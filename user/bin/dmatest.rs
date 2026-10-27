@@ -101,13 +101,13 @@ fn main(args: Args) -> i32 {
 
     // 1. Errors: rights, size, address bus; dma_phys only for DMA buffers.
     let ro = handle_dup(dev, R_MAP_READ | R_DUP) as u64;
-    check!(n, dma_alloc(ro, 4096, EDU_BITS) == -13, "dma_alloc without R_MAP_WRITE must be EACCES");
+    check!(n, dma_alloc(ro, 4096, EDU_BITS) == ERROR_ACCESS_DENIED, "dma_alloc without R_MAP_WRITE must be ERROR_ACCESS_DENIED");
     close(ro);
-    check!(n, dma_alloc(1, 4096, EDU_BITS) == -9, "dma_alloc on the console must be EBADF");
-    check!(n, dma_alloc(dev, 0, EDU_BITS) == -22 && dma_alloc(dev, 2 * MIB + 1, EDU_BITS) == -22, "bad size must be EINVAL");
-    check!(n, dma_alloc(dev, 4096, 20) == -22 && dma_alloc(dev, 4096, 65) == -22, "bad address bits must be EINVAL");
+    check!(n, dma_alloc(1, 4096, EDU_BITS) == ERROR_INVALID_HANDLE, "dma_alloc on the console must be ERROR_INVALID_HANDLE");
+    check!(n, dma_alloc(dev, 0, EDU_BITS) == ERROR_INVALID_ARGUMENT && dma_alloc(dev, 2 * MIB + 1, EDU_BITS) == ERROR_INVALID_ARGUMENT, "bad size must be ERROR_INVALID_ARGUMENT");
+    check!(n, dma_alloc(dev, 4096, 20) == ERROR_INVALID_ARGUMENT && dma_alloc(dev, 4096, 65) == ERROR_INVALID_ARGUMENT, "bad address bits must be ERROR_INVALID_ARGUMENT");
     let plain = shm_create(4096) as u64;
-    check!(n, dma_phys(plain) == Err(-22), "dma_phys on plain shared memory must be EINVAL");
+    check!(n, dma_phys(plain) == Err(ERROR_INVALID_ARGUMENT), "dma_phys on plain shared memory must be ERROR_INVALID_ARGUMENT");
     close(plain);
 
     // 2. Buffer: shared-memory handle, physical address within edu's reach.
@@ -152,7 +152,7 @@ fn main(args: Args) -> i32 {
     loop {
         let b = dma_alloc(dev, 2 * MIB, EDU_BITS);
         if b < 0 {
-            check!(n, b == -12, "over the per-device limit must be ENOMEM ({})", b);
+            check!(n, b == ERROR_OUT_OF_MEMORY, "over the per-device limit must be ERROR_OUT_OF_MEMORY ({})", b);
             break;
         }
         big += 1;
@@ -170,7 +170,7 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0, "spawn holder: {}", strerror(pid));
     close(dev); // the child now holds the last claim – the 15 MiB of buffers are freed
     sleep_ms(30);
-    check!(n, dev_claim(HW_ROOT, EDU) == EBUSY, "device busy while the holder runs");
+    check!(n, dev_claim(HW_ROOT, EDU) == ERROR_BUSY, "device busy while the holder runs");
     check!(n, kill(pid as u64) == 0 && wait(pid as u64, 0) == Ok((pid as u64, KILLED)), "kill holder");
     let d = dev_claim(HW_ROOT, EDU);
     check!(n, d >= 0, "device free after kill: {}", strerror(d));

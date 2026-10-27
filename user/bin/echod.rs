@@ -43,7 +43,7 @@ fn main(_args: Args) -> i32 {
         if listening && ready & 1 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 listening = false;
             } else if r >= 0 && info.handles == 1 {
                 if nclients < MAX_CLIENTS {
@@ -60,7 +60,7 @@ fn main(_args: Args) -> i32 {
             }
             let c = clients[j];
             let r = chan_recv(c, &mut msg, CHAN_NONBLOCK, &mut info);
-            if r == EPIPE {
+            if r == ERROR_CLOSED {
                 close(c);
                 clients[j] = clients[nclients - 1];
                 nclients -= 1;

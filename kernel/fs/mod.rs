@@ -129,7 +129,7 @@ pub trait FileSystem {
         None
     }
     /// Read-only file system (read-only disk) – opening for
-    /// writing fails with EROFS immediately.
+    /// writing fails with ERROR_READ_ONLY immediately.
     fn read_only(&self) -> bool {
         false
     }

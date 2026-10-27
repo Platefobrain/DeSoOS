@@ -2,14 +2,14 @@
 // passes a read-only handle to it to a child started in the sandbox, and the
 // child tries to get out:
 //   - every call that takes a path is refused (open in every mode, stat,
-//     readdir, mkdir, unlink, chdir, spawn, spawn_ex) – EACCES,
+//     readdir, mkdir, unlink, chdir, spawn, spawn_ex) – ERROR_ACCESS_DENIED,
 //   - the handle it was given works, with exactly its rights (read yes, write
-//     EBADF, handle_dup cannot add rights),
+//     ERROR_ACCESS_DENIED, handle_dup cannot add rights),
 //   - console, memory, pipes, channels and getcwd still work (no path),
 //   - the kernel's view (`dcp inspect <own pid>`) says "files: none",
 //   - the refusals appear in `dcp audit` (sandbox, a capability without WRITE).
 // The parent then checks that nothing changed on disk, that unknown spawn flags
-// give EINVAL, and that an unsandboxed child still has files.
+// give ERROR_INVALID_ARGUMENT, and that an unsandboxed child still has files.
 // Result: "sandtest: N checks OK" and code 0.  Child mode: `sandtest child`
 // (exit code 0 = all refusals and permissions as expected, otherwise the
 // number of the first failed check).
@@ -24,8 +24,6 @@ use desoos::*;
 
 entry!(main);
 
-const EACCES: i64 = -13;
-const EINVAL: i64 = -22;
 const PATH: &str = "/sandtest.tmp";
 const DATA: &[u8] = b"secret data";
 
@@ -81,24 +79,24 @@ fn own_caps() -> &'static str {
 fn child() -> i32 {
     let mut n = 0;
     // 1–9: every path call is refused, whatever the mode or path.
-    expect!(n, open(PATH, O_READ) == EACCES);
-    expect!(n, open(PATH, O_WRITE | O_TRUNC) == EACCES);
-    expect!(n, open("/new-file", O_WRITE | O_CREATE) == EACCES);
-    expect!(n, open("relative", O_READ) == EACCES);
-    expect!(n, stat("/").err() == Some(EACCES));
+    expect!(n, open(PATH, O_READ) == ERROR_ACCESS_DENIED);
+    expect!(n, open(PATH, O_WRITE | O_TRUNC) == ERROR_ACCESS_DENIED);
+    expect!(n, open("/new-file", O_WRITE | O_CREATE) == ERROR_ACCESS_DENIED);
+    expect!(n, open("relative", O_READ) == ERROR_ACCESS_DENIED);
+    expect!(n, stat("/").err() == Some(ERROR_ACCESS_DENIED));
     let mut dir = [0u8; 256];
-    expect!(n, readdir("/", &mut dir) == EACCES);
-    expect!(n, mkdir("/sandbox-escape") == EACCES);
-    expect!(n, unlink(PATH) == EACCES);
-    expect!(n, chdir("/bin") == EACCES);
+    expect!(n, readdir("/", &mut dir) == ERROR_ACCESS_DENIED);
+    expect!(n, mkdir("/sandbox-escape") == ERROR_ACCESS_DENIED);
+    expect!(n, unlink(PATH) == ERROR_ACCESS_DENIED);
+    expect!(n, chdir("/bin") == ERROR_ACCESS_DENIED);
     // 10–11: no programs by path either (a way around the sandbox).
-    expect!(n, spawn("/bin/hello", &["hello"], 0, fds(1, 1, 1)) == EACCES);
-    expect!(n, spawn_ex("/bin/cat", &["cat", PATH], &[(1, 1)], 0) == EACCES);
+    expect!(n, spawn("/bin/hello", &["hello"], 0, fds(1, 1, 1)) == ERROR_ACCESS_DENIED);
+    expect!(n, spawn_ex("/bin/cat", &["cat", PATH], &[(1, 1)], 0) == ERROR_ACCESS_DENIED);
     // 12–14: the handle it was given works – with exactly its rights.
     let mut b = [0u8; 32];
     let r = read(3, &mut b);
     expect!(n, r == DATA.len() as i64 && &b[..DATA.len()] == DATA);
-    expect!(n, write(3, b"x") == EBADF);
+    expect!(n, write(3, b"x") == ERROR_ACCESS_DENIED);
     let up = handle_dup(3, R_ALL);
     expect!(n, up >= 0 && handle_info(up as u64) == Ok((KIND_FILE, R_READ | R_DUP)));
     // 15–17: things without paths still work.
@@ -153,7 +151,7 @@ fn main(args: Args) -> i32 {
     check!(n, stat("/sandbox-escape").is_err() && stat("/new-file").is_err(), "the sandboxed child created something");
 
     // Unknown spawn flags are refused; without the flag a child has files.
-    check!(n, spawn_ex("/bin/hello", &["hello"], &[(1, 1)], 1 << 7) == EINVAL, "unknown spawn flag must be EINVAL");
+    check!(n, spawn_ex("/bin/hello", &["hello"], &[(1, 1)], 1 << 7) == ERROR_INVALID_ARGUMENT, "unknown spawn flag must be ERROR_INVALID_ARGUMENT");
     let pid = spawn_ex("/bin/cat", &["cat", PATH], &[(1, 1)], 0);
     check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "an unsandboxed child must still read files");
     println!();

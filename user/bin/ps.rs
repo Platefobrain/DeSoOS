@@ -10,7 +10,7 @@ extern crate alloc;
 mod desoos;
 
 use alloc::vec;
-use desoos::{ERANGE, strerror, tasks};
+use desoos::{ERROR_BUFFER_TOO_SMALL, strerror, tasks};
 
 entry!(main);
 
@@ -18,7 +18,7 @@ fn main(_: desoos::Args) -> i32 {
     let mut buf = vec![0u8; 4096];
     let n = loop {
         let n = tasks(&mut buf);
-        if n == ERANGE && buf.len() < 64 * 1024 {
+        if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
             buf.resize(buf.len() * 2, 0);
             continue;
         }

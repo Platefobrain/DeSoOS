@@ -646,29 +646,29 @@ Before networking: no program (buggy or malicious) may bring down the kernel or 
 
 ### N – Network (plan 2026-10-18)
 
-**Goal:** DeSoOS on the network – ping, DNS, TCP client (`fetch`), then a server – with the driver and the whole
+**Goal:** DeSoOS on the network – ping, DNS, TCP client (`netget`), then a server – with the driver and the whole
 stack in a user-space service `/bin/netd` (like usbd) and network access as a capability. Design:
 `ARCHITECTURE.md`, "Network".
 - [x] **N1.** Design: netd per card, `net` / `net-listen` capabilities through init, sockets as channels with
       rights, message protocol, event loop, loopback, tests.
 - [x] **N2.** (v0.37.0) Card driver in `/bin/netd` (QEMU e1000e / e1000): reset, MAC, rx/tx rings (legacy
       descriptors, one 136 KiB DMA buffer), MSI; `netN` services in init (class 020000, "no driver" for other chips –
-      the test laptop's Realtek until N8); frame counters; `ifconfig`, `arping` (ARP probe – first real frame out
+      the test laptop's Realtek until N8); frame counters; `netconfig`, `arping` (ARP probe – first real frame out
       and back). NET TEST: ARP to QEMU's router, kill + restart by init, card / MSI / DMA returned.
 - [x] **N3.** (v0.38.0) Ethernet + ARP + IPv4 + ICMP: `ping 10.0.2.2`. Parsers in `user/lib/netproto.rs` (pure
       code, every malformed frame → error); ARP cache (16, 60 s), answers to ARP and pings for our address,
       next hop on the subnet or via the gateway; static 10.0.2.15/24 (DHCP in N4). NET TEST `/bin/netparse`
       (20 malicious frames, 20 000 mutations), nettest: ping 3/3, unreachable host, bad address, 0 malformed.
-- [x] **N4.** (v0.39.0) UDP + DHCP client: address, gateway and DNS from the network; `ifconfig` shows the lease,
-      `ifconfig renew`. Client as a pure state machine (`user/lib/dhcp.rs`): selecting, requesting, bound,
+- [x] **N4.** (v0.39.0) UDP + DHCP client: address, gateway and DNS from the network; `netconfig` shows the lease,
+      `netconfig renew`. Client as a pure state machine (`user/lib/dhcp.rs`): selecting, requesting, bound,
       renewing (T1), rebinding (T2), lease end, NAK; untrusted answers checked. NET TEST 2/4 `/bin/dhcptest`
       (54 checks, a simulated day of lease), netparse + UDP/DHCP (37 malicious cases), nettest 24 checks.
 - [x] **N5.** (v0.40.0) DNS resolver: `ping <name>`, `host <name>`; cache (TTL, negative answers), CNAME, answers
       checked (random id and port, backward-only pointers, our question). netd without waiting: one operation per
-      connection, many programs at once. `ifconfig dns`. NET TEST 3/5 `/bin/dnstest` (19 malicious answers,
+      connection, many programs at once. `netconfig dns`. NET TEST 3/5 `/bin/dnstest` (19 malicious answers,
       20 000 mutations); `tests/dns-stub.py` – a test DNS server on the host; nettest 46 checks (no internet
       needed). Known gap: any client may change the DNS server until N7.
-- [x] **N6.** (v0.41.0) TCP client: `fetch http://...`. Connection as a pure state machine (`user/lib/tcp.rs`):
+- [x] **N6.** (v0.41.0) TCP client: `netget http://...`. Connection as a pure state machine (`user/lib/tcp.rs`):
       windows, congestion control, RTO + fast retransmit, zero-window probe, all closing paths, RFC 5961 checks.
       The netd connection is the socket. NET TEST 4/6 `/bin/tcptest` (57 checks, 20 000 random segments);
       `tests/http-stub.py` on the host; nettest 61 checks (1 MiB with a pattern, cut / reset pages, refused,
@@ -679,12 +679,12 @@ stack in a user-space service `/bin/netd` (like usbd) and network access as a ca
       `nofiles --listen`; netd checks listen / admin per connection. tcptest 67, nettest 85 (host -> sandboxed
       httpd through tests/http-stub.py `/connect`). Gap: unsandboxed shell programs still have admin.
 - [x] **Before N8** (v0.43.0): addresses checked with ARP before use (DHCP: DECLINE on a conflict), conflicts
-      reported, RELEASE when switching to a fixed address and when netd ends, `ifconfig set a.b.c.d/nn gw ... dns ...`
-      / `ifconfig dhcp`. dhcptest 68, nettest 96.
-- [x] **N8** (v0.44.0–v0.45.1). Real hardware: RTL8111/8168 driver; ping and fetch on the test laptop over a
-      cable; throughput. 8168g/8168h bring-up, registers in BAR 2, diagnostics in `ifconfig`; the receive ring set
+      reported, RELEASE when switching to a fixed address and when netd ends, `netconfig set a.b.c.d/nn gw ... dns ...`
+      / `netconfig dhcp`. dhcptest 68, nettest 96.
+- [x] **N8** (v0.44.0–v0.45.1). Real hardware: RTL8111/8168 driver; ping and netget on the test laptop over a
+      cable; throughput. 8168g/8168h bring-up, registers in BAR 2, diagnostics in `netconfig`; the receive ring set
       up again after start (the card kept a stale ring from the firmware); interrupts masked while acknowledged
-      and re-armed. On the test laptop: DHCP from the home router, ping < 1 ms, fetch from the internet; 10 MiB from
+      and re-armed. On the test laptop: DHCP from the home router, ping < 1 ms, netget from the internet; 10 MiB from
       the UK in 3.9 s (**2643 KiB/s**, was 178 KiB/s with an 8 KiB window) after TCP window scaling, a 256 KiB
       receive ring and 256-descriptor card rings; no loss, no resends.
       v0.46.0: 1 MiB window, data ahead of a gap kept (up to 8 pieces). v0.47.0: the real brake was ramfs copying

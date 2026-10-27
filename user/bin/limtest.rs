@@ -1,13 +1,13 @@
 // Limits test – one program tries to take the resources of the whole system,
 // and the kernel must answer with an error (or kill only that program) and keep running:
-//   1. process bomb: spawn until EAGAIN (process limit), then kill them all
+//   1. process bomb: spawn until ERROR_WOULD_BLOCK (process limit), then kill them all
 //      and spawn works again,
-//   2. shared memory: shm_create(16 MiB) until ENOMEM (kernel reserve),
+//   2. shared memory: shm_create(16 MiB) until ERROR_OUT_OF_MEMORY (kernel reserve),
 //   3. memory hog: a child touches mmap pages until the kernel kills it (no
 //      frames beyond the reserve) – the parent and the rest of the system survive,
-//   4. ramfs: 1 MiB files until ENOSPC; far seek + write – ENOSPC, not a panic,
-//   5. IPC buffers: channel queues full of 4 KiB messages until ENOMEM; a write
-//      to a pipe meanwhile – ENOMEM; after closing everything comes back.
+//   4. ramfs: 1 MiB files until ERROR_NO_SPACE; far seek + write – ERROR_NO_SPACE, not a panic,
+//   5. IPC buffers: channel queues full of 4 KiB messages until ERROR_OUT_OF_MEMORY; a write
+//      to a pipe meanwhile – ERROR_OUT_OF_MEMORY; after closing everything comes back.
 // Result: "limtest: N checks OK, ..." and exit code 0.  Child modes: `limtest sleep`,
 // `limtest hog`.
 #![no_std]
@@ -36,7 +36,7 @@ static mut KIDS: [u64; MAX_KIDS] = [0; MAX_KIDS];
 static mut MSG: [u8; 4096] = [0x5a; 4096];
 
 /// Fills channel queues (up to `max` handles, starting at handle `first`) with
-/// 4 KiB messages; returns (sent, error other than EAGAIN or 0).
+/// 4 KiB messages; returns (sent, error other than ERROR_WOULD_BLOCK or 0).
 fn fill_queues(ch: &mut [u64; 64], max: usize) -> (usize, usize, i64) {
     let mut c = 0;
     while c + 2 <= max {
@@ -54,7 +54,7 @@ fn fill_queues(ch: &mut [u64; 64], max: usize) -> (usize, usize, i64) {
     for &e in ch[..c].iter() {
         loop {
             let r = chan_send(e, msg, CHAN_NONBLOCK);
-            if r == EAGAIN {
+            if r == ERROR_WOULD_BLOCK {
                 break; // this queue is full – next one
             }
             if r < 0 {
@@ -78,12 +78,12 @@ fn filler() -> i32 {
 /// spawn of /bin/limtest that waits for resources freed by the previous check:
 /// after `wait` the kernel may still be tearing the process down on another CPU
 /// (process slot, its memory frames are released by the idle reaper), so
-/// EAGAIN / ENOMEM right after a limit test is retried for up to 2 s.
+/// ERROR_WOULD_BLOCK / ERROR_OUT_OF_MEMORY right after a limit test is retried for up to 2 s.
 fn spawn_retry(argv: &[&str], map: &[(u64, u64)]) -> i64 {
     let t = uptime_ms();
     loop {
         let pid = spawn_ex("/bin/limtest", argv, map, 0);
-        if (pid != EAGAIN && pid != ENOMEM) || uptime_ms() - t > 2000 {
+        if (pid != ERROR_WOULD_BLOCK && pid != ERROR_OUT_OF_MEMORY) || uptime_ms() - t > 2000 {
             return pid;
         }
         sleep_ms(10);
@@ -129,7 +129,7 @@ fn main(args: Args) -> i32 {
         k += 1;
     };
     let procs = k;
-    check!(n, err == EAGAIN, "process bomb must end with EAGAIN, got {} after {} processes", err, k);
+    check!(n, err == ERROR_WOULD_BLOCK, "process bomb must end with ERROR_WOULD_BLOCK, got {} after {} processes", err, k);
     check!(n, k > 500, "too few processes before the limit: {}", k);
     for &pid in kids[..k].iter() {
         kill(pid);
@@ -142,7 +142,7 @@ fn main(args: Args) -> i32 {
     kill(pid as u64);
     let _ = wait(pid as u64, 0);
 
-    // 2. Shared memory until ENOMEM (at most ~60 handles).
+    // 2. Shared memory until ERROR_OUT_OF_MEMORY (at most ~60 handles).
     let mut shm = [0u64; 64];
     let mut s = 0;
     let serr = loop {
@@ -156,7 +156,7 @@ fn main(args: Args) -> i32 {
         shm[s] = h as u64;
         s += 1;
     };
-    check!(n, serr == ENOMEM, "shared memory must end with ENOMEM (kernel reserve), got {} after {} x 16 MiB", serr, s);
+    check!(n, serr == ERROR_OUT_OF_MEMORY, "shared memory must end with ERROR_OUT_OF_MEMORY (kernel reserve), got {} after {} x 16 MiB", serr, s);
     for &h in shm[..s].iter() {
         close(h);
     }
@@ -170,7 +170,7 @@ fn main(args: Args) -> i32 {
     let st = wait(pid as u64, 0);
     check!(n, matches!(st, Ok((_, s)) if s & STATUS_SIGNALED != 0), "memory hog must be killed by the kernel: {:?}", st);
 
-    // 4. ramfs until ENOSPC.
+    // 4. ramfs until ERROR_NO_SPACE.
     let _ = mkdir("/limt");
     let mut files = 0;
     let mut name = *b"/limt/f00";
@@ -199,7 +199,7 @@ fn main(args: Args) -> i32 {
             break r;
         }
     };
-    check!(n, ferr == ENOSPC, "ramfs must end with ENOSPC, got {} after {} file(s)", ferr, files);
+    check!(n, ferr == ERROR_NO_SPACE, "ramfs must end with ERROR_NO_SPACE, got {} after {} file(s)", ferr, files);
     for i in 0..files {
         name[7] = b'0' + (i / 10) as u8;
         name[8] = b'0' + (i % 10) as u8;
@@ -209,12 +209,12 @@ fn main(args: Args) -> i32 {
     check!(n, fd >= 0, "open /limt/far: {}", fd);
     check!(n, seek(fd as u64, 1 << 40, SEEK_SET) == 1 << 40, "seek to 1 TiB");
     let r = write(fd as u64, b"x");
-    check!(n, r == ENOSPC, "write at 1 TiB must be ENOSPC, not a kernel panic: {}", r);
+    check!(n, r == ERROR_NO_SPACE, "write at 1 TiB must be ERROR_NO_SPACE, not a kernel panic: {}", r);
     close(fd as u64);
     unlink("/limt/far");
     unlink("/limt");
 
-    // 5. IPC buffers until ENOMEM.  One process has 64 handles (~16 MiB of queues),
+    // 5. IPC buffers until ERROR_OUT_OF_MEMORY.  One process has 64 handles (~16 MiB of queues),
     // so part of the budget is taken by a helper (`limtest fill`), the rest by us.
     let (p, q) = channel_create().unwrap_or((0, 0));
     let fpid = spawn_retry(&["limtest", "fill"], &[(q, 0)]);
@@ -225,12 +225,12 @@ fn main(args: Args) -> i32 {
     check!(n, chan_recv(p, &mut ok, 0, &mut info) == 2, "filler ready");
     let mut ch = [0u64; 64];
     let (c, sent, cerr) = fill_queues(&mut ch, 56);
-    check!(n, cerr == ENOMEM, "channel queues must end with ENOMEM (IPC buffer budget), got {} after {} messages", cerr, sent);
+    check!(n, cerr == ERROR_OUT_OF_MEMORY, "channel queues must end with ERROR_OUT_OF_MEMORY (IPC buffer budget), got {} after {} messages", cerr, sent);
     let pr = pipe();
     check!(n, pr.is_ok(), "pipe");
     let (pr_r, pr_w) = pr.unwrap_or((0, 0));
     // Leftover budget (< one 4 KiB message) – the pipe takes as much as fits,
-    // then ENOMEM.
+    // then ERROR_OUT_OF_MEMORY.
     let msg = unsafe { &*core::ptr::addr_of!(MSG) };
     let mut piped = 0i64;
     let r = loop {
@@ -240,7 +240,7 @@ fn main(args: Args) -> i32 {
         }
         piped += r;
     };
-    check!(n, r == ENOMEM && piped < 4096 + 64, "pipe write with the budget used up must be ENOMEM: {} after {} bytes", r, piped);
+    check!(n, r == ERROR_OUT_OF_MEMORY && piped < 4096 + 64, "pipe write with the budget used up must be ERROR_OUT_OF_MEMORY: {} after {} bytes", r, piped);
     for &e in ch[..c].iter() {
         close(e);
     }
@@ -252,7 +252,7 @@ fn main(args: Args) -> i32 {
     close(pr_w);
 
     println!(
-        "limtest: {} checks OK, {} processes before EAGAIN, {} x 16 MiB shm before ENOMEM, hog killed, {} MiB in ramfs before ENOSPC, {} x 4 KiB messages before ENOMEM",
+        "limtest: {} checks OK, {} processes before ERROR_WOULD_BLOCK, {} x 16 MiB shm before ERROR_OUT_OF_MEMORY, hog killed, {} MiB in ramfs before ERROR_NO_SPACE, {} x 4 KiB messages before ERROR_OUT_OF_MEMORY",
         n, procs, s, files, sent
     );
     0
