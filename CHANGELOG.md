@@ -2,6 +2,56 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.52.1 — 2026-10-28
+
+### The rare TCG "hang" found and fixed: yield_now kept the BKL
+- The stall in ALLOC TEST 4/5 (3 of 6 TCG runs on the build machine in v0.46.1) reproduced on the build server by
+  running the allocator test 400 times in a row: 3 stalls of 30 s – 111 s (normally 70–370 ms). The stall
+  watchdog and samples of every CPU's RIP during a stall (QEMU monitor) showed the picture: CPU 0 spinning for the
+  Big Kernel Lock all the time, one CPU looping `yield_now` → `schedule` → back, the other CPUs idle.
+- Cause: kernel tasks run under the BKL. `schedule()` releases it at a task switch – but when nothing else is
+  ready on that CPU there is no switch, the yielding task keeps running and **keeps the BKL**. A frame worker
+  waiting in a yield loop for the other workers therefore held the BKL; the others (and the test task) needed it
+  to run. Only a timer tick landing in the loop's short IF = 1 window let them in (`yield_if_contended`), and
+  under TCG that window is easy to miss for seconds or minutes. A livelock, not a deadlock – which is why it
+  ended by itself and printed no lock report.
+- Fix: `yield_now` lets a waiting CPU take the BKL (release + a new ticket) when it did not switch. After the fix:
+  400 runs with 4 CPUs and 400 with 8, no stall, longest 372 ms (8 CPUs on a 2-core host); the full suite 30/30.
+  Any other yield loop under the BKL benefits the same way.
+- Docs: ARCHITECTURE (scheduler: why `yield_now` hands the BKL over), ROADMAP (known gap removed, "Next").
+
+## v0.52.0 — 2026-10-28
+
+### kill only for own descendants
+- Until now any process could end any other but init (the rights table showed `kill` with nothing to check). Now
+  the kernel lets a process end **only itself and its descendants** (it walks the parent links); anything else is
+  `ERROR_ACCESS_DENIED` and appears in `dcp audit`. Init is everyone's ancestor.
+- Services are init's children, so programs end them **through init**: the svc request `"kill <name>"` (library
+  `svc_kill`), answered `killed <name> (pid N)` / `not allowed` / `no such service` / `not running`. Only the
+  shell's own channel may ask – not the program channel or a narrowed one. Init restarts the service by its usual
+  rules.
+- The shell's `kill` is now a **built-in**: `kill <pid>` (a program started from this shell) or `kill <service>`
+  (e.g. `kill net0`). `/bin/kill` is removed – as the shell's child it would be a sibling of the jobs and could not
+  end them.
+- Tests: nettest – a program killing netd it did not start is refused, the program channel cannot ask init, netd
+  ended through init and restarted; svctest (edud) and usbtest (usb0) end services through init; INIT TEST –
+  `kill net0` in a shell without init. The rights table notes the check (`kill`: the target must be the caller or
+  its descendant).
+- Docs: ARCHITECTURE (processes, service manager – also the program channel in slot 5), README (shell built-ins),
+  ROADMAP (DCP 7 done).
+
+## v0.51.1 — 2026-10-28
+
+### Documentation brought up to date (no code changes)
+- ARCHITECTURE: the network chapter no longer says "the protocol stack comes next"; the old binary message draft is
+  replaced by the real text protocol (requests, replies, which right each needs); tools and testing describe what
+  exists (NET TEST 6 parts with their check counts, `netarp`, `netweb`); TCP rings (1 MiB receive), download speed
+  on the test laptop (7579 KiB/s), tcptest 77; self-tests: 30 suites, 234 tests, `[RESULT-RIGHTS]`.
+- ROADMAP: status 2026-10-28 (v0.51.0); phase 5 (network + DCP) done; N marked done; DCP steps 4–6 done
+  (network as a capability, the rights table, error names) and 7–9 open (`kill` rights, directory handles,
+  a manifest for init); "Next" in a proposed order (stability first); known gaps: the TCG hang, `kill`, network.
+- README: network and permissions in the feature list, test counts, the version in the title.
+
 ## v0.51.0 — 2026-10-27
 
 ### Program names: the network and USB families

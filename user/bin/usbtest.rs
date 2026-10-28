@@ -432,7 +432,8 @@ fn robust() -> i32 {
     check!(n, child > 0, "cannot start the reader");
     sleep_ms(300);
     let t_kill = uptime_ms();
-    check!(n, kill(pid0) == 0, "kill usb0");
+    let mut kb = [0u8; 128];
+    check!(n, matches!(svc_kill("usb0", &mut kb), Ok(t) if t.starts_with("killed usb0")), "kill usb0 through init");
     let w = wait(child as u64, 0);
     let t_err = uptime_ms() - t_kill;
     let mut out = [0u8; 256];
@@ -477,7 +478,8 @@ fn robust() -> i32 {
                 }
             }
         }
-        let _ = kill(last);
+        let mut kb = [0u8; 128];
+        let _ = svc_kill("usb0", &mut kb);
         sleep_ms(20);
     }
     let t0 = uptime_ms();

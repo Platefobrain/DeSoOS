@@ -1245,6 +1245,13 @@ pub fn yield_now() {
     without_interrupts(|| {
         NEED_RESCHED[cpu()].store(false, Ordering::Relaxed);
         schedule();
+        // Nothing else was ready here, so we kept running – and kept the BKL.
+        // If another CPU waits for it, let it in now (release + take a new
+        // ticket).  Without this a task that waits in a yield loop held the BKL
+        // for as long as the timer happened to miss its short IF = 1 window –
+        // under QEMU TCG seconds to minutes, while the task it waited for
+        // could not run without the BKL.
+        bkl::yield_if_contended();
     });
     after_switch(&bkl::tag::AFTER_YIELD);
 }

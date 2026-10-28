@@ -1,4 +1,4 @@
-# DeSoOS v0.51.0
+# DeSoOS v0.52.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -33,13 +33,20 @@ More documentation:
   read-only enforcement.
 - USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, read-only mass storage
   and hubs (nested up to 5 levels).
+- Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
+  Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback;
+  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP), `netweb` (a small web server).
+- Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
+  syscall; a file sandbox (`nofiles`); network administration only for `netconfig`.
 - File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`).
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests and stress tests, runnable automatically in QEMU or on real hardware.
+- Built-in self-tests (30 suites, 234 tests) and stress tests, runnable automatically in QEMU or on real
+  hardware.
 
-It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB and an NVMe SSD.
+It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
+Ethernet.
 
 ## Requirements
 
@@ -252,8 +259,10 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   (`cd /bin`, `./hello`).
 - Redirection `> file`, `>> file`, `< file`; a trailing `&` runs in the background (`ps`,
   `kill <pid>`, `wait`). Quote names containing spaces: `cat "my file.txt"`.
-- Built-ins: `cd`, `pwd`, `echo`, `exit`, `help`, `history`, `clear`, `wait`, `sync`, `reboot`,
+- Built-ins: `cd`, `pwd`, `echo`, `exit`, `help`, `history`, `clear`, `wait`, `kill`, `sync`, `reboot`,
   `halt`, `stress`.
+- `kill <pid>` ends a program started from this shell (the kernel lets a process end only its own
+  descendants); `kill <service>` (e.g. `kill net0`) asks init to end a service, which init then restarts.
 - Kernel information (read-only): `mem`, `cpus`, `irq`, `lspci`, `acpi`, `disk`, `mount`, `df`,
   `date`, `ver`, `uptime`.
 - `services` - state of services started by `init`, including USB controllers (`usb0`,

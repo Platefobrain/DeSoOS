@@ -616,6 +616,38 @@ pub fn svc_list(buf: &mut [u8]) -> Result<usize, i64> {
     Ok(n)
 }
 
+/// Ends a service through init ("kill <name>"; init restarts it by its rules) –
+/// the answer: "killed <name> (pid N)", "not allowed", "no such service" or
+/// "not running" (into `buf`).  Only with the shell's own service channel.
+pub fn svc_kill<'a>(name: &str, buf: &'a mut [u8]) -> Result<&'a str, i64> {
+    svc_kill_via(SVC, name, buf)
+}
+
+/// `svc_kill` through another service channel (the program channel: refused).
+pub fn svc_kill_via<'a>(svc: u64, name: &str, buf: &'a mut [u8]) -> Result<&'a str, i64> {
+    let mut msg = [0u8; 64];
+    let p = b"kill ";
+    if p.len() + name.len() > msg.len() {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    msg[..p.len()].copy_from_slice(p);
+    msg[p.len()..p.len() + name.len()].copy_from_slice(name.as_bytes());
+    let (mine, theirs) = channel_create()?;
+    let r = chan_send_h(svc, &msg[..p.len() + name.len()], &[theirs], 0);
+    if r != 0 {
+        close(mine);
+        close(theirs);
+        return Err(r);
+    }
+    let mut info = RecvInfo::default();
+    let r = chan_recv(mine, buf, 0, &mut info);
+    close(mine);
+    if r < 0 {
+        return Err(r);
+    }
+    Ok(core::str::from_utf8(&buf[..r as usize]).unwrap_or(""))
+}
+
 /// `new` refers to the object of `old` (the previous `new` is closed).
 pub fn dup2(old: u64, new: u64) -> i64 {
     syscall3(SYS_DUP2, old, new, 0)

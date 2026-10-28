@@ -180,7 +180,10 @@ fn main(_args: Args) -> i32 {
     check!(n, text.contains("via edud service: PING"), "svcbench from the shell: {:?}", text);
 
     // 6. edud killed – restart (the device comes back and the new instance claims it).
-    check!(n, kill(edu_pid) == 0, "kill edud");
+    check!(n, kill(edu_pid) == ERROR_ACCESS_DENIED, "a program killed a service it did not start (edud)");
+    let mut kb = [0u8; 128];
+    let r = svc_kill("edu", &mut kb);
+    check!(n, matches!(r, Ok(t) if t.starts_with("killed edu")), "kill edu through init: {:?}", r);
     check!(n, matches!(edu_call(e, OP_PING, 0), Err(ERROR_CLOSED)), "client of killed edud must get ERROR_CLOSED");
     close(e);
     let edu1 = wait_state("edu", "running", 3000, |p, r| p != edu_pid && p != 0 && r == 1);

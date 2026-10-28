@@ -1140,14 +1140,38 @@ fn sys_wait(p: &mut Process, pid: u64, status_ptr: u64, flags: u64) -> SysResult
     Ok(child)
 }
 
-pub(super) fn sys_kill(pid: u64) -> SysResult {
+/// kill(pid) from process `caller`: only the caller itself or one of its
+/// descendants (children, their children...); init can therefore end anything,
+/// a program only what it started.  Services are ended through init (the svc
+/// request "kill <name>").  `caller` 0 = the kernel.
+pub(super) fn sys_kill(caller: u64, pid: u64) -> SysResult {
     if !sched::with_process(pid, |_| ()).is_some() {
         return Err(ERROR_NO_PROCESS); // no such process (kill from a process does not touch kernel tasks)
     }
     if pid == super::procs::init_pid() {
         return Err(ERROR_NOT_PERMITTED);
     }
+    if caller != 0 && pid != caller && !is_descendant(pid, caller) {
+        return Err(ERROR_ACCESS_DENIED);
+    }
     if sched::request_exit(pid) { Ok(0) } else { Err(ERROR_NO_PROCESS) }
+}
+
+/// Whether process `pid` descends from `ancestor` (parent links up to the root).
+fn is_descendant(pid: u64, ancestor: u64) -> bool {
+    let mut cur = pid;
+    // Bounded: the process limit (1024) is the deepest possible chain.
+    for _ in 0..2048 {
+        let Some(parent) = sched::with_process(cur, |p| p.ppid()) else { return false };
+        if parent == ancestor {
+            return true;
+        }
+        if parent == 0 || parent == cur {
+            return false;
+        }
+        cur = parent;
+    }
+    false
 }
 
 fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
@@ -1462,7 +1486,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SPAWN_EX => sys_spawn_ex(p, frame),
         SYS_WAIT => sys_wait(p, a0, a1, a2),
         SYS_GETPPID => Ok(p.ppid()),
-        SYS_KILL => sys_kill(a0),
+        SYS_KILL => sys_kill(sched::current_id(), a0),
         SYS_CHDIR => sys_chdir(p, a0, a1),
         SYS_GETCWD => {
             let cwd = p.cwd.clone();

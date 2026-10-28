@@ -714,7 +714,12 @@ fn main(args: Args) -> i32 {
     check!(n, field(st, "ip") == "10.0.2.15" && num(st, "byhand") == 0 && num(st, "declined") == 0 && num(st, "conflicts") == 0, "DHCP address again: {:?}", st.lines().last());
 
     // Kill the driver: init restarts it, the new instance works.
-    check!(n, kill(pid1) == 0, "kill netd {}", pid1);
+    check!(n, kill(pid1) == ERROR_ACCESS_DENIED, "a program killed a service it did not start (netd {})", pid1);
+    let mut kb = [0u8; 128];
+    let r = svc_kill_via(PROG_SVC, "net0", &mut kb);
+    check!(n, matches!(r, Ok("not allowed")), "kill net0 through the program channel: {:?}", r);
+    let r = svc_kill("net0", &mut kb);
+    check!(n, matches!(r, Ok(t) if t.starts_with("killed net0")), "kill net0 through init: {:?}", r);
     let t = uptime_ms();
     let mut pid2 = 0;
     while uptime_ms() - t < 5000 {

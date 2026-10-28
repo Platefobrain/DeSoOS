@@ -52,6 +52,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("history", "history            command history"),
     ("clear", "clear              clear the screen (also Ctrl+L)"),
     ("wait", "wait               wait for background programs"),
+    ("kill", "kill <pid|service>  end a program started here, or a service (init restarts it)"),
     ("sync", "sync               flush file system buffers to disk"),
     ("reboot", "reboot             restart the computer"),
     ("halt", "halt               stop the computer"),
@@ -904,6 +905,33 @@ impl Shell {
         }
     }
 
+    /// `kill <pid | service>...` – a program: the kernel allows only the shell's
+    /// own descendants; a service (a name): through init, which restarts it.
+    fn kill(&mut self, cmd: &Command) {
+        if cmd.args.len() < 2 {
+            eprintln!("usage: kill <pid | service>...   (pids: 'ps', services: 'services')");
+            return;
+        }
+        for a in cmd.args.iter().skip(1) {
+            if let Ok(pid) = a.parse::<u64>() {
+                let r = desoos::kill(pid);
+                if r < 0 {
+                    let why = if r == desoos::ERROR_ACCESS_DENIED { " (not started from this shell - a service? use its name)" } else { "" };
+                    eprintln!("kill: {}: {}{}", pid, strerror(r), why);
+                }
+            } else if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
+                let mut buf = [0u8; 128];
+                match desoos::svc_kill(a, &mut buf) {
+                    Ok(t) if t.starts_with("killed") => {}
+                    Ok(t) => eprintln!("kill: {}: {}", a, t),
+                    Err(e) => eprintln!("kill: {}: {}", a, strerror(e)),
+                }
+            } else {
+                eprintln!("kill: {}: not a number (services need the shell started by init)", a);
+            }
+        }
+    }
+
     fn builtin(&mut self, cmd: &Command) {
         let name = cmd.args[0].as_str();
         let (fin, fout) = match open_redirects(cmd) {
@@ -940,6 +968,12 @@ impl Shell {
             n if SYSCTL_BUILTINS.contains(&n) => {
                 drop(o);
                 self.sysctl(cmd, fout);
+                close_redirects(fin, fout);
+                return;
+            }
+            "kill" => {
+                drop(o);
+                self.kill(cmd);
                 close_redirects(fin, fout);
                 return;
             }

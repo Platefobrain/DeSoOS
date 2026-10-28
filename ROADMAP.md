@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-10-14 – **M20 (USB) done** (v0.29.1): the test laptop's keyboard works (v0.25.1), USB stick read-only (v0.26.0, `/usb0`, confirmed on the test laptop), hubs and hot-plug (v0.27.0), robustness (v0.28.0, confirmed on the test laptop), faster FAT32 and measurements (v0.29.0; test laptop: USB stick 120 MB/s, keyboard 275 µs, stress 432 210). **P4 done** (v0.33.0: stress 534 072, +23.6%). Next: to be chosen (section "Next"). Earlier: **stage P (performance) closed** (v0.22.0): zombies held by parents, per-CPU heap and frames; test laptop: 436 134 / 528 869 scripts (+11% / +18% since M18). Next: **M20 (USB)** – plan below. **M19 (user-space services) done** (v0.19.7): `edu` driver as a process (MMIO, interrupts, DMA), service manager in init, `sysinfo` / `sysctl` instead of `kcmd`. **M18 (IPC) done** (v0.18.4): handles with rights, channels, handles in messages + `spawn_ex`, shared memory; ping-pong 6.6 µs. **M17b done** (v0.17.35). **M17a done** (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-10-28 – **v0.52.1.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL). 30/30 suites (234 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -8,13 +8,15 @@ Phase 1  Foundation       M1–M15    ✅  kernel, memory, scheduler, ring 3, sy
 Phase 2  Userland         M16–M16b  ✅  init + shell in user space, boot on a real laptop
 Phase 3  Scaling          M17–M17b  ✅  multiple cores ✅, fine-grained locks ✅ (M17a), file objects and process memory ✅ (M17b)
 Phase 4  Hybrid           M18–M20   ✅  IPC ✅, user-space services ✅, USB ✅
+Phase 5  Network + DCP    N, DCP    ✅  network service netd ✅, capabilities and the rights table ✅
+Phase 6  Stable base      next          no known hangs ✅ (v0.52.1), DCP finished (kill ✅, directories, manifests), TLS
 ```
 
 Order matters: SMP before IPC (IPC is written once, with spinlocks from the start),
 fine-grained locks (M17a) before M17b (new memory, process and VFS code is written without the BKL from the start),
 file objects and mmap before IPC (channel handles and shared memory build on them).
 
-Next steps: ~~SMP test on the test laptop~~ ✅ (16 CPUs) → ~~M17a~~ ✅ → ~~M17b~~ ✅ → ~~M18~~ ✅ → ~~M19~~ ✅ → ~~performance fixes (P1–P3)~~ ✅ → ~~M20~~ ✅ → **P4** (scheduler).
+Next steps: ~~SMP test on the test laptop~~ ✅ (16 CPUs) → ~~M17a~~ ✅ → ~~M17b~~ ✅ → ~~M18~~ ✅ → ~~M19~~ ✅ → ~~performance fixes (P1–P3)~~ ✅ → ~~M20~~ ✅ → ~~P4~~ ✅ → ~~N (network)~~ ✅ → ~~DCP rights table~~ ✅ → **stable base** (section "Next").
 
 ---
 
@@ -644,7 +646,7 @@ Before networking: no program (buggy or malicious) may bring down the kernel or 
       (`/bin/limtest`: fork bomb, shm, memory hog, ramfs, IPC – 17 checks). Test laptop: compare 600 637, max6
       593 350 (unchanged vs v0.34.3), 0 refusals in normal operation. **Stage closed.**
 
-### N – Network (plan 2026-10-18)
+### ✅ N – Network (plan 2026-10-18, done 2026-10-26, v0.47.0)
 
 **Goal:** DeSoOS on the network – ping, DNS, TCP client (`netget`), then a server – with the driver and the whole
 stack in a user-space service `/bin/netd` (like usbd) and network access as a capability. Design:
@@ -689,7 +691,10 @@ stack in a user-space service `/bin/netd` (like usbd) and network access as a ca
       receive ring and 256-descriptor card rings; no loss, no resends.
       v0.46.0: 1 MiB window, data ahead of a gap kept (up to 8 pieces). v0.47.0: the real brake was ramfs copying
       the whole file on every write – fixed (64 KiB chunks): 7579 KiB/s on a 100 Mb/s link (Debian: 9.78 MB/s).
-- Later: packet fuzzer extensions, IPv6, TLS (needs cryptography), USB Ethernet, Wi-Fi (maybe never).
+- [x] (v0.48.0) Network administration only for `netconfig`: init gives the shell a program channel without the
+      admin right; `ifconfig` → `netconfig`, `fetch` → `netget`. (v0.51.0) `arping` → `netarp`, `httpd` → `netweb`.
+- Later: `netstat`, UDP sockets for programs, resuming a cut download (HTTP Range), packet fuzzer extensions,
+  IPv6, TLS (needs cryptography), USB Ethernet, Wi-Fi (maybe never).
 
 ### Permissions – DCP (before networking, 2026-10-18)
 
@@ -705,10 +710,21 @@ DeSoOS's own model instead of Linux users/`rwx` or Windows ACLs: a process may d
       `secinfo` removed. View limited to own process and descendants (all with `SYS_POWER`). Audit log of the last
       64 refusals. Tests: missing / exited pid, a child cannot see its parent, inspection during handle churn on
       another CPU, refusals of the sandboxed child in the audit. **Stage closed.**
-- [ ] Then networking: the network service and sockets as handles with their own rights (send, receive, listen,
-      transfer).
-- Later: sandbox limited to one directory, a manifest for init (what each service gets), full file capabilities
-  (directory handles instead of global paths).
+- [x] **4.** (v0.42.0, N7) Networking as a capability: sockets are channels with their rights (send, receive,
+      transfer), netd checks `listen` / `admin` per connection, narrowed service channels (`nofiles --net` /
+      `--listen`). (v0.48.0) Programs started from the shell get no network administration (only `netconfig`).
+- [x] **5.** (v0.49.0) **One rights table for every syscall** (`kernel/user/sysrights.rs`): which arguments are
+      handles, of which kind, which rights; one gate before the call is decoded; a missing right is
+      `ERROR_ACCESS_DENIED` for every syscall (`read` / `write` included). RIGHTS TEST: the gate against every row,
+      real syscalls with a real object of every kind (`/bin/rightstest`), the gate's cost (~20 ns).
+- [x] **6.** (v0.50.0) DeSoOS error names (`ERROR_ACCESS_DENIED`, `ERROR_INVALID_HANDLE`, ...) in the kernel and
+      in programs; the numbers stay the Unix ones.
+- [x] **7.** (v0.52.0) `kill` only for the caller and its descendants (`ERROR_ACCESS_DENIED` otherwise); services
+      are ended through init (`"kill <name>"`, not from the program channel); the shell's `kill` is a built-in
+      (`kill <pid>` / `kill <service>`), `/bin/kill` removed. Tests: a program killing a service it did not start is
+      refused, the program channel cannot ask init, nettest / svctest / usbtest end services through init.
+- [ ] **8.** Directory handles: a program gets one subtree (`/data/project`), not the whole file system.
+- [ ] **9.** A manifest for init (what each service gets) – later the `.eso` manifest.
 
 ### Clock gaps (v0.35.3–v0.35.5, 2026-10-18)
 
@@ -845,10 +861,18 @@ comes back, and the stress test does not regress.
 
 ---
 
-## Next (in no particular order)
+## Next (proposed order, 2026-10-28)
 
-native file system, networking (TCP/IP), GUI (compositor on shared memory), audio,
-virtio-gpu, XSAVE/AVX, IOMMU, shared libraries, service manager as a separate program (`/bin/svcmgr`, variant B from M19).
+1. **Stability:** ~~the rare TCG stall in ALLOC TEST 4/5~~ ✅ (v0.52.1 – `yield_now` kept the BKL); repeated
+   test runs (TCG / KVM, 1–8 CPUs) as a habit, a loop mode for any suite; scheduler measurements (wake-up
+   latency, starvation) before any rewrite.
+2. **DCP finished:** ~~`kill` rights~~ ✅ (v0.52.0), directory handles, a manifest for init.
+3. **Release report:** one page per release – tests passed, QEMU / KVM configuration, results on the test laptop,
+   known problems, performance against the previous release.
+4. **TLS** (HTTPS in `netget`) – first a decision on cryptography (no home-made crypto).
+5. **Native file system** (DeSoFS) with crash recovery; FAT32 stays for boot and exchange.
+6. **GUI** – virtio-gpu, a compositor on shared memory, windows as processes.
+7. Later: audio, XSAVE/AVX, IOMMU, shared libraries, service manager as a separate program (`/bin/svcmgr`).
 
 **DeSo AI agent** (vision, `ARCHITECTURE.md` – "Direction: DeSo AI agent"): `.eso` application format (ELF + manifest:
 version, required handles, source hash), reproducible builds, the agent as an ordinary user-space program with
@@ -879,7 +903,7 @@ Number in parentheses = the stage in which the gap goes away.
 - no directories via descriptor (readdir by path)
 - IPC: no futex and no ring buffers in the library
 - ELF: only static ET_EXEC, envp and auxv empty
-- programs from `/bin` built into the kernel image (initrd); the asm test programs (M13–M14) too (since M19.i only from the kernel's emergency shell: `run <nazwa>`)
+- programs from `/bin` built into the kernel image (initrd); the asm test programs (M13–M14) too (since M19.i only from the kernel's emergency shell: `run <name>`)
 - limits (v0.35.2) are global, not per user: 1024 processes, kernel memory reserve, 16 MiB of IPC buffers, 24 MiB ramfs; kernel heap 64 MiB
 - `read(0)` reads a whole line; background processes compete with the shell for the keyboard (`readkey`/`read` – first come, first served)
 
@@ -910,6 +934,12 @@ Number in parentheses = the stage in which the gap goes away.
 - FPU: FXSAVE only, no AVX; QEMU TCG does not raise #XM
 - mouse (PS/2 and USB) only for console scrolling; system autorepeat only for USB (PS/2 – hardware)
 - hard-coded keyboard layout (Polish programmer's)
+
+**Network**
+- no TLS (`https://` refused), no IPv6, no UDP sockets for programs (UDP only inside netd: DHCP, DNS)
+- 8 TCP connections per netd (1 MiB receive ring each), 8 KiB send ring (uploads slow)
+- cards: Intel 8254x / 82574 (QEMU) and Realtek 8168g/8168h; no USB Ethernet, no Wi-Fi
+- DMA without an IOMMU: netd and usbd are trusted system code
 
 **Files**
 - FAT32: no GPT, FAT12/16, sectors ≠ 512 B; files max 4 GiB; `mv` of directories not implemented; times in UTC

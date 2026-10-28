@@ -268,6 +268,10 @@ const G_LISTEN: u8 = 2;
 const G_OTHER: u8 = 4;
 /// Network administration (addresses, DNS servers, DHCP).
 const G_NETADMIN: u8 = 8;
+/// Ending a service ("kill <name>"; init restarts it by its rules).  Programs
+/// cannot kill services themselves – the kernel lets a process end only its own
+/// descendants, and services are init's children.
+const G_SVCADMIN: u8 = 16;
 const G_PROGRAMS: u8 = G_NET | G_LISTEN | G_OTHER;
 /// Narrowed channels at once.
 const NARROW_MAX: usize = 12;
@@ -381,6 +385,26 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
                 _ => {}
             }
             close(h);
+        } else if let Some(name) = text.strip_prefix("kill ") {
+            let reply = match defs.iter().position(|d| d.name == name.trim()) {
+                _ if grants & G_SVCADMIN == 0 => Reply::Denied,
+                None => Reply::Unknown,
+                Some(i) if svcs[i].pid == 0 || svcs[i].state != State::Running => Reply::NotRunning,
+                Some(i) => {
+                    if kill(svcs[i].pid) == 0 { Reply::Killed(svcs[i].pid) } else { Reply::NotRunning }
+                }
+            };
+            let mut out = [0u8; 64];
+            let mut line = Out2::new(&mut out);
+            let _ = match reply {
+                Reply::Killed(pid) => core::fmt::write(&mut line, format_args!("killed {} (pid {})", name.trim(), pid)),
+                Reply::Denied => core::fmt::write(&mut line, format_args!("not allowed")),
+                Reply::Unknown => core::fmt::write(&mut line, format_args!("no such service")),
+                Reply::NotRunning => core::fmt::write(&mut line, format_args!("not running")),
+            };
+            let n = line.len;
+            chan_send(h, &out[..n], CHAN_NONBLOCK);
+            close(h);
         } else if text == "list" {
             let mut out = [0u8; 1024];
             let mut n = 0;
@@ -398,6 +422,14 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
             close(h);
         }
     }
+}
+
+/// Answer to "kill <name>".
+enum Reply {
+    Killed(u64),
+    Denied,
+    Unknown,
+    NotRunning,
 }
 
 /// Writes formatted text into a buffer (no allocation).

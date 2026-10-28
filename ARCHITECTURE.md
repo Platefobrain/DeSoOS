@@ -140,6 +140,11 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
 - The kernel starts only `/bin/init`. If init dies it is restarted; 3 deaths within 10 s → the kernel
   emergency shell. Init starts the shell and services (it contains the service manager) and reaps orphans;
   `kill(init)` → `ERROR_NOT_PERMITTED`.
+- **`kill` only for descendants:** a process may end itself and its descendants (children, their children...),
+  anything else → `ERROR_ACCESS_DENIED` (the kernel walks the parent links). Init is everyone's ancestor, so it can
+  end anything; services are init's children, so a program ends a service only by asking init (`"kill <name>"` on
+  the service channel – needs the shell's own channel, not the program channel). The shell's `kill` is a built-in
+  (an external `/bin/kill` would be the shell's child, a sibling of the jobs, and could not end them).
 - **`spawn` instead of `fork`/`exec`** – a new ELF image, a copy of the cwd, selected handles. `spawn_ex` gives
   the child **only** the listed handles (the basis of sandboxing).
 - **Zombies.** A finished process stays a zombie (only its exit code) until the parent calls `wait`. Status:
@@ -398,6 +403,12 @@ I/O APIC + MSI: device interrupts     IPI: resched, TLB shootdown, halt (panic)
   bound: `DESOOS_IDLE_POLL_US` (default 200 µs; 0 = `hlt` immediately); `DESOOS_IDLE_POLL_ADAPT=0` gives a fixed
   window. Why: on real hardware `hlt` puts the core into a deep sleep state and waking takes tens of µs, which
   lengthens every task hand-off.
+- **`yield_now` hands the BKL over.** Kernel tasks run under the BKL; the switch releases it, but when nothing
+  else is ready on that CPU there is no switch, the task keeps running – and kept the BKL. `yield_now` now lets
+  a waiting CPU in (release + a new ticket) before returning. Why: a task waiting for others in a yield loop held
+  the BKL until a timer tick happened to hit its short IF = 1 window; the tasks it waited for needed the BKL, so
+  under QEMU TCG the whole system stood for seconds to minutes (the rare ALLOC TEST 4/5 "hang": 3 stalls of 30 s
+  to 111 s in ~400 runs of the test before, none after the fix in 400 runs with 4 CPUs and 400 with 8).
 - The idle loop runs without the BKL; only one CPU at a time reaps dead tasks (taking the BKL only when there is
   something to free). Why: idle CPUs re-taking the BKL after every wake-up caused most of the BKL contention.
 - Future (only if measurements show the scheduler lock still contended): per-CPU ready queues with work
@@ -628,11 +639,14 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   `SEND | DUP` rights (only init can receive). A client creates its own channel and sends `"connect edu"` + one
   end; init forwards that end to the service's connection channel (without waiting); afterwards the client and
   the service talk directly. Unknown / not running service → init closes the end and the client gets `ERROR_CLOSED`.
-  `"list"` + an end → init replies with lines "name state pid N restarts N (program)" and closes. Library:
-  `svc_connect("edu")`, `svc_list(buf)`; command `services`.
+  `"list"` + an end → init replies with lines "name state pid N restarts N (program)" and closes.
+  `"kill <name>"` + an end → init ends the service (it is restarted by the rules below) and replies `killed <name>
+  (pid N)`, `not allowed` (the program channel or a narrowed one), `no such service` or `not running`. Library:
+  `svc_connect("edu")`, `svc_list(buf)`, `svc_kill("net0", buf)`; commands `services`, `kill <name>`.
 - Service crashed → its clients get `ERROR_CLOSED` and reconnect (after the restart).
 - The shell checks at startup whether slot 3 is a channel; if so, it starts programs with `spawn_ex` and
-  `[(in,0), (out,1), (2,2), (3,3)]`, otherwise with `spawn`.
+  `[(in,0), (out,1), (2,2), (5,3)]` – the program channel from slot 5 as the child's slot 3 (only `netconfig` gets
+  the shell's own channel, see "Network access is a capability"), otherwise with `spawn`.
 - Init loop: restarts whose time has come → `wait_many` on the svc channel (at most 100 ms) → reaping children
   (`wait` with `WNOHANG`): shell, services, orphans.
 - `init test <program>` – self-test mode: instead of the shell, `<program>` runs; when it ends, init closes the
@@ -915,7 +929,7 @@ panics; every case ends in an error or a valid result within limits.
 - Result line `[RESULT-USB]`: `enum_avg_ms enum_max_ms kread_kbs kcat_kbs hid_n hid_avg_us hid_max_us` (keys sent via
   `sendkey`).
 
-## Network (stage N – in progress: the card driver works, the protocol stack comes next)
+## Network
 
 Same shape as USB: the driver **and the whole protocol stack** run in a user-space service, `/bin/netd`, one per
 network card. The kernel gets no network code (at most small helpers if the driver needs them). A bug in a packet
@@ -937,7 +951,7 @@ parser kills netd, not the kernel; init restarts it and its clients get `ERROR_C
 | Where | Card | Notes |
 |---|---|---|
 | QEMU (tests) | Intel 82574L (**e1000e**, `8086:10d3`; QEMU's default card on q35) and 82540EM (e1000, `8086:100e`) – same legacy descriptors | **driver done (N2).** QEMU `-netdev user` provides a gateway (10.0.2.2), DHCP and DNS without a real network |
-| Real hardware | Realtek **RTL8111/8168** (`10ec:8168`), typical laptop/desktop Ethernet – the test laptop has an RTL8168h (version 541) | **driver done (N8)**, confirmed on the test laptop (DHCP, ping, netget, 10 MiB at 2.6 MiB/s) – QEMU has no model of this chip. Registers in memory BAR 2 (BAR 0 is I/O ports); 16-byte descriptors (OWN / end-of-ring / first / last, length with the 4-byte CRC); bring-up: leave the firmware's out-of-band mode, gate reception during the reset, rings, open the gate, MSI before rx/tx on, PHY through GPHY_OCP (advertise, restart auto-negotiation). Written for the 8168g/8168h generation; other versions get a warning. `netconfig` shows the chip version, key registers and any start-up wait that ran out |
+| Real hardware | Realtek **RTL8111/8168** (`10ec:8168`), typical laptop/desktop Ethernet – the test laptop has an RTL8168h (version 541) | **driver done (N8)**, confirmed on the test laptop (DHCP, ping, netget: 10 MiB at 7579 KiB/s – Debian on the same laptop and cable 9.78 MB/s, the link 100 Mb/s) – QEMU has no model of this chip. Registers in memory BAR 2 (BAR 0 is I/O ports); 16-byte descriptors (OWN / end-of-ring / first / last, length with the 4-byte CRC); bring-up: leave the firmware's out-of-band mode, gate reception during the reset, rings, open the gate, MSI before rx/tx on, PHY through GPHY_OCP (advertise, restart auto-negotiation). Written for the 8168g/8168h generation; other versions get a warning. `netconfig` shows the chip version, key registers and any start-up wait that ran out |
 | Later | USB Ethernet adapters (ASIX, RTL8153) | through `usbd`, which already exists |
 | Not planned | Wi-Fi | needs vendor firmware, 802.11 and WPA2/3 – months of work |
 
@@ -996,7 +1010,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 
 - **UDP** (`parse_udp`, `build_udp_frame`): length checked against the packet, checksum over the pseudo-header
   (0 = not computed, allowed in IPv4); netd sends with a checksum. Packets for ports nobody uses are counted and
-  dropped (no sockets yet – N5/N6).
+  dropped (programs get no UDP sockets yet – UDP is used by netd's own DHCP client and DNS resolver).
 - **DHCP parser** (`parse_dhcp`): fixed BOOTP part, magic cookie, options walked with every length checked; a known
   option with a wrong length (mask, router, DNS, lease, T1/T2, server id, message type) is an error, a mask with
   holes is an error, a message without a type (plain BOOTP) is refused. Unknown options are skipped.
@@ -1090,7 +1104,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   (RFC 5961), likewise a SYN on an open connection; an ACK for data never sent is dropped; challenge ACKs at most
   one per 100 ms. Initial sequence numbers and local ports are random. A segment for no connection gets a RST
   (never for a RST, never to a group address).
-- **netd:** 8 connections, their blocks (2 × 8 KiB rings each) in a static table that costs nothing in the program
+- **netd:** 8 connections, their blocks (a 1 MiB receive ring and an 8 KiB send ring each) in a static table that costs nothing in the program
   file (an all-zero block is a valid unused one). The program's messages go into the send ring only when a whole
   message fits (otherwise netd does not read – the program's `chan_send` waits: flow control from TCP back to the
   program); received data goes to the program without blocking – when its channel is full, the data stays in the
@@ -1100,11 +1114,11 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 - **`netget [-o file] [-v] http://host[:port]/path`:** HTTP/1.0 GET, the body to the console or a file, a summary to
   stderr; exit 0 complete, 2 no connection, 3 cut short (fewer bytes than Content-Length), 4 HTTP error.
   `https://` is refused – TLS needs cryptography (later).
-- Tests: `/bin/tcptest` (NET TEST 4/6) – 57 checks against a simulated peer: handshake, refused, SYN resend times,
-  windows, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
+- Tests: `/bin/tcptest` (NET TEST 4/6) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
+  windows, window scaling, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
   every closing path, wraparound at 2^32, hostile segments, 20 000 random segments. `tests/http-stub.py` (started
   by `tests/test.sh` on 127.0.0.1:58080, the guest connects to 10.0.2.2:58080 – QEMU's NAT): `/hello`, `/big`
-  (1 MiB with a pattern), `/slow`, `/short` (cut), `/reset` (RST), `/nolength`, 404. nettest: 61 checks.
+  (1 MiB with a pattern), `/slow`, `/short` (cut), `/reset` (RST), `/nolength`, 404 (nettest, see Testing).
   QEMU's user network terminates TCP itself, so hostile TCP behaviour can only come from tcptest – the stub tests
   the whole path (DNS, ARP, TCP, netd, channel, program).
 - Not yet: SACK, a bigger send ring (uploads), urgent data, keepalive.
@@ -1130,7 +1144,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   file access at all.
 - **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 of DeSoOS (`HOSTFWD=port`,
   `HOSTFWD=0` – off); `tests/test.sh` forwards 127.0.0.1:58082 to port 8081.
-- Tests: tcptest + 10 server-side checks (67); nettest 85 checks: narrowed rights (no listen, no DNS change, no
+- Tests: tcptest's server-side checks; nettest: narrowed rights (no listen, no DNS change, no
   other service, no widening), listening + loopback to 127.0.0.1 and to our address (200 KiB and 100 KiB both
   ways, the close seen by the server, a refused port), ping to ourselves, and a sandboxed `netweb` reached over
   loopback and **from the host**: `tests/http-stub.py /connect?port=58082` connects from the host through QEMU's
@@ -1184,36 +1198,41 @@ below passed a separate channel end in an `open` request; one connection per soc
 - closing the end = closing the socket (netd sees the closed channel and sends FIN / frees the port). netd dies
   → every socket gets `ERROR_CLOSED`.
 
-### Messages (draft, binary, little-endian)
+### Messages (text)
 
-Every message starts with a 16-byte header: `op u16`, `flags u16`, `len u32` (bytes after the header), `arg u64`.
+The control protocol is text, one request per message, one reply (or a stream of lines ending in a marker).
+A program's connection comes from init (`svc_connect("net0")`) with its rights already decided (see "Network
+access is a capability").
 
-| Direction | op | Meaning |
+| Request | Reply | Right |
 |---|---|---|
-| program → netd (control) | `OPEN_TCP` | + socket end, `arg` = IPv4 address and port – connect |
-| | `OPEN_UDP` | + socket end, `arg` = local port (0 = any) |
-| | `LISTEN_TCP` | + socket end, `arg` = port – only on a `listen` connection, else `ERROR_ACCESS_DENIED` |
-| | `RESOLVE` | data = host name → reply with addresses |
-| | `STATUS` | → text: address, gateway, DNS, MAC, counters (`netconfig`) |
-| netd → program (control) | `REPLY` | `arg` = result (≥ 0 or a negative `ERROR_*`), data = payload |
-| socket, both ways | `DATA` | TCP payload / one UDP datagram (UDP: `arg` = peer address and port) |
-| netd → program (socket) | `CONNECTED`, `EOF`, `ERROR` | `ERROR` `arg` = `ECONNREFUSED`, `ERROR_TIMED_OUT`, `EHOSTUNREACH`, `ECONNRESET` |
-| netd → program (listening socket) | `ACCEPT` | + a new socket end for the accepted connection, `arg` = peer |
+| `status` | a description (card, MAC, link, address, lease, DNS, counters, last TCP connection) + a `netd-status k=v …` line for tests | – |
+| `arp a.b.c.d` | `arp a.b.c.d is-at xx:…:xx in N ms` or no reply after 1 s | – |
+| `ping host [count]` | one line per answer as they come, a summary, `ping-end` | – |
+| `resolve name` | the IPv4 addresses (DNS, cached) | – |
+| `tcp host port` | `connected a.b.c.d:port from …` – from then on the connection **is** the socket | – |
+| `listen port` | the connection becomes a listener; each accepted connection arrives as `accepted a.b.c.d:port to port N` with a new channel (its socket) | listen |
+| `dns a.b.c.d[:port]` / `dns auto` | the DNS server by hand / back to DHCP's | admin |
+| `set a.b.c.d/nn [gw …] [dns …]`, `dhcp`, `renew` | an address by hand (checked with ARP first), back to DHCP, renew the lease now | admin |
+| `rxrestart` | set the receive ring up again (diagnosis, some cards) | admin |
 
-New error codes live only in the user library and netd (the kernel already has `ERROR_CLOSED`, `ERROR_ACCESS_DENIED`, `ERROR_WOULD_BLOCK`).
-Flow control: netd stops reading a socket's channel when the TCP send window is full; the program's `chan_send`
+A request without the right: `netd: "…" is an administrator request - not allowed for this program` (or "not
+allowed" for listen). On a socket every message is data – TCP payload in, TCP payload out; up to 4 KiB per
+message. The peer closing → netd closes its end, the program sees `ERROR_CLOSED`.
+Flow control: netd stops reading a socket's channel when the TCP send ring is full; the program's `chan_send`
 then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLOCK`.
 
 ### Inside netd
 
 - **One thread, one event loop:** `wait_many` on the IRQ, the connection channel, the control channels and the
   socket channels (16 entries per call – netd rotates through larger sets), with the nearest timer as the
-  timeout (ARP retries, DHCP lease, TCP retransmission and keep-alive).
+  timeout (ARP retries, DHCP lease, TCP retransmission, TIME-WAIT).
 - **Layers, each a separate module with no hardware access** (testable on the host like `usbparse`): driver
   (rings, MSI) → Ethernet → ARP cache → IPv4 (no fragment reassembly at first; fragments dropped and counted) →
   ICMP (echo), UDP, TCP → DHCP client, DNS resolver.
 - **TCP:** connection state machine, sequence numbers, retransmission timer with backoff, receive / send windows,
-  MSS, FIN / RST, TIME_WAIT. Congestion control simple at first (slow start + congestion avoidance).
+  MSS, window scaling, data kept ahead of a gap, FIN / RST, TIME_WAIT; congestion control: slow start, congestion
+  avoidance, fast retransmit (details in "TCP").
 - **Loopback** (127.0.0.1) inside netd – lets the self-tests run a TCP client and server in one VM without any
   outside network.
 - **Limits:** per-client socket count, receive buffer per socket, total buffers (netd's own memory is already
@@ -1221,18 +1240,30 @@ then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLO
 
 ### Tools
 
-- `netconfig` (netd `STATUS`), `ping <host>`, `netget http://host/path` (HTTP/1.0 GET to stdout), a small
-  `nc`-like tool for TCP / UDP tests.
+- `netconfig` – every card: link, address, lease, DNS, counters, the last TCP connection; `netconfig renew / dns /
+  set / dhcp / rxrestart` – the only program with the admin right.
+- `ping <address or name> [count]`, `host <name>` (DNS), `netarp <a.b.c.d>` (one ARP request).
+- `netget [-o file] [-v] http://host[:port]/path` – HTTP/1.0 download with the speed; `https://` is refused (no TLS).
+- `netweb [-n count] <port> < page` – a minimal web server; `nofiles --listen netweb 8080 < /index.html` runs it
+  with no file access.
 
 ### Testing
 
-- QEMU with `-device e1000 -netdev user,...`: DHCP, ping 10.0.2.2, DNS 10.0.2.3 work with no internet access;
-  loopback TCP for client/server tests; `hostfwd` to reach a DeSoOS server from the host.
-- A fuzzer sends netd random and malformed frames (bad lengths, checksums, options, TCP flags) – netd must neither
-  crash nor leak; the kernel is not involved.
-- Real hardware (N8): ping and netget on the test laptop over a cable; throughput measured like the USB stick.
+NET TEST, 6 parts (QEMU q35 with `-device e1000e -netdev user,...`: gateway 10.0.2.2, DNS 10.0.2.3, no internet
+needed):
+
+| Part | Program | What |
+|---|---|---|
+| 1/6 | `netparse` (59 checks) | 37 hostile frames and messages refused with the right error, 20 000 mutations – no panic, sizes consistent |
+| 2/6 | `dhcptest` (68) | the DHCP client with a simulated clock: every state, resends, ARP check, DECLINE, RELEASE, T1/T2, NAK |
+| 3/6 | `dnstest` (41) | 19 hostile answers, the cache, 20 000 mutations |
+| 4/6 | `tcptest` (77) | TCP against a simulated peer: windows, scaling, retransmission, out-of-order, closing, hostile segments, the server side, 20 000 random segments |
+| 5/6 | `nettest` (102) | the real path: init starts netd, DHCP, DNS against `tests/dns-stub.py`, TCP and netget against `tests/http-stub.py`, rights (program channel, narrowed channels), listen + loopback, a sandboxed `netweb` reached from the host, concurrent clients, ARP and ping, netd killed and restarted |
+| 6/6 | – | no frames, channels or memory left behind |
+
+- Real hardware: the test laptop over a cable (DHCP from the home router, ping, netget from the internet).
 - netd never writes to disk; it only sends packets the user asked for (plus DHCP, ARP and TCP control packets).
-  Nothing listens unless a `net-listen` program was started.
+  Nothing listens unless a program asked for `listen` (and has the right).
 
 ## Resource limits
 
@@ -1257,9 +1288,9 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 28 self-test suites in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs): exceptions, memory,
-  scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators, files, IPC, services,
-  USB, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (234 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
+  exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
+  files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test
@@ -1278,7 +1309,8 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   spinning, idle polling statistics, leaks.
 - The last line, **`[RESULT]`**, is for automatic comparison of builds (humans read the screen, programs read this
   line): `ver mode idlepoll cpus ms scripts primes ipc idle pingpong_ns chan_msgs chan_mbs chan16_ms shm16_ms usb: …
-  pass`. Additional lines: `[RESULT-SVC]` (service benchmarks), `[RESULT-USB]`.
+  pass`. Additional lines: `[RESULT-SVC]` (service benchmarks), `[RESULT-USB]`, `[RESULT-RIGHTS]` (the rights
+  gate).
 - On real hardware (16 threads, 60 s), compare mode runs roughly 390–430 thousand scripts.
 
 ## Future: the DeSo AI agent

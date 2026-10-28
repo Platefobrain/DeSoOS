@@ -135,6 +135,7 @@ disk read 0 0\n\
 reboot\n\
 lspci -x\n\
 kill 1\n\
+kill net0\n\
 exit 7\n";
     let sh = start("/bin/sh", &["sh"], script);
     check!(sh.is_some(), "cannot start /bin/sh");
@@ -155,6 +156,7 @@ exit 7\n";
         "DeSoOS v",
         "/m16/up: file,",
         "kill: 1: no such process",
+        "kill: net0: not a number (services need the shell started by init)",
         "sh: mkfs: only in the kernel emergency shell",
         "sh: k: only in the kernel emergency shell",
         "disk: only the list here",
@@ -197,7 +199,7 @@ exit 7\n";
     procs::set_init_pid(init);
     let adopted = wait_for(3_000, || task_named("sleep").map(|t| t.ppid) == Some(init));
     check!(adopted, "sleep not adopted by init {} ({:?})", init, task_named("sleep").map(|t| t.ppid));
-    check!(syscalls::sys_kill(init) == Err(syscalls::ERROR_NOT_PERMITTED), "kill(init) allowed");
+    check!(syscalls::sys_kill(0, init) == Err(syscalls::ERROR_NOT_PERMITTED), "kill(init) allowed");
     let r = finish(init, 5_000);
     procs::set_init_pid(0);
     check!(matches!(r, Some((ExitKind::Exit(3), _))), "init shell: {:?}", r);
