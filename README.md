@@ -1,4 +1,4 @@
-# DeSoOS v0.52.1
+# DeSoOS v0.53.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -16,6 +16,8 @@ More documentation:
 - `ARCHITECTURE.md` - architecture: what lives in the kernel, what runs in user space, syscalls
   and IPC.
 - `CHANGELOG.md` and `ROADMAP.md` - detailed development history and plans.
+- `RELEASE.md` - release report: tests passed, QEMU / KVM configuration, real-hardware results, known
+  problems, performance against the previous release.
 
 ## Features
 
@@ -37,12 +39,13 @@ More documentation:
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback;
   tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP), `netweb` (a small web server).
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
-  syscall; a file sandbox (`nofiles`); network administration only for `netconfig`.
+  syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
+  administration only for `netconfig`.
 - File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`).
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (30 suites, 234 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (30 suites, 235 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -296,6 +299,9 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   use what the shell hands it (`nofiles cat < notes.txt` works, `nofiles cat notes.txt` is refused).
   `nofiles --net <program>` - plus network connections; `nofiles --listen <program>` - plus servers. Such a
   program reaches no other service and cannot change network settings (DNS server, DHCP).
+  `nofiles --dir <dir> <program>` - plus one directory (read and write), `--dir-ro <dir>` - read only: the
+  program's relative paths work inside it and nowhere else (`nofiles --dir-ro /notes cat todo.txt` works,
+  `nofiles --dir-ro /notes cat ../secret.txt` is refused).
 - Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`
   start a new one.
 - `mkfs`, disk writes (`disk write`) and `run` are available only in the kernel emergency shell.

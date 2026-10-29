@@ -40,13 +40,15 @@ impl Objects {
     }
 }
 
-/// One handle argument of a row: register, kinds, rights, write_if.
+/// One handle argument of a row: register, kinds, rights always needed, and up
+/// to two conditions (argument register, flag bit, the right it adds).
 #[derive(Clone, Copy)]
 struct Arg {
     reg: usize,
     kinds: u64,
     need: u64,
-    write_if: usize,
+    conds: [(usize, u64, u64); 2],
+    nc: usize,
 }
 
 fn hex(s: &str) -> u64 {
@@ -93,7 +95,11 @@ fn main(args: Args) -> i32 {
             }
         }
     }
-    for k in [KIND_CONSOLE, KIND_FILE, KIND_PIPE, KIND_CHANNEL, KIND_SHM, KIND_HW_ROOT, KIND_DEVICE, KIND_IRQ, KIND_SYSCTL, KIND_INPUT, KIND_BLK] {
+    let d = dir_open("/", O_READ | O_WRITE);
+    if d >= 0 {
+        objs.by_kind[KIND_DIR as usize] = d as u64;
+    }
+    for k in [KIND_CONSOLE, KIND_FILE, KIND_PIPE, KIND_CHANNEL, KIND_SHM, KIND_HW_ROOT, KIND_DEVICE, KIND_IRQ, KIND_SYSCTL, KIND_INPUT, KIND_BLK, KIND_DIR] {
         if objs.by_kind[k as usize] == 0 {
             println!("rightstest: FAIL no object of kind {}", k);
             unlink(PATH);
@@ -123,13 +129,24 @@ fn main(args: Args) -> i32 {
         let nr: u64 = w.next().and_then(|x| x.parse().ok()).unwrap_or(999);
         let name = w.next().unwrap_or("?");
         let _path = w.next();
-        let mut hargs = [Arg { reg: 0, kinds: 0, need: 0, write_if: 0 }; 6];
+        let mut hargs = [Arg { reg: 0, kinds: 0, need: 0, conds: [(0, 0, 0); 2], nc: 0 }; 6];
         let mut na = 0;
         for t in w {
-            let mut p = t.split(':');
-            let (r, k, nd, wi) = (p.next().unwrap_or("0"), p.next().unwrap_or("0"), p.next().unwrap_or("0"), p.next().unwrap_or("0"));
+            // "reg:kinds:need" then "+reg:bit:right" per condition.
+            let mut parts = t.split('+');
+            let mut p = parts.next().unwrap_or("").split(':');
+            let (r, k, nd) = (p.next().unwrap_or("0"), p.next().unwrap_or("0"), p.next().unwrap_or("0"));
             if na < 6 {
-                hargs[na] = Arg { reg: r.parse().unwrap_or(0), kinds: hex(k), need: hex(nd), write_if: wi.parse().unwrap_or(0) };
+                let mut a = Arg { reg: r.parse().unwrap_or(0), kinds: hex(k), need: hex(nd), conds: [(0, 0, 0); 2], nc: 0 };
+                for c in parts {
+                    let mut q = c.split(':');
+                    let (cr, b, rt) = (q.next().unwrap_or("0"), q.next().unwrap_or("0"), q.next().unwrap_or("0"));
+                    if a.nc < 2 {
+                        a.conds[a.nc] = (cr.parse().unwrap_or(0), hex(b), hex(rt));
+                        a.nc += 1;
+                    }
+                }
+                hargs[na] = a;
                 na += 1;
             }
         }
@@ -139,7 +156,7 @@ fn main(args: Args) -> i32 {
             in_call += 1;
         }
         let hargs = &hargs[..na];
-        if hargs.iter().all(|a| a.need == 0) {
+        if hargs.iter().all(|a| a.need == 0 && a.nc == 0) {
             continue;
         }
         with_handles += 1;
@@ -158,13 +175,18 @@ fn main(args: Args) -> i32 {
             break;
         }
         for (i, a) in hargs.iter().enumerate() {
-            // The rights to take away: the base ones, plus MAP_WRITE when the call asks for writing.
-            let variants: [(u64, u64); 2] = [(a.need, 1), (a.need | R_MAP_WRITE, 3)];
-            let count = if a.write_if != 0 { 2 } else { 1 };
-            for &(need, prot) in &variants[..count] {
+            // The rights to take away: the base ones (every condition off), then each
+            // condition switched on alone (e.g. a writable mapping, opening for writing).
+            for v in 0..=a.nc {
                 let mut args6 = base;
-                if a.write_if != 0 {
-                    args6[a.write_if - 1] = prot;
+                for c in &a.conds[..a.nc] {
+                    args6[c.0] = 0;
+                }
+                let mut need = a.need;
+                if v > 0 {
+                    let c = a.conds[v - 1];
+                    args6[c.0] = c.1;
+                    need |= c.2;
                 }
                 for bit in 0..8 {
                     let right = 1u64 << bit;

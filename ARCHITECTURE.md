@@ -190,8 +190,9 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 48 | `dev_find` |
 | 49 | `input_inject` |
 | 50 | `blk_attach` |
+| 51–56 | `dir_open`, `openat`, `readdirat`, `statat`, `mkdirat`, `unlinkat` (directory handles) |
 
-The syscall profiler (`prof.rs`) tracks all 51 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
+The syscall profiler (`prof.rs`) tracks all 57 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
 
 ### Errors
 
@@ -248,10 +249,11 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 | 9 `SYSCTL` | permission for system actions (reboot, halt, sync, stress) |
 | 10 `INPUT` | an input event source (keyboard/mouse) |
 | 11 `BLK` | permission to register a block device |
+| 12 `DIR` | a directory: work inside it by relative paths (`READ` – read and list, `WRITE` – create, change, remove) |
 
 | Right | For | Meaning |
 |---|---|---|
-| `READ`, `WRITE` | console, file, pipe, `INPUT`/`BLK` (`WRITE`) | missing → `ERROR_ACCESS_DENIED` |
+| `READ`, `WRITE` | console, file, pipe, directory, `INPUT`/`BLK` (`WRITE`) | missing → `ERROR_ACCESS_DENIED` |
 | `SEND`, `RECV` | channel; `IRQ` (`RECV`) | missing → `ERROR_ACCESS_DENIED` |
 | `MAP_READ`, `MAP_WRITE` | shared memory, device | missing → `ERROR_ACCESS_DENIED` |
 | `DUP` | all | may be copied (`dup`, `handle_dup`, handle for a child) |
@@ -260,14 +262,15 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 **Rights can only be reduced** (`handle_dup(h, mask)`); no operation adds them.
 
 **The rights table** (`kernel/user/sysrights.rs`): one row per syscall – which arguments are handles, of which
-kinds, and which rights each needs (a mapping needs `MAP_WRITE` only when it asks for writing). `syscall_dispatch`
+kinds, and which rights each needs – some only when the call asks for them (a mapping needs `MAP_WRITE` only
+when it asks for writing; `openat` needs the directory's `READ` / `WRITE` according to its flags). `syscall_dispatch`
 asks the table before the call is decoded – one gate for every syscall; the syscall functions only use the
 objects. A handle that does not exist or is of the wrong kind → `ERROR_INVALID_HANDLE`; a handle without a right → `ERROR_ACCESS_DENIED`
 (the same for every syscall, `read` / `write` included – unlike POSIX, where a read-only descriptor gives
 `ERROR_INVALID_HANDLE`); a number without a row → `ERROR_NOT_IMPLEMENTED`. Handles passed in a list in memory (the handles in a message:
 `TRANSFER`; the `wait_many` list; `spawn` / `spawn_ex`: `DUP`; the `sysctl` output handle: `WRITE`) are checked
 by the call itself, and the row says so. The table also has the `path` column (file sandbox, below). It is
-readable as text (`sysinfo rights`): `nr name path|- reg:kinds:need:write_if …`.
+readable as text (`sysinfo rights`): `nr name path|- reg:kinds:need[+reg:bit:right]… …`.
 RIGHTS TEST checks it three ways: the gate alone against every row (every right of every handle argument taken
 away in turn), `/bin/rightstest` through real syscalls with a real object of every kind (it reads the table from
 the kernel, so a new row is tested without changing it), and the gate's cost (~20–40 ns per syscall in QEMU TCG;
@@ -276,7 +279,8 @@ the kernel, so a new row is tested without changing it), and the gate's cost (~2
 **This is the whole permission model (capabilities).** A process has no user or group; what it may do is exactly
 the handles it holds. Unlike Linux (UID/GID + `rwx` bits, root may do everything), a program started from the shell
 gets only the handles its parent passes; `usbd` holds one claimed controller, `INPUT` and `BLK`, nothing else.
-Files are the exception: by default a process may open any path.
+Files are the exception: by default a process may open any path – unless it runs in the file sandbox, where it
+reaches only the files and directories it was given.
 
 **File sandbox:** `spawn` / `spawn_ex` with `SPAWN_NO_FILES` starts a process with no file system access by
 path. `open` (every mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `ERROR_ACCESS_DENIED`,
@@ -284,6 +288,22 @@ refused in one place before the call is decoded (the `path` column of the rights
 must be marked there). File handles it was given keep working with their rights. The flag is inherited by every child and can
 never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
 passes the handle), `nofiles cat file` gets "access denied". Half of the `sysfuzz` children run in it.
+
+**Directory handles** (`dir_open` → kind 12 `DIR`): a process works inside one directory by paths relative to the
+handle – `openat`, `readdirat`, `statat`, `mkdirat`, `unlinkat`. The path is resolved by the kernel against the
+handle's directory: an absolute path, or a `..` that would climb above the directory, is `ERROR_ACCESS_DENIED`;
+`sub/../x` stays inside; `""` / `.` is the directory itself (list, stat – not remove). There are no symbolic links
+(ramfs, FAT32), so there is no other way out. Rights: `READ` to read and list, `WRITE` to create, change and remove
+(`openat` needs whichever its flags ask for); `handle_dup` makes a read-only copy. `dir_open` itself takes a path,
+so it is refused in the sandbox – a sandboxed process gets directories only from its parent.
+Shell: `nofiles --dir <dir> <program>` (read and write) or `--dir-ro <dir>` (read only) – the program gets the
+handle in slot 4; the user library retries a refused relative `open` / `readdir` / `stat` / `mkdir` / `unlink`
+inside it, so ordinary programs work unchanged: `nofiles --dir-ro /notes cat todo.txt`. Limit: the handle holds the
+directory's path, not the directory itself – a directory removed and created again under the same name is reached
+through the old handle (directories cannot be moved yet). Plan: a busy directory before folders can be moved, the
+directory itself (a node number) with the native file system.
+Test: FILE TEST 8/8 (`/bin/dirtest`: seven ways out refused, read-only / write-only rights, a sandboxed child with
+only a read-only directory) and 3/8 (`nofiles --dir` in the shell).
 
 **DCP (DeSoOS Capability Permissions)** is the name of this model, and `dcp` the command that shows it:
 `dcp` (every visible process: devices, system powers, file access), `dcp inspect <pid>` (every capability with
@@ -1288,7 +1308,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (234 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (235 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed

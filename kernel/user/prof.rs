@@ -19,29 +19,29 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use crate::arch::x86_64::percpu::PerCpu;
 
 /// Categories 0..SYSCALLS are syscall numbers.
-pub const SYSCALLS: usize = 51; // syscall numbers 0..51 (48 dev_find, 49–50 reserved in the design)
-pub const PF_USER: usize = 51;
-pub const IRQ_PIT: usize = 52;
-pub const IRQ_TIMER: usize = 53;
-pub const IRQ_RESCHED: usize = 54;
-pub const REAP: usize = 55;
-pub const EXIT: usize = 56;
-pub const LOAD_ELF: usize = 57;
-pub const CTX_SWITCH: usize = 58;
-pub const DRV_EXEC: usize = 59;
+pub const SYSCALLS: usize = 57; // syscall numbers 0..57
+pub const PF_USER: usize = 57;
+pub const IRQ_PIT: usize = 58;
+pub const IRQ_TIMER: usize = 59;
+pub const IRQ_RESCHED: usize = 60;
+pub const REAP: usize = 61;
+pub const EXIT: usize = 62;
+pub const LOAD_ELF: usize = 63;
+pub const CTX_SWITCH: usize = 64;
+pub const DRV_EXEC: usize = 65;
 /// Measurements whose end precedes their start (should not happen – a sanity check).
-const TSC_SKEW: usize = 60;
-pub const SP_READ: usize = 61;
-pub const SP_ELF: usize = 62;
-pub const SP_TASK: usize = 63;
-const N: usize = 64;
+const TSC_SKEW: usize = 66;
+pub const SP_READ: usize = 67;
+pub const SP_ELF: usize = 68;
+pub const SP_TASK: usize = 69;
+const N: usize = 70;
 
 const NAMES: [&str; N] = [
     "exit(sys)", "write", "read", "open", "close", "getpid", "sleep", "yield", "uptime", "spawn", "wait",
     "getppid", "kill", "chdir", "getcwd", "readdir", "stat", "mkdir", "unlink", "readkey", "tasks", "(21)",
     "dup", "dup2", "seek", "pipe", "brk", "mmap", "munmap", "handle_dup", "handle_info", "chan_create",
     "chan_send", "chan_recv", "shm_create", "shm_map", "spawn_ex", "shm_size", "wait_many", "dev_claim",
-    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "dev_find", "input_inject", "blk_attach", "#PF user", "IRQ PIT", "LAPIC timer",
+    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "dev_find", "input_inject", "blk_attach", "dir_open", "openat", "readdirat", "statat", "mkdirat", "unlinkat", "#PF user", "IRQ PIT", "LAPIC timer",
     "resched IPI", "reap", "exit proc", " spawn:load", "ctx switch", "drv exec", "TSC skew", " sp:readfile", " sp:elf+pt", " sp:task",
 ];
 

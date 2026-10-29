@@ -58,6 +58,19 @@
 //
 // open flags: 1 READ, 2 WRITE, 4 CREATE, 8 TRUNC, 16 APPEND.
 //
+// Directory handles (a program works inside one directory only):
+//
+//  51  dir_open(path, len, flags) -> DIR   flags READ (read, list) | WRITE (create,
+//        change, remove inside); a path call (refused in the file sandbox)
+//  52  openat(dir, path, len, flags) -> fd    like open, the path relative to dir
+//  53  readdirat(dir, path, len, buf, buflen) -> n
+//  54  statat(dir, path, len, out)
+//  55  mkdirat(dir, path, len)
+//  56  unlinkat(dir, path, len)
+//      A path through a directory handle is relative and never leaves the directory
+//      (absolute, or ".." above it -> ERROR_ACCESS_DENIED); "" / "." = the directory
+//      itself (readdirat, statat).  Rights: the table in sysrights.rs.
+//
 // Process memory: pointer + length are checked (lower half, pages present
 // with the USER bit, WRITABLE for writes), and the copying itself goes
 // through process addresses between `stac` and `clac` (SMAP: outside this
@@ -278,6 +291,12 @@ pub const SYS_INPUT_INJECT: u64 = 49;
 /// 64 KiB each in the buffer), timeout_ms u32 (0 = 5000, otherwise 100..30000), 4 bytes
 /// zero, 40-byte description (ASCII).  The disk is always read-only.
 pub const SYS_BLK_ATTACH: u64 = 50;
+pub const SYS_DIR_OPEN: u64 = 51;
+pub const SYS_OPENAT: u64 = 52;
+pub const SYS_READDIRAT: u64 = 53;
+pub const SYS_STATAT: u64 = 54;
+pub const SYS_MKDIRAT: u64 = 55;
+pub const SYS_UNLINKAT: u64 = 56;
 /// Maximum number of entries in the spawn_ex map.
 pub const SPAWN_EX_MAX: u64 = 16;
 
@@ -449,7 +468,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
     match p.fd(fd)? {
         // A channel has no READ / WRITE (messages – chan_send / chan_recv).
-        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => Err(ERROR_INVALID_HANDLE),
+        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::Dir(_) => Err(ERROR_INVALID_HANDLE),
         Fd::Pipe(e) => {
             if !e.write {
                 return Err(ERROR_INVALID_HANDLE);
@@ -532,7 +551,7 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
         }
     } else {
         match p.fd(fd)? {
-            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk => return Err(ERROR_INVALID_HANDLE),
+            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::Dir(_) => return Err(ERROR_INVALID_HANDLE),
             Fd::Pipe(e) => {
                 if e.write {
                     return Err(ERROR_INVALID_HANDLE);
@@ -559,15 +578,15 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
 }
 
 fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
-    if len == 0 || len > 255 {
-        return Err(ERROR_INVALID_ARGUMENT);
-    }
     if flags & (O_READ | O_WRITE) == 0 || flags & !(O_READ | O_WRITE | O_CREATE | O_TRUNC | O_APPEND) != 0 {
         return Err(ERROR_INVALID_ARGUMENT);
     }
-    let raw = copy_from_user(p, ptr, len)?;
-    let name = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
-    let path = fs::normalize(&p.cwd, name);
+    let path = user_path(p, ptr, len)?;
+    open_path(p, path, flags)
+}
+
+/// open / openat after the path is resolved (flags already checked).
+fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
     let write = flags & O_WRITE != 0;
     // Writes to a read-only file system (USB stick, SSD) fail immediately.
     if write && fs::is_read_only(&path) {
@@ -1196,26 +1215,106 @@ fn text_to_user(p: &mut Process, ptr: u64, len: u64, text: &str) -> SysResult {
 }
 
 fn sys_readdir(p: &mut Process, f: &SyscallFrame) -> SysResult {
-    use core::fmt::Write;
     let path = user_path(p, f.rdi, f.rsi)?;
-    let entries = fs::read_dir(&path).map_err(fs_error)?;
+    readdir_path(p, &path, f.rdx, f.r10)
+}
+
+fn readdir_path(p: &mut Process, path: &str, buf: u64, cap: u64) -> SysResult {
+    use core::fmt::Write;
+    let entries = fs::read_dir(path).map_err(fs_error)?;
     let mut text = String::new();
     for e in entries {
         let kind = if e.kind == FileType::Directory { 'd' } else { 'f' };
         let _ = writeln!(text, "{}\t{}\t{}", kind, e.size, e.name);
     }
-    text_to_user(p, f.rdx, f.r10, &text)
+    text_to_user(p, buf, cap, &text)
 }
 
 fn sys_stat(p: &mut Process, ptr: u64, len: u64, out: u64) -> SysResult {
     let path = user_path(p, ptr, len)?;
-    let m = fs::stat(&path).map_err(fs_error)?;
+    stat_path(p, &path, out)
+}
+
+fn stat_path(p: &mut Process, path: &str, out: u64) -> SysResult {
+    let m = fs::stat(path).map_err(fs_error)?;
     let kind: u64 = if m.kind == FileType::Directory { 1 } else { 0 };
     let mut buf = [0u8; 16];
     buf[..8].copy_from_slice(&kind.to_le_bytes());
     buf[8..].copy_from_slice(&m.size.to_le_bytes());
     copy_to_user(p, out, &buf)?;
     Ok(0)
+}
+
+/// dir_open(path, len, flags) – a DIR handle (lowest free number from 3) with READ
+/// and / or WRITE as asked, plus DUP and TRANSFER.  ERROR_NOT_DIRECTORY – not a
+/// directory; ERROR_READ_ONLY – WRITE on a read-only file system.
+fn sys_dir_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
+    if flags & (O_READ | O_WRITE) == 0 || flags & !(O_READ | O_WRITE) != 0 {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let path = user_path(p, ptr, len)?;
+    match fs::stat(&path) {
+        Ok(m) if m.kind == FileType::Directory => {}
+        Ok(_) => return Err(ERROR_NOT_DIRECTORY),
+        Err(e) => return Err(fs_error(e)),
+    }
+    if flags & O_WRITE != 0 && fs::is_read_only(&path) {
+        return Err(ERROR_READ_ONLY);
+    }
+    let r = (if flags & O_READ != 0 { rights::READ } else { 0 })
+        | (if flags & O_WRITE != 0 { rights::WRITE } else { 0 })
+        | rights::DUP
+        | rights::TRANSFER;
+    install_handle(p, 3, Handle { obj: Fd::Dir(Arc::new(super::process::DirObj { path })), rights: r })
+}
+
+/// A path inside directory handle `h` (the handle's kind and rights: the table).
+/// Relative only; ".." may not climb above the directory; "" / "." = the
+/// directory itself, allowed only when `itself` (readdirat, statat).
+fn dir_path(p: &mut Process, h: u64, ptr: u64, len: u64, itself: bool) -> Result<String, i64> {
+    let Fd::Dir(d) = p.fd(h)? else { return Err(ERROR_INVALID_HANDLE) };
+    let base = d.path.clone();
+    if len > 255 {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let raw = if len == 0 { Vec::new() } else { copy_from_user(p, ptr, len)? };
+    let name = core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    if name.starts_with('/') {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in name.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(ERROR_ACCESS_DENIED);
+                }
+            }
+            x => parts.push(x),
+        }
+    }
+    if parts.is_empty() {
+        return if itself { Ok(base) } else { Err(ERROR_INVALID_ARGUMENT) };
+    }
+    let mut path = base;
+    for x in parts {
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        path.push_str(x);
+    }
+    Ok(path)
+}
+
+/// openat(dir, path, len, flags) – like open, inside the directory.
+fn sys_openat(p: &mut Process, f: &SyscallFrame) -> SysResult {
+    let (h, ptr, len, flags) = (f.rdi, f.rsi, f.rdx, f.r10);
+    if flags & (O_READ | O_WRITE) == 0 || flags & !(O_READ | O_WRITE | O_CREATE | O_TRUNC | O_APPEND) != 0 {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let path = dir_path(p, h, ptr, len, false)?;
+    open_path(p, path, flags)
 }
 
 /// Key -> number for readkey (never zero: 0 = end of input).
@@ -1396,6 +1495,7 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
         // Process memory – changed only by the process itself, frames without the BKL.
         SYS_BRK | SYS_MMAP | SYS_MUNMAP => Some(4),
         SYS_OPEN | SYS_CLOSE | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_GETCWD => Some(3),
+        SYS_DIR_OPEN | SYS_OPENAT | SYS_READDIRAT | SYS_STATAT | SYS_MKDIRAT | SYS_UNLINKAT => Some(3),
         // Processes – zombie table under its own lock
         // (task list: under the scheduler lock).
         SYS_SPAWN | SYS_SPAWN_EX | SYS_WAIT | SYS_KILL | SYS_GETPPID => Some(4),
@@ -1495,6 +1595,12 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_READDIR => sys_readdir(p, frame),
         SYS_STAT => sys_stat(p, a0, a1, a2),
         SYS_MKDIR => user_path(p, a0, a1).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
+        SYS_DIR_OPEN => sys_dir_open(p, a0, a1, a2),
+        SYS_OPENAT => sys_openat(p, frame),
+        SYS_READDIRAT => dir_path(p, a0, a1, a2, true).and_then(|path| readdir_path(p, &path, frame.r10, frame.r8)),
+        SYS_STATAT => dir_path(p, a0, a1, a2, true).and_then(|path| stat_path(p, &path, frame.r10)),
+        SYS_MKDIRAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
+        SYS_UNLINKAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),
         SYS_UNLINK => user_path(p, a0, a1).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),
         SYS_READKEY => sys_readkey(p, a0, a1),
         SYS_TASKS => sys_tasks(p, a0, a1),

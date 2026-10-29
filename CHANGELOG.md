@@ -2,6 +2,42 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.53.0 — 2026-10-29
+
+### Directory handles: a program sees one directory only
+- Until now a program either could open any path, or (in the file sandbox) only the files the shell handed it.
+  New handle kind **12 `DIR`** (`dir_open(path, flags)`, rights `READ` – read and list, `WRITE` – create, change,
+  remove) and six syscalls relative to it: `openat`, `readdirat`, `statat`, `mkdirat`, `unlinkat` (51–56 with
+  `dir_open`). The kernel resolves the path against the directory: absolute paths and any `..` above it are
+  `ERROR_ACCESS_DENIED`; `sub/../x` stays inside; `""` / `.` is the directory itself.
+- The rights table checks them like every other syscall; a row can now say that a right is needed only when a
+  flag is set (`openat`: `READ` when opening for reading, `WRITE` when for writing; the writable mapping uses the
+  same mechanism). `sysinfo rights` shows the conditions (`+reg:bit:right`); RIGHTS TEST and `rightstest` test each
+  condition on its own.
+- Shell: **`nofiles --dir <dir> <program>`** (read and write) and **`--dir-ro <dir>`** (read only) – the program
+  gets the directory handle; the user library retries a refused relative `open` / `readdir` / `stat` / `mkdir` /
+  `unlink` inside it, so programs such as `cat` and `cp` work unchanged (`nofiles --dir-ro /notes cat todo.txt`).
+- `dcp` names the kind `DIRECTORY`; the profiler tracks 57 syscall numbers.
+- Tests: FILE TEST 8/8 – `/bin/dirtest`, 42 checks (seven ways out refused, read-only / write-only copies, a file
+  handle is not a directory, a sandboxed child with only a read-only directory reads inside it – also through
+  plain `open` / `readdir` / `stat` – and reaches nothing else); FILE TEST 3/8 – `nofiles --dir` / `--dir-ro` in the
+  shell (`cat`, a refused `../`, `cp` refused read-only and allowed read-write). RIGHTS TEST: 56 rows, 28 refusals.
+- Limit: the handle holds the directory's path, not the directory (a directory removed and created again under the
+  same name is reached through the old handle; directories cannot be moved yet). Plan in ROADMAP: a busy directory
+  before `mv` of folders, the directory itself (node number) with DeSoFS, before the GUI file manager.
+- Docs: ARCHITECTURE (handle kinds, syscalls, rights table, "Directory handles"), README (`nofiles --dir`,
+  features), ROADMAP (DCP 8 done, known gap reworded).
+
+## v0.52.2 — 2026-10-29
+
+### Release report (no code changes)
+- New `RELEASE.md`: one section per release – what is new since the last report, the test runs (TCG, KVM, ten TCG
+  runs in a row, the 400-round allocator hunt) with their configuration and times, real-hardware results with the
+  version they were last measured on, known problems, and the `[RESULT-SVC]` / `[RESULT-USB]` numbers against the
+  previous release with a verdict. First report: v0.52.1 (no regression; the test laptop not re-measured since
+  v0.47.0).
+- README lists it; ROADMAP "Next" item 3 done.
+
 ## v0.52.1 — 2026-10-28
 
 ### The rare TCG "hang" found and fixed: yield_now kept the BKL

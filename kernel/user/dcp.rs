@@ -94,6 +94,7 @@ fn cap_name(k: u64) -> &'static str {
         kind::SYSCTL => "SYS_POWER",
         kind::INPUT => "INPUT_SEND",
         kind::BLK => "DISK_ATTACH",
+        kind::DIR => "DIRECTORY",
         _ => "?",
     }
 }
@@ -112,6 +113,7 @@ fn cap_meaning(k: u64) -> &'static str {
         kind::SYSCTL => "reboot, halt, sync, stress",
         kind::INPUT => "keys and mouse to the system",
         kind::BLK => "may add USB disks",
+        kind::DIR => "files inside one directory",
         _ => "",
     }
 }

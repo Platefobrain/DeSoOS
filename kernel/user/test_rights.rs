@@ -45,7 +45,9 @@ pub fn self_test() {
         check!(dup == 1, "syscall name {:?} appears {} times", r.name, dup);
         for a in r.args {
             check!(a.reg < 6 && a.kinds != 0, "{}: bad argument {} / kinds {:#x}", r.name, a.reg, a.kinds);
-            check!(a.write_if == 0 || (a.write_if as usize - 1 != a.reg as usize && a.write_if <= 6), "{}: bad write_if", r.name);
+            for c in &a.conds {
+                check!(c.reg == 0 || (c.reg <= 6 && !r.args.iter().any(|b| b.reg + 1 == c.reg) && c.bit != 0 && c.right != 0), "{}: bad condition", r.name);
+            }
             // Argument values: handle numbers 10 + register; the rest 0.
             let mut args = [0u64; 6];
             for b in r.args {
@@ -57,19 +59,24 @@ pub fn self_test() {
                 Ok((kind_of(b.kinds), 0xFF))
             };
             check!(check_with(nr as u64, &args, full).is_ok(), "{}: full rights refused", r.name);
-            for bit in 0..8 {
-                let right = 1u32 << bit;
-                let need = super::sysrights::need_of(a, &args) | if a.write_if != 0 { super::process::rights::MAP_WRITE } else { 0 };
-                if need & right == 0 {
-                    continue;
+            // The base rights, then each condition switched on alone.
+            let mut variants = alloc::vec![args];
+            for c in a.conds.iter().filter(|c| c.reg != 0) {
+                let mut v = args;
+                v[(c.reg - 1) as usize] = c.bit;
+                variants.push(v);
+            }
+            for wargs in variants {
+                let need = super::sysrights::need_of(a, &wargs);
+                for bit in 0..8 {
+                    let right = 1u32 << bit;
+                    if need & right == 0 {
+                        continue;
+                    }
+                    let less = |n: u64| full(n).map(|(k, rt)| if n == 10 + a.reg as u64 { (k, rt & !right) } else { (k, rt) });
+                    check!(check_with(nr as u64, &wargs, less) == Err(ERROR_ACCESS_DENIED), "{}: without right {:#x} not refused", r.name, right);
+                    refused += 1;
                 }
-                let mut wargs = args;
-                if a.write_if != 0 {
-                    wargs[a.write_if as usize - 1] = super::vm::PROT_READ | super::vm::PROT_WRITE;
-                }
-                let less = |n: u64| full(n).map(|(k, rt)| if n == 10 + a.reg as u64 { (k, rt & !right) } else { (k, rt) });
-                check!(check_with(nr as u64, &wargs, less) == Err(ERROR_ACCESS_DENIED), "{}: without right {:#x} not refused", r.name, right);
-                refused += 1;
             }
             if a.kinds != 0xFFFE {
                 let wrong = (1..16u64).find(|&i| a.kinds & (1 << i) == 0).unwrap_or(15);

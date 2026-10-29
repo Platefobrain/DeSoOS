@@ -37,9 +37,21 @@ const IRQ: u16 = k(kind::IRQ);
 const SYSCTL: u16 = k(kind::SYSCTL);
 const INPUT: u16 = k(kind::INPUT);
 const BLK: u16 = k(kind::BLK);
+const DIR: u16 = k(kind::DIR);
 /// Data streams: read / write.
 const STREAM: u16 = CONSOLE | FILE | PIPE;
 const ANY: u16 = 0xFFFE;
+
+/// An extra right needed when a flag bit is set in another argument.
+#[derive(Clone, Copy)]
+pub struct Cond {
+    /// 1 + the argument register with the flags; 0 = no condition.
+    pub reg: u8,
+    pub bit: u64,
+    pub right: u32,
+}
+
+const NO_COND: Cond = Cond { reg: 0, bit: 0, right: 0 };
 
 /// One handle argument.
 #[derive(Clone, Copy)]
@@ -47,19 +59,30 @@ pub struct Arg {
     /// Argument register: 0 rdi, 1 rsi, 2 rdx, 3 r10, 4 r8, 5 r9.
     pub reg: u8,
     pub kinds: u16,
-    /// Rights the handle must have (0 = the kind is enough).
+    /// Rights the handle must have always (0 = the kind is enough).
     pub need: u32,
-    /// 1 + the argument whose PROT_WRITE bit also needs MAP_WRITE; 0 = none.
-    pub write_if: u8,
+    /// Rights needed only when the call asks for them (e.g. a writable mapping).
+    pub conds: [Cond; 2],
 }
 
 const fn h(reg: u8, kinds: u16, need: u32) -> Arg {
-    Arg { reg, kinds, need, write_if: 0 }
+    Arg { reg, kinds, need, conds: [NO_COND; 2] }
 }
 
 /// A mapping: MAP_READ always, MAP_WRITE when `prot` (argument `prot_reg`) asks for writing.
 const fn map(reg: u8, kinds: u16, prot_reg: u8) -> Arg {
-    Arg { reg, kinds, need: MAP_READ, write_if: prot_reg + 1 }
+    Arg { reg, kinds, need: MAP_READ, conds: [Cond { reg: prot_reg + 1, bit: super::vm::PROT_WRITE, right: MAP_WRITE }, NO_COND] }
+}
+
+/// Opening through a directory: READ when the flags (argument `flags_reg`) ask to
+/// read, WRITE when they ask to write.
+const fn open_in(reg: u8, flags_reg: u8) -> Arg {
+    Arg {
+        reg,
+        kinds: DIR,
+        need: 0,
+        conds: [Cond { reg: flags_reg + 1, bit: O_READ, right: READ }, Cond { reg: flags_reg + 1, bit: O_WRITE, right: WRITE }],
+    }
 }
 
 pub struct Rule {
@@ -81,8 +104,8 @@ const fn with(name: &'static str, args: &'static [Arg]) -> Option<Rule> {
 }
 
 /// Indexed by syscall number.
-pub static TABLE: [Option<Rule>; 51] = {
-    let mut t = [const { None }; 51];
+pub static TABLE: [Option<Rule>; 57] = {
+    let mut t = [const { None }; 57];
     t[SYS_EXIT as usize] = plain("exit");
     t[SYS_WRITE as usize] = with("write", &[h(0, STREAM, WRITE)]);
     t[SYS_READ as usize] = with("read", &[h(0, STREAM, READ)]);
@@ -135,13 +158,25 @@ pub static TABLE: [Option<Rule>; 51] = {
     t[SYS_INPUT_INJECT as usize] = with("input_inject", &[h(0, INPUT, WRITE)]);
     t[SYS_BLK_ATTACH as usize] =
         with("blk_attach", &[h(0, BLK, WRITE), h(1, CHANNEL, SEND | RECV | TRANSFER), h(2, SHM, MAP_READ)]);
+    t[SYS_DIR_OPEN as usize] = path("dir_open");
+    t[SYS_OPENAT as usize] = with("openat", &[open_in(0, 3)]);
+    t[SYS_READDIRAT as usize] = with("readdirat", &[h(0, DIR, READ)]);
+    t[SYS_STATAT as usize] = with("statat", &[h(0, DIR, READ)]);
+    t[SYS_MKDIRAT as usize] = with("mkdirat", &[h(0, DIR, WRITE)]);
+    t[SYS_UNLINKAT as usize] = with("unlinkat", &[h(0, DIR, WRITE)]);
     t
 };
 
 /// The rights a handle argument needs with these argument values.
 #[inline]
 pub fn need_of(a: &Arg, args: &[u64; 6]) -> u32 {
-    if a.write_if != 0 && args[(a.write_if - 1) as usize] & super::vm::PROT_WRITE != 0 { a.need | MAP_WRITE } else { a.need }
+    let mut need = a.need;
+    for c in &a.conds {
+        if c.reg != 0 && args[(c.reg - 1) as usize] & c.bit != 0 {
+            need |= c.right;
+        }
+    }
+    need
 }
 
 /// The gate: every handle argument of syscall `nr` exists, is of the right kind
@@ -193,15 +228,19 @@ pub fn is_path_call(nr: u64) -> bool {
 }
 
 /// The table as text (sysinfo "rights"), one line per syscall:
-/// `nr name path|- [reg:kinds:need:write_if ...] [| checked in the call: ...]`
-/// (kinds and need in hex).
+/// `nr name path|- [reg:kinds:need[+creg:bit:right]... ...] [| checked in the call: ...]`
+/// (kinds, need, bit and right in hex; `+creg:bit:right` – `right` is also needed
+/// when argument `creg` has `bit` set).
 pub fn text() -> String {
     let mut s = String::new();
     for (nr, r) in TABLE.iter().enumerate() {
         let Some(r) = r else { continue };
         let _ = write!(s, "{} {} {}", nr, r.name, if r.path { "path" } else { "-" });
         for a in r.args {
-            let _ = write!(s, " {}:{:x}:{:x}:{}", a.reg, a.kinds, a.need, a.write_if);
+            let _ = write!(s, " {}:{:x}:{:x}", a.reg, a.kinds, a.need);
+            for c in a.conds.iter().filter(|c| c.reg != 0) {
+                let _ = write!(s, "+{}:{:x}:{:x}", c.reg - 1, c.bit, c.right);
+            }
         }
         if !r.in_call.is_empty() {
             let _ = write!(s, " | checked in the call: {}", r.in_call);

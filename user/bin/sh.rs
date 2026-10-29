@@ -597,19 +597,44 @@ impl Shell {
         // `nofiles --net prog` – plus network connections, `--listen` – plus
         // servers: the program gets a narrowed service channel from init that opens
         // only network connections (no other services, no DNS / DHCP settings).
+        // `nofiles --dir <dir> prog` – plus one directory (read and write),
+        // `--dir-ro <dir>` – read only: a directory handle; relative paths of the
+        // program work inside it, nothing outside.
         if cmd.args[0] == "nofiles" {
             cmd.args.remove(0);
-            let net = match cmd.args.first().map(|a| a.as_str()) {
-                Some("--net") => Some("net"),
-                Some("--listen") => Some("net listen"),
-                _ => None,
-            };
-            if net.is_some() {
+            let mut net = None;
+            let mut dir: Option<(String, bool)> = None;
+            loop {
+                match cmd.args.first().map(|a| a.as_str()) {
+                    Some("--net") => net = Some("net"),
+                    Some("--listen") => net = Some("net listen"),
+                    Some(o @ ("--dir" | "--dir-ro")) => {
+                        let rw = o == "--dir";
+                        if cmd.args.len() < 2 {
+                            eprintln!("sh: nofiles {}: which directory?", o);
+                            return;
+                        }
+                        dir = Some((cmd.args[1].clone(), rw));
+                        cmd.args.remove(0);
+                    }
+                    _ => break,
+                }
                 cmd.args.remove(0);
             }
             let Some(name) = cmd.args.first().cloned() else {
-                eprintln!("usage: nofiles [--net | --listen] <program> [args]   (e.g. nofiles cat < file, nofiles --listen netweb 8080 < page.html)");
+                eprintln!("usage: nofiles [--net | --listen] [--dir <dir> | --dir-ro <dir>] <program> [args]   (e.g. nofiles cat < file, nofiles --dir /notes cat todo.txt, nofiles --listen netweb 8080 < page.html)");
                 return;
+            };
+            let dirh = match &dir {
+                None => None,
+                Some((d, rw)) => {
+                    let r = desoos::dir_open(d, if *rw { O_READ | O_WRITE } else { O_READ });
+                    if r < 0 {
+                        eprintln!("sh: nofiles: {}: {}", d, strerror(r));
+                        return;
+                    }
+                    Some(r as u64)
+                }
             };
             let svc = match net {
                 None => None,
@@ -628,10 +653,13 @@ impl Shell {
                 }
             };
             match find_program(&name) {
-                Some(path) => self.external_svc(&path, &cmd, true, svc),
+                Some(path) => self.external_svc(&path, &cmd, true, svc, dirh),
                 None => eprintln!("sh: nofiles: {}: no such program in /bin", name),
             }
             if let Some(h) = svc {
+                close(h);
+            }
+            if let Some(h) = dirh {
                 close(h);
             }
             return;
@@ -661,11 +689,12 @@ impl Shell {
     }
 
     fn external(&mut self, path: &str, cmd: &Command, nofiles: bool) {
-        self.external_svc(path, cmd, nofiles, None)
+        self.external_svc(path, cmd, nofiles, None, None)
     }
 
-    /// `svc`: a narrowed service channel for slot 3 (sandboxed network programs).
-    fn external_svc(&mut self, path: &str, cmd: &Command, nofiles: bool, svc: Option<u64>) {
+    /// `svc`: a narrowed service channel for slot 3 (sandboxed network programs);
+    /// `dir`: a directory handle for slot 4 (`nofiles --dir`).
+    fn external_svc(&mut self, path: &str, cmd: &Command, nofiles: bool, svc: Option<u64>, dir: Option<u64>) {
         let (fin, fout) = match open_redirects(cmd) {
             Ok(f) => f,
             Err(e) => {
@@ -675,9 +704,17 @@ impl Shell {
         };
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
         let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { desoos::SPAWN_NO_FILES } else { 0 };
-        let pid = match svc {
-            Some(h) => desoos::spawn_ex(path, &args, &[(fin, 0), (fout, 1), (2, 2), (h, desoos::SVC)], flags),
-            None => spawn_child(path, &args, flags, fin, fout),
+        let pid = if svc.is_some() || dir.is_some() {
+            let mut map: Vec<(u64, u64)> = alloc::vec![(fin, 0), (fout, 1), (2, 2)];
+            if let Some(h) = svc {
+                map.push((h, desoos::SVC));
+            }
+            if let Some(h) = dir {
+                map.push((h, 4));
+            }
+            desoos::spawn_ex(path, &args, &map, flags)
+        } else {
+            spawn_child(path, &args, flags, fin, fout)
         };
         close_redirects(fin, fout);
         if pid < 0 {

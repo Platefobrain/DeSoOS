@@ -62,7 +62,7 @@ pub fn self_test() {
     check!(r.is_some(), "fdtest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "fdtest: {:?} {:?}", kind, out.trim());
-    serial_println!("[FILE TEST] 1/7 dup, dup2, seek, shared position (also with a spawned child): {} PASS", out.trim());
+    serial_println!("[FILE TEST] 1/8 dup, dup2, seek, shared position (also with a spawned child): {} PASS", out.trim());
 
     // 2. Pipes: read / write, end of data, ERROR_CLOSED, 200 KiB through cat,
     // child output through a pipe, a waiting reader.
@@ -70,11 +70,13 @@ pub fn self_test() {
     check!(r.is_some(), "pipetest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "pipetest: {:?} {:?}", kind, out.trim());
-    serial_println!("[FILE TEST] 2/7 pipes: EOF, ERROR_CLOSED, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 2/8 pipes: EOF, ERROR_CLOSED, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
 
     // 3. Pipes in the shell: program | program, builtin | program,
     // three stages with redirection, syntax errors.
-    let script: &[u8] = b"echo one two | cat\nprimes 30 | cat | cat > /pipe.out\ncat /pipe.out\nhelp | cat\necho x |\nrm /pipe.out\n";
+    let script: &[u8] = b"echo one two | cat\nprimes 30 | cat | cat > /pipe.out\ncat /pipe.out\nhelp | cat\necho x |\n\
+mkdir /nd\necho inside > /nd/x.txt\nnofiles --dir-ro /nd cat x.txt\nnofiles --dir-ro /nd cat ../pipe.out\n\
+nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y.txt\nrm /nd/x.txt\nrm /nd/y.txt\nrm /nd\nrm /pipe.out\n";
     let opts = SpawnOptions { stdin: Some(script.to_vec()), capture: true, ..SpawnOptions::default() };
     let sh = exec("/bin/sh", &["sh"], "/", &opts).ok();
     check!(sh.is_some(), "sh did not start");
@@ -86,7 +88,11 @@ pub fn self_test() {
     check!(out.contains("Programs in /bin"), "help | cat: {:?}", out);
     check!(out.contains("missing command around |"), "syntax error not reported: {:?}", out);
     check!(crate::fs::stat("/pipe.out").is_err(), "/pipe.out left behind");
-    serial_println!("[FILE TEST] 3/7 shell: echo | cat, primes | cat | cat > file, help | cat, syntax error PASS");
+    // nofiles --dir: the program works inside one directory only.
+    check!(out.matches("inside\n").count() == 2, "nofiles --dir: cat x.txt / the copy made inside: {:?}", out);
+    check!(out.contains("cat: ../pipe.out: access denied"), "nofiles --dir-ro: a path above the directory: {:?}", out);
+    check!(out.contains("access denied") && crate::fs::stat("/nd").is_err(), "nofiles --dir-ro cp must be refused, /nd removed: {:?}", out);
+    serial_println!("[FILE TEST] 3/8 shell: echo | cat, primes | cat | cat > file, help | cat, syntax error, nofiles --dir / --dir-ro PASS");
 
     // 4. Process memory: brk, mmap / munmap (also partial), lazy pages
     // (64 MiB region, a few pages used), kernel copying into
@@ -104,7 +110,7 @@ pub fn self_test() {
         frames,
         crate::memory::free_frame_count()
     );
-    serial_println!("[FILE TEST] 4/7 process memory: brk, mmap/munmap, lazy pages, growing stack, allocator: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 4/8 process memory: brk, mmap/munmap, lazy pages, growing stack, allocator: {} PASS", out.trim());
 
     // 5. System call fuzzer: children without handles call random
     // syscalls with extreme arguments; the kernel must not crash or
@@ -130,7 +136,7 @@ pub fn self_test() {
         crate::memory::free_frame_count()
     );
     check!(crate::fs::stat("/fuzz").is_err(), "/fuzz could not be removed");
-    serial_println!("[FILE TEST] 5/7 syscall fuzzer: {}; {} junk entries removed PASS", out.trim(), junk);
+    serial_println!("[FILE TEST] 5/8 syscall fuzzer: {}; {} junk entries removed PASS", out.trim(), junk);
 
     // 6. Limits – process bomb, shared memory, memory
     // hog, filling ramfs, IPC buffers.  The program gets an error or dies,
@@ -194,7 +200,7 @@ pub fn self_test() {
         check!(crate::fs::ramfs::bytes_used() == ram_a, "ramfs bytes after the chunk test: {} -> {}", ram_a, crate::fs::ramfs::bytes_used());
         serial_println!("[FILE TEST]   ramfs chunks: 300 KiB pattern, edges, truncate + extend OK; 10 MiB of 4 KiB appends in {} ms", ms);
     }
-    serial_println!("[FILE TEST] 6/7 limits (processes, kernel memory reserve, ramfs, IPC buffers): {} PASS", out.trim());
+    serial_println!("[FILE TEST] 6/8 limits (processes, kernel memory reserve, ramfs, IPC buffers): {} PASS", out.trim());
 
     // 7. File sandbox: a child started with SPAWN_NO_FILES cannot use any path
     // (open, stat, readdir, mkdir, unlink, chdir, spawn) and works only with the
@@ -208,8 +214,16 @@ pub fn self_test() {
     check!(denied >= 11, "sandbox refusals counted: {}", denied);
     check!(crate::fs::stat("/sandtest.tmp").is_err(), "sandtest left its file");
     let line = out.lines().find(|l| l.contains("checks OK")).unwrap_or("").trim();
-    serial_println!("[FILE TEST] 7/7 file sandbox: {} ({} path calls refused) PASS", line, denied);
+    serial_println!("[FILE TEST] 7/8 file sandbox: {} ({} path calls refused) PASS", line, denied);
 
+    // 8. Directory handles: work inside one directory, no way out, rights, a
+    // sandboxed child with only a read-only directory.
+    let r = run("/bin/dirtest", &["dirtest"], 30_000);
+    check!(r.is_some(), "dirtest did not finish");
+    let (kind, out) = r.unwrap();
+    check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "dirtest: {:?} {:?}", kind, out.trim());
+    check!(crate::fs::stat("/dirtest").is_err() && crate::fs::stat("/dirtest-outside.txt").is_err(), "dirtest left its files");
+    serial_println!("[FILE TEST] 8/8 directory handles: {} PASS", out.trim());
     serial_println!("[FILE TEST] All file tests passed!");
     crate::selftest::pass();
 }

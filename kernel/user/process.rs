@@ -39,9 +39,16 @@ pub struct OpenFile {
     pub offset: Mutex<u64>,
 }
 
-/// Handle rights (bits).  Rights can only be reduced (handle_dup);
-/// missing READ / WRITE on read / write = ERROR_INVALID_HANDLE (as in POSIX), missing
-/// others = ERROR_ACCESS_DENIED.  Design: ARCHITECTURE.md, "IPC".
+/// A directory handle (`dir_open`): the process may work inside this directory
+/// only, by paths relative to it (`openat`, `readdirat`, ...).  The path is
+/// normalized and absolute; nothing resolved through the handle leaves it.
+pub struct DirObj {
+    pub path: String,
+}
+
+/// Handle rights (bits).  Rights can only be reduced (handle_dup); a missing
+/// right = ERROR_ACCESS_DENIED (the syscall rights table, sysrights.rs).
+/// Design: ARCHITECTURE.md, "Syscalls and handles".
 pub mod rights {
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;
@@ -72,6 +79,9 @@ pub mod kind {
     pub const INPUT: u64 = 10;
     /// Registering a USB disk in the kernel (blk_attach) – usbd only.
     pub const BLK: u64 = 11;
+    /// A directory: work inside it by relative paths (READ – read and list,
+    /// WRITE – create, change and remove).
+    pub const DIR: u64 = 12;
 }
 
 /// Process handle table entry – object + rights.
@@ -110,6 +120,8 @@ impl Handle {
             Fd::Input(_) => return Handle { obj, rights: WRITE | DUP },
             // Like INPUT – WRITE (blk_attach) + DUP (init gives copies to usbd).
             Fd::Blk => return Handle { obj, rights: WRITE | DUP },
+            // dir_open gives the rights it was asked for; this default is both.
+            Fd::Dir(_) => READ | WRITE,
         };
         Handle { obj, rights: io | DUP | TRANSFER }
     }
@@ -127,6 +139,7 @@ impl Handle {
             Fd::Sysctl => kind::SYSCTL,
             Fd::Input(_) => kind::INPUT,
             Fd::Blk => kind::BLK,
+            Fd::Dir(_) => kind::DIR,
         }
     }
 }
@@ -157,6 +170,8 @@ pub enum Fd {
     /// Right to register a disk (blk_attach) – created only by the kernel
     /// for init (slot 6), init gives a copy to every usbd.
     Blk,
+    /// A directory (dir_open) – rights given at creation (READ / WRITE + DUP, TRANSFER).
+    Dir(Arc<DirObj>),
 }
 
 /// Handle table: the slots plus a published summary of each slot (kind,
