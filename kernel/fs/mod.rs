@@ -241,7 +241,7 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
         if meta.kind == FileType::Directory {
             return Err(FsError::IsADirectory);
         }
-        let mut data = alloc::vec![0u8; meta.size as usize];
+        let mut data = zeroed(meta.size)?;
         let mut done = 0;
         while done < data.len() {
             let n = fs.read(path, done as u64, &mut data[done..])?;
@@ -587,6 +587,17 @@ pub fn sync_all() -> Result<()> {
     Ok(())
 }
 
+/// A zeroed buffer of `size` bytes for a whole file – the size comes from the disk (a
+/// pendrive may claim a 4 GiB file), so fallible: ERROR_NO_SPACE instead of a kernel
+/// panic when the heap has no such block.
+pub fn zeroed(size: u64) -> Result<Vec<u8>> {
+    let size = usize::try_from(size).map_err(|_| FsError::NoSpace)?;
+    let mut v = Vec::new();
+    v.try_reserve_exact(size).map_err(|_| FsError::NoSpace)?;
+    v.resize(size, 0);
+    Ok(v)
+}
+
 /// A whole file into memory.
 pub fn read_file(path: &str) -> Result<Vec<u8>> {
     // A file system with its own locks – one atomic read.
@@ -598,7 +609,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
     if meta.kind == FileType::Directory {
         return Err(FsError::IsADirectory);
     }
-    let mut data = alloc::vec![0u8; meta.size as usize];
+    let mut data = zeroed(meta.size)?;
     let mut done = 0;
     while done < data.len() {
         let n = read(path, done as u64, &mut data[done..])?;
@@ -772,7 +783,7 @@ pub fn self_test() {
     check!(normalize("/x/y", "..") == "/x", "normalize 2");
     check!(normalize("/x", "/../..//z/") == "/z", "normalize 3");
     check!(split_parent("/a/b") == ("/a", "b") && split_parent("/a") == ("/", "a"), "split_parent");
-    serial_println!("[FS TEST] 1/11 path normalization PASS");
+    serial_println!("[FS TEST] 1/12 path normalization PASS");
 
     // 2. ramfs through the VFS: files, directories, errors.
     t!(mkdir("/tmp/t"), "mkdir /tmp/t");
@@ -792,7 +803,7 @@ pub fn self_test() {
     check!(remove("/tmp/mp") == Err(FsError::Busy), "remove mount point");
     t!(unmount("/tmp/mp"), "unmount mp");
     t!(remove("/tmp/mp"), "rm mp");
-    serial_println!("[FS TEST] 2/11 ramfs: files, dirs, append, errors PASS");
+    serial_println!("[FS TEST] 2/12 ramfs: files, dirs, append, errors PASS");
 
     // 3. FAT32 on a RAM disk (8 MiB) – mkfs + mount.
     let disk = block::register(alloc::boxed::Box::new(RamDisk::new("ram0", 16384)));
@@ -803,7 +814,7 @@ pub fn self_test() {
     let free0 = mount_stats("/tmp/fat").map(|s| s.free_bytes).unwrap_or(0);
     check!(free0 > 7 * 1024 * 1024, "free after mkfs = {}", free0);
     check!(t!(read_dir("/tmp/fat"), "ls root").is_empty(), "fresh root not empty");
-    serial_println!("[FS TEST] 3/11 mkfs + mount ({}) PASS", info);
+    serial_println!("[FS TEST] 3/12 mkfs + mount ({}) PASS", info);
 
     // 4. Names: 8.3, lowercase (NT), long names with Polish characters, letter case.
     t!(write_file("/tmp/fat/README.TXT", b"upper"), "8.3 upper");
@@ -818,7 +829,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/ZAŻÓŁĆ GĘŚLĄ JAŹŃ.MD"), "case polish") == b"polski", "case polish");
     check!(create("/tmp/fat/NOTES.TXT") == Err(FsError::AlreadyExists), "dup case");
     check!(create("/tmp/fat/bad:name") == Err(FsError::InvalidName), "invalid name");
-    serial_println!("[FS TEST] 4/11 names: 8.3, lowercase, long + Polish, case-insensitive PASS");
+    serial_println!("[FS TEST] 4/12 names: 8.3, lowercase, long + Polish, case-insensitive PASS");
 
     // 5. A large file spanning many clusters, reading at an offset, appending.
     let big: Vec<u8> = (0..5000u32).map(|i| (i * 31 % 251) as u8).collect();
@@ -831,7 +842,7 @@ pub fn self_test() {
     let mut expect = big.clone();
     expect.extend_from_slice(&big[..300]);
     check!(t!(read_file("/tmp/fat/big.bin"), "read appended") == expect, "append content");
-    serial_println!("[FS TEST] 5/11 multi-cluster file, offset read, append PASS");
+    serial_println!("[FS TEST] 5/12 multi-cluster file, offset read, append PASS");
 
     // 6. Writing in the middle, a zero-filled hole, truncation.
     t!(write("/tmp/fat/big.bin", 10, b"XYZ"), "overwrite middle");
@@ -846,7 +857,7 @@ pub fn self_test() {
     t!(truncate("/tmp/fat/big.bin", 1000), "grow");
     let g = t!(read_file("/tmp/fat/big.bin"), "read grown");
     check!(g.len() == 1000 && g[..600] == expect[..600] && g[600..].iter().all(|&b| b == 0), "grow zeroes");
-    serial_println!("[FS TEST] 6/11 overwrite, sparse hole = zeros, truncate/grow PASS");
+    serial_println!("[FS TEST] 6/12 overwrite, sparse hole = zeros, truncate/grow PASS");
 
     // 7. Directories: nested, many entries (the directory grows by clusters), removal.
     t!(mkdir("/tmp/fat/dir"), "mkdir");
@@ -865,7 +876,7 @@ pub fn self_test() {
     t!(remove("/tmp/fat/dir/reuse"), "rm reuse");
     t!(remove("/tmp/fat/dir/sub"), "rmdir sub");
     t!(remove("/tmp/fat/dir"), "rmdir dir");
-    serial_println!("[FS TEST] 7/11 nested dirs, 40 long names (dir grows), rm/rmdir PASS");
+    serial_println!("[FS TEST] 7/12 nested dirs, 40 long names (dir grows), rm/rmdir PASS");
 
     // 8. No leaks: after removing everything the free space is as after mkfs.
     for f in ["README.TXT", "notes.txt", "Zażółć gęślą jaźń.md", "a very long file name with spaces.text", "big.bin", "sparse"] {
@@ -873,7 +884,7 @@ pub fn self_test() {
     }
     let free1 = mount_stats("/tmp/fat").map(|s| s.free_bytes).unwrap_or(0);
     check!(free1 == free0, "leaked clusters: free {} -> {}", free0, free1);
-    serial_println!("[FS TEST] 8/11 no leaked clusters ({} KiB free) PASS", free1 / 1024);
+    serial_println!("[FS TEST] 8/12 no leaked clusters ({} KiB free) PASS", free1 / 1024);
 
     // 9. Persistence: unmount, reopen from disk, the data is there.
     t!(write_file("/tmp/fat/persist.txt", "zapisane na dysku ✓".as_bytes()), "persist write");
@@ -884,7 +895,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/persist.txt"), "read after remount") == "zapisane na dysku ✓".as_bytes(), "persist");
     check!(t!(stat("/tmp/fat/Katalog"), "stat dir").kind == FileType::Directory, "dir persisted");
     check!(t!(stat("/tmp/fat/persist.txt"), "stat").modified.is_some(), "timestamp");
-    serial_println!("[FS TEST] 9/11 unmount + reopen: data persists PASS");
+    serial_println!("[FS TEST] 9/12 unmount + reopen: data persists PASS");
 
     // 10. Across file systems + redirection in the shell.
     t!(write_file("/tmp/src.txt", b"from ramfs"), "ramfs src");
@@ -902,7 +913,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/z z.txt"), "quoted redirect") == b"x > y\n", "quotes + redirect");
     crate::shell::execute("cd Katalog", &mut out, &mut ctx);
     check!(ctx.cwd.as_str() == "/tmp/fat/Katalog", "cd -> {}", ctx.cwd);
-    serial_println!("[FS TEST] 10/11 ramfs -> FAT32 copy, shell > >>, quotes, cd PASS");
+    serial_println!("[FS TEST] 10/12 ramfs -> FAT32 copy, shell > >>, quotes, cd PASS");
 
     // Cleanup: unmount and remove the test disk.
     let _ = unmount("/tmp/fat");
@@ -1016,7 +1027,72 @@ pub fn self_test() {
     let r = fat32::Fat32::open(sp);
     block::remove(sp);
     check!(matches!(r, Err(FsError::Corrupt(_))), "a volume with more than {:#x} clusters must not mount", fat32::FAT32_MAX_CLUSTERS);
-    serial_println!("[FS TEST] 11/11 MBR partition: filled up ({} files), the next partition intact; a volume longer than its partition and more clusters than FAT32 can number refused PASS", files);
+    serial_println!("[FS TEST] 11/12 MBR partition: filled up ({} files), the next partition intact; a volume longer than its partition and more clusters than FAT32 can number refused PASS", files);
+
+    // 12. Sizes from a hostile disk do not crash the kernel: a file claiming 3.75 GiB
+    // (reading it whole – as exec does – is ERROR_NO_SPACE, not a failed allocation) and a
+    // directory chain longer than FAT allows (65 536 entries) – refused as corrupt.
+    let d3 = block::register(alloc::boxed::Box::new(RamDisk::new("ram3", 16384)));
+    t!(fat32::mkfs(d3, "HOSTILE", true), "mkfs ram3");
+    t!(mkdir("/tmp/h"), "mkdir /tmp/h");
+    t!(mount("/tmp/h", Box::new(Locked::new(t!(fat32::Fat32::open(d3), "open ram3")))), "mount ram3");
+    t!(write_file("/tmp/h/huge.bin", b"ten bytes!"), "huge.bin");
+    t!(mkdir("/tmp/h/d"), "mkdir d");
+    t!(unmount("/tmp/h"), "unmount ram3");
+    let mut bs = [0u8; 512];
+    t!(block::read(d3, 0, &mut bs).map_err(FsError::from), "bpb");
+    let reserved = u16::from_le_bytes([bs[14], bs[15]]) as u64;
+    let mut sec = [0u8; 512];
+    let mut dir_cluster = 0u32;
+    let mut patched = false;
+    // The short entries ("HUGE    BIN", "D          ") – in the root directory (data area).
+    for lba in reserved..16384u64 {
+        t!(block::read(d3, lba, &mut sec).map_err(FsError::from), "scan");
+        let mut dirty = false;
+        for e in sec.chunks_mut(32) {
+            if &e[..11] == b"HUGE    BIN" {
+                e[28..32].copy_from_slice(&0xF000_0000u32.to_le_bytes());
+                dirty = true;
+            } else if &e[..11] == b"D          " && e[11] & 0x10 != 0 {
+                dir_cluster = u32::from(u16::from_le_bytes([e[20], e[21]])) << 16 | u32::from(u16::from_le_bytes([e[26], e[27]]));
+            }
+        }
+        if dirty {
+            t!(block::write(d3, lba, &sec).map_err(FsError::from), "patch size");
+            patched = true;
+        }
+        if patched && dir_cluster != 0 {
+            break;
+        }
+    }
+    check!(patched && dir_cluster >= 2, "test entries not found on the disk ({} {})", patched, dir_cluster);
+    // The directory's chain: its cluster -> 8000 -> 8001 -> ... -> 12100 (512 B clusters:
+    // 4102 clusters = 2 MiB + a bit), in the first FAT.
+    let set = |c: u32, v: u32| -> bool {
+        let off = c as u64 * 4;
+        let lba = reserved + off / 512;
+        let mut s = [0u8; 512];
+        if block::read(d3, lba, &mut s).is_err() {
+            return false;
+        }
+        let o = (off % 512) as usize;
+        s[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        block::write(d3, lba, &s).is_ok()
+    };
+    let mut ok = set(dir_cluster, 8000);
+    for c in 8000..12100u32 {
+        ok &= set(c, c + 1);
+    }
+    ok &= set(12100, 0x0FFF_FFFF);
+    check!(ok, "writing the long chain");
+    t!(mount("/tmp/h", Box::new(Locked::new(t!(fat32::Fat32::open(d3), "reopen ram3")))), "remount ram3");
+    check!(t!(stat("/tmp/h/huge.bin"), "stat huge").size == 0xF000_0000, "the size patch did not take");
+    check!(read_file("/tmp/h/huge.bin") == Err(FsError::NoSpace), "a 3.75 GiB file read whole must be ERROR_NO_SPACE: {:?}", read_file("/tmp/h/huge.bin").map(|v| v.len()));
+    check!(matches!(read_dir("/tmp/h/d"), Err(FsError::Corrupt(_))), "a directory over 65536 entries must be refused as corrupt: {:?}", read_dir("/tmp/h/d").map(|v| v.len()));
+    let _ = unmount("/tmp/h");
+    let _ = remove("/tmp/h");
+    block::remove(d3);
+    serial_println!("[FS TEST] 12/12 hostile sizes: a file claiming 3.75 GiB read whole -> ERROR_NO_SPACE, a directory chain over 65536 entries -> corrupt, no failed allocation PASS");
 
     serial_println!("[FS TEST] =================================");
     crate::selftest::pass();

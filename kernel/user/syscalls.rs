@@ -464,6 +464,9 @@ fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     write_fd(p, fd, &data)
 }
 
+/// Captured output kept per program (see write_fd).
+const CAPTURE_MAX: usize = 1024 * 1024;
+
 /// Bytes a pipe write copies from the process at a time.
 const PIPE_STEP: u64 = 4096;
 
@@ -495,7 +498,14 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
             return Err(ERROR_INVALID_HANDLE);
         }
         if let Some(out) = p.stdout.as_ref() {
-            out.lock().extend_from_slice(data);
+            // Captured output (kernel-started programs, tests): at most CAPTURE_MAX bytes
+            // kept, the rest counted as written and dropped – a chatty program must not
+            // grow the kernel heap without end.
+            let mut o = out.lock();
+            let room = CAPTURE_MAX.saturating_sub(o.len()).min(data.len());
+            if room > 0 && o.try_reserve(room).is_ok() {
+                o.extend_from_slice(&data[..room]);
+            }
         } else {
             crate::console::write_from_process(&String::from_utf8_lossy(data));
         }

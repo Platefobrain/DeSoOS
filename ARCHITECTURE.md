@@ -117,6 +117,10 @@ part. Protection: NX, SMEP, SMAP, CR0.WP, W^X for programs.
 - **Rule: no multi-MiB heap blocks at run time.** After the heap has been full, its free space is fragmented
   (blocks allocated meanwhile stay where they are), so a large contiguous block may not exist even with most of the
   heap free. Large buffers live in pieces (ramfs files in 64 KiB chunks, the selftest RAM disk too) or in frames.
+- **Sizes from a disk are untrusted.** A whole-file buffer (`fs::read_file`, exec), a FAT32 cluster chain and a
+  FAT32 directory are allocated with `try_reserve`: a pendrive claiming a 4 GiB file or a huge chain gives
+  `ERROR_NO_SPACE`, not a failed allocation; a directory over 65 536 entries (the FAT maximum, 2 MiB) is refused as
+  corrupt before anything is allocated. Captured output of kernel-started programs keeps at most 1 MiB.
 
 ### Kernel memory reserve
 
@@ -1336,7 +1340,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (237 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (238 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying

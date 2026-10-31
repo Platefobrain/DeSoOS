@@ -10,6 +10,63 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.57.2 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.57.1)
+
+| Version | Change |
+|---|---|
+| v0.57.2 | sizes read from a disk allocated fallibly – a pendrive claiming a 4 GiB file no longer crashes the kernel (whole-file reads, FAT32 chains, FAT32 directories over 65 536 entries refused); captured output ≤ 1 MiB per program |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 238 tests PASS | 89 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 238 tests PASS | 73 s |
+
+New: FS TEST 12/12 (a FAT32 volume patched on disk: a 3.75 GiB file entry → `ERROR_NO_SPACE`, a directory chain over
+65 536 entries → corrupt).
+
+### Known problems
+
+- The kernel's own allocations (scheduler, drivers, the kernel side of services) are not fallible; they rely on
+  the 8 MiB heap reserve. Item J of the code review is closed (ROADMAP "Next", 0.J).
+- Otherwise as in v0.57.1.
+
+### Performance against the previous release (v0.57.1 → v0.57.2, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.57.1 | TCG v0.57.2 | KVM v0.57.1 | KVM v0.57.2 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 286 | 3 130 | 35 050 | 35 990 |
+| irq_user_ns | 8 285 | 12 275 | 65 595 | 66 006 |
+| fact_kernel_ns | 29 779 | 29 819 | 58 496 | 55 478 |
+| fact_user_ns | 74 404 | 75 272 | 93 545 | 93 457 |
+| fact_svc_ns | 210 084 | 189 573 | 105 318 | 106 837 |
+| ping_svc_ns | 128 700 | 115 740 | 23 174 | 19 000 |
+| restart_us | 7 100 | 3 600 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.57.1 | TCG v0.57.2 | KVM v0.57.1 | KVM v0.57.2 |
+|---|---|---|---|---|
+| start_ms | 419 | 409 | 404 | 379 |
+| enum_avg_ms | 25 | 28 | 26 | 25 |
+| read_kbs (usbd) | 70 620 | 74 472 | 78 769 | 71 859 |
+| kread_kbs (kernel) | 55 113 | 73 065 | 96 437 | 92 699 |
+| kcat_kbs (kernel, cat) | 61 285 | 54 878 | 96 303 | 84 155 |
+| hid_avg_us (keyboard) | 587 | 562 | 353 | 434 |
+
+Verdict: no regression. The change adds a capacity check on whole-file and FAT32 chain buffers; USB reads through the
+kernel (`kread_kbs`, `kcat_kbs`) stay in their usual spread. TCG `irq_user_ns` 12 275 is above its usual 7 000 – 11 000 –
+the `edu` user-driver path the change does not touch (KVM 66 006 is normal); TCG noise.
+
+---
+
 ## v0.57.1 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**

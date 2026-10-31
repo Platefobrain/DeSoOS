@@ -165,12 +165,15 @@ impl FileInner {
         }
     }
 
-    fn to_vec(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(self.len);
+    /// The whole file in one buffer – fallible (ERROR_NO_SPACE when the heap has no
+    /// block that large).
+    fn to_vec(&self) -> Result<Vec<u8>> {
+        let mut v = Vec::new();
+        v.try_reserve_exact(self.len).map_err(|_| FsError::NoSpace)?;
         for c in &self.chunks {
             v.extend_from_slice(c);
         }
-        v
+        Ok(v)
     }
 }
 
@@ -360,7 +363,7 @@ impl ConcurrentFs for RamFs {
     fn read_all(&self, path: &str) -> Result<Vec<u8>> {
         let f = self.file(path)?;
         let i = f.inner.lock();
-        Ok(i.to_vec())
+        i.to_vec()
     }
 
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {

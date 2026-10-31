@@ -64,6 +64,8 @@ const CCACHE_BYTES: usize = 512 * 1024;
 const CCACHE_MAX: usize = 64;
 /// Longest contiguous cluster read at once.
 const RUN_MAX: usize = 1024 * 1024;
+/// The largest directory FAT allows: 65 536 entries of 32 bytes.
+const DIR_MAX_BYTES: usize = 65536 * 32;
 /// Read-ahead – this many sectors at once.
 const RA_SECTORS: usize = 128;
 /// Free-cluster counting – this many FAT bytes per read.
@@ -780,6 +782,9 @@ impl Fat32 {
         Ok(())
     }
 
+    /// The cluster numbers of a chain.  Its length comes from the disk (a 4 GiB file with
+    /// 512 B clusters is 8 million entries, 32 MiB), so the list grows with fallible
+    /// allocation: ERROR_NO_SPACE instead of a kernel panic.
     fn chain(&mut self, first: u32) -> Result<Vec<u32>> {
         let mut out = Vec::new();
         let mut c = first;
@@ -789,6 +794,9 @@ impl Fat32 {
             }
             if out.len() as u32 > self.total_clusters {
                 return Err(FsError::Corrupt("cluster chain loop"));
+            }
+            if out.len() == out.capacity() && out.try_reserve(out.len().max(16)).is_err() {
+                return Err(FsError::NoSpace);
             }
             out.push(c);
             c = self.fat_get(c)?;
@@ -897,7 +905,15 @@ impl Fat32 {
     fn load_dir(&mut self, first: u32) -> Result<DirBuf> {
         let first = if first == 0 { self.root_cluster } else { first };
         let clusters = self.chain(first)?;
-        let mut data = vec![0u8; clusters.len() * self.cluster_bytes];
+        // FAT allows at most 65 536 entries (2 MiB) in a directory; a longer chain is a
+        // damaged or crafted disk – refused before the buffer is allocated.
+        let bytes = clusters.len().saturating_mul(self.cluster_bytes);
+        if bytes > DIR_MAX_BYTES {
+            return Err(FsError::Corrupt("directory larger than 65536 entries"));
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(bytes).map_err(|_| FsError::NoSpace)?;
+        data.resize(bytes, 0);
         for (i, &c) in clusters.iter().enumerate() {
             self.read_cluster(c, &mut data[i * self.cluster_bytes..(i + 1) * self.cluster_bytes])?;
         }

@@ -2,6 +2,23 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.57.2 — 2026-11-01
+
+### The last kernel allocations sized from outside made fallible
+- **Sizes read from a disk:** reading a whole file (exec, the kernel shell's `cat` / `cp`) allocated the size the
+  file system reported in one go – a pendrive whose directory entry claims a 4 GiB file made the kernel ask for 4
+  GiB and panic. FAT32 cluster chains (a 4 GiB file with 512 B clusters is 8 million entries) and directory buffers
+  were sized the same way. Now all of them use fallible allocation (`ERROR_NO_SPACE`), and a directory longer than
+  FAT allows (65 536 entries, 2 MiB) is refused as corrupt before any buffer is made.
+- **Captured output** of programs the kernel starts (self-tests, the supervisor) keeps at most 1 MiB per program;
+  the rest is counted as written and dropped.
+- Not changed: `sysinfo` / `dcp` texts and the other kernel-internal buffers are bounded by the process limit and
+  `MAX_IO` (at most a few hundred KiB) and sit behind the heap reserve – no change needed.
+- Tests: FS TEST 12/12 (new) – a FAT32 volume patched on disk: a file whose entry claims 3.75 GiB is read whole →
+  `ERROR_NO_SPACE`, a directory chain of 4 102 clusters (over 65 536 entries) → corrupt. Without the change the first
+  check crashes the kernel. 238 tests.
+- Docs: ARCHITECTURE (sizes from a disk), ROADMAP (0.J done), README.
+
 ## v0.57.1 — 2026-11-01
 
 ### The two biggest ways to fill the kernel heap fixed at the source
