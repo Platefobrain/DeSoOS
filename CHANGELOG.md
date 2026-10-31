@@ -2,6 +2,46 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.57.1 — 2026-11-01
+
+### The two biggest ways to fill the kernel heap fixed at the source
+- **Pipe writes are copied in 4 KiB pieces.** `write` to a pipe copied up to 64 KiB from the program into the kernel
+  at once and kept that copy while waiting for room – a thousand waiting writers held 64 MiB, the whole heap. Now a
+  waiting writer holds 4 KiB. An invalid address in the middle of the buffer gives a short write (the bytes before
+  it), like a reader that goes away.
+- **ramfs counts files and directories in its limit,** not only their data: 384 B plus the name per node (an empty
+  file with a short name costs the heap ~400 B). Empty files used to grow the heap without bound; now ~59 000 of them
+  fill the 24 MiB and the next one is `ERROR_NO_SPACE`.
+- `mmap` finds a free range by binary search from where the last area ended (with thousands of areas every call
+  scanned the whole list).
+- Tests: FILE TEST 9/9 (`oomtest`) now fills the heap the way several programs could at once – empty files up to the
+  ramfs limit, 2 560 IPC messages, then children with thousands of memory areas each until the heap reserve (~170
+  children); then mmap, pipe, channel and spawn are refused, the system keeps running, and everything comes back.
+  Faster than before (~7 s instead of ~9–14 s on TCG). 12 rounds in loop mode: 12/12.
+- Docs: ARCHITECTURE (resource limits, pipe ends), ROADMAP (0.J2 done).
+
+## v0.57.0 — 2026-11-01
+
+### Kernel heap reserve: a program can no longer crash the kernel by filling its heap
+- The kernel heap is 64 MiB, and an empty heap is a kernel panic (the stable Rust toolchain has no fallible
+  `Box` / `Arc`). A review of every way a program can grow it found four (each limited by its own budget, but not
+  together): many processes each with up to 4096 memory areas (~96 KiB of area list per process), blocked pipe
+  writers each holding a 64 KiB copy, empty files and directories (the ramfs limit counts only file data), and the
+  sum of all budgets (ramfs 24 MiB + IPC buffers 16 MiB + objects + processes) exceeding the heap.
+- Now the last **8 MiB of the heap belong to the kernel**: every syscall that makes the kernel allocate for the
+  caller (read, write, open, spawn, pipe, channel, send / receive, mmap, shared memory, directory handles, devices,
+  sysinfo, tasks, mkdir...) is refused with `ERROR_OUT_OF_MEMORY` beforehand while the heap is within the reserve
+  (`heap::admit`, lock-free). Exit, close, wait, kill, sleep, unlink and munmap always work, so programs can still
+  give memory back.
+- The selftest RAM disk keeps its contents in 64 KiB pieces: after the heap had been full, its 16 MiB in one block
+  no longer fitted (the heap's free space is fragmented by blocks allocated meanwhile) – found by the new test.
+- Tests: FILE TEST 9/9 (new) – `/bin/oomtest` fills the kernel heap with empty files (~125 000) until `open` gives
+  `ERROR_OUT_OF_MEMORY`; then pipe, channel, mmap, spawn and mkdir are refused, getpid / uptime / sleep work, the
+  kernel keeps running; after the files are removed the heap is back (to within 2 MiB) and everything works. Without
+  the reserve this test crashes the kernel. 237 tests.
+- Docs: ARCHITECTURE (kernel heap reserve, no multi-MiB heap blocks), ROADMAP ("Next" 0.J with the review and the
+  next steps, known gaps), README.
+
 ## v0.56.1 — 2026-10-31
 
 ### Lost exit status of an orphan fixed; `test.sh` refuses to run twice

@@ -105,6 +105,18 @@ part. Protection: NX, SMEP, SMAP, CR0.WP, W^X for programs.
 - The heap grows and returns pages from its end.
 - **Rule: a hot allocator has no global lock per operation.** Why: a single heap lock once consumed 83% of
   CPU time on 16 cores.
+- **Kernel heap reserve (8 MiB).** An empty heap is a kernel panic (a stable Rust toolchain has no fallible `Box`
+  / `Arc`), so programs may fill the heap only up to 56 MiB: every syscall that makes the kernel allocate for the
+  caller (data copies, new objects, processes, memory areas, paths, text for the caller – `allocates()` in
+  `syscalls.rs`) is refused with `ERROR_OUT_OF_MEMORY` beforehand while less than the reserve plus 128 KiB is left
+  (`heap::admit`, lock-free: an atomic copy of the bytes in use). Calls that give memory back or need none (exit,
+  close, wait, kill, sleep, unlink, munmap) always work. The rest belongs to the kernel itself – the scheduler,
+  interrupts, process exit, services' own work. This covers every way a program can grow the heap at once (many
+  processes with many memory areas, blocked pipe writers, empty files, many objects – each with its own budget,
+  but all of them together could exceed the heap); the budgets stay as the first line.
+- **Rule: no multi-MiB heap blocks at run time.** After the heap has been full, its free space is fragmented
+  (blocks allocated meanwhile stay where they are), so a large contiguous block may not exist even with most of the
+  heap free. Large buffers live in pieces (ramfs files in 64 KiB chunks, the selftest RAM disk too) or in frames.
 
 ### Kernel memory reserve
 
@@ -251,7 +263,7 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 
 | Kind | Object |
 |---|---|
-| — | console, file (`OpenFile` – position shared between copies, as in Unix), pipe end (64 KiB buffer), channel end |
+| — | console, file (`OpenFile` – position shared between copies, as in Unix), pipe end (64 KiB buffer; a write is copied in 4 KiB pieces, so a writer waiting for room holds 4 KiB of kernel heap, not 64), channel end |
 | 5 `SHM` | shared memory object (also used for DMA buffers) |
 | 6 `HW_ROOT` | the root of hardware access – only init has it |
 | 7 `DEVICE` | one claimed PCI device |
@@ -1309,9 +1321,10 @@ No program can take resources the kernel depends on – it gets an error or dies
 | processes | 1024 (the last 64 only for init and its children: shell, services) | `spawn` → `ERROR_WOULD_BLOCK` |
 | frames for processes (pages, page tables, shared memory) | everything except the kernel reserve: 1/16 of RAM, 16–256 MiB | #PF → process killed, `shm_create` → `ERROR_OUT_OF_MEMORY` |
 | IPC buffers on the heap (channel queues + pipes) | 16 MiB total (`kbuf`) | `chan_send` / pipe write → `ERROR_OUT_OF_MEMORY` |
-| ramfs file data (heap) | 24 MiB | `ERROR_NO_SPACE` |
+| ramfs (heap): file data + 384 B and the name per file / directory | 24 MiB | `ERROR_NO_SPACE` |
 | handles per process | 64 | `ERROR_TOO_MANY_HANDLES` |
-| mappings per process | 4 GiB (`brk` ≤ 1 GiB) | `ERROR_OUT_OF_MEMORY` |
+| mappings per process | 4 GiB (`brk` ≤ 1 GiB), 4096 areas | `ERROR_OUT_OF_MEMORY` |
+| kernel heap, all of the above together | programs stop 8 MiB before the 64 MiB maximum | allocating syscalls → `ERROR_OUT_OF_MEMORY` |
 | channel queue | 64 messages, 4 KiB + 8 handles each | `ERROR_WOULD_BLOCK` / blocking |
 | stack per process | 8 MiB | #PF → process killed |
 | shared memory object | 16 MiB | error |
@@ -1323,7 +1336,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (236 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (237 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying

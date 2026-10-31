@@ -449,8 +449,43 @@ pub fn copy_to_user(p: &mut Process, ptr: u64, data: &[u8]) -> Result<(), i64> {
 
 fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     let len = len.min(MAX_IO);
+    // A pipe may make the writer wait for room: copy piece by piece, so a waiting writer
+    // holds at most PIPE_STEP bytes of kernel heap, not the whole 64 KiB (a thousand
+    // waiting writers would otherwise hold 64 MiB – the whole heap).
+    if !p.is_console(fd) {
+        if let Ok(Fd::Pipe(e)) = p.fd(fd) {
+            if e.write {
+                let e = e.clone();
+                return pipe_write_user(p, &e, ptr, len);
+            }
+        }
+    }
     let data = copy_from_user(p, ptr, len)?;
     write_fd(p, fd, &data)
+}
+
+/// Bytes a pipe write copies from the process at a time.
+const PIPE_STEP: u64 = 4096;
+
+/// write() to a pipe from process memory, PIPE_STEP bytes at a time.  An error after some
+/// bytes went through returns their count (like a short write).
+fn pipe_write_user(p: &mut Process, e: &super::pipe::PipeEnd, ptr: u64, len: u64) -> SysResult {
+    let mut done = 0u64;
+    while done < len {
+        let n = (len - done).min(PIPE_STEP);
+        let r = copy_from_user(p, ptr + done, n).and_then(|chunk| e.write(&chunk).map(|w| w as u64));
+        match r {
+            Ok(w) => {
+                done += w;
+                if w < n {
+                    break; // the reader went away mid-way
+                }
+            }
+            Err(err) if done == 0 => return Err(err),
+            Err(_) => break,
+        }
+    }
+    Ok(done)
 }
 
 /// Writes ready data to a process descriptor (write, kcmd).
@@ -1542,6 +1577,55 @@ fn audit_refusal(p: &mut Process, frame: &SyscallFrame, sandboxed: bool) {
     super::dcp::record(sched::current_id(), &anc[..n], &name, frame.rax, &what, reason);
 }
 
+/// Room a call that allocates must leave above the kernel reserve: the largest single
+/// buffer a call copies (MAX_IO) plus the objects it may create.
+const ADMIT_BYTES: usize = MAX_IO as usize + 64 * 1024;
+
+/// Calls refused because the kernel heap reached its reserve (tests, `mem`).
+pub static HEAP_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether a syscall makes the kernel allocate heap memory for the caller: data
+/// copies (read, write, send, receive), new objects (files, pipes, channels, shared
+/// memory, directories, devices), new processes, new memory areas, text built for the
+/// caller (sysinfo, tasks), new paths (open, mkdir, chdir...).  Not: exit, close,
+/// wait, kill, sleep, yield, unlink, munmap, brk – these give memory back or use none.
+fn allocates(nr: u64) -> bool {
+    matches!(
+        nr,
+        SYS_WRITE
+            | SYS_READ
+            | SYS_OPEN
+            | SYS_SPAWN
+            | SYS_SPAWN_EX
+            | SYS_CHDIR
+            | SYS_READDIR
+            | SYS_STAT
+            | SYS_MKDIR
+            | SYS_TASKS
+            | SYS_DUP
+            | SYS_DUP2
+            | SYS_HANDLE_DUP
+            | SYS_PIPE
+            | SYS_MMAP
+            | SYS_CHANNEL_CREATE
+            | SYS_CHAN_SEND
+            | SYS_CHAN_RECV
+            | SYS_SHM_CREATE
+            | SYS_SHM_MAP
+            | SYS_WAIT_MANY
+            | SYS_DEV_CLAIM
+            | SYS_DEV_MAP
+            | SYS_IRQ_BIND
+            | SYS_DMA_ALLOC
+            | SYS_SYSINFO
+            | SYS_DIR_OPEN
+            | SYS_OPENAT
+            | SYS_READDIRAT
+            | SYS_STATAT
+            | SYS_MKDIRAT
+    )
+}
+
 /// Called from syscall_entry (assembly) – on the task's kernel stack.
 #[unsafe(no_mangle)]
 extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
@@ -1571,12 +1655,20 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
     // The rights gate: every handle argument exists, has the right kind and the
     // rights from the table – before the call is decoded.
     let gate = if sandboxed { Ok(()) } else { super::sysrights::check(p, frame) };
+    // The kernel heap reserve: calls that make the kernel allocate are refused while
+    // the heap is close to full (closing, waiting, exiting and killing still work –
+    // they give memory back).
+    let heap_full = allocates(frame.rax) && !crate::memory::heap::admit(ADMIT_BYTES);
     let result: SysResult = match frame.rax {
         _ if sandboxed => {
             SANDBOX_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Err(ERROR_ACCESS_DENIED)
         }
         _ if gate.is_err() => gate.map(|_| 0),
+        _ if heap_full => {
+            HEAP_REFUSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Err(ERROR_OUT_OF_MEMORY)
+        }
         SYS_EXIT => {
             record_exit(ExitKind::Exit(a0 as i64), frame.rip, frame.rax, frame.rbx);
             exit_current();

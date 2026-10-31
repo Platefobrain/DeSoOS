@@ -62,7 +62,7 @@ pub fn self_test() {
     check!(r.is_some(), "fdtest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "fdtest: {:?} {:?}", kind, out.trim());
-    serial_println!("[FILE TEST] 1/8 dup, dup2, seek, shared position (also with a spawned child): {} PASS", out.trim());
+    serial_println!("[FILE TEST] 1/9 dup, dup2, seek, shared position (also with a spawned child): {} PASS", out.trim());
 
     // 2. Pipes: read / write, end of data, ERROR_CLOSED, 200 KiB through cat,
     // child output through a pipe, a waiting reader.
@@ -70,7 +70,7 @@ pub fn self_test() {
     check!(r.is_some(), "pipetest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "pipetest: {:?} {:?}", kind, out.trim());
-    serial_println!("[FILE TEST] 2/8 pipes: EOF, ERROR_CLOSED, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 2/9 pipes: EOF, ERROR_CLOSED, 200 KiB through cat, child output, blocking reader: {} PASS", out.trim());
 
     // 3. Pipes in the shell: program | program, builtin | program,
     // three stages with redirection, syntax errors.
@@ -92,7 +92,7 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
     check!(out.matches("inside\n").count() == 2, "nofiles --dir: cat x.txt / the copy made inside: {:?}", out);
     check!(out.contains("cat: ../pipe.out: access denied"), "nofiles --dir-ro: a path above the directory: {:?}", out);
     check!(out.contains("access denied") && crate::fs::stat("/nd").is_err(), "nofiles --dir-ro cp must be refused, /nd removed: {:?}", out);
-    serial_println!("[FILE TEST] 3/8 shell: echo | cat, primes | cat | cat > file, help | cat, syntax error, nofiles --dir / --dir-ro PASS");
+    serial_println!("[FILE TEST] 3/9 shell: echo | cat, primes | cat | cat > file, help | cat, syntax error, nofiles --dir / --dir-ro PASS");
 
     // 4. Process memory: brk, mmap / munmap (also partial), lazy pages
     // (64 MiB region, a few pages used), kernel copying into
@@ -110,7 +110,7 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
         frames,
         crate::memory::free_frame_count()
     );
-    serial_println!("[FILE TEST] 4/8 process memory: brk, mmap/munmap, lazy pages, growing stack, allocator: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 4/9 process memory: brk, mmap/munmap, lazy pages, growing stack, allocator: {} PASS", out.trim());
 
     // 5. System call fuzzer: children without handles call random
     // syscalls with extreme arguments; the kernel must not crash or
@@ -136,7 +136,7 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
         crate::memory::free_frame_count()
     );
     check!(crate::fs::stat("/fuzz").is_err(), "/fuzz could not be removed");
-    serial_println!("[FILE TEST] 5/8 syscall fuzzer: {}; {} junk entries removed PASS", out.trim(), junk);
+    serial_println!("[FILE TEST] 5/9 syscall fuzzer: {}; {} junk entries removed PASS", out.trim(), junk);
 
     // 6. Limits – process bomb, shared memory, memory
     // hog, filling ramfs, IPC buffers.  The program gets an error or dies,
@@ -200,7 +200,7 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
         check!(crate::fs::ramfs::bytes_used() == ram_a, "ramfs bytes after the chunk test: {} -> {}", ram_a, crate::fs::ramfs::bytes_used());
         serial_println!("[FILE TEST]   ramfs chunks: 300 KiB pattern, edges, truncate + extend OK; 10 MiB of 4 KiB appends in {} ms", ms);
     }
-    serial_println!("[FILE TEST] 6/8 limits (processes, kernel memory reserve, ramfs, IPC buffers): {} PASS", out.trim());
+    serial_println!("[FILE TEST] 6/9 limits (processes, kernel memory reserve, ramfs, IPC buffers): {} PASS", out.trim());
 
     // 7. File sandbox: a child started with SPAWN_NO_FILES cannot use any path
     // (open, stat, readdir, mkdir, unlink, chdir, spawn) and works only with the
@@ -214,7 +214,7 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
     check!(denied >= 11, "sandbox refusals counted: {}", denied);
     check!(crate::fs::stat("/sandtest.tmp").is_err(), "sandtest left its file");
     let line = out.lines().find(|l| l.contains("checks OK")).unwrap_or("").trim();
-    serial_println!("[FILE TEST] 7/8 file sandbox: {} ({} path calls refused) PASS", line, denied);
+    serial_println!("[FILE TEST] 7/9 file sandbox: {} ({} path calls refused) PASS", line, denied);
 
     // 8. Directory handles: work inside one directory, no way out, rights, a
     // sandboxed child with only a read-only directory.
@@ -223,7 +223,23 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "dirtest: {:?} {:?}", kind, out.trim());
     check!(crate::fs::stat("/dirtest").is_err() && crate::fs::stat("/dirtest-outside.txt").is_err(), "dirtest left its files");
-    serial_println!("[FILE TEST] 8/8 directory handles: {} PASS", out.trim());
+    serial_println!("[FILE TEST] 8/9 directory handles: {} PASS", out.trim());
+
+    // 9. The kernel heap: empty files up to the ramfs limit (nodes count), IPC messages,
+    // then children with thousands of memory areas until the heap reserve; allocating calls
+    // get ERROR_OUT_OF_MEMORY, the kernel keeps running, and after the cleanup the heap is back.
+    let heap0 = crate::memory::heap::used_bytes();
+    let refused0 = super::syscalls::HEAP_REFUSED.load(core::sync::atomic::Ordering::Relaxed);
+    let r = run("/bin/oomtest", &["oomtest"], 300_000);
+    check!(r.is_some(), "oomtest did not finish");
+    let (kind, out) = r.unwrap();
+    check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "oomtest: {:?} {:?}", kind, out.trim());
+    let refused = super::syscalls::HEAP_REFUSED.load(core::sync::atomic::Ordering::Relaxed) - refused0;
+    check!(refused >= 5, "only {} calls refused by the heap reserve", refused);
+    let heap1 = crate::memory::heap::used_bytes();
+    check!(heap1 <= heap0 + 2 * 1024 * 1024, "kernel heap not given back: {} KiB before, {} KiB after", heap0 / 1024, heap1 / 1024);
+    let line = out.lines().find(|l| l.starts_with("oomtest:")).unwrap_or("").trim();
+    serial_println!("[FILE TEST] 9/9 kernel heap reserve: {} ({} calls refused, heap {} -> {} KiB) PASS", line, refused, heap0 / 1024, heap1 / 1024);
     serial_println!("[FILE TEST] All file tests passed!");
     crate::selftest::pass();
 }

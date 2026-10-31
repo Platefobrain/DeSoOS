@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-10-31 – **v0.56.1.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1). 30/30 suites (236 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-11-01 – **v0.57.1.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1). 30/30 suites (237 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -871,8 +871,11 @@ comes back, and the stress test does not regress.
    partition length from the MBR, the BPB size and every sector address checked against it~~ ✅, (F) ~~`dcp audit`
    over the whole tree of descendants~~ ✅ (v0.55.0); second review (2026-10-31): (G) ~~FAT32 cluster count
    limit~~ ✅, (H) ~~a test for the 16-generation audit limit~~ ✅, (I) ~~fallible allocation in `shm_map`~~ ✅
-   (v0.55.1); (J) the whole kernel survives a full kernel heap (`Vec` / `Arc` / `collect` on syscall paths return
-   `ERROR_OUT_OF_MEMORY` instead of a panic) – a plan and fixes before DeSoFS; (E) FAT32 rollback on I/O errors in the middle of a
+   (v0.55.1); (J) the whole kernel survives a full kernel heap – review done (four ways for a program to fill it: processes ×
+   memory areas, blocked pipe writers, empty files, the sum of the budgets): (J1) ~~an 8 MiB kernel heap reserve,
+   allocating syscalls refused before it~~ ✅ (v0.57.0); (J2) ~~pipe writes copied piece by piece (no 64 KiB held while
+   waiting), ramfs counts nodes and names in its limit~~ ✅ (v0.57.1); (J3) fallible allocation on the USB / FAT32 paths and in
+   the `sysinfo` / `dcp` texts; (E) FAT32 rollback on I/O errors in the middle of a
    write – with DeSoFS.
 1. **Stability:** ~~the rare TCG stall in ALLOC TEST 4/5~~ ✅ (v0.52.1 – `yield_now` kept the BKL); repeated
    test runs (TCG / KVM, 1–8 CPUs) as a habit, ~~a loop mode for any suite~~ ✅ (v0.56.0, `LOOP=suite:rounds`); ~~the rare
@@ -899,8 +902,8 @@ reviewing the diff. Requires: services (M19), networking, VFS isolation for the 
 Number in parentheses = the stage in which the gap goes away.
 
 **Memory**
-- a full kernel heap (64 MiB) still panics the kernel on many allocation paths – process memory, `shm_map` and the area
-  list already return `ERROR_OUT_OF_MEMORY` (Next, 0.J)
+- kernel heap: programs are stopped 8 MiB before it is full (v0.57.0); the kernel's own work past that point and
+  a fragmented heap after it had been full (no large contiguous blocks) are not checked by a test yet (Next, 0.J3)
 - splitting a 2 MiB direct-map page (map_mmio) is one-way – 4 KiB pages are not merged back later
 - the heap shrinks only from the end; large blocks (> 2 KiB) still under a single heap lock (address-ordered list, first-fit)
 - core TSCs are not synchronized (test laptop) – times measured on a single CPU (statistics, profile); no TSC synchronization

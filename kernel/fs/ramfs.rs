@@ -48,6 +48,26 @@ const CHUNK: usize = 64 * 1024;
 /// + writing 1 byte) and the kernel would crash on the next allocation.  Above the limit:
 /// ERROR_NO_SPACE.
 pub const RAMFS_MAX: u64 = 24 * 1024 * 1024;
+
+/// What a file or directory costs the kernel heap besides its data (the node, its entry
+/// in the parent's map, the name's allocation) – counted in RAMFS_MAX together with the
+/// name, so empty files and directories cannot fill the heap either (measured: ~400 B
+/// per empty file with a short name).
+const NODE_COST: u64 = 384;
+
+fn node_cost(name: &str) -> u64 {
+    NODE_COST + name.len() as u64
+}
+
+/// Takes `n` bytes of the ramfs limit – ERROR_NO_SPACE above it.
+fn charge(n: u64) -> Result<()> {
+    use core::sync::atomic::Ordering::SeqCst;
+    RAMFS_BYTES.fetch_update(SeqCst, SeqCst, |u| u.checked_add(n).filter(|&t| t <= RAMFS_MAX)).map(|_| ()).map_err(|_| FsError::NoSpace)
+}
+
+fn refund(n: u64) {
+    RAMFS_BYTES.fetch_sub(n, core::sync::atomic::Ordering::SeqCst);
+}
 static RAMFS_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Data bytes in ramfs (all files).
@@ -241,18 +261,25 @@ impl RamFs {
         if !valid_name(name) {
             return Err(FsError::InvalidName);
         }
+        charge(node_cost(name))?;
         let _t = self.tree.write();
-        match Self::node_mut(self.root_mut(), parent)? {
-            Node::Dir { children, modified } => {
+        let r = match Self::node_mut(self.root_mut(), parent) {
+            Ok(Node::Dir { children, modified }) => {
                 if children.contains_key(name) {
-                    return Err(FsError::AlreadyExists);
+                    Err(FsError::AlreadyExists)
+                } else {
+                    children.insert(String::from(name), node);
+                    *modified = rtc::now();
+                    Ok(())
                 }
-                children.insert(String::from(name), node);
-                *modified = rtc::now();
-                Ok(())
             }
-            Node::File(_) => Err(FsError::NotADirectory),
+            Ok(Node::File(_)) => Err(FsError::NotADirectory),
+            Err(e) => Err(e),
+        };
+        if r.is_err() {
+            refund(node_cost(name));
         }
+        r
     }
 
     /// All files of the subtree (under `tree` – without file locks).
@@ -403,6 +430,7 @@ impl ConcurrentFs for RamFs {
                 _ => {}
             }
             *modified = rtc::now();
+            refund(node_cost(name));
             children.remove(name)
         };
         Ok(())

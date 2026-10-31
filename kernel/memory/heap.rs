@@ -172,6 +172,7 @@ impl Heap {
                     }
 
                     self.used += size;
+                    USED.store(self.used, core::sync::atomic::Ordering::Relaxed);
                     return alloc_start as *mut u8;
                 }
 
@@ -295,6 +296,7 @@ impl Heap {
         }
 
         self.used -= size;
+        USED.store(self.used, core::sync::atomic::Ordering::Relaxed);
         unsafe {
             let node = self.insert_free(addr, size);
             if node as usize + (*node).size == self.mapped_end && (*node).size >= SHRINK_AT {
@@ -309,6 +311,26 @@ impl Heap {
 unsafe impl Send for Heap {}
 
 pub struct KernelHeap;
+
+/// `Heap.used`, readable without the heap lock (`admit` on syscall paths).
+static USED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The part of the heap only the kernel itself may fill: programs are refused
+/// (ERROR_OUT_OF_MEMORY) before the heap gets this close to its maximum, so the
+/// kernel's own allocations – the scheduler, waking tasks, process exit, interrupt
+/// handling – always find room.  An empty heap is a kernel panic (a stable Rust
+/// toolchain has no fallible `Box` / `Arc`), so this margin is what keeps a program
+/// from crashing the system by filling the heap.
+pub const KERNEL_RESERVE: usize = 8 * 1024 * 1024;
+
+/// Whether a program may make the kernel allocate `bytes` more: the heap (blocks
+/// in use, the CPU lists counted as free) stays below its maximum minus the
+/// kernel reserve.  Lock-free, a few loads; slightly stale values are fine – the
+/// reserve is far larger than any single request.
+pub fn admit(bytes: usize) -> bool {
+    let used = USED.load(core::sync::atomic::Ordering::Relaxed).saturating_sub(cached_bytes());
+    used.saturating_add(bytes).saturating_add(KERNEL_RESERVE) <= HEAP_MAX_SIZE
+}
 
 static HEAP_LOCK: IrqSpinLock<Heap> = IrqSpinLock::new("heap", level::HEAP, Heap::empty());
 

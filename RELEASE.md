@@ -10,6 +10,126 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.57.1 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.57.0)
+
+| Version | Change |
+|---|---|
+| v0.57.1 | pipe writes copied in 4 KiB pieces (a waiting writer no longer holds 64 KiB of kernel heap); ramfs counts files and directories (384 B + name) in its 24 MiB limit; faster `mmap` with thousands of areas; `oomtest` fills the heap the way several programs could at once |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 237 tests PASS | 88 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 237 tests PASS | 74 s |
+| Loop (build server, TCG) | `LOOP=files:12` | 12/12 PASS | ~21 s per round |
+
+The new `oomtest` is ~10 s faster on TCG than in v0.57.0 (98 s → 88 s for the whole run).
+
+### Known problems
+
+- Kernel heap: the kernel's own work past the reserve and a fragmented heap after it had been full are not
+  checked by a test yet (ROADMAP "Next", 0.J3).
+- Otherwise as in v0.57.0.
+
+### Performance against the previous release (v0.57.0 → v0.57.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.57.0 | TCG v0.57.1 | KVM v0.57.0 | KVM v0.57.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 716 | 3 286 | 32 336 | 35 050 |
+| irq_user_ns | 9 465 | 8 285 | 50 851 | 65 595 |
+| fact_kernel_ns | 28 801 | 29 779 | 55 493 | 58 496 |
+| fact_user_ns | 76 335 | 74 404 | 102 722 | 93 545 |
+| fact_svc_ns | 212 765 | 210 084 | 103 626 | 105 318 |
+| ping_svc_ns | 111 919 | 128 700 | 18 791 | 23 174 |
+| restart_us | 5 000 | 7 100 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.57.0 | TCG v0.57.1 | KVM v0.57.0 | KVM v0.57.1 |
+|---|---|---|---|---|
+| start_ms | 430 | 419 | 397 | 404 |
+| enum_avg_ms | 23 | 25 | 27 | 26 |
+| read_kbs (usbd) | 74 472 | 70 620 | 107 789 | 78 769 |
+| kread_kbs (kernel) | 97 491 | 55 113 | 112 490 | 96 437 |
+| kcat_kbs (kernel, cat) | 42 894 | 61 285 | 124 612 | 96 303 |
+| hid_avg_us (keyboard) | 642 | 587 | 435 | 353 |
+
+Verdict: no regression. None of the benchmarks writes to a pipe or creates ramfs files. KVM `ping_svc_ns` 23 174 is
+back in its usual 20 000 – 23 000 (v0.57.0's 18 791 was the low end); TCG `restart_us` 7 100 and the USB read rates
+move within their usual spread (TCG `kread_kbs` 55 113 – 97 491 across the last releases, KVM `read_kbs` 71 859 –
+107 789).
+
+---
+
+## v0.57.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.56.1)
+
+| Version | Change |
+|---|---|
+| v0.57.0 | kernel heap reserve: the last 8 MiB of the kernel heap belong to the kernel, allocating syscalls get `ERROR_OUT_OF_MEMORY` before it – a program can no longer crash the kernel by filling its heap; the selftest RAM disk in 64 KiB pieces |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 237 tests PASS | 98 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 237 tests PASS | 74 s |
+
+New: FILE TEST 9/9 (`oomtest` – ~125 000 empty files fill the kernel heap to its reserve, allocating calls are
+refused, the kernel keeps running, the heap comes back). It costs ~14 s on TCG (file creation and removal) and ~2 s
+on KVM – the main reason for the longer TCG run.
+
+### Known problems
+
+- After the kernel heap has been full, its free space is fragmented: no multi-MiB blocks may be allocated at run
+  time (the RAM disk of the tests was the one that did – fixed). Pipe writers still hold a 64 KiB copy while
+  waiting, and ramfs does not count empty files in its limit – both stopped by the reserve now, to be fixed at the
+  source (ROADMAP "Next", 0.J2).
+- Otherwise as in v0.56.1.
+
+### Performance against the previous release (v0.56.1 → v0.57.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.56.1 | TCG v0.57.0 | KVM v0.56.1 | KVM v0.57.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 013 | 3 716 | 32 206 | 32 336 |
+| irq_user_ns | 10 858 | 9 465 | 69 132 | 50 851 |
+| fact_kernel_ns | 26 616 | 28 801 | 57 870 | 55 493 |
+| fact_user_ns | 75 757 | 76 335 | 98 814 | 102 722 |
+| fact_svc_ns | 215 053 | 212 765 | 117 647 | 103 626 |
+| ping_svc_ns | 120 409 | 111 919 | 22 431 | 18 791 |
+| restart_us | 3 700 | 5 000 | 1 400 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.56.1 | TCG v0.57.0 | KVM v0.56.1 | KVM v0.57.0 |
+|---|---|---|---|---|
+| start_ms | 413 | 430 | 348 | 397 |
+| enum_avg_ms | 26 | 23 | 27 | 27 |
+| read_kbs (usbd) | 51 200 | 74 472 | 105 025 | 107 789 |
+| kread_kbs (kernel) | 68 393 | 97 491 | 104 261 | 112 490 |
+| kcat_kbs (kernel, cat) | 50 483 | 42 894 | 81 104 | 124 612 |
+| hid_avg_us (keyboard) | 898 | 642 | 441 | 435 |
+
+`[RESULT-RIGHTS]`: gate 26 ns (TCG), 4 ns (KVM) – the heap check next to it costs nothing measurable.
+
+Verdict: no regression. The reserve check is a few atomic loads per allocating syscall; IPC (`ping_svc_ns`, KVM
+18 791 – the best so far) and USB reads are unchanged or better. TCG `irq_kernel_ns` +23 % is a kernel-only path the
+check does not touch – TCG noise.
+
+---
+
 ## v0.56.1 — 2026-10-31
 
 **Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**

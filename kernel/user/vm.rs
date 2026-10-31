@@ -184,7 +184,11 @@ impl ProcMem {
     fn find_gap(&self, from: u64, len: u64) -> Option<u64> {
         let mut c = from;
         let fits = |c: u64, limit: u64| c.checked_add(len).and_then(|e| e.checked_add(PAGE)).map_or(false, |e| e <= limit);
-        for v in self.vmas.iter().filter(|v| matches!(v.kind, VmaKind::Mmap | VmaKind::Shared)) {
+        // The areas are sorted and do not overlap, so their ends are sorted too: skip the
+        // ones entirely below `from` by binary search (with thousands of areas a linear
+        // scan made every mmap O(n)).
+        let first = self.vmas.partition_point(|v| v.end + PAGE <= from);
+        for v in self.vmas[first..].iter().filter(|v| matches!(v.kind, VmaKind::Mmap | VmaKind::Shared)) {
             if v.end + PAGE <= c {
                 continue;
             }

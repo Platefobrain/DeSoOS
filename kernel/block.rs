@@ -329,16 +329,36 @@ pub fn partition_kind(index: usize) -> Option<&'static str> {
 // In-memory disk (file system tests without touching a real disk)
 // ------------------------------------------------------------
 
+/// Contents in 64 KiB pieces, not one block: a 16 MiB test disk is then 256 small heap
+/// blocks instead of one 16 MiB block, which a fragmented heap (e.g. right after the heap
+/// reserve test filled it) may not have.
+#[cfg(selftest)]
+const RAM_CHUNK: usize = 64 * 1024;
+
 #[cfg(selftest)]
 pub struct RamDisk {
     name: String,
-    data: Vec<u8>,
+    sectors: u64,
+    chunks: Vec<Vec<u8>>,
 }
 
 #[cfg(selftest)]
 impl RamDisk {
     pub fn new(name: &str, sectors: u64) -> Self {
-        RamDisk { name: String::from(name), data: alloc::vec![0u8; sectors as usize * SECTOR_SIZE] }
+        let bytes = sectors as usize * SECTOR_SIZE;
+        let chunks = (0..bytes.div_ceil(RAM_CHUNK)).map(|k| alloc::vec![0u8; RAM_CHUNK.min(bytes - k * RAM_CHUNK)]).collect();
+        RamDisk { name: String::from(name), sectors, chunks }
+    }
+
+    /// Copies between `buf` and the disk at byte `off`, piece by piece.
+    fn each(&mut self, off: usize, len: usize, mut f: impl FnMut(&mut [u8], core::ops::Range<usize>)) {
+        let mut done = 0;
+        while done < len {
+            let (k, o) = ((off + done) / RAM_CHUNK, (off + done) % RAM_CHUNK);
+            let n = (RAM_CHUNK - o).min(len - done);
+            f(&mut self.chunks[k][o..o + n], done..done + n);
+            done += n;
+        }
     }
 }
 
@@ -348,24 +368,22 @@ impl BlockDevice for RamDisk {
         &self.name
     }
     fn description(&self) -> String {
-        alloc::format!("RAM disk, {} KiB", self.data.len() / 1024)
+        alloc::format!("RAM disk, {} KiB", self.sectors * SECTOR_SIZE as u64 / 1024)
     }
     fn sector_count(&self) -> u64 {
-        (self.data.len() / SECTOR_SIZE) as u64
+        self.sectors
     }
     fn read_only(&self) -> bool {
         false
     }
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         check_range(self.sector_count(), lba, buf.len())?;
-        let o = lba as usize * SECTOR_SIZE;
-        buf.copy_from_slice(&self.data[o..o + buf.len()]);
+        self.each(lba as usize * SECTOR_SIZE, buf.len(), |disk, r| buf[r].copy_from_slice(disk));
         Ok(())
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         check_range(self.sector_count(), lba, buf.len())?;
-        let o = lba as usize * SECTOR_SIZE;
-        self.data[o..o + buf.len()].copy_from_slice(buf);
+        self.each(lba as usize * SECTOR_SIZE, buf.len(), |disk, r| disk.copy_from_slice(&buf[r]));
         Ok(())
     }
     fn flush(&mut self) -> Result<(), BlockError> {
