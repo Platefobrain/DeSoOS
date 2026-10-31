@@ -2,6 +2,47 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.55.0 — 2026-10-31
+
+### FAT32 stays inside its partition; `dcp audit` shows the whole tree (after a code review)
+- **FAT32 partition bounds:** only the partition's start was taken from the MBR, so a FAT32 boot sector (BPB)
+  claiming a larger volume than the partition – damaged or crafted – made reads and writes run into the next
+  partition (only the end of the whole disk was checked). Now the partition length is kept, a BPB larger than the
+  partition is `file system corrupt` (the volume does not mount), and every sector address is checked against the
+  volume before it reaches the disk (no overflow on `start + lba`). A partition table entry running past the end
+  of the disk ends with the disk.
+- **`dcp audit` – descendants, not only children:** a program saw refusals of itself and its children; a
+  grandchild's refusal (a program started by a program it started) was invisible. Each audit entry now keeps up to
+  16 ancestors of the refused process as they were at that moment, and a program sees every entry it is an
+  ancestor of. PIDs are never reused, so an old entry never shows up for a newer process.
+- Tests: FS TEST 11/11 (new) – a FAT32 volume in partition 1 of an MBR disk filled up while partition 2 holds a
+  marker (the marker stays), a partition shorter than the volume and a BPB larger than the partition refused;
+  FILE TEST 7/8 – `sandtest` checks that a grandchild's refusal (through a plain child) is seen by the grandparent.
+  236 tests.
+- Docs: ARCHITECTURE (FAT32 volume bounds, DCP "who sees what"), ROADMAP (0.D and 0.F done, known gaps updated).
+
+## v0.54.0 — 2026-10-31
+
+### Process memory hardened (after a code review)
+- **Area limit:** at most 4096 areas (VMAs) per process. Until now only their total size was limited (4 GiB), so
+  a program mapping 4 KiB at a time could make about a million areas and fill the kernel heap – a kernel panic.
+  Now the next `mmap` (or a `munmap` hole that would split an area) is `ERROR_OUT_OF_MEMORY`; the area list grows
+  with fallible allocation, so a full kernel heap is `ERROR_OUT_OF_MEMORY` as well.
+- **Freed address ranges are reused:** `mmap` addresses only grew and `munmap` never gave them back, so after ~28 000
+  rounds of 4 GiB `mmap` + `munmap` a long-running program would have run past the mmap range. Now `mmap` takes
+  the next free gap (next fit, with a guard page above every area) and starts again from the bottom of the
+  range at its end (`MMAP_END`, below the stack).
+- **`PROT_NONE`:** `mmap(len, 0)` reserves a range with no access – every access kills the program (#PF), a
+  kernel copy into it is `ERROR_INVALID_ADDRESS` (until now it behaved like read-only). `PROT_WRITE` without
+  `PROT_READ` is `ERROR_INVALID_ARGUMENT`.
+- Areas are kept sorted (lookup by binary search) and their total size is a counter, not summed on every call;
+  `munmap` skips untouched stretches whole (no page table there) instead of walking every page.
+- Library: `MMAP_BASE`, `MMAP_END`.
+- Tests: FILE TEST 4/8 (`memtest`, 37 checks): 4 KiB areas until `ERROR_OUT_OF_MEMORY` at the limit and back after
+  `munmap`, a hole at the limit refused, 60 000 × 2 GiB `mmap` + `munmap` (117 TiB – more than the whole range) with
+  a reused page zero again, `PROT_NONE` (a kernel copy refused, a child reading it dies).
+- Docs: ARCHITECTURE (process memory), ROADMAP (review findings in "Next", the rest in "Known gaps").
+
 ## v0.53.0 — 2026-10-29
 
 ### Directory handles: a program sees one directory only

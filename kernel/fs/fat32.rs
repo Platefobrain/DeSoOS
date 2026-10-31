@@ -412,6 +412,10 @@ pub struct Fat32 {
     disk: usize,
     disk_name: String,
     part_lba: u64,
+    /// Volume length in sectors (from the BPB, checked against the partition from the
+    /// MBR): no sector at or past it is ever read or written – the next partition is safe
+    /// even when the BPB lies.
+    vol_sectors: u64,
     spc: u32,
     cluster_bytes: usize,
     reserved: u32,
@@ -451,12 +455,21 @@ enum Located {
 impl Fat32 {
     // ---------------- disk access ----------------
 
+    /// Disk address of `len` bytes at volume sector `lba` – only inside the volume.
+    fn disk_lba(&self, lba: u64, len: usize) -> Result<u64> {
+        let n = len.div_ceil(SECTOR_SIZE) as u64;
+        match lba.checked_add(n) {
+            Some(end) if end <= self.vol_sectors => self.part_lba.checked_add(lba).ok_or(FsError::Corrupt("sector outside the volume")),
+            _ => Err(FsError::Corrupt("sector outside the volume")),
+        }
+    }
+
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> Result<()> {
-        Ok(block::read(self.disk, self.part_lba + lba, buf)?)
+        Ok(block::read(self.disk, self.disk_lba(lba, buf.len())?, buf)?)
     }
 
     fn write_sectors(&self, lba: u64, buf: &[u8]) -> Result<()> {
-        Ok(block::write(self.disk, self.part_lba + lba, buf)?)
+        Ok(block::write(self.disk, self.disk_lba(lba, buf.len())?, buf)?)
     }
 
     fn cluster_lba(&self, c: u32) -> u64 {
@@ -592,9 +605,11 @@ impl Fat32 {
         let mut s0 = [0u8; SECTOR_SIZE];
         block::read(disk, 0, &mut s0)?;
 
-        let mut part_lba = None;
+        let dev_sectors = block::with_device(disk, |d| d.sector_count())?;
+        // (start, length) of the volume's place on the disk.
+        let mut part = None;
         if is_fat32_boot(&s0) {
-            part_lba = Some(0u64);
+            part = Some((0u64, dev_sectors));
         } else if s0[510] == 0x55 && s0[511] == 0xAA {
             for p in 0..4 {
                 let e = &s0[446 + p * 16..446 + p * 16 + 16];
@@ -602,18 +617,19 @@ impl Fat32 {
                 if kind == 0xEE {
                     return Err(FsError::Unsupported); // GPT
                 }
-                if matches!(kind, 0x0B | 0x0C) {
-                    let start = le32(e, 8) as u64;
+                let (start, len) = (le32(e, 8) as u64, le32(e, 12) as u64);
+                if matches!(kind, 0x0B | 0x0C) && start != 0 && len != 0 && start < dev_sectors {
                     let mut bs = [0u8; SECTOR_SIZE];
                     block::read(disk, start, &mut bs)?;
                     if is_fat32_boot(&bs) {
-                        part_lba = Some(start);
+                        // A partition running past the end of the disk ends with the disk.
+                        part = Some((start, len.min(dev_sectors - start)));
                         break;
                     }
                 }
             }
         }
-        let part_lba = part_lba.ok_or(FsError::NoFileSystem)?;
+        let (part_lba, part_sectors) = part.ok_or(FsError::NoFileSystem)?;
         let mut bs = [0u8; SECTOR_SIZE];
         block::read(disk, part_lba, &mut bs)?;
 
@@ -624,6 +640,9 @@ impl Fat32 {
         let fat_size = le32(&bs, 36);
         let root_cluster = le32(&bs, 44);
         let fsinfo_sector = le16(&bs, 48);
+        if total > part_sectors {
+            return Err(FsError::Corrupt("volume larger than its partition"));
+        }
         let data_start = reserved as u64 + num_fats as u64 * fat_size as u64;
         if data_start >= total {
             return Err(FsError::Corrupt("data area outside the volume"));
@@ -637,6 +656,7 @@ impl Fat32 {
             disk,
             disk_name,
             part_lba,
+            vol_sectors: total,
             spc,
             cluster_bytes: spc as usize * SECTOR_SIZE,
             reserved,
@@ -711,7 +731,7 @@ impl Fat32 {
         let s = &self.fat_cache[i];
         for copy in 0..self.num_fats {
             let lba = self.reserved as u64 + copy as u64 * self.fat_size as u64 + s.sector as u64;
-            block::write(self.disk, self.part_lba + lba, &s.data)?;
+            self.write_sectors(lba, &s.data)?;
         }
         self.fat_cache[i].dirty = false;
         Ok(())

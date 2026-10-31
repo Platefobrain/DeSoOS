@@ -115,6 +115,22 @@ impl AddressSpace {
         Some(frame)
     }
 
+    /// End of the unmapped stretch around `va` when a whole table above the page
+    /// is missing (the next 2 MiB / 1 GiB / 512 GiB boundary); `va` itself when the page
+    /// table for `va` exists.  Lets range walks skip untouched areas.
+    pub fn hole_end(&self, va: u64) -> u64 {
+        let up = |bits: u32| (va | ((1u64 << bits) - 1)).saturating_add(1);
+        if va >= USER_SPACE_END {
+            return va;
+        }
+        let Some(pdpt) = Self::next(self.pml4, index(va, 4), false) else { return up(39) };
+        let Some(pd) = Self::next(pdpt, index(va, 3), false) else { return up(30) };
+        if Self::next(pd, index(va, 2), false).is_none() {
+            return up(21);
+        }
+        va
+    }
+
     /// (physical address, entry flags) for `va` in the lower half.
     #[allow(dead_code)]
     pub fn translate(&self, va: u64) -> Option<(u64, u64)> {

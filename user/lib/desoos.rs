@@ -135,6 +135,9 @@ pub const SYSCTL_STRESS: u64 = 4;
 /// mmap: region protection.
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
+/// The range where mmap places areas (above the heap, below the stack; kernel vm.rs).
+pub const MMAP_BASE: u64 = 0x0000_1000_0000_0000;
+pub const MMAP_END: u64 = 0x0000_7fff_ffff_0000 - 8 * 1024 * 1024;
 
 /// seek: from the start / from the current position / from the end.
 pub const SEEK_SET: u64 = 0;

@@ -7,10 +7,12 @@
 //     ERROR_ACCESS_DENIED, handle_dup cannot add rights),
 //   - console, memory, pipes, channels and getcwd still work (no path),
 //   - the kernel's view (`dcp inspect <own pid>`) says "files: none",
-//   - the refusals appear in `dcp audit` (sandbox, a capability without WRITE).
+//   - the refusals appear in `dcp audit` (sandbox, a capability without WRITE),
+//   - a grandchild's refusal is seen too (`sandtest middle` starts a sandboxed
+//     `sandtest grand`, which tries one path) – audit covers the whole tree.
 // The parent then checks that nothing changed on disk, that unknown spawn flags
 // give ERROR_INVALID_ARGUMENT, and that an unsandboxed child still has files.
-// Result: "sandtest: N checks OK" and code 0.  Child mode: `sandtest child`
+// Result: "sandtest: N checks OK" and code 0.  Child modes: `sandtest child`
 // (exit code 0 = all refusals and permissions as expected, otherwise the
 // number of the first failed check).
 #![no_std]
@@ -112,6 +114,17 @@ fn child() -> i32 {
 }
 
 fn main(args: Args) -> i32 {
+    match args.get(1) {
+        // A plain child that starts a sandboxed grandchild and returns its code.
+        Some("middle") => {
+            let pid = spawn_ex("/bin/sandtest", &["sandtest", "grand"], &[(1, 1)], SPAWN_NO_FILES);
+            return if pid > 0 { wait(pid as u64, 0).map(|(_, c)| c as i32).unwrap_or(3) } else { 2 };
+        }
+        Some("grand") => {
+            return if open("/sandtest-grandchild", O_READ) == ERROR_ACCESS_DENIED { 0 } else { 1 };
+        }
+        _ => {}
+    }
     if args.get(1) == Some("child") {
         return child();
     }
@@ -142,6 +155,14 @@ fn main(args: Args) -> i32 {
     check!(n, mine("no files (sandbox)") >= 11, "dcp audit: sandbox refusals of the child missing ({} found)", mine("no files (sandbox)"));
     check!(n, mine("open /sandtest.tmp") >= 1, "dcp audit: the refused path is not shown");
     check!(n, mine("has no WRITE right") >= 1, "dcp audit: write without WRITE not recorded");
+    // A grandchild (through a plain child): its refusal is in our view as well.
+    let pid = spawn("/bin/sandtest", &["sandtest", "middle"], 0, STDIO);
+    check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "middle / sandboxed grandchild failed");
+    let audit = match sysinfo("dcp audit", buf) {
+        Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
+        Err(_) => "",
+    };
+    check!(n, audit.lines().any(|l| l.contains("open /sandtest-grandchild")), "dcp audit: a grandchild's refusal is not seen by its grandparent");
 
     // Nothing changed on disk; the parent still has files.
     let mut b = [0u8; 32];
@@ -156,6 +177,6 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "an unsandboxed child must still read files");
     println!();
     unlink(PATH);
-    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights; refusals in dcp audit)", n);
+    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights; refusals in dcp audit, also a grandchild's)", n);
     0
 }

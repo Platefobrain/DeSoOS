@@ -10,6 +10,146 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.55.0 — 2026-10-31
+
+**Status: stable on QEMU (TCG and KVM) and on the test laptop (measured again on this release).**
+
+### What is new since the last report (v0.54.0)
+
+| Version | Change |
+|---|---|
+| v0.55.0 | FAT32 stays inside its MBR partition (the partition length kept, a BPB larger than the partition refused, every sector checked); `dcp audit` shows refusals of all descendants, not only children |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 236 tests PASS | 83 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 236 tests PASS | 73 s |
+
+New: FS TEST 11/11 (a full FAT32 partition leaves the next partition intact; a partition shorter than the volume
+and a BPB larger than the partition do not mount); FILE TEST 7/8 – a grandchild's refusal is seen in `dcp audit`.
+
+### Real hardware (test laptop: Ryzen 7 4800H, 16 threads, NVMe, xHCI, Realtek RTL8168h) – measured on v0.55.0
+
+| What | v0.55.0 | Last before |
+|---|---|---|
+| Boot from a USB stick, shell, USB keyboard, mouse, hubs (`usblist`: 7 devices) | works | works (v0.47.0) |
+| Stress, 16 CPUs, 60 s, compare mode (2 runs) | PASS, **587 878 / 587 935 scripts** + ~293 950 primes, 8 213 / 8 104 IPC jobs; 0 deadlock reports | 600 637 scripts (v0.35.2) |
+| USB stick read before the stress (256 KiB / 4 KiB reads) | **125 051 / 124 184 KiB/s**, second run 122 375 / 126 567 | 120 MB/s (v0.29.0) |
+| USB stick read during the stress | 4 606 / 4 584 MiB at 78 604 / 78 213 KiB/s, all passes identical, 0 errors | – |
+| IPC (`ipcbench`) | ping-pong 4.5 µs, 190 476 msg/s × 4 KiB (744 MB/s) | – |
+| Network: DHCP, `ping 192.168.1.1` | address in 15.7 s after boot; ping 4/4 < 1 ms, 0 % loss | DHCP, ping < 1 ms (v0.47.0) |
+| `netget` 10 MiB from the internet (link 100 Mb/s) | 6 692 (first after boot), then **8 258, 9 543, 9 507 KiB/s** (1 073 ms) | 7 579 KiB/s (v0.47.0); Debian on the same laptop and cable 9.78 MB/s |
+| Keyboard latency (key pressed during the stress) | **110 µs** average (41 presses, 20–248 µs) | 275 µs (v0.29.0) |
+
+Verdict: works on real hardware after eight releases without a test there. Stress −2 % against v0.35.2 (the same in
+both runs; many changes since), USB reads a little faster, keyboard latency 2.5× lower. `netget` reaches
+9 543 KiB/s – the speed of Debian on the same cable (the 100 Mb/s link is the limit); the first, slower run right
+after boot was noise. Clock gaps at boot (33 and 40 ms at 0.36 s – the firmware's xHCI
+hand-over) and a few of 2–3 ms later, as known.
+
+### Known problems
+
+- From the code review, still open: an I/O error in the middle of a FAT32 write can leave lost clusters (with
+  DeSoFS).
+- Otherwise as in v0.54.0.
+
+### Performance against the previous release (v0.54.0 → v0.55.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.54.0 | TCG v0.55.0 | KVM v0.54.0 | KVM v0.55.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 108 | 3 096 | 35 650 | 36 055 |
+| irq_user_ns | 8 129 | 6 905 | 66 093 | 67 226 |
+| fact_kernel_ns | 28 196 | 29 065 | 50 735 | 53 835 |
+| fact_user_ns | 74 626 | 72 806 | 92 506 | 91 827 |
+| fact_svc_ns | 208 116 | 170 357 | 105 097 | 106 044 |
+| ping_svc_ns | 121 359 | 109 589 | 21 677 | 21 619 |
+| restart_us | 6 200 | 4 200 | 1 300 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.54.0 | TCG v0.55.0 | KVM v0.54.0 | KVM v0.55.0 |
+|---|---|---|---|---|
+| start_ms | 408 | 400 | 366 | 411 |
+| enum_avg_ms | 31 | 26 | 24 | 25 |
+| read_kbs (usbd) | 54 613 | 83 591 | 80 313 | 71 859 |
+| kread_kbs (kernel) | 74 535 | 61 091 | 89 487 | 86 949 |
+| kcat_kbs (kernel, cat) | 46 483 | 53 146 | 102 080 | 100 279 |
+| hid_avg_us (keyboard) | 800 | 645 | 187 | 311 |
+
+Verdict: no regression. KVM is unchanged within noise; on TCG `fact_svc_ns` is back at 170 357 (the +20 % in
+v0.54.0 was noise, as assumed). The FAT32 bounds check costs nothing measurable (`kread_kbs` / `kcat_kbs` on KVM
+within 3 %).
+
+---
+
+## v0.54.0 — 2026-10-31
+
+**Status: stable on QEMU (TCG and KVM); real hardware not re-measured since v0.47.0.**
+
+### What is new since the last report (v0.53.0)
+
+| Version | Change |
+|---|---|
+| v0.54.0 | process memory hardened after a code review: at most 4096 areas per process (`ERROR_OUT_OF_MEMORY` instead of a full kernel heap), freed `mmap` ranges reused (the range never runs out), `PROT_NONE`; `munmap` skips untouched stretches |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 235 tests PASS | 84 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 235 tests PASS | 72 s |
+
+New in FILE TEST 4/8 (`memtest`, 37 checks): 4 KiB areas up to the limit and back, a hole at the limit refused,
+60 000 × 2 GiB `mmap` + `munmap` (more than the whole mmap range), `PROT_NONE`.
+
+### Real hardware
+
+Unchanged since the v0.52.1 report (last measured v0.47.0 / v0.35.2 / v0.29.0).
+
+### Known problems
+
+- From the code review, still open: FAT32 on an MBR partition does not keep the partition length (the size is
+  checked only against the end of the disk); an I/O error in the middle of a FAT32 write can leave lost clusters;
+  `dcp audit` shows children, not grandchildren. Plan in `ROADMAP.md` ("Next", 0.D–F).
+- Once in the build server's runs: NOBKL TEST 10/10 reported 199 of 200 orphans reaped (a timing race in the test,
+  not seen on the build machine); to be looked at.
+- Otherwise as in v0.53.0.
+
+### Performance against the previous release (v0.53.0 → v0.54.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.53.0 | TCG v0.54.0 | KVM v0.53.0 | KVM v0.54.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 195 | 3 108 | 35 155 | 35 650 |
+| irq_user_ns | 7 852 | 8 129 | 65 897 | 66 093 |
+| fact_kernel_ns | 26 490 | 28 196 | 55 944 | 50 735 |
+| fact_user_ns | 72 542 | 74 626 | 93 852 | 92 506 |
+| fact_svc_ns | 173 160 | 208 116 | 99 255 | 105 097 |
+| ping_svc_ns | 130 208 | 121 359 | 20 387 | 21 677 |
+| restart_us | 3 500 | 6 200 | 1 200 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.53.0 | TCG v0.54.0 | KVM v0.53.0 | KVM v0.54.0 |
+|---|---|---|---|---|
+| start_ms | 407 | 408 | 386 | 366 |
+| enum_avg_ms | 30 | 31 | 26 | 24 |
+| read_kbs (usbd) | 64 000 | 54 613 | 71 859 | 80 313 |
+| kread_kbs (kernel) | 56 978 | 74 535 | 77 694 | 89 487 |
+| kcat_kbs (kernel, cat) | 60 835 | 46 483 | 76 937 | 102 080 |
+| hid_avg_us (keyboard) | 543 | 800 | 389 | 187 |
+
+Verdict: no regression. KVM is unchanged or better. On TCG `fact_svc_ns` (+20 %) and `kcat_kbs` are lower, but
+the change does not touch those paths, the same numbers on KVM are normal, and TCG moves by ±15 % between runs
+(`restart_us` 3 500 – 6 200 over the last releases).
+
+---
+
 ## v0.53.0 — 2026-10-29
 
 **Status: stable on QEMU (TCG and KVM); real hardware not re-measured since v0.47.0.**

@@ -772,7 +772,7 @@ pub fn self_test() {
     check!(normalize("/x/y", "..") == "/x", "normalize 2");
     check!(normalize("/x", "/../..//z/") == "/z", "normalize 3");
     check!(split_parent("/a/b") == ("/a", "b") && split_parent("/a") == ("/", "a"), "split_parent");
-    serial_println!("[FS TEST] 1/10 path normalization PASS");
+    serial_println!("[FS TEST] 1/11 path normalization PASS");
 
     // 2. ramfs through the VFS: files, directories, errors.
     t!(mkdir("/tmp/t"), "mkdir /tmp/t");
@@ -792,7 +792,7 @@ pub fn self_test() {
     check!(remove("/tmp/mp") == Err(FsError::Busy), "remove mount point");
     t!(unmount("/tmp/mp"), "unmount mp");
     t!(remove("/tmp/mp"), "rm mp");
-    serial_println!("[FS TEST] 2/10 ramfs: files, dirs, append, errors PASS");
+    serial_println!("[FS TEST] 2/11 ramfs: files, dirs, append, errors PASS");
 
     // 3. FAT32 on a RAM disk (8 MiB) – mkfs + mount.
     let disk = block::register(alloc::boxed::Box::new(RamDisk::new("ram0", 16384)));
@@ -803,7 +803,7 @@ pub fn self_test() {
     let free0 = mount_stats("/tmp/fat").map(|s| s.free_bytes).unwrap_or(0);
     check!(free0 > 7 * 1024 * 1024, "free after mkfs = {}", free0);
     check!(t!(read_dir("/tmp/fat"), "ls root").is_empty(), "fresh root not empty");
-    serial_println!("[FS TEST] 3/10 mkfs + mount ({}) PASS", info);
+    serial_println!("[FS TEST] 3/11 mkfs + mount ({}) PASS", info);
 
     // 4. Names: 8.3, lowercase (NT), long names with Polish characters, letter case.
     t!(write_file("/tmp/fat/README.TXT", b"upper"), "8.3 upper");
@@ -818,7 +818,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/ZAŻÓŁĆ GĘŚLĄ JAŹŃ.MD"), "case polish") == b"polski", "case polish");
     check!(create("/tmp/fat/NOTES.TXT") == Err(FsError::AlreadyExists), "dup case");
     check!(create("/tmp/fat/bad:name") == Err(FsError::InvalidName), "invalid name");
-    serial_println!("[FS TEST] 4/10 names: 8.3, lowercase, long + Polish, case-insensitive PASS");
+    serial_println!("[FS TEST] 4/11 names: 8.3, lowercase, long + Polish, case-insensitive PASS");
 
     // 5. A large file spanning many clusters, reading at an offset, appending.
     let big: Vec<u8> = (0..5000u32).map(|i| (i * 31 % 251) as u8).collect();
@@ -831,7 +831,7 @@ pub fn self_test() {
     let mut expect = big.clone();
     expect.extend_from_slice(&big[..300]);
     check!(t!(read_file("/tmp/fat/big.bin"), "read appended") == expect, "append content");
-    serial_println!("[FS TEST] 5/10 multi-cluster file, offset read, append PASS");
+    serial_println!("[FS TEST] 5/11 multi-cluster file, offset read, append PASS");
 
     // 6. Writing in the middle, a zero-filled hole, truncation.
     t!(write("/tmp/fat/big.bin", 10, b"XYZ"), "overwrite middle");
@@ -846,7 +846,7 @@ pub fn self_test() {
     t!(truncate("/tmp/fat/big.bin", 1000), "grow");
     let g = t!(read_file("/tmp/fat/big.bin"), "read grown");
     check!(g.len() == 1000 && g[..600] == expect[..600] && g[600..].iter().all(|&b| b == 0), "grow zeroes");
-    serial_println!("[FS TEST] 6/10 overwrite, sparse hole = zeros, truncate/grow PASS");
+    serial_println!("[FS TEST] 6/11 overwrite, sparse hole = zeros, truncate/grow PASS");
 
     // 7. Directories: nested, many entries (the directory grows by clusters), removal.
     t!(mkdir("/tmp/fat/dir"), "mkdir");
@@ -865,7 +865,7 @@ pub fn self_test() {
     t!(remove("/tmp/fat/dir/reuse"), "rm reuse");
     t!(remove("/tmp/fat/dir/sub"), "rmdir sub");
     t!(remove("/tmp/fat/dir"), "rmdir dir");
-    serial_println!("[FS TEST] 7/10 nested dirs, 40 long names (dir grows), rm/rmdir PASS");
+    serial_println!("[FS TEST] 7/11 nested dirs, 40 long names (dir grows), rm/rmdir PASS");
 
     // 8. No leaks: after removing everything the free space is as after mkfs.
     for f in ["README.TXT", "notes.txt", "Zażółć gęślą jaźń.md", "a very long file name with spaces.text", "big.bin", "sparse"] {
@@ -873,7 +873,7 @@ pub fn self_test() {
     }
     let free1 = mount_stats("/tmp/fat").map(|s| s.free_bytes).unwrap_or(0);
     check!(free1 == free0, "leaked clusters: free {} -> {}", free0, free1);
-    serial_println!("[FS TEST] 8/10 no leaked clusters ({} KiB free) PASS", free1 / 1024);
+    serial_println!("[FS TEST] 8/11 no leaked clusters ({} KiB free) PASS", free1 / 1024);
 
     // 9. Persistence: unmount, reopen from disk, the data is there.
     t!(write_file("/tmp/fat/persist.txt", "zapisane na dysku ✓".as_bytes()), "persist write");
@@ -884,7 +884,7 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/persist.txt"), "read after remount") == "zapisane na dysku ✓".as_bytes(), "persist");
     check!(t!(stat("/tmp/fat/Katalog"), "stat dir").kind == FileType::Directory, "dir persisted");
     check!(t!(stat("/tmp/fat/persist.txt"), "stat").modified.is_some(), "timestamp");
-    serial_println!("[FS TEST] 9/10 unmount + reopen: data persists PASS");
+    serial_println!("[FS TEST] 9/11 unmount + reopen: data persists PASS");
 
     // 10. Across file systems + redirection in the shell.
     t!(write_file("/tmp/src.txt", b"from ramfs"), "ramfs src");
@@ -902,13 +902,74 @@ pub fn self_test() {
     check!(t!(read_file("/tmp/fat/z z.txt"), "quoted redirect") == b"x > y\n", "quotes + redirect");
     crate::shell::execute("cd Katalog", &mut out, &mut ctx);
     check!(ctx.cwd.as_str() == "/tmp/fat/Katalog", "cd -> {}", ctx.cwd);
-    serial_println!("[FS TEST] 10/10 ramfs -> FAT32 copy, shell > >>, quotes, cd PASS");
+    serial_println!("[FS TEST] 10/11 ramfs -> FAT32 copy, shell > >>, quotes, cd PASS");
 
     // Cleanup: unmount and remove the test disk.
     let _ = unmount("/tmp/fat");
     let _ = remove("/tmp/fat");
     let _ = remove("/tmp/src.txt");
     block::remove(disk);
+
+    // 11. A FAT32 partition from the MBR never reaches past its end: the volume from
+    // step 3 copied into partition 1 of a second RAM disk (partition 2 behind it holds
+    // a marker); it mounts and is filled up – the marker stays; a BPB claiming more
+    // sectors than the partition, or a partition shorter than the volume, does not mount.
+    const VOL: u64 = 16384;
+    const START: u64 = 2048;
+    let src = block::register(alloc::boxed::Box::new(RamDisk::new("ram1", VOL)));
+    t!(fat32::mkfs(src, "PARTVOL", true), "mkfs ram1");
+    let d2 = block::register(alloc::boxed::Box::new(RamDisk::new("ram2", START + VOL + 64)));
+    let mut chunk = alloc::vec![0u8; 64 * 1024];
+    let mut lba = 0;
+    while lba < VOL {
+        t!(block::read(src, lba, &mut chunk).map_err(FsError::from), "copy read");
+        t!(block::write(d2, START + lba, &chunk).map_err(FsError::from), "copy write");
+        lba += (chunk.len() / 512) as u64;
+    }
+    block::remove(src);
+    let mbr = |len1: u64| {
+        let mut m = [0u8; 512];
+        for (p, (kind, start, len)) in [(0x0Cu8, START, len1), (0x83, START + VOL, 64)].into_iter().enumerate() {
+            let e = &mut m[446 + p * 16..446 + p * 16 + 16];
+            e[4] = kind;
+            e[8..12].copy_from_slice(&(start as u32).to_le_bytes());
+            e[12..16].copy_from_slice(&(len as u32).to_le_bytes());
+        }
+        m[510] = 0x55;
+        m[511] = 0xAA;
+        m
+    };
+    let marker = [0xA5u8; 512];
+    t!(block::write(d2, 0, &mbr(VOL)).map_err(FsError::from), "mbr");
+    for k in 0..64 {
+        t!(block::write(d2, START + VOL + k, &marker).map_err(FsError::from), "marker");
+    }
+    let fs3 = t!(fat32::Fat32::open(d2), "open the partition");
+    t!(mkdir("/tmp/part"), "mkdir /tmp/part");
+    t!(mount("/tmp/part", Box::new(fs3)), "mount the partition");
+    let big = alloc::vec![0x5Au8; 256 * 1024];
+    let mut files = 0;
+    while write_file(&format!("/tmp/part/f{}.bin", files), &big).is_ok() && files < 64 {
+        files += 1;
+    }
+    let _ = unmount("/tmp/part");
+    let _ = remove("/tmp/part");
+    let mut intact = true;
+    let mut sec = [0u8; 512];
+    for k in 0..64 {
+        intact &= block::read(d2, START + VOL + k, &mut sec).is_ok() && sec == marker;
+    }
+    check!(files >= 20 && files < 64 && intact, "a full partition ({} files of 256 KiB) must not touch the next one (intact: {})", files, intact);
+    t!(block::write(d2, 0, &mbr(VOL - 8)).map_err(FsError::from), "short mbr");
+    check!(matches!(fat32::Fat32::open(d2), Err(FsError::Corrupt(_))), "a volume longer than its partition must not mount");
+    t!(block::write(d2, 0, &mbr(VOL)).map_err(FsError::from), "mbr again");
+    let mut bs = [0u8; 512];
+    t!(block::read(d2, START, &mut bs).map_err(FsError::from), "read bpb");
+    bs[32..36].copy_from_slice(&((VOL + 64) as u32).to_le_bytes());
+    t!(block::write(d2, START, &bs).map_err(FsError::from), "lying bpb");
+    check!(matches!(fat32::Fat32::open(d2), Err(FsError::Corrupt(_))), "a BPB larger than its partition must not mount");
+    block::remove(d2);
+    serial_println!("[FS TEST] 11/11 MBR partition: filled up ({} files), the next partition intact; a volume longer than its partition refused PASS", files);
 
     serial_println!("[FS TEST] =================================");
     crate::selftest::pass();

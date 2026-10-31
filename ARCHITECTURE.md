@@ -120,10 +120,18 @@ zeroing and no TLB shootdown).
 
 ### Process memory (`kernel/user/vm.rs`)
 
-- A list of regions (heap, mmap, stack, shared).
+- A list of regions (heap, mmap, stack, shared), sorted by address; at most **4096 regions** per process (96 KiB of
+  kernel heap) – one more is `ERROR_OUT_OF_MEMORY`, and so is a full kernel heap (the list grows with fallible
+  allocation).
 - **Lazy pages:** a page is created zeroed on first access (#PF from ring 3, or `copy_from_user` /
   `copy_to_user`).
-- `brk` up to 1 GiB; anonymous `mmap`/`munmap`; 4 GiB total per process.
+- `brk` up to 1 GiB; anonymous `mmap`/`munmap`; 4 GiB total per process (a counter, not a sum on every call).
+- **mmap addresses:** `0x1000_0000_0000` (`MMAP_BASE`) up to the lowest stack page (`MMAP_END`); next fit from the
+  end of the last region with a guard page above every region, and from `MMAP_BASE` again at the end – ranges
+  freed by `munmap` are reused, the range never runs out while the regions fit.
+- **Protection:** `PROT_READ`, `PROT_READ | PROT_WRITE`, or `0` (`PROT_NONE` – a reserved range, never mapped: every
+  access is a #PF, a kernel copy is `ERROR_INVALID_ADDRESS`). Pages are never executable.
+- `munmap` skips stretches without a page table (2 MiB / 1 GiB / 512 GiB) instead of walking every page.
 - A process is single-threaded, so only the process itself changes its regions and page tables – no locks.
 - A ring-3 #PF runs on the task stack (no IST); a kernel stack overflow → #DF (on an IST stack).
 - **Shared regions** – pages of a shared memory object, mapped eagerly, always NX; the frames belong to the
@@ -314,7 +322,8 @@ refusals: sandbox path calls, a handle without a right from the table – with t
 `FILE`, `PIPE`, `IPC`, `MEM_SHARE`, `DEVICE_CLAIM` (HW_ROOT), `DEVICE_CONTROL`, `DEVICE_IRQ`, `SYS_POWER` (SYSCTL),
 `INPUT_SEND`, `DISK_ATTACH` (BLK); rights `READ`, `WRITE`, `SEND`, `RECEIVE`, `MAP_READ`, `MAP_WRITE`, `COPY` (DUP),
 `SHARE` (TRANSFER). **Who sees what:** a process sees itself and its descendants (and audit entries of itself and
-its children); a holder of `SYS_POWER` (the shell) and the kernel's emergency shell see everything. A process
+its descendants – each entry keeps up to 16 ancestors of the refused process as they were at that moment; PIDs
+are never reused, so an old entry cannot show up for a newer process); a holder of `SYS_POWER` (the shell) and the kernel's emergency shell see everything. A process
 changes its own table without locks, so other CPUs never touch its handles: the table (`FdTable`) publishes a
 64-bit summary per slot in atomics on every change (kind, rights, detail), and `dcp` reads only those under the
 scheduler lock (`user/dcp.rs`, `sched::process_caps`). The audit log is a fixed ring under a leaf spinlock,
@@ -511,7 +520,10 @@ execute `hlt`.
   slow pendrive blocks only that filesystem. `kind` / `source` / `read_only` are copied at mount time (so `mount`
   and `open` do not wait for the disk); `df` (`mount_stats`) goes through the concurrent path. Mount and unmount
   (write side) wait for in-flight reads – at most the ublk timeout (5 s).
-- **FAT32:** long file names (including Polish characters), `mkfs`, cluster-leak check. Performance features
+- **FAT32:** long file names (including Polish characters), `mkfs`, cluster-leak check. **Volume bounds:** on an MBR
+  partition the length comes from the partition table; a BPB claiming more sectors than the partition (or the
+  disk) does not mount (`file system corrupt`), and every sector read or written is checked against the volume –
+  a lying or damaged FAT32 never reaches the next partition. Performance features
   (each pendrive request is a SCSI command costing hundreds of µs to ms):
   - FAT read in blocks of 8 sectors,
   - cluster cache (≤ 512 KiB / 64 entries, write-through) – reading a file does not re-read path directories,
@@ -1308,7 +1320,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (235 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (236 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed

@@ -3,6 +3,10 @@
 //   memtest          – all checks; "memtest: N checks OK", code 0
 //   memtest unmapped – touches a page after munmap (should die from #PF)
 //   memtest stack    – recursion deeper than the 8 MiB stack (should die)
+//   memtest protnone – reads a PROT_NONE page (should die from #PF)
+// Also: the area limit (MAX_VMAS – 4 KiB areas until ERROR_OUT_OF_MEMORY, the kernel keeps
+// running, everything comes back after munmap), freed address ranges are reused (60 000 ×
+// 2 GiB mmap + munmap = 117 TiB, more than the whole mmap range), PROT_NONE.
 #![no_std]
 #![no_main]
 
@@ -45,6 +49,10 @@ fn main(args: Args) -> i32 {
             munmap(a, 8192);
             unsafe { core::ptr::write_volatile(a as *mut u8, 2) }; // #PF -> exit
             return 0;
+        }
+        Some("protnone") => {
+            let a = mmap(4096, 0).unwrap_or(0);
+            return unsafe { core::ptr::read_volatile(a as *const u8) } as i32; // #PF -> exit
         }
         Some("stack") => {
             return deep(4096) as i32; // ~16 MiB of stack > 8 MiB
@@ -121,13 +129,88 @@ fn main(args: Args) -> i32 {
     let _ = deep(256);
     n += 1;
 
-    // 6. Children: access after munmap and stack overflow terminate only the child.
-    for (mode, want) in [("unmapped", 14u64), ("stack", 14)] {
+    // 6. The area limit: 4 KiB areas until ERROR_OUT_OF_MEMORY (not a kernel panic), a hole
+    // cut in an area at the limit – ERROR_OUT_OF_MEMORY too; after munmap all of it works again.
+    static mut AREAS: [u64; 5000] = [0; 5000];
+    let areas = unsafe { &mut *core::ptr::addr_of_mut!(AREAS) };
+    let mut count = 0;
+    let last = loop {
+        if count == areas.len() {
+            break 0;
+        }
+        match mmap(4096, PROT_READ | PROT_WRITE) {
+            Ok(a) => {
+                areas[count] = a;
+                count += 1;
+            }
+            Err(e) => break e,
+        }
+    };
+    check!(n, last == ERROR_OUT_OF_MEMORY && (4000..=4096).contains(&count), "4 KiB areas: {} until {}", count, error_name(last));
+    unsafe { core::ptr::write_volatile(areas[count - 1] as *mut u8, 7) };
+    for a in areas[..count].iter() {
+        munmap(*a, 4096);
+    }
+    let big = mmap(3 * 4096, PROT_READ | PROT_WRITE).unwrap_or(0);
+    let mut filled = 0;
+    while filled < areas.len() {
+        match mmap(4096, PROT_READ) {
+            Ok(a) => areas[filled] = a,
+            Err(_) => break,
+        }
+        filled += 1;
+    }
+    check!(n, big != 0 && munmap(big + 4096, 4096) == ERROR_OUT_OF_MEMORY, "a hole in an area at the limit must be ERROR_OUT_OF_MEMORY ({} areas)", filled);
+    check!(n, munmap(big, 3 * 4096) == 0, "munmap of a whole area at the limit");
+    for a in areas[..filled].iter() {
+        munmap(*a, 4096);
+    }
+    let a = mmap(4096, PROT_READ | PROT_WRITE);
+    check!(n, a.is_ok(), "mmap after the limit: {:?}", a);
+    munmap(a.unwrap_or(0), 4096);
+
+    // 7. Freed ranges come back: 60 000 × 2 GiB > the whole mmap range (112 TiB);
+    // a reused page is zero again.
+    let mut prev = 0;
+    let mut wrapped = 0;
+    for i in 0..60_000u32 {
+        let Ok(a) = mmap(2 << 30, PROT_READ | PROT_WRITE) else {
+            check!(n, false, "mmap 2 GiB number {} failed - freed ranges not reused", i);
+            return 1;
+        };
+        if i == 0 || a < prev {
+            unsafe {
+                check!(n, core::ptr::read_volatile(a as *const u64) == 0, "a reused page must be zero");
+                core::ptr::write_volatile(a as *mut u64, 0x1234);
+            }
+            if i > 0 {
+                wrapped += 1;
+            }
+        }
+        munmap(a, 2 << 30);
+        prev = a;
+    }
+    check!(n, prev >= MMAP_BASE && prev < MMAP_END && wrapped >= 1, "last address {:#x} inside the mmap range, {} returns to its start", prev, wrapped);
+
+    // 8. PROT_NONE: the range exists, no access – a read into it from the kernel fails;
+    // PROT_WRITE without PROT_READ is invalid.
+    let none = mmap(8192, 0);
+    check!(n, none.is_ok(), "mmap PROT_NONE: {:?}", none);
+    let none = none.unwrap_or(0);
+    let fd = open("/bin/hello", O_READ);
+    let r = read(fd as u64, unsafe { core::slice::from_raw_parts_mut(none as *mut u8, 100) });
+    close(fd as u64);
+    check!(n, r == ERROR_INVALID_ADDRESS, "read into PROT_NONE: {}", r);
+    check!(n, write(1, unsafe { core::slice::from_raw_parts(none as *const u8, 1) }) == ERROR_INVALID_ADDRESS, "write from PROT_NONE");
+    check!(n, munmap(none, 8192) == 0 && mmap(4096, PROT_WRITE) == Err(ERROR_INVALID_ARGUMENT), "PROT_WRITE alone must be ERROR_INVALID_ARGUMENT");
+
+    // 9. Children: access after munmap, PROT_NONE and stack overflow terminate only the child.
+    for (mode, want) in [("unmapped", 14u64), ("protnone", 14), ("stack", 14)] {
         let pid = spawn("/bin/memtest", &["memtest", mode], 0, STDIO);
         let st = wait(pid as u64, 0);
         check!(n, matches!(st, Ok((_, s)) if s == STATUS_SIGNALED | want), "memtest {}: {:?}", mode, st);
     }
 
-    println!("memtest: {} checks OK", n);
+    println!("memtest: {} checks OK (area limit at {} areas, 60 000 x 2 GiB mmap reusing freed ranges, PROT_NONE)", n, count);
     0
 }

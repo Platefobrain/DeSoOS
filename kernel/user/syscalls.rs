@@ -1526,7 +1526,20 @@ fn audit_refusal(p: &mut Process, frame: &SyscallFrame, sandboxed: bool) {
         (Reason::Denied, alloc::format!("handle {}", frame.rdi).into_bytes())
     };
     let name = sched::current_name();
-    super::dcp::record(sched::current_id(), p.ppid(), &name, frame.rax, &what, reason);
+    // Ancestors (parent first) – so that every process up the tree sees the refusal.
+    let mut anc = [0u64; super::dcp::ANCESTORS];
+    let mut n = 0;
+    let mut cur = p.ppid();
+    while n < anc.len() && cur != 0 {
+        anc[n] = cur;
+        n += 1;
+        let Some(up) = sched::with_process(cur, |q| q.ppid()) else { break };
+        if up == cur {
+            break;
+        }
+        cur = up;
+    }
+    super::dcp::record(sched::current_id(), &anc[..n], &name, frame.rax, &what, reason);
 }
 
 /// Called from syscall_entry (assembly) – on the task's kernel stack.

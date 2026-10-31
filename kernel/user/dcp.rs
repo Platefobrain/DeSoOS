@@ -385,12 +385,16 @@ pub enum Reason {
 const AUDIT_LOG: usize = 64;
 const NAME_MAX: usize = 12;
 const WHAT_MAX: usize = 40;
+/// Ancestors kept with a refusal (parent first): a viewer this many levels up still sees it.
+pub const ANCESTORS: usize = 16;
 
 #[derive(Clone, Copy)]
 struct Entry {
     ms: u64,
     pid: u64,
-    ppid: u64,
+    /// The process's ancestors at the moment of the refusal (parent first, 0 = end).
+    /// PIDs are never reused, so an old entry cannot leak to a newer process.
+    anc: [u64; ANCESTORS],
     name: [u8; NAME_MAX],
     name_len: u8,
     syscall: u64,
@@ -428,11 +432,15 @@ fn copy_text<const N: usize>(s: &[u8]) -> ([u8; N], u8) {
 }
 
 /// Records a refusal (from the syscall layer, no locks held).
-pub fn record(pid: u64, ppid: u64, name: &str, syscall: u64, what: &[u8], reason: Reason) {
+pub fn record(pid: u64, ancestors: &[u64], name: &str, syscall: u64, what: &[u8], reason: Reason) {
     REFUSALS.fetch_add(1, Ordering::Relaxed);
     let (name, name_len) = copy_text::<NAME_MAX>(name.as_bytes());
     let (what, what_len) = copy_text::<WHAT_MAX>(what);
-    let e = Entry { ms: crate::time::uptime_ms(), pid, ppid, name, name_len, syscall, what, what_len, reason };
+    let mut anc = [0u64; ANCESTORS];
+    for (d, &a) in anc.iter_mut().zip(ancestors) {
+        *d = a;
+    }
+    let e = Entry { ms: crate::time::uptime_ms(), pid, anc, name, name_len, syscall, what, what_len, reason };
     let mut log = LOG.lock();
     let i = log.next % AUDIT_LOG;
     log.entries[i] = Some(e);
@@ -484,9 +492,10 @@ fn audit(viewer: Option<Viewer>) -> String {
     let _ = writeln!(out, "DCP audit - last refusals ({} since boot, last {} kept)", REFUSALS.load(Ordering::Relaxed), AUDIT_LOG);
     let mut shown = 0;
     for e in copy.iter() {
-        // A program sees refusals of itself and its children; all with SYS_POWER.
+        // A program sees refusals of itself and its descendants (the tree at the moment
+        // of the refusal, ANCESTORS levels down); all with SYSCTL.
         if let Some(v) = viewer {
-            if !v.all && e.pid != v.pid && e.ppid != v.pid {
+            if !v.all && e.pid != v.pid && !e.anc.contains(&v.pid) {
                 continue;
             }
         }

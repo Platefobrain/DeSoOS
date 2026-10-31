@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-10-29 – **v0.53.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0). 30/30 suites (235 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-10-31 – **v0.55.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0). 30/30 suites (236 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -864,8 +864,13 @@ comes back, and the stress test does not regress.
 
 ---
 
-## Next (proposed order, 2026-10-28)
+## Next (proposed order, 2026-10-31)
 
+0. **Hardening after the code review (2026-10-30):** (A) ~~a limit on areas per process~~ ✅, (B) ~~freed `mmap`
+   ranges reused, the end of the range checked~~ ✅, (C) ~~`PROT_NONE`~~ ✅ (v0.54.0); (D) ~~FAT32: the
+   partition length from the MBR, the BPB size and every sector address checked against it~~ ✅, (F) ~~`dcp audit`
+   over the whole tree of descendants~~ ✅ (v0.55.0); (E) FAT32 rollback on I/O errors in the middle of a
+   write – with DeSoFS.
 1. **Stability:** ~~the rare TCG stall in ALLOC TEST 4/5~~ ✅ (v0.52.1 – `yield_now` kept the BKL); repeated
    test runs (TCG / KVM, 1–8 CPUs) as a habit, a loop mode for any suite; scheduler measurements (wake-up
    latency, starvation) before any rewrite.
@@ -900,6 +905,8 @@ Number in parentheses = the stage in which the gap goes away.
 - kernel image without NX (only code is RO) – together with DSB
 
 **Processes and syscalls**
+- `dcp audit` keeps 16 ancestors per entry: a viewer more than 16 levels up does not see the refusal; a process whose
+  parent ended is reparented to init, so its later refusals are no longer seen by the old grandparent
 - `spawn` instead of `fork`/`exec`; no environment variables or signals (kill = process exit)
 - system actions (`sysctl`) behind a single `SYSCTL` handle – no split into reboot / sync / stress; disk changes only from the kernel's emergency shell
 - PID = scheduler task number (0 = BSP idle, 1 = kernel startup task, then the idle tasks of the other cores – with 4 CPUs init has PID 5)
@@ -930,6 +937,7 @@ Number in parentheses = the stage in which the gap goes away.
 - block layer: one operation across all disks at a time (global lock) – NVMe queues the commands of one request, different tasks wait in turn (M17a)
 - virtio-blk: copying through a 64 KiB DMA buffer, only the first virtio disk; NVMe: 128 KiB buffer (copying)
 - NVMe: one I/O queue pair, first active namespace, no metadata; a real SSD is read-only (deliberately)
+- FAT32: an I/O error in the middle of a write can leave lost clusters (Next, 0.E – with DeSoFS)
 - GPT: read-only; MBR – only via FAT32 (first FAT32 partition); FAT32 only with 512 B sectors (an ESP on a 4Kn disk will not mount)
 - without a serial port, logs only on screen (status bar in the top-right corner: time, keyboard)
 - USB keyboard only via usbd (user space): a dead usbd = no keyboard until init restarts it
