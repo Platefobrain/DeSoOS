@@ -323,7 +323,12 @@ impl ProcMem {
         obj: alloc::sync::Arc<super::shm::ShmObj>,
         write: bool,
     ) -> Result<u64, i64> {
-        let pages: Vec<Option<u64>> = obj.frames().iter().map(|&f| Some(f)).collect();
+        let frames = obj.frames();
+        let mut pages: Vec<Option<u64>> = Vec::new();
+        if pages.try_reserve_exact(frames.len()).is_err() {
+            return Err(super::syscalls::ERROR_OUT_OF_MEMORY);
+        }
+        pages.extend(frames.iter().map(|&f| Some(f)));
         self.map_pages(space, &pages, write, 0, SharedRef::Shm(obj))
     }
 

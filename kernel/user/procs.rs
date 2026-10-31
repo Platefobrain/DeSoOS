@@ -288,6 +288,13 @@ pub fn on_exit(me: TaskId, kind: ExitKind) {
                 child_q(ppid).wake_all();
                 break;
             }
+            // The parent has already finished exiting.  If it handed us on (to init)
+            // between our reading `ppid` and the lookup, go to the new parent – a
+            // plain `break` lost this status (init's orphan count came up short under
+            // a slow host, where the window between the two steps is long).
+            None if p.ppid() != ppid => {
+                continue;
+            }
             _ => break,
         }
     }

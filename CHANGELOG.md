@@ -2,6 +2,49 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.56.1 — 2026-10-31
+
+### Lost exit status of an orphan fixed; `test.sh` refuses to run twice
+- **The rare "199 of 200 orphans reaped" failure of NOBKL TEST was a kernel bug, not a test race.** An exiting
+  process reads its parent (`ppid`) and then hands its exit status to it. If the parent finished exiting in
+  between – after handing this child over to init – the lookup found no parent and the status was dropped: init
+  never saw that orphan. Now the child reads `ppid` again in that case and goes to the new parent. The window is a
+  few instructions, so it needed a slow host (QEMU TCG on a busy machine): the loop mode reproduced it on the build
+  server in 7 – 60 rounds of `LOOP=nobkl`; with the fix 90 + 110 rounds passed, and the new path was taken 3 times in
+  110 rounds (each time an orphan that would have been lost).
+- **`tests/test.sh` checks that no other test or QEMU is running** (host port 58082 still listened on) before it
+  rebuilds `build/` and replaces the test disks, and stops with "another test or QEMU is already running" instead
+  of QEMU's "Could not set up host forwarding rule". Connections of a previous run left in TIME_WAIT do not count,
+  so `tests/test.sh; ACCEL=kvm tests/test.sh` still works.
+- Docs: ARCHITECTURE (zombies), README (running tests), ROADMAP (stability).
+
+## v0.56.0 — 2026-10-31
+
+### Loop mode for the self-tests
+- **`LOOP=nobkl:400 tests/test.sh`** – the boot suites run once, then only the named suite runs round after round
+  until a round fails (USB, network, stress and the other suites are skipped). For rare failures that show up once
+  in hundreds of runs – until now that took a modified kernel. Suites: `smp`, `lock`, `tlb`, `alloc`, `nobkl`,
+  `files`, `ipc`, `rights` (SVC TEST is not repeatable: the `edu` test device keeps state from the first round).
+  An unknown name fails the run and lists the suites.
+- The kernel reads the request from the fw_cfg file `opt/desoos/loop` (only in automatic test mode); each round
+  prints `[LOOP] suite round i/N`, the end `[RESULT-LOOP] suite=… rounds=… passed=… min_ms=… avg_ms=… max_ms=…`.
+  In loop mode the default timeout is 3600 s.
+- `tests/test.sh` now also shows the `[RESULT-RIGHTS]` line (rows, refusals, gate cost) and the loop result.
+- First use: `LOOP=nobkl:60` reproduced the rare "199 of 200 orphans reaped" failure of NOBKL TEST in round 9 –
+  the next fix.
+- Docs: README (loop mode), ARCHITECTURE (self-tests), ROADMAP ("Next", stability).
+
+## v0.55.1 — 2026-10-31
+
+### Small fixes from the second code review
+- **FAT32: at most 0x0FFFFFF5 clusters.** Cluster numbers from 0x0FFFFFF7 on are the "bad cluster" and "end of chain"
+  markers, but a crafted or damaged boot sector (BPB) could describe a volume with more clusters, so a data cluster
+  could be read as a marker. Such a volume is now `file system corrupt` and does not mount.
+- **Shared memory mapping:** the page list for `shm_map` is allocated with fallible allocation
+  (`ERROR_OUT_OF_MEMORY` instead of a kernel panic when the kernel heap is full).
+- Tests: FS TEST 11/11 – a sparse 2 TiB test disk whose BPB numbers 0x10000000 clusters does not mount; FILE TEST
+  7/8 – `sandtest` checks the `dcp audit` depth limit: a refusal 16 generations down is seen, 17 down is not.
+
 ## v0.55.0 — 2026-10-31
 
 ### FAT32 stays inside its partition; `dcp audit` shows the whole tree (after a code review)

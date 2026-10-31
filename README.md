@@ -1,4 +1,4 @@
-# DeSoOS v0.55.0
+# DeSoOS v0.56.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -140,12 +140,18 @@ tests/test.sh --no-build     # run only (after your own ./build.sh --selftest)
 tests/test.sh --verbose      # show the whole log live
 TIMEOUT=300 tests/test.sh    # change the timeout (default 180 s)
 ACCEL=kvm tests/test.sh      # with KVM; SMP=N also works (default 4)
+LOOP=nobkl:400 tests/test.sh # loop mode: one suite 400 times, stops at the first failure
 ```
+
+**Loop mode** is for rare failures that show up once in hundreds of runs. The boot suites run once, then only the
+named suite runs round after round (USB, network, stress and the other suites are skipped); the default timeout
+becomes 3600 s. Suites: `smp`, `lock`, `tlb`, `alloc`, `nobkl`, `files`, `ipc`, `rights`. The summary shows
+`[RESULT-LOOP] suite=… rounds=… passed=… min_ms=… avg_ms=… max_ms=…` and the failed round, if any.
 
 Result and exit code: `PASS` (0), `FAIL` (1, with a list of failures), `TIMEOUT` (2, hang) or a
 QEMU/build error (3). Full log: `logs/test.log`. Tests use separate, temporary disk images, so
-`disk.img` is left untouched. Do not run `test.sh` at the same time as `run-qemu.sh` (both use
-`build/`).
+`disk.img` is left untouched. Do not run `test.sh` at the same time as `run-qemu.sh` or another `test.sh` (they
+share `build/` and a host port) – `test.sh` checks this and stops with "another test or QEMU is already running".
 
 How it works: QEMU receives the fw_cfg file `opt/desoos/autotest` and an `isa-debug-exit`
 device; after the tests (or on a panic / critical exception) the kernel powers QEMU off with the

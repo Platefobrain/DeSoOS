@@ -4,6 +4,9 @@
 #   tests/test.sh              build --selftest + tests (result: PASS / FAIL)
 #   tests/test.sh --no-build   run only (e.g. after your own ./build.sh --selftest)
 #   tests/test.sh --verbose    show the whole log live
+#   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
+#                              the named suite 400 times (stops at the first failure);
+#                              suites: smp lock tlb alloc nobkl files ipc rights
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
 #             3 = QEMU exited otherwise (e.g. triple fault / reboot).
@@ -17,7 +20,9 @@ cd "$ROOT"
 
 BUILD=1
 VERBOSE=0
-TIMEOUT="${TIMEOUT:-180}"
+LOOP="${LOOP:-}"
+# Loop mode takes longer – a larger default timeout (set TIMEOUT to change it).
+if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-180}"; fi
 # Number of QEMU cores.  More virtual CPUs than host threads =
 # long stalls (the host suspends the virtual CPU whose turn it is to take
 # the Big Kernel Lock; the watchdog reports it) – on a weak host: SMP=2 ./test.sh
@@ -40,10 +45,20 @@ for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
     --verbose|-v) VERBOSE=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg"; exit 3 ;;
   esac
 done
+
+# Another test (or QEMU from run-qemu.sh) still running?  Both need host port 58082, and
+# this script would rebuild build/ and replace the test disks under the running one.
+# SO_REUSEADDR (as QEMU uses): connections of the previous run left in TIME_WAIT
+# do not count, only a port somebody still listens on.
+if ! python3 -c 'import socket; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 58082))' 2>/dev/null; then
+  echo "ERROR: another test or QEMU is already running (host port 58082 is busy)."
+  echo "Wait for it to finish, or stop it: pkill qemu-system-x86"
+  exit 3
+fi
 
 if [ "$BUILD" = 1 ]; then
   ./build.sh --selftest || { echo "ERROR: build failed"; exit 3; }
@@ -80,7 +95,7 @@ LOG="$ROOT/logs/test.log"
 # sends it the "[HOTPLUG] …" lines from the log (a hub with a mouse and the test USB stick).
 MON="${TMPDIR:-/tmp}/desoos-monitor-$$.sock"
 rm -f "$MON"
-echo "Running self-tests in QEMU ($ACCEL, $SMP CPU, timeout ${TIMEOUT} s)..."
+echo "Running self-tests in QEMU ($ACCEL, $SMP CPU, timeout ${TIMEOUT} s${LOOP:+, loop $LOOP})..."
 START=$(date +%s)
 
 # -cpu max / host: NX, SMEP, RDTSCP etc. as on a modern processor (needed by the tests).
@@ -110,6 +125,12 @@ QEMU=(qemu-system-x86_64
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
   -fw_cfg name=opt/desoos/autotest,string=1
   -serial stdio -display none -no-reboot)
+if [ -n "$LOOP" ]; then
+  case "$LOOP" in
+    *[!a-z0-9:]*|"") echo "LOOP: suite:rounds, e.g. LOOP=nobkl:400 (got: $LOOP)"; exit 3 ;;
+  esac
+  QEMU+=(-fw_cfg name=opt/desoos/loop,string="$LOOP")
+fi
 
 : > "$LOG"
 python3 "$T/qemu-hotplug.py" "$LOG" "$MON" &
@@ -140,6 +161,11 @@ echo "Log: logs/test.log (${TIME} s, ${PASSED} tests PASS)"
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
 grep -a "^\[RESULT-USB\]" "$LOG" | tail -n1 || true
+# The syscall rights table – the [RESULT-RIGHTS] line from RIGHTS TEST.
+grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
+# Loop mode – rounds passed and round times.
+grep -a "^\[RESULT-LOOP\]" "$LOG" | tail -n1 || true
+grep -a "^\[LOOP\] .*FAILED" "$LOG" | tail -n1 || true
 
 case "$CODE" in
   33)

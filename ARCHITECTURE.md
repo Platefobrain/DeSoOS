@@ -161,6 +161,8 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
     The child appends itself under the scheduler lock (`with_process` on the parent – it checks that the parent
     is not exiting and is still its parent). An exiting parent, in one section, sets `exiting`, takes its zombies
     and hands live children over (`reparent_with`); its zombies go to init. `wait` takes only its own list lock.
+    A child whose parent finished exiting between the child reading `ppid` and looking the parent up checks
+    `ppid` again and goes to the new parent (init) – otherwise its exit status was lost.
   - The list holds 4 entries inline in the process (no heap), more in a `Vec`.
   - The list lock is a single byte, not an `IrqSpinLock`. Why: `IrqSpinLock` is 64 B aligned and would push every
     `Process` onto the slow heap path. A compile-time assertion keeps `Process` ≤ 2 KiB with alignment ≤ 16.
@@ -523,7 +525,8 @@ execute `hlt`.
 - **FAT32:** long file names (including Polish characters), `mkfs`, cluster-leak check. **Volume bounds:** on an MBR
   partition the length comes from the partition table; a BPB claiming more sectors than the partition (or the
   disk) does not mount (`file system corrupt`), and every sector read or written is checked against the volume –
-  a lying or damaged FAT32 never reaches the next partition. Performance features
+  a lying or damaged FAT32 never reaches the next partition. A volume with more clusters than FAT32 can number
+  (over 0x0FFFFFF5 – higher values are the bad-cluster and end-of-chain markers) does not mount either. Performance features
   (each pendrive request is a SCSI command costing hundreds of µs to ms):
   - FAT read in blocks of 8 sectors,
   - cluster cache (≤ 512 KiB / 64 entries, write-through) – reading a file does not re-read path directories,
@@ -1320,7 +1323,8 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (236 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs):
+- **Self-tests:** `tests/test.sh` – 30 self-test suites (236 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+  loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed

@@ -9,7 +9,9 @@
 //   - the kernel's view (`dcp inspect <own pid>`) says "files: none",
 //   - the refusals appear in `dcp audit` (sandbox, a capability without WRITE),
 //   - a grandchild's refusal is seen too (`sandtest middle` starts a sandboxed
-//     `sandtest grand`, which tries one path) – audit covers the whole tree.
+//     `sandtest grand`, which tries one path) – audit covers the whole tree, up to
+//     16 generations: a refusal 16 levels down is seen, 17 levels down is not
+//     (`sandtest chain K path` – K plain processes, then a sandboxed `grand`).
 // The parent then checks that nothing changed on disk, that unknown spawn flags
 // give ERROR_INVALID_ARGUMENT, and that an unsandboxed child still has files.
 // Result: "sandtest: N checks OK" and code 0.  Child modes: `sandtest child`
@@ -25,6 +27,20 @@ mod desoos;
 use desoos::*;
 
 entry!(main);
+
+/// `v` as decimal text in `buf`.
+fn fmt_u32(mut v: u32, buf: &mut [u8; 12]) -> &str {
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("0")
+}
 
 const PATH: &str = "/sandtest.tmp";
 const DATA: &[u8] = b"secret data";
@@ -121,7 +137,21 @@ fn main(args: Args) -> i32 {
             return if pid > 0 { wait(pid as u64, 0).map(|(_, c)| c as i32).unwrap_or(3) } else { 2 };
         }
         Some("grand") => {
-            return if open("/sandtest-grandchild", O_READ) == ERROR_ACCESS_DENIED { 0 } else { 1 };
+            let path = args.get(2).unwrap_or("/sandtest-grandchild");
+            return if open(path, O_READ) == ERROR_ACCESS_DENIED { 0 } else { 1 };
+        }
+        // K plain processes in a row, the last one starts a sandboxed `grand path`.
+        Some("chain") => {
+            let k: u32 = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(1);
+            let path = args.get(3).unwrap_or("/sandtest-chain");
+            let mut num = [0u8; 12];
+            let pid = if k <= 1 {
+                spawn_ex("/bin/sandtest", &["sandtest", "grand", path], &[(1, 1)], SPAWN_NO_FILES)
+            } else {
+                let next = fmt_u32(k - 1, &mut num);
+                spawn("/bin/sandtest", &["sandtest", "chain", next, path], 0, STDIO)
+            };
+            return if pid > 0 { wait(pid as u64, 0).map(|(_, c)| c as i32).unwrap_or(3) } else { 2 };
         }
         _ => {}
     }
@@ -163,6 +193,18 @@ fn main(args: Args) -> i32 {
         Err(_) => "",
     };
     check!(n, audit.lines().any(|l| l.contains("open /sandtest-grandchild")), "dcp audit: a grandchild's refusal is not seen by its grandparent");
+    // The depth limit (16 ancestors kept): 15 plain processes + the refusing one = 16
+    // levels below us – seen; 16 + 1 = 17 levels – not seen.
+    for (k, path, seen) in [("15", "/sandtest-level16", true), ("16", "/sandtest-level17", false)] {
+        let pid = spawn("/bin/sandtest", &["sandtest", "chain", k, path], 0, STDIO);
+        check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "chain {} failed", k);
+        let audit = match sysinfo("dcp audit", buf) {
+            Ok(len) => core::str::from_utf8(&buf[..len]).unwrap_or(""),
+            Err(_) => "",
+        };
+        let found = audit.lines().any(|l| l.contains(path));
+        check!(n, found == seen, "dcp audit: a refusal {} levels down {} (expected {})", if seen { 16 } else { 17 }, if found { "seen" } else { "not seen" }, if seen { "seen" } else { "not seen" });
+    }
 
     // Nothing changed on disk; the parent still has files.
     let mut b = [0u8; 32];
@@ -177,6 +219,6 @@ fn main(args: Args) -> i32 {
     check!(n, pid > 0 && matches!(wait(pid as u64, 0), Ok((_, 0))), "an unsandboxed child must still read files");
     println!();
     unlink(PATH);
-    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights; refusals in dcp audit, also a grandchild's)", n);
+    println!("sandtest: {} checks OK (sandboxed child: 18 checks - paths refused, given handle works with its rights; refusals in dcp audit, also a grandchild's, 16 generations down yes, 17 no)", n);
     0
 }

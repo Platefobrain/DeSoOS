@@ -969,7 +969,54 @@ pub fn self_test() {
     t!(block::write(d2, START, &bs).map_err(FsError::from), "lying bpb");
     check!(matches!(fat32::Fat32::open(d2), Err(FsError::Corrupt(_))), "a BPB larger than its partition must not mount");
     block::remove(d2);
-    serial_println!("[FS TEST] 11/11 MBR partition: filled up ({} files), the next partition intact; a volume longer than its partition refused PASS", files);
+
+    // A BPB numbering more clusters than FAT32 can (0x0FFFFFF7 on are markers): a sparse
+    // 2 TiB disk (only the boot sector stored, everything else zeros), 1 sector per
+    // cluster, a FAT big enough for 0x10000000 entries – it must not mount.
+    struct Sparse([u8; 512]);
+    impl block::BlockDevice for Sparse {
+        fn name(&self) -> &str {
+            "sparse"
+        }
+        fn description(&self) -> String {
+            String::from("sparse test disk")
+        }
+        fn sector_count(&self) -> u64 {
+            u32::MAX as u64
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
+        fn read(&mut self, lba: u64, buf: &mut [u8]) -> core::result::Result<(), BlockError> {
+            block::check_range(self.sector_count(), lba, buf.len())?;
+            buf.fill(0);
+            if lba == 0 {
+                buf[..512].copy_from_slice(&self.0);
+            }
+            Ok(())
+        }
+        fn write(&mut self, _: u64, _: &[u8]) -> core::result::Result<(), BlockError> {
+            Err(BlockError::ReadOnly)
+        }
+        fn flush(&mut self) -> core::result::Result<(), BlockError> {
+            Ok(())
+        }
+    }
+    let mut b = [0u8; 512];
+    b[11..13].copy_from_slice(&512u16.to_le_bytes());
+    b[13] = 1; // sectors per cluster
+    b[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved
+    b[16] = 1; // FATs
+    b[32..36].copy_from_slice(&0xFFFF_0000u32.to_le_bytes()); // total sectors
+    b[36..40].copy_from_slice(&(0x1000_0000u32 / 128 + 1).to_le_bytes()); // FAT sectors
+    b[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+    b[510] = 0x55;
+    b[511] = 0xAA;
+    let sp = block::register(alloc::boxed::Box::new(Sparse(b)));
+    let r = fat32::Fat32::open(sp);
+    block::remove(sp);
+    check!(matches!(r, Err(FsError::Corrupt(_))), "a volume with more than {:#x} clusters must not mount", fat32::FAT32_MAX_CLUSTERS);
+    serial_println!("[FS TEST] 11/11 MBR partition: filled up ({} files), the next partition intact; a volume longer than its partition and more clusters than FAT32 can number refused PASS", files);
 
     serial_println!("[FS TEST] =================================");
     crate::selftest::pass();

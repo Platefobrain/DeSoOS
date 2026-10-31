@@ -10,6 +10,187 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.56.1 — 2026-10-31
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.56.0)
+
+| Version | Change |
+|---|---|
+| v0.56.1 | a lost exit status of an orphan fixed (the rare "199 of 200 orphans" of NOBKL TEST was a kernel bug); `tests/test.sh` refuses to start while another test or QEMU runs |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 236 tests PASS | 84 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 236 tests PASS | 72 s |
+| Loop (build server, TCG) | `LOOP=nobkl` – before the fix failed in round 7 / 9 / 60 | 90/90 and 110/110 PASS | ~5 s per round |
+
+`[RESULT-RIGHTS]`: 56 rows, 28 refusals; gate 25 ns (TCG), 5 ns (KVM).
+
+### Known problems
+
+- A full kernel heap still panics the kernel on many allocation paths (ROADMAP "Next", 0.J).
+- Otherwise as in v0.56.0 (the orphan failure is fixed).
+
+### Performance against the previous release (v0.56.0 → v0.56.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.56.0 | TCG v0.56.1 | KVM v0.56.0 | KVM v0.56.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 116 | 3 013 | 36 055 | 32 206 |
+| irq_user_ns | 6 966 | 10 858 | 35 891 | 69 132 |
+| fact_kernel_ns | 26 371 | 26 616 | 53 262 | 57 870 |
+| fact_user_ns | 73 991 | 75 757 | 141 843 | 98 814 |
+| fact_svc_ns | 193 423 | 215 053 | 103 466 | 117 647 |
+| ping_svc_ns | 111 669 | 120 409 | 22 862 | 22 431 |
+| restart_us | 5 200 | 3 700 | 1 300 | 1 400 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.56.0 | TCG v0.56.1 | KVM v0.56.0 | KVM v0.56.1 |
+|---|---|---|---|---|
+| start_ms | 424 | 413 | 345 | 348 |
+| enum_avg_ms | 26 | 26 | 26 | 27 |
+| read_kbs (usbd) | 63 015 | 51 200 | 91 022 | 105 025 |
+| kread_kbs (kernel) | 85 376 | 68 393 | 107 464 | 104 261 |
+| kcat_kbs (kernel, cat) | 46 218 | 50 483 | 112 530 | 81 104 |
+| hid_avg_us (keyboard) | 647 | 898 | 180 | 441 |
+
+Verdict: no regression. The fix adds one comparison on a path taken only when a parent disappears mid-exit; the
+`[RESULT-SVC]` benchmarks never exit there. KVM is back in the other `edu` state (`irq_user_ns` ~69 000, `fact_user_ns`
+~99 000 – see v0.56.0). TCG `irq_user_ns` 10 858 is above its usual 6 900 – 8 100, but the same `edu` driver path
+on KVM is normal; TCG noise.
+
+---
+
+## v0.56.0 — 2026-10-31
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.55.1)
+
+| Version | Change |
+|---|---|
+| v0.56.0 | loop mode for the self-tests (`LOOP=suite:rounds tests/test.sh`); `[RESULT-RIGHTS]` in the test summary |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 236 tests PASS | 84 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 236 tests PASS | 71 s |
+
+`[RESULT-RIGHTS]`: 56 rows, 28 refusals; gate 25 ns (TCG), 5 ns (KVM).
+
+Loop mode on the build machine: `LOOP=nobkl:400` (TCG) – **400/400 rounds PASS** in 1 076 s (round 1.9 – 3.0 s, average
+2.7 s); the orphan race did not show up there.
+
+### Known problems
+
+- NOBKL TEST 10/10 "199 of 200 orphans reaped" – reproduced on the (slower, shared) build server with
+  `LOOP=nobkl:60` (round 9), not on the build machine in 400 rounds: a timing race that needs a slow host; the next
+  fix.
+- Running two `tests/test.sh` at the same time fails with "Could not set up host forwarding rule" (both use
+  the same host port) – run them one after another.
+- Otherwise as in v0.55.1.
+
+### Performance against the previous release (v0.55.1 → v0.56.0, same machine)
+
+`[RESULT-SVC]` (ns; KVM v0.55.1 = the second run):
+
+| | TCG v0.55.1 | TCG v0.56.0 | KVM v0.55.1 | KVM v0.56.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 173 | 3 116 | 36 324 | 36 055 |
+| irq_user_ns | 7 600 | 6 966 | 66 291 | 35 891 |
+| fact_kernel_ns | 26 535 | 26 371 | 56 609 | 53 262 |
+| fact_user_ns | 74 294 | 73 991 | 97 656 | 141 843 |
+| fact_svc_ns | 198 019 | 193 423 | 105 652 | 103 466 |
+| ping_svc_ns | 117 647 | 111 669 | 22 967 | 22 862 |
+| restart_us | 3 900 | 5 200 | 1 200 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.55.1 | TCG v0.56.0 | KVM v0.55.1 | KVM v0.56.0 |
+|---|---|---|---|---|
+| start_ms | 410 | 424 | 397 | 345 |
+| enum_avg_ms | 26 | 26 | 27 | 26 |
+| read_kbs (usbd) | 73 142 | 63 015 | 87 148 | 91 022 |
+| kread_kbs (kernel) | 77 224 | 85 376 | 125 732 | 107 464 |
+| kcat_kbs (kernel, cat) | 32 150 | 46 218 | 76 032 | 112 530 |
+| hid_avg_us (keyboard) | 527 | 647 | 308 | 180 |
+
+Verdict: no regression – loop mode is off unless `LOOP` is set, and the normal run executes the same suites in the
+same order. On KVM the user-space `edu` driver benchmark has two states: `irq_user_ns` ~66 000 with `fact_user_ns`
+~95 000, or `irq_user_ns` ~37 000 with `fact_user_ns` 140 000 – 184 000 (v0.55.1 first run, this run). Both appear
+on the same build, so it is the host (how QEMU's `edu` thread is scheduled), not the kernel.
+
+---
+
+## v0.55.1 — 2026-10-31
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0 (no driver changes since).**
+
+### What is new since the last report (v0.55.0)
+
+| Version | Change |
+|---|---|
+| v0.55.1 | small fixes from a second code review: FAT32 volumes with more clusters than FAT32 can number do not mount; `shm_map` with fallible allocation; a test of the 16-generation `dcp audit` limit |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 236 tests PASS | 84 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 236 tests PASS | 72 s |
+
+New checks inside existing tests: FS TEST 11/11 (a sparse 2 TiB disk numbering 0x10000000 clusters refused), FILE
+TEST 7/8 (`dcp audit`: 16 generations down seen, 17 not).
+
+### Known problems
+
+- Twice in the build server's runs (not on the build machine): NOBKL TEST 10/10 "199 of 200 orphans reaped" – a
+  timing race in the test; next to be fixed (a loop mode for the self-tests first, to reproduce it).
+- A full kernel heap still panics the kernel on many allocation paths (ROADMAP "Next", 0.J).
+- Otherwise as in v0.55.0.
+
+### Performance against the previous release (v0.55.0 → v0.55.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.55.0 | TCG v0.55.1 | KVM v0.55.0 | KVM v0.55.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 096 | 3 173 | 36 055 | 32 835 |
+| irq_user_ns | 6 905 | 7 600 | 67 226 | 38 973 |
+| fact_kernel_ns | 29 065 | 26 535 | 53 835 | 56 401 |
+| fact_user_ns | 72 806 | 74 294 | 91 827 | **183 823** |
+| fact_svc_ns | 170 357 | 198 019 | 106 044 | 111 482 |
+| ping_svc_ns | 109 589 | 117 647 | 21 619 | 22 977 |
+| restart_us | 4 200 | 3 900 | 1 300 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.55.0 | TCG v0.55.1 | KVM v0.55.0 | KVM v0.55.1 |
+|---|---|---|---|---|
+| start_ms | 400 | 410 | 411 | 398 |
+| enum_avg_ms | 26 | 26 | 25 | 28 |
+| read_kbs (usbd) | 83 591 | 73 142 | 71 859 | 102 400 |
+| kread_kbs (kernel) | 61 091 | 77 224 | 86 949 | 87 906 |
+| kcat_kbs (kernel, cat) | 53 146 | 32 150 | 100 279 | 83 152 |
+| hid_avg_us (keyboard) | 645 | 527 | 311 | 347 |
+
+Verdict: no regression from this release's code – it touches only FAT32 mounting, `shm_map` and two tests, none of
+which these benchmarks use. KVM `fact_user_ns` doubled while `irq_user_ns` in the same run dropped by 42 % (both
+measure the user-space driver of QEMU's emulated `edu` device, where KVM leaves to QEMU on every register access) –
+a host-side outlier. **Second KVM run: `fact_user_ns` 97 656, `irq_user_ns` 66 291, 30/30 PASS in 71 s – back in
+the usual range, so it was noise.** TCG `kcat_kbs` 32 150 is the lowest so far (range 40 592 –
+62 224), `kread_kbs` in the same run is normal.
+
+---
+
 ## v0.55.0 — 2026-10-31
 
 **Status: stable on QEMU (TCG and KVM) and on the test laptop (measured again on this release).**

@@ -9,6 +9,11 @@
 //   QEMU down itself with an exit code: PASS -> 33, FAIL -> 35 ((value << 1) | 1).
 //   Without that file (plain ./run-qemu.sh, real hardware) nothing
 //   changes – the shell starts after the tests.
+// * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/desoos/loop`
+//   holds "suite:rounds".  The suites up to SMP start run once (the system needs
+//   them), then only the named suite runs, round after round, until a round fails;
+//   the others are skipped.  Result: "[RESULT-LOOP] suite=… rounds=… passed=… …".
+//   For rare failures that show up once in hundreds of runs.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -79,6 +84,7 @@ const FW_CFG_DATA: u16 = 0x511;
 const FW_CFG_SIGNATURE: u16 = 0x0000;
 const FW_CFG_FILE_DIR: u16 = 0x0019;
 const AUTOTEST_FILE: &[u8] = b"opt/desoos/autotest";
+const LOOP_FILE: &[u8] = b"opt/desoos/loop";
 
 const DEBUG_EXIT_PORT: u16 = 0xf4;
 const EXIT_PASS: u8 = 0x10; // QEMU exits with code 33
@@ -93,11 +99,16 @@ fn fw_cfg_bytes(buf: &mut [u8]) {
 /// Whether QEMU has a fw_cfg file with this name.  On real hardware ports
 /// 0x510/0x511 do not exist – the "QEMU" signature will not match.
 fn fw_cfg_has_file(name: &[u8]) -> bool {
+    fw_cfg_find(name).is_some()
+}
+
+/// (size, selector) of a fw_cfg file.
+fn fw_cfg_find(name: &[u8]) -> Option<(u32, u16)> {
     let mut sig = [0u8; 4];
     unsafe { outw(FW_CFG_SELECTOR, FW_CFG_SIGNATURE) };
     fw_cfg_bytes(&mut sig);
     if &sig != b"QEMU" {
-        return false;
+        return None;
     }
 
     unsafe { outw(FW_CFG_SELECTOR, FW_CFG_FILE_DIR) };
@@ -111,10 +122,109 @@ fn fw_cfg_has_file(name: &[u8]) -> bool {
         let file = &entry[8..];
         let len = file.iter().position(|&b| b == 0).unwrap_or(file.len());
         if &file[..len] == name {
-            return true;
+            let size = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let select = u16::from_be_bytes([entry[4], entry[5]]);
+            return Some((size, select));
         }
     }
-    false
+    None
+}
+
+// ------------------------------------------------------------
+// Loop mode
+// ------------------------------------------------------------
+
+/// The suite to repeat (name, at most 15 bytes) and the number of rounds.
+#[derive(Clone, Copy)]
+struct LoopSpec {
+    name: [u8; 16],
+    len: usize,
+    rounds: u32,
+}
+
+static mut LOOP: Option<LoopSpec> = None;
+
+/// Reads `opt/desoos/loop` ("suite:rounds") – once, at startup, on one CPU.
+fn detect_loop() {
+    let Some((size, select)) = fw_cfg_find(LOOP_FILE) else { return };
+    let mut buf = [0u8; 32];
+    let n = (size as usize).min(buf.len());
+    unsafe { outw(FW_CFG_SELECTOR, select) };
+    fw_cfg_bytes(&mut buf[..n]);
+    let text = core::str::from_utf8(&buf[..n]).unwrap_or("").trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    let (name, rounds) = text.split_once(':').unwrap_or((text, "100"));
+    let rounds = rounds.parse::<u32>().unwrap_or(0);
+    if name.is_empty() || name.len() > 15 || rounds == 0 {
+        serial_println!("[LOOP] bad loop request {:?} (expected suite:rounds, e.g. nobkl:400)", text);
+        return;
+    }
+    let mut spec = LoopSpec { name: [0; 16], len: name.len(), rounds };
+    spec.name[..name.len()].copy_from_slice(name.as_bytes());
+    unsafe { LOOP = Some(spec) };
+    serial_println!("[LOOP] loop mode: suite {} x {}", name, rounds);
+}
+
+fn loop_spec() -> Option<LoopSpec> {
+    unsafe { *core::ptr::addr_of!(LOOP) }
+}
+
+/// Whether loop mode is on (the boot suites still run once).
+pub fn looping() -> bool {
+    loop_spec().is_some()
+}
+
+/// The suite names loop mode accepts (they run after SMP start and can repeat).  SVC TEST
+/// is not among them: the `edu` test device keeps state from the first round.
+pub const LOOPABLE: &[&str] = &["smp", "lock", "tlb", "alloc", "nobkl", "files", "ipc", "rights"];
+
+/// Runs a repeatable suite: once normally; in loop mode only the named suite,
+/// `rounds` times, stopping at the first failed round.
+pub fn suite(name: &str, run: fn()) {
+    let Some(spec) = loop_spec() else {
+        run();
+        return;
+    };
+    let wanted = core::str::from_utf8(&spec.name[..spec.len]).unwrap_or("");
+    if wanted != name {
+        return;
+    }
+    let (mut min, mut max, mut total) = (u64::MAX, 0u64, 0u64);
+    let (mut passed, mut ran) = (0u32, 0u32);
+    for round in 1..=spec.rounds {
+        serial_println!("[LOOP] {} round {}/{}", name, round, spec.rounds);
+        let before = PASSED.load(Ordering::SeqCst);
+        let t0 = crate::time::uptime_ms();
+        run();
+        let ms = crate::time::uptime_ms() - t0;
+        (min, max, total) = (min.min(ms), max.max(ms), total + ms);
+        ran += 1;
+        if PASSED.load(Ordering::SeqCst) == before {
+            serial_println!("[LOOP] {} FAILED in round {}/{}", name, round, spec.rounds);
+            break;
+        }
+        passed += 1;
+    }
+    let avg = if ran > 0 { total / ran as u64 } else { 0 };
+    serial_println!(
+        "[RESULT-LOOP] suite={} rounds={} passed={} min_ms={} avg_ms={} max_ms={}",
+        name,
+        spec.rounds,
+        passed,
+        if min == u64::MAX { 0 } else { min },
+        avg,
+        max
+    );
+}
+
+/// Loop mode with a name no suite has – a failure (called after the suites).
+pub fn check_loop_name() {
+    if let Some(spec) = loop_spec() {
+        let wanted = core::str::from_utf8(&spec.name[..spec.len]).unwrap_or("");
+        if !LOOPABLE.contains(&wanted) {
+            serial_println!("[LOOP] unknown suite {:?} - repeatable suites: {}", wanted, LOOPABLE.join(", "));
+            STARTED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Checks for automatic mode (once, at startup).
@@ -123,6 +233,7 @@ pub fn detect_autotest() {
     AUTOTEST.store(on, Ordering::SeqCst);
     if on {
         serial_println!("[TEST] Automatic test mode (QEMU will exit after the self-tests)");
+        detect_loop();
     }
 }
 

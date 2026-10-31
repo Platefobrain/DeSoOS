@@ -74,6 +74,9 @@ const FSINFO_TRAIL: u32 = 0xAA55_0000;
 
 /// Minimum number of FAT32 clusters per the Microsoft specification.
 pub const FAT32_MIN_CLUSTERS: u32 = 65525;
+/// At most this many clusters: numbers 2..=0x0FFFFFF6 – from 0x0FFFFFF7 on the values mean
+/// "bad cluster" and "end of chain", so a larger volume would mix data with markers.
+pub const FAT32_MAX_CLUSTERS: u32 = BAD - 2;
 
 fn le16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -650,6 +653,9 @@ impl Fat32 {
         let by_size = ((total - data_start) / spc as u64) as u32;
         let by_fat = fat_size.saturating_mul(SECTOR_SIZE as u32 / 4).saturating_sub(2);
         let total_clusters = by_size.min(by_fat);
+        if total_clusters > FAT32_MAX_CLUSTERS {
+            return Err(FsError::Corrupt("more clusters than FAT32 can number"));
+        }
         let label = String::from(core::str::from_utf8(&bs[71..82]).unwrap_or("").trim_end());
 
         let mut fs = Fat32 {

@@ -191,50 +191,61 @@ pub extern "sysv64" fn kernel_main(
     user::init_self_test();
 
     // Remaining cores (INIT-SIPI-SIPI); from now on processes run
-    // in parallel, the kernel under the Big Kernel Lock.
+    // in parallel, the kernel under the Big Kernel Lock.  The suites from here on
+    // can be repeated in loop mode (`selftest::suite`); USB, network and stress
+    // are skipped then.
     arch::x86_64::smp::init();
     #[cfg(selftest)]
-    user::smp_self_test();
+    selftest::suite("smp", user::smp_self_test);
     // Spinlocks and the SMP stress test.
     #[cfg(selftest)]
-    user::lock_self_test();
+    selftest::suite("lock", user::lock_self_test);
     // TLB shootdown.
     #[cfg(selftest)]
-    user::tlb_self_test();
+    selftest::suite("tlb", user::tlb_self_test);
     // Heap and frame allocator without the BKL.
     #[cfg(selftest)]
-    user::alloc_self_test();
+    selftest::suite("alloc", user::alloc_self_test);
     // Syscalls without the BKL.
     #[cfg(selftest)]
-    user::nobkl_self_test();
+    selftest::suite("nobkl", user::nobkl_self_test);
     // File objects, pipes, process memory.
     #[cfg(selftest)]
-    user::files_self_test();
+    selftest::suite("files", user::files_self_test);
     // IPC – handles with rights, channels, shared memory.
     #[cfg(selftest)]
-    user::ipc_self_test();
+    selftest::suite("ipc", user::ipc_self_test);
     // The syscall rights table – every right taken away in turn.
     #[cfg(selftest)]
-    user::rights_self_test();
+    selftest::suite("rights", user::rights_self_test);
     // User-space services.
     #[cfg(selftest)]
-    user::svc_self_test();
+    if !selftest::looping() {
+        user::svc_self_test();
+    }
     // USB keyboard autorepeat (kernel task; before the USB self-tests).
     input::start_repeat_task();
     // usb-disks task (mounting USB disks) – from boot, before the self-tests.
     user::ublk::start_monitor();
     // USB – xHCI controller and usbd in user space.
     #[cfg(selftest)]
-    user::usb_self_test();
+    if !selftest::looping() {
+        user::usb_self_test();
+    }
     // Network card – netd in user space.
     #[cfg(selftest)]
-    user::net_self_test();
+    if !selftest::looping() {
+        user::net_self_test();
+    }
     #[cfg(selftest)]
-    user::stress_self_test();
+    if !selftest::looping() {
+        user::stress_self_test();
+    }
 
     #[cfg(selftest)]
     {
         serial_println!("[DeSoOS] Self-tests finished");
+        selftest::check_loop_name();
         let ok = selftest::finish();
         selftest::exit_if_autotest(ok);
     }
