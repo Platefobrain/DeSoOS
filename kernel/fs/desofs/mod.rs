@@ -21,8 +21,12 @@
 // SHA-256 comes from DeSoCrypto (common/desocrypto) – the kernel's first use of it.
 
 pub mod layout;
+pub mod format;
+pub mod vol;
 #[cfg(selftest)]
 pub mod test;
+#[cfg(selftest)]
+pub mod test_write;
 
 #[path = "../../../common/desocrypto/mod.rs"]
 mod desocrypto;
@@ -94,19 +98,19 @@ impl Report {
 // Device access – only reads.
 // ------------------------------------------------------------
 
-struct Dev {
-    index: usize,
+pub(crate) struct Dev {
+    pub(crate) index: usize,
     /// Whole 4 KiB blocks the device holds.
-    blocks: u64,
+    pub(crate) blocks: u64,
 }
 
 impl Dev {
-    fn open(index: usize) -> Result<Dev, String> {
+    pub(crate) fn open(index: usize) -> Result<Dev, String> {
         let sectors = crate::block::with_device(index, |d| d.sector_count()).map_err(|e| format!("disk {}: {}", index, e))?;
         Ok(Dev { index, blocks: sectors / (BLOCK as u64 / crate::block::SECTOR_SIZE as u64) })
     }
 
-    fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), String> {
+    pub(crate) fn read(&self, block: u64, buf: &mut [u8]) -> Result<(), String> {
         let lba = block.checked_mul((BLOCK / crate::block::SECTOR_SIZE) as u64).ok_or_else(|| String::from("block address overflow"))?;
         if block >= self.blocks {
             return Err(format!("block {} beyond the device", block));
@@ -122,16 +126,16 @@ impl Dev {
 const CHUNK: usize = 64 * 1024;
 
 /// One byte per block.
-const M_FREE: u8 = 0;
-const M_RESERVED: u8 = 1;
-const M_DATA: u8 = 2;
+pub(crate) const M_FREE: u8 = 0;
+pub(crate) const M_RESERVED: u8 = 1;
+pub(crate) const M_DATA: u8 = 2;
 /// METADATA: 0x80 | kind << 4 | level.
-fn m_meta(kind: &[u8; 4], level: u8) -> u8 {
+pub(crate) fn m_meta(kind: &[u8; 4], level: u8) -> u8 {
     let k = if kind == KIND_DSRT { 1 } else if kind == KIND_DSPT { 2 } else { 3 };
     0x80 | (k << 4) | level
 }
 
-struct ByteMap {
+pub(crate) struct ByteMap {
     chunks: Vec<Vec<u8>>,
 }
 
@@ -149,10 +153,10 @@ impl ByteMap {
         }
         Some(ByteMap { chunks })
     }
-    fn get(&self, i: u64) -> u8 {
+    pub(crate) fn get(&self, i: u64) -> u8 {
         self.chunks[i as usize / CHUNK][i as usize % CHUNK]
     }
-    fn set(&mut self, i: u64, v: u8) {
+    pub(crate) fn set(&mut self, i: u64, v: u8) {
         self.chunks[i as usize / CHUNK][i as usize % CHUNK] = v;
     }
     fn clear(&mut self) {
@@ -206,7 +210,19 @@ struct Scan<'a> {
     /// One 4 KiB buffer per depth of the walk (heap – the walk nests ~12 levels).
     bufs: Vec<Vec<u8>>,
     marked: u64,
+    /// When set: every newly marked block is recorded (the older superblock's own
+    /// blocks – freed after the first commit of a read-write mount).
+    collect: Option<Vec<u64>>,
+    /// Free node numbers below `next_node` seen in the live root of the newer
+    /// superblock (reused first when files are created).
+    free_nodes: Vec<u64>,
+    collect_free: bool,
+    first_root: bool,
+    next_node_limit: u64,
 }
+
+/// Most free node numbers remembered from a mount walk.
+const FREE_NODES_MAX: usize = 4096;
 
 enum Met {
     /// First time: the block was read, checked and is in `bufs[depth]`.
@@ -232,6 +248,14 @@ impl<'a> Scan<'a> {
         Ok(&mut self.bufs[depth][..])
     }
 
+    fn record(&mut self, addr: u64) -> Res<()> {
+        if let Some(v) = &mut self.collect {
+            v.try_reserve(1).map_err(|_| String::from("out of memory"))?;
+            v.push(addr);
+        }
+        Ok(())
+    }
+
     /// Checks shared by data and metadata pointers.
     fn check_ptr(&mut self, p: &Ptr) -> Res<()> {
         if p.addr < RESERVED || p.addr >= self.total {
@@ -253,7 +277,7 @@ impl<'a> Scan<'a> {
             M_FREE => {
                 self.map.set(p.addr, M_DATA);
                 self.marked += 1;
-                Ok(())
+                self.record(p.addr)
             }
             M_DATA => Ok(()), // shared with another root
             _ => Err(at(p.addr, "used both as data and as metadata")),
@@ -286,6 +310,7 @@ impl<'a> Scan<'a> {
         }
         self.map.set(p.addr, code);
         self.marked += 1;
+        self.record(p.addr)?;
         Ok((Met::Fresh, count))
     }
 
@@ -407,7 +432,13 @@ impl<'a> Scan<'a> {
             let number = index * NODES_PER_BLOCK + slot;
             let off = HDR_SIZE + slot as usize * NODE_SIZE;
             let node = Node::parse(&self.bufs[depth][off..], number, self.sb_gen).map_err(|w| format!("node {}: {}", number, w))?;
-            let Some(node) = node else { continue };
+            let Some(node) = node else {
+                if self.collect_free && number != 0 && number < self.next_node_limit && self.free_nodes.len() < FREE_NODES_MAX {
+                    self.free_nodes.try_reserve(1).map_err(|_| String::from("out of memory"))?;
+                    self.free_nodes.push(number);
+                }
+                continue;
+            };
             used += 1;
             let mut data = [0u8; 192];
             data.copy_from_slice(&self.bufs[depth][off + 56..off + 248]);
@@ -422,6 +453,10 @@ impl<'a> Scan<'a> {
         if used != count {
             return Err(at(p.addr, "header count differs from the nodes"));
         }
+        if used == 0 {
+            // Errata E4: an empty node block is an empty pointer in its parent.
+            return Err(at(p.addr, "node block without any node"));
+        }
         Ok(())
     }
 
@@ -429,7 +464,12 @@ impl<'a> Scan<'a> {
     fn root(&mut self, e: &RootEntry) -> Res<RootStats> {
         self.root_bits.bytes.clear();
         let mut st = RootStats::default();
-        self.node_table(&e.nodes, e.depth, 0, &mut st, 1)?;
+        self.next_node_limit = e.next_node;
+        self.collect_free = self.first_root && e.kind == ROOT_LIVE;
+        self.first_root = false;
+        let r = self.node_table(&e.nodes, e.depth, 0, &mut st, 1);
+        self.collect_free = false;
+        r?;
         if !st.shared {
             if !st.has_root {
                 return Err(String::from("no root directory (node 1)"));
@@ -499,13 +539,24 @@ struct RootStats {
 /// Reads disk `index` and decides what mounting it as DeSoFS would be allowed to do.
 /// Never writes.
 pub fn probe(index: usize) -> Report {
-    match probe_inner(index) {
-        Ok(r) => r,
+    match scan_volume(index) {
+        Ok((r, _)) => r,
         Err(why) => Report::refused(why),
     }
 }
 
-fn probe_inner(index: usize) -> Res<Report> {
+/// What a mount needs besides the report.
+pub(crate) struct Scanned {
+    pub map: ByteMap,
+    /// Blocks reachable only from the older superblock (free after the first commit).
+    pub older_only: Vec<u64>,
+    pub free_nodes: Vec<u64>,
+    pub sb: Superblock,
+    /// Generation in slot A / B (None = no valid superblock there).
+    pub slot_gen: [Option<u64>; 2],
+}
+
+pub(crate) fn scan_volume(index: usize) -> Res<(Report, Scanned)> {
     let dev = Dev::open(index)?;
     if dev.blocks < 3 {
         return Err(String::from("not a DeSoFS volume (device too small)"));
@@ -575,19 +626,39 @@ fn probe_inner(index: usize) -> Res<Report> {
         }
     };
     reset(&mut map);
-    let mut scan = Scan { dev: &dev, total, sb_gen: 0, uuid, map: &mut map, root_bits: &mut bits, bufs: Vec::new(), marked: 0 };
+    let mut scan = Scan {
+        dev: &dev,
+        total,
+        sb_gen: 0,
+        uuid,
+        map: &mut map,
+        root_bits: &mut bits,
+        bufs: Vec::new(),
+        marked: 0,
+        collect: None,
+        free_nodes: Vec::new(),
+        collect_free: false,
+        first_root: true,
+        next_node_limit: 0,
+    };
 
     let new_res = scan.superblock(sbs[newer].as_ref().unwrap());
     let old_res = match (older, &new_res) {
-        (Some(o), Ok(_)) => Some(scan.superblock(sbs[o].as_ref().unwrap())),
+        (Some(o), Ok(_)) => {
+            scan.collect = Some(Vec::new());
+            Some(scan.superblock(sbs[o].as_ref().unwrap()))
+        }
         (Some(o), Err(_)) => {
             // E3: the damaged newer tree leaves no traces – the older one alone.
             reset(scan.map);
             scan.marked = 0;
+            scan.free_nodes.clear();
             Some(scan.superblock(sbs[o].as_ref().unwrap()))
         }
         (None, _) => None,
     };
+    let older_only = scan.collect.take().unwrap_or_default();
+    let free_nodes = core::mem::take(&mut scan.free_nodes);
 
     let mut warnings = Vec::new();
     let ro_feature = sbs.iter().flatten().any(|s| s.ro_compat != 0);
@@ -616,7 +687,9 @@ fn probe_inner(index: usize) -> Res<Report> {
         Some(_) if tie => 2,
         Some(o) => o as u8 + 1,
     };
-    Ok(Report {
+    let slot_gen = [sbs[0].as_ref().map(|s| s.generation), sbs[1].as_ref().map(|s| s.generation)];
+    let scanned = Scanned { map, older_only, free_nodes, sb: sb.clone(), slot_gen };
+    let report = Report {
         state,
         slot: chosen as u8 + 1,
         next_slot,
@@ -630,5 +703,6 @@ fn probe_inner(index: usize) -> Res<Report> {
         uuid: sb.uuid,
         map_bytes,
         warnings,
-    })
+    };
+    Ok((report, scanned))
 }

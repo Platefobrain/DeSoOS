@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-11-01 – **v0.60.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3), service manifests – every service gets exactly what its manifest grants, drivers without file access (v0.58.0), sandboxed services cannot be handed files either, stricter manifests (v0.58.1), **DeSoCrypto v0.1.0** – DeSoOS's own cryptographic library: SHA-256, HMAC, HKDF, `sha256sum` (v0.59.0), its test-only code out of normal builds and keys wiped on drop (v0.59.1), **DeSoFS format 1 closed** (`docs/DESOFS-FORMAT.md`) and stage 1 – a read-only check of a volume (v0.60.0). 32/32 suites (249 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-11-01 – **v0.61.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3), service manifests – every service gets exactly what its manifest grants, drivers without file access (v0.58.0), sandboxed services cannot be handed files either, stricter manifests (v0.58.1), **DeSoCrypto v0.1.0** – DeSoOS's own cryptographic library: SHA-256, HMAC, HKDF, `sha256sum` (v0.59.0), its test-only code out of normal builds and keys wiped on drop (v0.59.1), **DeSoFS format 1 closed** (`docs/DESOFS-FORMAT.md`) and stage 1 – a read-only check of a volume (v0.60.0), stage 2a – writing: format, mount, files, directories, atomic rename (v0.61.0). 32/32 suites (256 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -901,10 +901,12 @@ comes back, and the stress test does not regress.
    (finds damage, not deliberate changes), free space derived by walking the trees at mount, every operation committed
    before it returns; tool `desofs` in the kernel shell. Stages: ~~(1) format 1 closed, read-only check of a volume –
    superblocks, every metadata block and node, the mount decision (read-write / read-only / refused), the reference
-   image from an independent Python implementation, 93 cases~~ ✅ (v0.60.0); (2) allocator, copy-on-write
-   commit, files, directories, `rename`, `desofs format`, power loss at every write (v0.61.0); (3) `desofs check` and
-   `repair`, directories read in parts (v0.62.0); (4) `/disk` in QEMU as DeSoFS, write → restart → read, speed
-   (v0.63.0); (5) snapshots (v0.64.0). Later: **installation on a disk** – partitions and GPT writes, `/` mounted from
+   image from an independent Python implementation, 93 cases~~ ✅ (v0.60.0); ~~(2a) allocator, copy-on-write commit,
+   files, directories, atomic `rename` (also in the VFS), `desofs format` / `mount`, a computed space bound per
+   operation and a reserve for freeing operations~~ ✅ (v0.61.0); (2b) power loss at every write: a sector-level
+   crash disk, every write position, random subsets of unflushed sectors, interrupted superblocks, write / flush errors
+   (v0.62.0); (3) `desofs check` and `repair`, directories read in parts (v0.63.0); (4) `/disk` in QEMU as DeSoFS,
+   write → restart → read, speed (v0.64.0); (5) snapshots (v0.65.0). Later: **installation on a disk** – partitions and GPT writes, `/` mounted from
    DeSoFS, programs on the disk, an installer (USB stick → ESP + DeSoFS), real-disk writes only with Dawid's consent; FAT32 stays for boot and exchange. Directory handles
    then hold the directory itself (a node number), not its path – needed before the GUI file manager.
 6. **GUI** – virtio-gpu, a compositor on shared memory, windows as processes.
@@ -963,7 +965,11 @@ Number in parentheses = the stage in which the gap goes away.
 - kernel without preemption in the middle of a syscall (only sleeping locks)
 
 **DeSoFS**
-- stage 1 only: volumes are checked read-only (`desofs info`), not mounted; no writing, no files yet (stage 2)
+- stage 2a: writing works, but the power-loss tests at every write position come with v0.62.0; mounted only by hand
+  (`desofs mount` → `/desofs`), not at boot (stage 4); `rename` exists for the kernel (VFS, kernel-shell `mv`), not
+  yet as a syscall – the user-space `mv` still copies
+- every operation is its own commit (2 flushes): a `write_file` is truncate + write = two commits, so a power loss
+  between them leaves an empty file – safe replacement is write to a new file + `rename`
 - format 1: volumes up to 64 GiB (the map of the walk needs 18 MiB there); linear directory search; no hard links,
   no preallocation; snapshots specified but not implemented (stage 5)
 - the walk re-reads metadata shared between roots instead of storing pointers; inside later roots (snapshots, the

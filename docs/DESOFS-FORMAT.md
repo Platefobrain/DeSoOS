@@ -416,3 +416,7 @@ memory of the walk.
 - A pointer that two roots use for the same data block should be identical in all 48 bytes; that is checked by
   `desofs check`, not at mount (it would need the pointer of every data block in memory). The allocator stays safe
   (the block is marked used either way) and a conflicting checksum shows when reading through the wrong pointer.
+
+**E4 (2026-11-01, §3, §6) – no empty node blocks.** Like a DSPT, a DSND without any node (`count` 0) is not allowed –
+the parent holds an empty pointer instead (one form on the disk). The range holding node 1 is never empty. The walk
+refuses such a block; the writer never produces one (a node block whose last node is freed is removed).

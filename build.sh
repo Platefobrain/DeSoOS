@@ -117,11 +117,16 @@ echo "];" >> "$INITRD"
 if [ "$MODE" = "selftest" ]; then
   command -v python3 >/dev/null 2>&1 || { echo "python3 not found (needed for the self-test build: tests/mkdesofs.py)."; exit 1; }
   python3 tests/mkdesofs.py build/user/desofs-ref.img
+  python3 tests/mkdesofs.py --format 64 build/user/desofs-fmt.img
   echo "#[allow(dead_code)]" >> "$INITRD"
   echo "pub static DESOFS_REF: &[u8] = include_bytes!(\"$ROOT/build/user/desofs-ref.img\");" >> "$INITRD"
+  echo "#[allow(dead_code)]" >> "$INITRD"
+  echo "pub static DESOFS_FMT: &[u8] = include_bytes!(\"$ROOT/build/user/desofs-fmt.img\");" >> "$INITRD"
 else
   echo "#[allow(dead_code)]" >> "$INITRD"
   echo "pub static DESOFS_REF: &[u8] = &[];" >> "$INITRD"
+  echo "#[allow(dead_code)]" >> "$INITRD"
+  echo "pub static DESOFS_FMT: &[u8] = &[];" >> "$INITRD"
 fi
 mv "$INITRD" build/user/initrd.rs
 

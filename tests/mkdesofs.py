@@ -4,7 +4,9 @@
 # DESOFS TEST: the kernel must accept exactly this image, and the test then breaks
 # copies of it in every way the specification forbids.
 #
-#   python3 tests/mkdesofs.py image.img
+#   python3 tests/mkdesofs.py image.img                  reference image (below)
+#   python3 tests/mkdesofs.py --format BLOCKS image.img  what `desofs format` writes
+#                                                         (chapter 14; fixed uuid / time)
 #
 # Contents (fixed uuid and times, so the image is the same on every build):
 #   superblock A (block 1): generation 4 -> tree v4
@@ -18,7 +20,7 @@ import struct
 import sys
 
 BLOCK = 4096
-TOTAL = 64
+TOTAL = 128
 UUID = bytes(range(0x10, 0x20))
 LABEL = b"DESOFS-TEST"
 TIME = 1_700_000_000
@@ -174,9 +176,39 @@ def pattern(k):
     return bytes(((k * 31 + i * 7) & 0xFF) for i in range(BLOCK))
 
 
+FMT_UUID = bytes(range(0xA0, 0xB0))
+FMT_LABEL = b"DESOFS-FMT"
+
+
+def format_image(blocks, path):
+    """DESOFS-FORMAT chapter 14: the state right after `desofs format`."""
+    global img, TOTAL, next_free, UUID
+    TOTAL = blocks
+    img = bytearray(TOTAL * BLOCK)
+    next_free = 16
+    UUID = FMT_UUID
+    n1 = node(1, 2, 0, 0, 1, 1, b"")
+    nd = dsnd({1: n1}, 1)           # block 16
+    nt = dspt(1, [ptr(nd, 1)], 1)   # block 17
+    rt = root_block([(1, ptr(nt, 1), 1, 2, 0, b"")], 1)  # block 18
+    sb = b"DESOFS01" + struct.pack("<II", 1, BLOCK) + UUID
+    sb += struct.pack("<QQQQ", 1, TOTAL, 3, TIME)
+    sb += struct.pack("<IIII", 0, 0, 0, 0)
+    sb += ptr(rt, 1) + FMT_LABEL + bytes(32 - len(FMT_LABEL))
+    sb += bytes(4064 - len(sb))
+    sb += hashlib.sha256(sb).digest()
+    put(1, sb)
+    put(2, sb)
+    with open(path, "wb") as f:
+        f.write(img)
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "--format":
+        format_image(int(sys.argv[2]), sys.argv[3])
+        return
     if len(sys.argv) != 2:
-        raise SystemExit("usage: mkdesofs.py image.img")
+        raise SystemExit("usage: mkdesofs.py image.img | --format BLOCKS image.img")
 
     # ---- tree v4 (generation 4) ----
     G4 = 4

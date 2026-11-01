@@ -298,7 +298,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
     Command { name: "mkfs", usage: "mkfs <disk> [yes]", help: "format a disk as FAT32 (erases it!)", run: cmd_mkfs },
-    Command { name: "desofs", usage: "desofs info <disk>", help: "DeSoFS: check a volume (read-only)", run: cmd_desofs },
+    Command { name: "desofs", usage: "desofs info|format|mount|unmount <disk>", help: "DeSoFS: check, format, mount at /desofs", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1421,9 +1421,18 @@ fn cmd_mv(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     if src == dst {
         return;
     }
+    // One atomic step where the file system can (DeSoFS); otherwise copy + remove.
+    match crate::fs::rename(&src, &dst) {
+        Ok(()) => return,
+        Err(crate::fs::FsError::Unsupported) => {}
+        Err(e) => {
+            let _ = writeln!(out, "mv: {}", e);
+            return;
+        }
+    }
     match crate::fs::stat(&src) {
         Ok(m) if m.kind == crate::fs::FileType::Directory => {
-            let _ = writeln!(out, "mv: moving directories is not supported yet");
+            let _ = writeln!(out, "mv: moving directories is not supported here (only within DeSoFS)");
             return;
         }
         Err(e) => {
@@ -1483,7 +1492,7 @@ fn cmd_df(_: &str, out: &mut dyn Write, _: &mut Context) {
 
 /// `desofs info <disk>` – reads a DeSoFS volume and says what a mount would be
 /// allowed to do.  Only reads; `format`, `check` and `repair` come with later stages.
-fn cmd_desofs(args: &str, out: &mut dyn Write, _ctx: &mut Context) {
+fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     let mut parts = args.split_whitespace();
     let sub = parts.next().unwrap_or("");
     let disk = parts.next().and_then(|s| s.parse::<usize>().ok());
@@ -1512,11 +1521,67 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, _ctx: &mut Context) {
                 let _ = writeln!(out, "  warning: {}", w);
             }
         }
-        ("format" | "check" | "repair", _) => {
-            let _ = writeln!(out, "desofs {}: not yet (format/check/repair come with later DeSoFS stages)", sub);
+        ("format", Some(disk)) => {
+            let name = crate::block::with_device(disk, |d| String::from(d.name())).unwrap_or_default();
+            if parts.next() != Some("yes") {
+                let _ = writeln!(out, "This ERASES everything on disk {} ({}) and makes it a DeSoFS volume.", disk, name);
+                let _ = writeln!(out, "To continue type: desofs format {} yes", disk);
+                return;
+            }
+            // Whatever is mounted from that disk goes first.
+            if ctx.cwd.starts_with("/disk") || ctx.cwd.starts_with("/desofs") {
+                *ctx.cwd = String::from("/");
+            }
+            if disk == 0 {
+                let _ = crate::fs::unmount("/disk");
+            }
+            let _ = crate::fs::unmount("/desofs");
+            let p = crate::fs::desofs::format::Params { uuid: crate::fs::desofs::format::random_uuid(), time: crate::drivers::rtc::now().to_unix(), label: "DESOFS" };
+            match crate::fs::desofs::format::format(disk, &p) {
+                Ok(blocks) => {
+                    let _ = writeln!(out, "disk {} ({}): DeSoFS, {} blocks ({} KiB) - 'desofs mount {}' to use it", disk, name, blocks, blocks * 4, disk);
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "desofs format: {}", e);
+                }
+            }
+        }
+        ("mount", Some(disk)) => {
+            match crate::fs::desofs::vol::Volume::mount(disk) {
+                Ok(v) => {
+                    let ro = v.read_only_reason().map(String::from);
+                    let _ = crate::fs::mkdir("/desofs");
+                    match crate::fs::mount("/desofs", alloc::boxed::Box::new(crate::fs::Locked::new(v))) {
+                        Ok(()) => {
+                            let _ = match ro {
+                                None => writeln!(out, "disk {} mounted at /desofs (DeSoFS, read-write; until reboot)", disk),
+                                Some(w) => writeln!(out, "disk {} mounted at /desofs read-only: {}", disk, w),
+                            };
+                        }
+                        Err(e) => {
+                            let _ = writeln!(out, "desofs mount: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "desofs mount: {}", e);
+                }
+            }
+        }
+        ("unmount", _) => {
+            if ctx.cwd.starts_with("/desofs") {
+                *ctx.cwd = String::from("/");
+            }
+            let _ = match crate::fs::unmount("/desofs") {
+                Ok(()) => writeln!(out, "/desofs unmounted"),
+                Err(e) => writeln!(out, "desofs unmount: {}", e),
+            };
+        }
+        ("check" | "repair", _) => {
+            let _ = writeln!(out, "desofs {}: not yet (comes with a later DeSoFS stage)", sub);
         }
         _ => {
-            let _ = writeln!(out, "usage: desofs info <disk>   (disk numbers: 'disk')");
+            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount   (disk numbers: 'disk')");
         }
     }
 }

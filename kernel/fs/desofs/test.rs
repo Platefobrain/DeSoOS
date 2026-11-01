@@ -186,7 +186,7 @@ pub fn self_test() {
     serial_println!("[DESOFS TEST] Starting DeSoFS format 1 tests (read-only volume check)...");
     crate::selftest::begin();
     let base: &[u8] = crate::initrd::DESOFS_REF;
-    check!(base.len() == 64 * BLOCK, "reference image missing ({} bytes; build.sh runs tests/mkdesofs.py)", base.len());
+    check!(base.len() == 128 * BLOCK, "reference image missing ({} bytes; build.sh runs tests/mkdesofs.py)", base.len());
     let m = locate(base);
 
     // 1. The reference image from the independent Python implementation: read-write,
@@ -198,13 +198,13 @@ pub fn self_test() {
     check!(r.slot == 2 && r.next_slot == 1 && r.generation == 5, "reference: slot {} next {} gen {}", r.slot, r.next_slot, r.generation);
     check!(r.nodes == 5 && r.snapshots == 1 && r.label == "DESOFS-TEST", "reference: {} nodes, {} snapshots, label {:?}", r.nodes, r.snapshots, r.label);
     check!(r.used_counted == Some(31) && r.used_stored == 31 && r.warnings.is_empty(), "reference: used {:?}/{} {:?}", r.used_counted, r.used_stored, r.warnings);
-    check!(r.map_bytes == 64 + 8, "map bytes {} for 64 blocks (expected 72)", r.map_bytes);
+    check!(r.map_bytes == 128 + 16, "map bytes {} for 128 blocks (expected 144)", r.map_bytes);
     let mut img = base.to_vec();
     let b2 = rd(&img, 2).to_vec();
     blk(&mut img, 1).copy_from_slice(&b2);
     let r = run(&img);
     check!(r.state == State::ReadWrite && r.slot == 2 && r.next_slot == 2, "tie: {} slot {} next {}", why(&r), r.slot, r.next_slot);
-    serial_println!("[DESOFS TEST] 1/7 reference image (tests/mkdesofs.py): read-write, generation 5 in B, {} nodes, {} snapshot, {} blocks used, next commit to A; tie -> next to B PASS", 5, 1, 31);
+    serial_println!("[DESOFS TEST] 1/14 reference image (tests/mkdesofs.py): read-write, generation 5 in B, {} nodes, {} snapshot, {} blocks used, next commit to A; tie -> next to B PASS", 5, 1, 31);
 
     // 2. Superblocks.
     let mut cases: u32 = 0;
@@ -239,7 +239,7 @@ pub fn self_test() {
     let r = run_dev(base, 48 * 8);
     check!(refused(&r, "larger than the device"), "volume > device: {}", why(&r));
     cases += 1;
-    serial_println!("[DESOFS TEST] 2/7 superblocks: {} cases (marker, checksum, uuid, same generation, version, block size, features, size limits, label, reserved bytes, empty root) PASS", cases);
+    serial_println!("[DESOFS TEST] 2/14 superblocks: {} cases (marker, checksum, uuid, same generation, version, block size, features, size limits, label, reserved bytes, empty root) PASS", cases);
 
     // 3. Pointers and block headers (single superblock: damage = refusal).
     cases = 0;
@@ -255,7 +255,7 @@ pub fn self_test() {
     }
     let n2 = node_off(2) + 56; // node 2 (hello.txt) data
     case!("pointer into blocks 0-15", "blocks 0-15", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2, 5); reseal(i) });
-    case!("pointer past the volume", "outside the volume", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2, 64); reseal(i) });
+    case!("pointer past the volume", "outside the volume", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2, 128); reseal(i) });
     case!("empty pointer with a birth", "empty pointer with non-zero", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2 + 48 + 8, 7); reseal(i) });
     case!("data birth 0", "birth outside", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2 + 8, 0); reseal(i) });
     case!("data birth from the future", "birth outside", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), n2 + 8, 6); reseal(i) });
@@ -269,7 +269,7 @@ pub fn self_test() {
     case!("header reserved bytes", "reserved bytes", |i: &mut Vec<u8>| { blk(i, m.nd5)[50] = 1; reseal(i) });
     case!("checksum (not resealed)", "checksum does not match", |i: &mut Vec<u8>| blk(i, m.nd5)[node_off(2) + 24] ^= 1);
     case!("pointer block without pointers", "without any pointer", |i: &mut Vec<u8>| { blk(i, m.big)[HDR_SIZE..].fill(0); blk(i, m.big)[6] = 0; reseal(i) });
-    serial_println!("[DESOFS TEST] 3/7 pointers and headers: {} cases (range, reserved blocks, empty-pointer form, birth for data and metadata, kind, level, count, self address, uuid, generation, padding, checksum, empty pointer block) PASS", cases);
+    serial_println!("[DESOFS TEST] 3/14 pointers and headers: {} cases (range, reserved blocks, empty-pointer form, birth for data and metadata, kind, level, count, self address, uuid, generation, padding, checksum, empty pointer block) PASS", cases);
 
     // 4. Tree structure: a block twice in one tree, the same block as data and metadata
     // (both orders), a loop, a shared block of another kind, holes, pointers past the size.
@@ -283,7 +283,7 @@ pub fn self_test() {
     case!("hole in a directory", "hole in a directory", |i: &mut Vec<u8>| { let o = node_off(1) + 56; blk(i, m.nd5)[o..o + 48].fill(0); reseal(i) });
     case!("direct pointer past the size", "beyond the file size", |i: &mut Vec<u8>| { let p = make_ptr(i, m.a_txt, 4); blk(i, m.nd5)[n2 + 48..n2 + 96].copy_from_slice(&p); reseal(i) });
     case!("tree pointer past the size", "beyond the file size", |i: &mut Vec<u8>| { let src = HDR_SIZE; let dst = HDR_SIZE + 30 * PTR_SIZE; let p: [u8; 48] = rd(i, m.big)[src..src + 48].try_into().unwrap(); blk(i, m.big)[dst..dst + 48].copy_from_slice(&p); blk(i, m.big)[6] += 1; reseal(i) });
-    serial_println!("[DESOFS TEST] 4/7 tree structure: {} cases (block twice in a tree, data/metadata in both orders, loop, shared block of another kind, directory hole, pointers past the size at depth 0 and 1) PASS", cases);
+    serial_println!("[DESOFS TEST] 4/14 tree structure: {} cases (block twice in a tree, data/metadata in both orders, loop, shared block of another kind, directory hole, pointers past the size at depth 0 and 1) PASS", cases);
 
     // 5. Nodes and root entries.
     cases = 0;
@@ -305,6 +305,21 @@ pub fn self_test() {
     case!("node 0 in use", "node 0 is in use", |i: &mut Vec<u8>| { blk(i, m.nd5)[nd(0, 8)] = 1; reseal(i) });
     case!("garbage in a free node", "free node with non-zero", |i: &mut Vec<u8>| { blk(i, m.nd5)[nd(7, 100)] = 1; reseal(i) });
     case!("parent 0", "parent is 0", |i: &mut Vec<u8>| { put64(blk(i, m.nd5), nd(2, 40), 0); reseal(i) });
+    case!("empty node block (errata E4)", "without any node", |i: &mut Vec<u8>| {
+        // A node block with no node at all (block 100 is free in the reference image),
+        // linked as the second leaf of the live node table.
+        let hdr: Vec<u8> = rd(i, m.nd5)[..HDR_SIZE].to_vec();
+        let b = blk(i, 100);
+        b.fill(0);
+        b[..HDR_SIZE].copy_from_slice(&hdr);
+        b[6] = 0;
+        b[16..24].copy_from_slice(&100u64.to_le_bytes());
+        let p = make_ptr(i, 100, 5);
+        let o = HDR_SIZE + PTR_SIZE;
+        blk(i, m.nt5)[o..o + 48].copy_from_slice(&p);
+        blk(i, m.nt5)[6] = 2;
+        reseal(i)
+    });
     case!("node block tail", "tail not zero", |i: &mut Vec<u8>| { blk(i, m.nd5)[4000] = 1; reseal(i) });
     case!("next_node 1", "below 2", |i: &mut Vec<u8>| { put64(blk(i, m.rt5), HDR_SIZE + 56, 1); reseal(i) });
     case!("next_node not above the nodes", "next_node not above", |i: &mut Vec<u8>| { put64(blk(i, m.rt5), HDR_SIZE + 56, 5); reseal(i) });
@@ -320,7 +335,7 @@ pub fn self_test() {
     case!("snapshot from the future", "created_gen", |i: &mut Vec<u8>| { put64(blk(i, m.rt5), e1 + 64, 6); reseal(i) });
     case!("live root with a name", "live root entry", |i: &mut Vec<u8>| { blk(i, m.rt5)[HDR_SIZE + 72] = b'x'; reseal(i) });
     case!("root block tail", "tail not zero", |i: &mut Vec<u8>| { blk(i, m.rt5)[4090] = 1; reseal(i) });
-    serial_println!("[DESOFS TEST] 5/7 nodes and root entries: {} cases (flags, links, node_gen, depth, size, number, type, directory size, padding, node 0/1, parent, next_node, root-entry kinds, table depth, snapshot names, tails) PASS", cases);
+    serial_println!("[DESOFS TEST] 5/14 nodes and root entries: {} cases (flags, links, node_gen, depth, size, number, type, directory size, padding, node 0/1, parent, next_node, root-entry kinds, table depth, snapshot names, tails) PASS", cases);
 
     // 6. Two superblocks: damage in one tree only, in both, and metadata shared with
     // the older superblock met again with a wrong birth, a wrong checksum, or as
@@ -347,7 +362,7 @@ pub fn self_test() {
     let r = run(base);
     check!(r.used_counted == Some(31), "shared subtrees counted more than once: {:?}", r.used_counted);
     cases += 1;
-    serial_println!("[DESOFS TEST] 6/7 two superblocks: {} cases (older / newer / both trees damaged -> read-only newer / read-only older / refused; shared metadata from the older superblock re-read: wrong birth, wrong checksum, another kind -> read-only; shared blocks counted once) PASS", cases);
+    serial_println!("[DESOFS TEST] 6/14 two superblocks: {} cases (older / newer / both trees damaged -> read-only newer / read-only older / refused; shared metadata from the older superblock re-read: wrong birth, wrong checksum, another kind -> read-only; shared blocks counted once) PASS", cases);
 
     // 7. Directory blocks (checked when a directory is used) and the map budget.
     let mut names: Vec<Vec<u8>> = Vec::new();
@@ -387,8 +402,27 @@ pub fn self_test() {
     // Errata E1: the two maps for the largest volume of format 1 now (64 GiB).
     let max_maps = MAX_BLOCKS_V1 + MAX_BLOCKS_V1.div_ceil(8);
     check!(max_maps == 18 << 20, "64 GiB map budget {} bytes (expected 18 MiB)", max_maps);
-    serial_println!("[DESOFS TEST] 7/7 directory blocks: {} cases (valid blocks, lengths, coverage, . and .., '/', NUL, UTF-8, padding, deleted entry, type, caller refusal); maps: 72 B for 64 blocks, 18 MiB for 64 GiB PASS", cases);
+    serial_println!("[DESOFS TEST] 7/14 directory blocks: {} cases (valid blocks, lengths, coverage, . and .., '/', NUL, UTF-8, padding, deleted entry, type, caller refusal); maps: 144 B for 128 blocks, 18 MiB for 64 GiB PASS", cases);
 
+    // 8-14: writing (stage 2a).
+    let steps: [(&str, fn() -> super::test_write::T); 7] = [
+        ("format", super::test_write::t_format),
+        ("files", super::test_write::t_files),
+        ("directories", super::test_write::t_dirs),
+        ("rename", super::test_write::t_rename),
+        ("full disk", super::test_write::t_full),
+        ("snapshot", super::test_write::t_snapshot),
+        ("VFS, program, failing disk", super::test_write::t_vfs),
+    ];
+    for (k, (name, f)) in steps.iter().enumerate() {
+        match f() {
+            Ok(line) => serial_println!("[DESOFS TEST] {}/14 {}: {} PASS", 8 + k, name, line),
+            Err(e) => {
+                serial_println!("[DESOFS TEST] FAIL: {}: {}", name, e);
+                return;
+            }
+        }
+    }
     serial_println!("[DESOFS TEST] All DeSoFS tests passed!");
     crate::selftest::pass();
 }

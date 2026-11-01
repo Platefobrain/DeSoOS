@@ -2,6 +2,40 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.61.0 — 2026-11-01
+
+### DeSoFS stage 2a – writing
+- **New: `kernel/fs/desofs/vol.rs`** – a mounted DeSoFS volume as a `FileSystem`: stat, read_dir, read, write,
+  truncate, create, mkdir, remove, rename. Every operation is one copy-on-write transaction committed before it
+  returns: new blocks written bottom-up with their checksums, flush, superblock to the slot with the older generation,
+  flush. Blocks the new tree drops become free one commit later (the older superblock still reaches them); after a
+  mount the older superblock's own blocks are freed by the first commit. Blocks a snapshot may hold are never freed
+  (R1). File depth grows and shrinks to the smallest that holds the size; holes; directories reuse deleted entries.
+- **Space:** every operation computes an upper bound of the blocks it can allocate and refuses before changing
+  anything; a reserve (min(max(64 blocks, 1/64), 1/4 of the volume)) is kept for remove, truncate and rename – the
+  computed worst case is 30 blocks.
+- **Errors:** a write or flush error, or a directory entry that does not match its node, turns the volume read-only;
+  a bad data block fails only that read; no panics on allocation failure.
+- **New: `kernel/fs/desofs/format.rs`** – `desofs format` (chapter 14): blocks 0–15 zeroed first, refuses a read-only
+  disk and a whole disk with a partition table (GPT, or an MBR with partitions; a FAT boot sector is not one).
+- **rename in the VFS:** `FileSystem::rename` and `ConcurrentFs::rename` (default "unsupported"), forwarded by
+  `Locked`, `fs::rename` (same file system only, mount points busy). DeSoFS: replaces a file or an empty directory,
+  refuses moving a directory into itself, file onto directory and back, a non-empty target. The kernel-shell `mv` uses
+  it and falls back to copying.
+- **Errata E4** (`docs/DESOFS-FORMAT.md`): no node block without nodes (an empty pointer instead); the walk checks it.
+- The walk also returns the blocks only the older superblock reaches and the free node numbers of the live tree.
+- **Kernel shell:** `desofs format <disk> [yes]`, `desofs mount <disk>` (→ `/desofs` until reboot), `desofs unmount`.
+- `tests/mkdesofs.py --format BLOCKS` writes the state after `desofs format`; the reference image grows to 128 blocks
+  (room for writes).
+- Tests: DESOFS TEST 8–14 (32 suites, 256 tests): kernel format equal byte for byte to the Python one; files, 300-entry
+  directories, every rename rule, a full disk with the reserve, the reference snapshot never overwritten, the VFS with
+  `/bin/sha256sum` reading from DeSoFS, a disk failing at each write position. After every operation the walk accepts
+  the volume with exact counts, the contents equal a model, no operation exceeded its bound and no block reachable from
+  a superblock is free in the allocator (checked by mutation: freeing one commit too early is caught). Also errata E4
+  in test 5.
+- Docs: ARCHITECTURE (DeSoFS stage 2a), ROADMAP (stages renumbered: crash tests v0.62.0, check v0.63.0, `/disk`
+  v0.64.0, snapshots v0.65.0), README, `docs/DESOFS-FORMAT.md` (E4).
+
 ## v0.60.0 — 2026-11-01
 
 ### DeSoFS stage 1 – format 1 closed, read-only check of a volume

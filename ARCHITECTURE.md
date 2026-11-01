@@ -1361,14 +1361,42 @@ Stage 1 (v0.60.0) is read-only: `desofs::probe(disk)` (`mod.rs`, structures in `
   numbers against `next_node`;
 - decides: read-write (both trees known), read-only (one tree damaged, or an unknown ro_compat feature) or refused –
   never writes and never panics on a hostile image; the maps are allocated fallibly in 64 KiB pieces.
-Directory blocks are checked by `layout::check_dir_block` (used from stage 2 when directories are read). SHA-256
-comes from DeSoCrypto – its first use in the kernel. Kernel shell: `desofs info <disk>`.
+Directory blocks are checked by `layout::check_dir_block`. SHA-256 comes from DeSoCrypto – its first use in the
+kernel.
+
+Stage 2a (v0.61.0) writes – `vol.rs` (`Volume`, a `FileSystem`, mounted through `Locked`) and `format.rs`:
+- **one operation = one transaction:** changed blocks are copied to newly allocated places in memory (`Tx::dirty`,
+  copy on first change), pointers to them are placeholders; at commit a seal pass goes from the new root block down
+  through the new blocks only and fills in checksums bottom-up, then: write new blocks → flush → superblock to the slot
+  with the older generation (tie → B) → flush. Only then does the call return;
+- **allocator:** next-fit over the stage-1 map; blocks the new tree drops are still in the older superblock's tree, so
+  they become free after the next commit (`pending_free`); after a mount, the blocks only the older superblock reaches
+  (recorded by the walk) are freed by the first commit. R1: with a snapshot, a block born at or before it is kept;
+- **space:** each operation computes an upper bound of new blocks before touching anything and fails with "no space"
+  instead of half-way; a reserve of min(max(64, 1/64), 1/4) of the volume is left to remove, truncate and rename (the
+  worst case – a cross-directory rename replacing a file with depth-5 trees – is 30 blocks);
+- **trees:** fixed fan-out path copy (`tree_set`), pointer blocks without pointers removed, file depth grows and
+  shrinks to the smallest that holds the size, node table grows a level when a number does not fit, an emptied node
+  block removed (errata E4); directories reuse deleted entries and never shrink (stable readdir cursor);
+- **rename:** one commit; replaces a file or an empty directory, refuses a directory into itself, file ↔ directory,
+  a non-empty target; new `rename` in the VFS (`FileSystem`, `ConcurrentFs`, `Locked`, `fs::rename`: same file system
+  only, mount points busy) – ramfs and FAT32 answer "unsupported", the kernel-shell `mv` then copies;
+- **errors:** a write or flush error, or a directory entry that does not match its node, turns the volume read-only;
+  a bad data block fails that one read; allocations are fallible.
+`desofs format` writes chapter 14 (blocks 0–15 zeroed first; refuses a read-only disk and a whole disk with a
+partition table). Kernel shell: `desofs info | format | mount | unmount`.
 
 Testing: `tests/mkdesofs.py` is an independent implementation of the format (written from the specification) and
 builds the reference image – two superblocks (generations 4 and 5), a snapshot, a file with a hole, a subdirectory, a
 DSPT shared between the trees; `build.sh --selftest` embeds it. DESOFS TEST checks that the kernel accepts exactly
 that image, then runs 93 cases, nearly all copies broken in a way the specification forbids – most "resealed" (all checksums above the change
-recomputed), so the rule itself must catch it. Every image lives in a RAM disk; nothing touches a real disk.
+recomputed), so the rule itself must catch it. Every image lives in a RAM disk; nothing touches a real disk. Stage 2a
+adds tests 8–14: the kernel's `desofs format` equal byte for byte to `mkdesofs.py --format`; files (depth 0 → 2 → 0,
+holes, partial blocks), 300-entry directories, every `rename` rule, a full disk with the reserve, the reference image's
+snapshot never overwritten, the VFS with `/bin/sha256sum` reading a DeSoFS file, and a disk that fails at each write
+position (operation fails, volume read-only, remount shows old or new). After every operation: the walk accepts the
+volume with exact counts, contents equal a model, no operation exceeded its bound, and **no block reachable from
+either superblock is free in the allocator** (this invariant catches freeing one commit too early).
 
 ## Cryptography – DeSoCrypto (`common/desocrypto/`)
 
@@ -1433,7 +1461,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 32 self-test suites (249 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 32 self-test suites (256 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, cryptography, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying

@@ -1,4 +1,4 @@
-# DeSoOS v0.60.0
+# DeSoOS v0.61.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -46,11 +46,12 @@ More documentation:
   HMAC-SHA256, HKDF-SHA256 (no heap, no syscalls); tool `sha256sum`.
 - File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`); DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
-  (`docs/DESOFS-FORMAT.md`) and volumes can be checked read-only (`desofs info`), files come next.
+  (`docs/DESOFS-FORMAT.md`); volumes can be formatted, checked and mounted with files and directories (kernel shell
+  `desofs`), the power-loss tests come next.
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (32 suites, 249 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (32 suites, 256 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -334,7 +335,11 @@ Line editing and console:
   (`/` and `/disk`).
 - Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, plus kernel
   commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`, `desofs info <disk>` (read-only check of a
-  DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write).
+  DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write),
+  `desofs format <disk> [yes]` (erases the disk; refused on a read-only disk or a whole disk with a partition table),
+  `desofs mount <disk>` (mounts it at `/desofs` until reboot) and `desofs unmount`. In QEMU: `desofs format 0 yes`
+  turns `disk.img` into DeSoFS (your FAT32 files on it are gone – copy them first). `mv` inside DeSoFS is one atomic
+  step (also directories).
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
 - Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.

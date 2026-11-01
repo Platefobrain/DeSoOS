@@ -129,6 +129,11 @@ pub trait FileSystem {
     fn mkdir(&mut self, path: &str) -> Result<()>;
     /// Removes a file or an empty directory.
     fn remove(&mut self, path: &str) -> Result<()>;
+    /// Renames / moves inside this file system in one step (an existing file at `to` is
+    /// replaced, an empty directory too).  Not every file system can (FsError::Unsupported).
+    fn rename(&mut self, _from: &str, _to: &str) -> Result<()> {
+        Err(FsError::Unsupported)
+    }
     fn stats(&mut self) -> Option<FsStats>;
     /// Writes everything that is in buffers to disk.
     fn sync(&mut self) -> Result<()>;
@@ -167,6 +172,10 @@ pub trait ConcurrentFs {
     fn create(&self, path: &str) -> Result<()>;
     fn mkdir(&self, path: &str) -> Result<()>;
     fn remove(&self, path: &str) -> Result<()>;
+    /// As FileSystem::rename.
+    fn rename(&self, _from: &str, _to: &str) -> Result<()> {
+        Err(FsError::Unsupported)
+    }
     fn stats(&self) -> FsStats;
 }
 
@@ -228,6 +237,9 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     }
     fn remove(&mut self, path: &str) -> Result<()> {
         self.fs.lock().remove(path)
+    }
+    fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        self.fs.lock().rename(from, to)
     }
     fn stats(&mut self) -> Option<FsStats> {
         self.fs.lock().stats()
@@ -317,6 +329,9 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
     }
     fn remove(&self, path: &str) -> Result<()> {
         self.fs.lock().remove(path)
+    }
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        self.fs.lock().rename(from, to)
     }
     fn stats(&self) -> FsStats {
         self.fs.lock().stats().unwrap_or(FsStats { total_bytes: 0, free_bytes: 0 })
@@ -599,6 +614,33 @@ pub fn remove(path: &str) -> Result<()> {
         return Err(FsError::Busy);
     }
     resolve(path, |fs, p| fs.remove(p))
+}
+
+/// Renames / moves `from` to `to` in one step – both on the same file system (otherwise
+/// FsError::Unsupported: a copy is the caller's job); a mount point cannot move or be
+/// replaced (FsError::Busy).
+pub fn rename(from: &str, to: &str) -> Result<()> {
+    let (from, to) = (normalize("/", from), normalize("/", to));
+    let _g = FS_LOCK.read();
+    if is_mount_point(&from) || is_mount_point(&to) || from == "/" {
+        return Err(FsError::Busy);
+    }
+    let (i, rf) = find_mount(&from)?;
+    let (j, rt) = find_mount(&to)?;
+    if i != j {
+        return Err(FsError::Unsupported);
+    }
+    if let Some(c) = mounts()[i].fs.concurrent() {
+        return c.rename(&rf, &rt);
+    }
+    drop(_g);
+    let _w = FsWrite::lock();
+    let (i, rf) = find_mount(&from)?;
+    let (j, rt) = find_mount(&to)?;
+    if i != j || is_mount_point(&from) || is_mount_point(&to) {
+        return Err(FsError::Unsupported);
+    }
+    mounts()[i].fs.rename(&rf, &rt)
 }
 
 pub fn truncate(path: &str, size: u64) -> Result<()> {

@@ -10,6 +10,73 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.61.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); DeSoFS stage 2a (format, mount, files and directories, rename). Not yet tried
+on the test laptop.**
+
+### What is new since the last report (v0.60.0)
+
+| Version | Change |
+|---|---|
+| v0.61.0 | DeSoFS writing: `kernel/fs/desofs/vol.rs` (a mounted volume as a `FileSystem`, one copy-on-write commit per operation, space bound computed before every operation, reserve for freeing operations); `desofs format` / `mount` / `unmount` in the kernel shell; `rename` in the VFS (the shell `mv` uses it); errata E4; DESOFS TEST 8–14 |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 32/32 suites, 256 tests PASS | 97 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 32/32 suites, 256 tests PASS | 75 s |
+
+DESOFS TEST grows from 7 to 14 tests: the kernel format equal byte for byte to `tests/mkdesofs.py --format`; files,
+300-entry directories, every rename rule, a full disk with the reserve, the reference snapshot never overwritten, the
+VFS with `/bin/sha256sum` reading from DeSoFS, a disk failing at each write position. After every operation the walk
+accepts the volume with exact counts, the contents equal a model, no operation exceeded its bound and no reachable
+block is free in the allocator. The TCG run is 6 s longer than v0.60.0 – the new DeSoFS tests. All DeSoFS volumes live
+in RAM disks; nothing is written to any disk.
+
+### Known problems
+
+- DeSoFS: crash tests (sectors lost between flushes) not yet – v0.62.0; `desofs check` / `repair` not yet; a mount
+  lasts until reboot (`/desofs`); no snapshots from the shell.
+- Otherwise as in v0.60.0.
+
+### Performance against the previous release (v0.60.0 → v0.61.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.60.0 | TCG v0.61.0 | KVM v0.60.0 | KVM v0.61.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 2 764 | 2 991 | 35 517 | 31 510 |
+| irq_user_ns | 11 758 | 6 355 | 64 829 | 64 641 |
+| fact_kernel_ns | 25 461 | 26 556 | 52 798 | 51 773 |
+| fact_user_ns | 70 997 | 70 721 | 94 517 | 88 613 |
+| fact_svc_ns | 193 610 | 177 147 | 104 329 | 103 252 |
+| ping_svc_ns | 118 273 | 109 950 | 22 182 | 19 743 |
+| restart_us | 6 700 | 6 600 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.60.0 | TCG v0.61.0 | KVM v0.60.0 | KVM v0.61.0 |
+|---|---|---|---|---|
+| start_ms | 414 | 396 | 380 | 376 |
+| enum_avg_ms | 26 | 31 | 25 | 26 |
+| read_kbs (usbd) | 89 043 | 78 769 | 85 333 | 74 472 |
+| kread_kbs (kernel) | 64 198 | 56 699 | 73 602 | 82 775 |
+| kcat_kbs (kernel, cat) | 50 678 | 44 565 | 69 779 | 72 396 |
+| hid_avg_us (keyboard) | 695 | 696 | 172 | 275 |
+
+`[RESULT-RIGHTS]` gate_ns: TCG 79 → 62, KVM 5 → 5. `[RESULT-CRYPTO]` (KiB/s): TCG 45 320 / 48 000 / 50 880 →
+47 124 / 49 600 / 49 920; KVM 179 200 / 215 360 / 214 400 → 181 760 / 217 600 / 218 240.
+
+Verdict: no regression. None of these paths changed – DeSoFS runs only in its test and the `desofs` command; the VFS
+gained `rename`, which nothing measured here calls. TCG `irq_user_ns` is back in its usual range (6 355 after 11 758);
+the USB numbers move within their known spread of the emulated stick (TCG read 66 064 – 89 043, KVM kcat 69 779 –
+110 559); KVM `hid_avg_us` 275 is one run of a ~0.2 ms measurement (225 – 232 in v0.59.x). KVM crypto is the best so far
+(217 600 / 218 240).
+
+---
+
 ## v0.60.0 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); DeSoFS stage 1 (read-only check of a volume). Not yet tried on the test laptop.**
