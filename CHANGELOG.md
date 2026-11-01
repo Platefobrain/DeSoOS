@@ -2,6 +2,24 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.57.3 — 2026-11-01
+
+### Directory listings bounded by what the caller can take (found by a third code review)
+- `readdir` on a FAT32 directory built three full copies before checking the caller's buffer: the list of entries
+  with names, the VFS list, and the whole text. A crafted directory of 65 536 short names (the FAT maximum) made
+  that ~13 MiB – more than the kernel's 8 MiB heap reserve, though the caller can take at most 64 KiB.
+- Now FAT32 entries are read one at a time (`for_each_entry`; lookups, "is it empty" and the name check of a new
+  entry build no list of all entries; long names on the stack), and a listing takes at most as many entries as can
+  fit (`read_dir_max`): `readdir` asks for buffer / 7 + 1 (a line is at least 7 bytes), a larger directory is
+  `ERROR_BUFFER_TOO_SMALL` before any list is made, and the text stops at the buffer. The lists that remain grow with
+  fallible allocation (FAT32 and ramfs). Sorting compares names character by character (no lowercase copies per
+  comparison).
+- Tests: FS TEST 12/12 – a directory of exactly 65 536 entries written on the test disk: a listing limited to 100
+  stops with "too many", lookups go through all 65 536 to the last entry and to a missing name, and the kernel heap
+  is back where it was.
+- Reading a directory in parts with a cursor (like Linux `getdents`) changes the syscall – planned with DeSoFS.
+- Docs: ARCHITECTURE (sizes from a disk), ROADMAP.
+
 ## v0.57.2 — 2026-11-01
 
 ### The last kernel allocations sized from outside made fallible

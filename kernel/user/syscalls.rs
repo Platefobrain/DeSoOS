@@ -1266,13 +1266,20 @@ fn sys_readdir(p: &mut Process, f: &SyscallFrame) -> SysResult {
 
 fn readdir_path(p: &mut Process, path: &str, buf: u64, cap: u64) -> SysResult {
     use core::fmt::Write;
-    let entries = fs::read_dir(path).map_err(fs_error)?;
+    // Only what can fit in the caller's buffer is built: a line is at least 7 bytes
+    // ("f\t0\tX\n"), so a directory with more entries than cap / 7 is
+    // ERROR_BUFFER_TOO_SMALL before any list is made (a FAT32 directory may have 65 536).
+    let cap = cap.min(MAX_IO) as usize;
+    let entries = fs::read_dir_max(path, cap / 7 + 1).map_err(|e| if e == FsError::TooMany { ERROR_BUFFER_TOO_SMALL } else { fs_error(e) })?;
     let mut text = String::new();
     for e in entries {
         let kind = if e.kind == FileType::Directory { 'd' } else { 'f' };
         let _ = writeln!(text, "{}\t{}\t{}", kind, e.size, e.name);
+        if text.len() > cap {
+            return Err(ERROR_BUFFER_TOO_SMALL);
+        }
     }
-    text_to_user(p, buf, cap, &text)
+    text_to_user(p, buf, cap as u64, &text)
 }
 
 fn sys_stat(p: &mut Process, ptr: u64, len: u64, out: u64) -> SysResult {

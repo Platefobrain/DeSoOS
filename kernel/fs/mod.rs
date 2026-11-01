@@ -39,6 +39,8 @@ pub enum FsError {
     NoFileSystem,
     Corrupt(&'static str),
     Io(BlockError),
+    /// More directory entries than the caller can take (read_dir_max).
+    TooMany,
 }
 
 impl From<BlockError> for FsError {
@@ -67,6 +69,7 @@ impl core::fmt::Display for FsError {
             FsError::NoFileSystem => f.write_str("no FAT32 file system"),
             FsError::Corrupt(what) => write!(f, "file system corrupt: {}", what),
             FsError::Io(e) => write!(f, "I/O error: {}", e),
+            FsError::TooMany => f.write_str("too many directory entries"),
         }
     }
 }
@@ -108,6 +111,12 @@ pub trait FileSystem {
     fn source(&self) -> String;
     fn stat(&mut self, path: &str) -> Result<Metadata>;
     fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>>;
+    /// At most `max` entries: a directory with more is FsError::TooMany, and the list is
+    /// never built past `max` (the entry count comes from the disk).
+    fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
+        let v = self.read_dir(path)?;
+        if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
+    }
     /// Reads from `offset`; returns the number of bytes read (0 = end of file).
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     /// Writes from `offset` (the file grows as needed, holes are zero-filled).
@@ -141,6 +150,11 @@ pub trait FileSystem {
 pub trait ConcurrentFs {
     fn stat(&self, path: &str) -> Result<Metadata>;
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>>;
+    /// As FileSystem::read_dir_max.
+    fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
+        let v = self.read_dir(path)?;
+        if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
+    }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     fn read_all(&self, path: &str) -> Result<Vec<u8>>;
     fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<usize>;
@@ -193,6 +207,9 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir(path)
     }
+    fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
+        self.fs.lock().read_dir_max(path, max)
+    }
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.fs.lock().read(path, offset, buf)
     }
@@ -231,6 +248,9 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
     }
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir(path)
+    }
+    fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
+        self.fs.lock().read_dir_max(path, max)
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.fs.lock().read(path, offset, buf)
@@ -516,9 +536,26 @@ pub fn stat(path: &str) -> Result<Metadata> {
 }
 
 pub fn read_dir(path: &str) -> Result<Vec<DirEntry>> {
-    let mut entries = with_fs(path, |c, p| c.read_dir(p), |fs, p| fs.read_dir(p))?;
-    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    read_dir_max(path, usize::MAX)
+}
+
+/// A directory listing of at most `max` entries (sorted, case-insensitively); more –
+/// FsError::TooMany, without building the whole list (readdir: what fits in the caller's
+/// buffer).
+pub fn read_dir_max(path: &str, max: usize) -> Result<Vec<DirEntry>> {
+    let mut entries = with_fs(path, |c, p| c.read_dir_max(p, max), |fs, p| fs.read_dir_max(p, max))?;
+    // Compared character by character – no lowercase copies per comparison.
+    entries.sort_by(|a, b| a.name.chars().flat_map(char::to_lowercase).cmp(b.name.chars().flat_map(char::to_lowercase)));
     Ok(entries)
+}
+
+/// Pushes onto a list that grows with fallible allocation (lists sized by data from a disk).
+pub fn try_push<T>(v: &mut Vec<T>, x: T) -> Result<()> {
+    if v.len() == v.capacity() {
+        v.try_reserve(v.len().max(16)).map_err(|_| FsError::NoSpace)?;
+    }
+    v.push(x);
+    Ok(())
 }
 
 pub fn read(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -1038,12 +1075,14 @@ pub fn self_test() {
     t!(mount("/tmp/h", Box::new(Locked::new(t!(fat32::Fat32::open(d3), "open ram3")))), "mount ram3");
     t!(write_file("/tmp/h/huge.bin", b"ten bytes!"), "huge.bin");
     t!(mkdir("/tmp/h/d"), "mkdir d");
+    t!(mkdir("/tmp/h/e"), "mkdir e");
     t!(unmount("/tmp/h"), "unmount ram3");
     let mut bs = [0u8; 512];
     t!(block::read(d3, 0, &mut bs).map_err(FsError::from), "bpb");
     let reserved = u16::from_le_bytes([bs[14], bs[15]]) as u64;
     let mut sec = [0u8; 512];
     let mut dir_cluster = 0u32;
+    let mut full_cluster = 0u32;
     let mut patched = false;
     // The short entries ("HUGE    BIN", "D          ") – in the root directory (data area).
     for lba in reserved..16384u64 {
@@ -1055,17 +1094,19 @@ pub fn self_test() {
                 dirty = true;
             } else if &e[..11] == b"D          " && e[11] & 0x10 != 0 {
                 dir_cluster = u32::from(u16::from_le_bytes([e[20], e[21]])) << 16 | u32::from(u16::from_le_bytes([e[26], e[27]]));
+            } else if &e[..11] == b"E          " && e[11] & 0x10 != 0 {
+                full_cluster = u32::from(u16::from_le_bytes([e[20], e[21]])) << 16 | u32::from(u16::from_le_bytes([e[26], e[27]]));
             }
         }
         if dirty {
             t!(block::write(d3, lba, &sec).map_err(FsError::from), "patch size");
             patched = true;
         }
-        if patched && dir_cluster != 0 {
+        if patched && dir_cluster != 0 && full_cluster != 0 {
             break;
         }
     }
-    check!(patched && dir_cluster >= 2, "test entries not found on the disk ({} {})", patched, dir_cluster);
+    check!(patched && dir_cluster >= 2 && full_cluster >= 2, "test entries not found on the disk ({} {} {})", patched, dir_cluster, full_cluster);
     // The directory's chain: its cluster -> 8000 -> 8001 -> ... -> 12100 (512 B clusters:
     // 4102 clusters = 2 MiB + a bit), in the first FAT.
     let set = |c: u32, v: u32| -> bool {
@@ -1085,14 +1126,48 @@ pub fn self_test() {
     }
     ok &= set(12100, 0x0FFF_FFFF);
     check!(ok, "writing the long chain");
+    // A directory of exactly 65 536 entries (the FAT maximum, 2 MiB): its cluster ->
+    // 3000 -> ... -> 7094 (4096 clusters of 512 B), every slot a short entry "Fnnnnnnn".
+    let num_fats = bs[16] as u64;
+    let fat_size = u32::from_le_bytes([bs[36], bs[37], bs[38], bs[39]]) as u64;
+    let data_start = reserved + num_fats * fat_size;
+    let mut cl = full_cluster;
+    let mut k = 0u32;
+    for next in (3000..3000 + 4095u32).map(Some).chain(core::iter::once(None)) {
+        let mut sec = [0u8; 512];
+        for e in sec.chunks_mut(32) {
+            e[..11].copy_from_slice(b"F0000000BIN");
+            let mut v = k;
+            for d in (1..8).rev() {
+                e[d] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+            e[11] = 0x20;
+            k += 1;
+        }
+        ok &= block::write(d3, data_start + (cl as u64 - 2), &sec).is_ok();
+        ok &= set(cl, next.unwrap_or(0x0FFF_FFFF));
+        if let Some(nx) = next {
+            cl = nx;
+        }
+    }
+    check!(ok && k == 65536, "writing the full directory ({} entries)", k);
     t!(mount("/tmp/h", Box::new(Locked::new(t!(fat32::Fat32::open(d3), "reopen ram3")))), "remount ram3");
     check!(t!(stat("/tmp/h/huge.bin"), "stat huge").size == 0xF000_0000, "the size patch did not take");
     check!(read_file("/tmp/h/huge.bin") == Err(FsError::NoSpace), "a 3.75 GiB file read whole must be ERROR_NO_SPACE: {:?}", read_file("/tmp/h/huge.bin").map(|v| v.len()));
     check!(matches!(read_dir("/tmp/h/d"), Err(FsError::Corrupt(_))), "a directory over 65536 entries must be refused as corrupt: {:?}", read_dir("/tmp/h/d").map(|v| v.len()));
+    // The full directory: a listing of at most 100 entries stops at the 101st (what a
+    // readdir with a small buffer asks for); a lookup walks all 65 536 entries to the last
+    // one (and to the end for a missing name) without building any list.
+    let heap0 = crate::memory::heap::used_bytes();
+    check!(matches!(read_dir_max("/tmp/h/e", 100), Err(FsError::TooMany)), "a listing limited to 100 entries must stop: {:?}", read_dir_max("/tmp/h/e", 100).map(|v| v.len()));
+    check!(stat("/tmp/h/e/F0065535.BIN").is_ok() && matches!(stat("/tmp/h/e/nothere.txt"), Err(FsError::NotFound)), "lookups in the full directory");
+    let heap1 = crate::memory::heap::used_bytes();
+    check!(heap1 <= heap0 + 512 * 1024, "kernel heap grew by {} KiB after listing the full directory", (heap1.saturating_sub(heap0)) / 1024);
     let _ = unmount("/tmp/h");
     let _ = remove("/tmp/h");
     block::remove(d3);
-    serial_println!("[FS TEST] 12/12 hostile sizes: a file claiming 3.75 GiB read whole -> ERROR_NO_SPACE, a directory chain over 65536 entries -> corrupt, no failed allocation PASS");
+    serial_println!("[FS TEST] 12/12 hostile sizes: a file claiming 3.75 GiB read whole -> ERROR_NO_SPACE, a directory chain over 65536 entries -> corrupt, a directory of exactly 65536 entries: listing limited to 100 stops, lookups through all of it, nothing left on the heap PASS");
 
     serial_println!("[FS TEST] =================================");
     crate::selftest::pass();

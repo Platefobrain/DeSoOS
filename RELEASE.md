@@ -10,6 +10,62 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.57.3 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**
+
+### What is new since the last report (v0.57.2)
+
+| Version | Change |
+|---|---|
+| v0.57.3 | directory listings bounded by the caller's buffer: FAT32 entries read one at a time, `readdir` takes at most what fits (a crafted 65 536-entry directory no longer costs ~13 MiB of kernel heap) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 238 tests PASS | 91 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 238 tests PASS | 74 s |
+
+FS TEST 12/12 now also has a directory of exactly 65 536 entries (listing limited to 100 stops, lookups through all
+of it, heap back) – +2 s on TCG.
+
+### Known problems
+
+- No cursor for `readdir` yet: a directory larger than the caller's buffer gives `ERROR_BUFFER_TOO_SMALL` (planned
+  with DeSoFS).
+- Otherwise as in v0.57.2.
+
+### Performance against the previous release (v0.57.2 → v0.57.3, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.57.2 | TCG v0.57.3 | KVM v0.57.2 | KVM v0.57.3 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 130 | 3 411 | 35 990 | 35 784 |
+| irq_user_ns | 12 275 | 10 908 | 66 006 | 65 767 |
+| fact_kernel_ns | 29 819 | 23 223 | 55 478 | 52 015 |
+| fact_user_ns | 75 272 | 85 543 | 93 457 | 87 989 |
+| fact_svc_ns | 189 573 | 207 900 | 106 837 | 102 880 |
+| ping_svc_ns | 115 740 | 122 399 | 19 000 | 21 172 |
+| restart_us | 3 600 | 4 000 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.57.2 | TCG v0.57.3 | KVM v0.57.2 | KVM v0.57.3 |
+|---|---|---|---|---|
+| start_ms | 409 | 354 | 379 | 383 |
+| enum_avg_ms | 28 | 24 | 25 | 27 |
+| read_kbs (usbd) | 74 472 | 91 022 | 71 859 | 69 423 |
+| kread_kbs (kernel) | 73 065 | 56 212 | 92 699 | 115 075 |
+| kcat_kbs (kernel, cat) | 54 878 | 42 923 | 84 155 | 110 559 |
+| hid_avg_us (keyboard) | 562 | 544 | 434 | 327 |
+
+Verdict: no regression. The change touches directory listings only; the benchmarks list no directories. All values
+are inside their usual spread (TCG `kread_kbs` / `kcat_kbs` swing by ±30 % between runs; KVM is equal or better).
+
+---
+
 ## v0.57.2 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**

@@ -323,32 +323,46 @@ impl ConcurrentFs for RamFs {
     }
 
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.read_dir_max(path, usize::MAX)
+    }
+
+    fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         // Under the tree only copies of names and file Arcs – sizes after releasing it
-        // (the file lock sleeps).
-        let listed: Vec<(String, core::result::Result<Arc<FileNode>, DateTime>)> = {
+        // (the file lock sleeps).  Lists with fallible allocation (tens of thousands of
+        // entries are possible).
+        let mut listed: Vec<(String, core::result::Result<Arc<FileNode>, DateTime>)> = Vec::new();
+        {
             let _t = self.tree.read();
             let children = match Self::node(self.root(), path)? {
                 Node::Dir { children, .. } => children,
                 Node::File(_) => return Err(FsError::NotADirectory),
             };
-            children
-                .iter()
-                .map(|(name, node)| match node {
-                    Node::File(f) => (name.clone(), Ok(f.clone())),
-                    Node::Dir { modified, .. } => (name.clone(), Err(*modified)),
-                })
-                .collect()
-        };
-        Ok(listed
-            .into_iter()
-            .map(|(name, node)| match node {
+            if children.len() > max {
+                return Err(FsError::TooMany);
+            }
+            listed.try_reserve_exact(children.len()).map_err(|_| FsError::NoSpace)?;
+            for (name, node) in children.iter() {
+                let mut n = String::new();
+                n.try_reserve_exact(name.len()).map_err(|_| FsError::NoSpace)?;
+                n.push_str(name);
+                listed.push(match node {
+                    Node::File(f) => (n, Ok(f.clone())),
+                    Node::Dir { modified, .. } => (n, Err(*modified)),
+                });
+            }
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(listed.len()).map_err(|_| FsError::NoSpace)?;
+        for (name, node) in listed {
+            out.push(match node {
                 Ok(f) => {
                     let i = f.inner.lock();
                     DirEntry { name, kind: FileType::File, size: i.len as u64, modified: Some(i.modified) }
                 }
                 Err(modified) => DirEntry { name, kind: FileType::Directory, size: 0, modified: Some(modified) },
-            })
-            .collect())
+            });
+        }
+        Ok(out)
     }
 
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -472,6 +486,9 @@ impl FileSystem for RamFs {
 
     fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
         ConcurrentFs::read_dir(self, path)
+    }
+    fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
+        ConcurrentFs::read_dir_max(self, path, max)
     }
 
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {

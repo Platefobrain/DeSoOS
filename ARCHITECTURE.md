@@ -120,7 +120,10 @@ part. Protection: NX, SMEP, SMAP, CR0.WP, W^X for programs.
 - **Sizes from a disk are untrusted.** A whole-file buffer (`fs::read_file`, exec), a FAT32 cluster chain and a
   FAT32 directory are allocated with `try_reserve`: a pendrive claiming a 4 GiB file or a huge chain gives
   `ERROR_NO_SPACE`, not a failed allocation; a directory over 65 536 entries (the FAT maximum, 2 MiB) is refused as
-  corrupt before anything is allocated. Captured output of kernel-started programs keeps at most 1 MiB.
+  corrupt before anything is allocated. Directory entries are read one at a time (`for_each_entry` – lookups build
+  no list); a listing takes at most as many entries as can fit (`read_dir_max`: `readdir` asks for buffer / 7 + 1, a
+  larger directory is `ERROR_BUFFER_TOO_SMALL` before any list is built), and the text for the caller stops at its
+  buffer. Captured output of kernel-started programs keeps at most 1 MiB.
 
 ### Kernel memory reserve
 

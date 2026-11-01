@@ -306,10 +306,13 @@ impl Entry {
     }
 }
 
-fn parse_dir(buf: &DirBuf) -> Vec<Entry> {
-    let mut out = Vec::new();
-    // Collected long-name parts: (first slot, count, checksum, parts)
-    let mut lfn: Option<(usize, usize, u8, Vec<Option<[u16; 13]>>)> = None;
+/// Calls `f` for every entry of a directory, in order, until `f` returns Ok(false).  No
+/// list of all entries is built (a directory may have 65 536 of them – read from a disk
+/// that may be crafted); one entry and its name at a time.
+fn for_each_entry(buf: &DirBuf, mut f: impl FnMut(Entry) -> Result<bool>) -> Result<()> {
+    // Collected long-name parts: (first slot, count, checksum, parts) – at most 20 parts,
+    // in place.
+    let mut lfn: Option<(usize, usize, u8, [Option<[u16; 13]>; 20])> = None;
 
     for i in 0..buf.slots() {
         let s = buf.slot(i);
@@ -329,7 +332,7 @@ fn parse_dir(buf: &DirBuf) -> Vec<Entry> {
                 continue;
             }
             if ord & 0x40 != 0 {
-                lfn = Some((i, index, s[13], vec![None; index]));
+                lfn = Some((i, index, s[13], [None; 20]));
             }
             if let Some((_, count, sum, parts)) = lfn.as_mut() {
                 if index <= *count && s[13] == *sum {
@@ -360,22 +363,25 @@ fn parse_dir(buf: &DirBuf) -> Vec<Entry> {
         let mut first_slot = i;
         let mut name = None;
         if let Some((start, count, sum, parts)) = lfn.take() {
-            if sum == lfn_checksum(&short) && start + count == i && parts.iter().all(|p| p.is_some()) {
-                let mut units = Vec::new();
-                'outer: for p in parts.iter().flatten() {
+            if sum == lfn_checksum(&short) && start + count == i && parts[..count].iter().all(|p| p.is_some()) {
+                // At most 20 × 13 UTF-16 units – on the stack.
+                let mut units = [0u16; 20 * 13];
+                let mut n = 0;
+                'outer: for p in parts[..count].iter().flatten() {
                     for &u in p {
                         if u == 0x0000 {
                             break 'outer;
                         }
-                        units.push(u);
+                        units[n] = u;
+                        n += 1;
                     }
                 }
-                name = Some(String::from_utf16_lossy(&units));
+                name = Some(String::from_utf16_lossy(&units[..n]));
                 first_slot = start;
             }
         }
         let name = name.unwrap_or_else(|| short_to_name(&short, s[12]));
-        out.push(Entry {
+        let go_on = f(Entry {
             name,
             short,
             attr,
@@ -385,9 +391,12 @@ fn parse_dir(buf: &DirBuf) -> Vec<Entry> {
             mdate: le16(s, 24),
             first_slot,
             sfn_slot: i,
-        });
+        })?;
+        if !go_on {
+            break;
+        }
     }
-    out
+    Ok(())
 }
 
 fn names_equal(a: &str, b: &str) -> bool {
@@ -935,9 +944,14 @@ impl Fat32 {
     fn lookup(&mut self, dir_first: u32, name: &str) -> Result<(DirBuf, Entry)> {
         let buf = self.load_dir(dir_first)?;
         let wanted_upper = name.to_uppercase();
-        let found = parse_dir(&buf).into_iter().find(|e| {
-            names_equal(&e.name, name) || short_to_name(&e.short, 0) == wanted_upper
-        });
+        let mut found = None;
+        for_each_entry(&buf, |e| {
+            if names_equal(&e.name, name) || short_to_name(&e.short, 0) == wanted_upper {
+                found = Some(e);
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
         match found {
             Some(e) => Ok((buf, e)),
             None => Err(FsError::NotFound),
@@ -1002,11 +1016,20 @@ impl Fat32 {
             return Err(FsError::InvalidName);
         }
         let mut buf = self.load_dir(dir_first)?;
-        let entries = parse_dir(&buf);
-        if entries.iter().any(|e| names_equal(&e.name, name)) {
+        // Short names in use (11 bytes each, not whole entries) – fallible.
+        let mut existing: Vec<[u8; 11]> = Vec::new();
+        let mut taken = false;
+        for_each_entry(&buf, |e| {
+            if names_equal(&e.name, name) {
+                taken = true;
+                return Ok(false);
+            }
+            super::try_push(&mut existing, e.short)?;
+            Ok(true)
+        })?;
+        if taken {
             return Err(FsError::AlreadyExists);
         }
-        let existing: Vec<[u8; 11]> = entries.iter().map(|e| e.short).collect();
 
         let (short, nt, lfn_units) = match exact_short_name(name) {
             Some((s, nt)) if !existing.contains(&s) => (s, nt, None),
@@ -1192,17 +1215,29 @@ impl FileSystem for Fat32 {
     }
 
     fn read_dir(&mut self, path: &str) -> Result<Vec<DirEntry>> {
+        self.read_dir_max(path, usize::MAX)
+    }
+
+    fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         let first = self.dir_cluster(path)?;
         let buf = self.load_dir(first)?;
-        Ok(parse_dir(&buf)
-            .into_iter()
-            .map(|e| DirEntry {
-                kind: e.kind(),
-                size: if e.is_dir() { 0 } else { e.size as u64 },
-                modified: from_fat_date_time(e.mdate, e.mtime),
-                name: e.name,
-            })
-            .collect())
+        let mut out = Vec::new();
+        for_each_entry(&buf, |e| {
+            if out.len() == max {
+                return Err(FsError::TooMany);
+            }
+            super::try_push(
+                &mut out,
+                DirEntry {
+                    kind: e.kind(),
+                    size: if e.is_dir() { 0 } else { e.size as u64 },
+                    modified: from_fat_date_time(e.mdate, e.mtime),
+                    name: e.name,
+                },
+            )?;
+            Ok(true)
+        })?;
+        Ok(out)
     }
 
     fn read(&mut self, path: &str, offset: u64, out: &mut [u8]) -> Result<usize> {
@@ -1359,7 +1394,12 @@ impl FileSystem for Fat32 {
         };
         if e.is_dir() && e.cluster != 0 {
             let content = self.load_dir(e.cluster)?;
-            if !parse_dir(&content).is_empty() {
+            let mut any = false;
+            for_each_entry(&content, |_| {
+                any = true;
+                Ok(false)
+            })?;
+            if any {
                 return Err(FsError::NotEmpty);
             }
         }
