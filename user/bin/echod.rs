@@ -4,7 +4,9 @@
 // back what it sent; "pid" -> the service's process number (text);
 // "crash" -> the service exits with code 7 (restart test); "files" -> what opening
 // /bin/sh gives ("ok" or the error name – a service started with `files none` in its
-// manifest must get ERROR_ACCESS_DENIED).
+// manifest must get ERROR_ACCESS_DENIED).  A message the kernel refused to deliver (it
+// carried a file or directory handle – a sandboxed service may not receive them) is
+// answered with "refused".
 // Exit: connection channel closed and no clients left -> code 0.
 #![no_std]
 #![no_main]
@@ -66,6 +68,10 @@ fn main(_args: Args) -> i32 {
                 close(c);
                 clients[j] = clients[nclients - 1];
                 nclients -= 1;
+                continue;
+            }
+            if r == ERROR_ACCESS_DENIED {
+                chan_send(c, b"refused", CHAN_NONBLOCK);
                 continue;
             }
             if r < 0 {

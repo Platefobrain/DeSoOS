@@ -224,12 +224,27 @@ impl ChanEnd {
     /// handles.  Empty queue and the other side closed – ERROR_CLOSED.
     /// `room` – free slots in the receiver's handle table: more handles in the
     /// message = ERROR_TOO_MANY_HANDLES, the message stays.
-    pub fn recv(&self, cap: usize, hcap: usize, room: usize, nonblock: bool) -> Result<Message, RecvError> {
+    /// `no_files`: the receiver is in the file sandbox – a first message carrying a FILE or
+    /// DIR handle is removed and dropped (ERROR_ACCESS_DENIED), before any size check, so
+    /// it can neither be taken nor block the queue.
+    pub fn recv(&self, cap: usize, hcap: usize, room: usize, nonblock: bool, no_files: bool) -> Result<Message, RecvError> {
         let mine = self.mine();
         loop {
             {
                 let mut q = mine.q.lock();
                 if let Some(front) = q.front() {
+                    if no_files && front.handles.iter().any(|h| matches!(h.obj, super::process::Fd::File(_) | super::process::Fd::Dir(_))) {
+                        let m = q.pop_front().unwrap();
+                        super::kbuf::give(m.cost());
+                        if m.carries_channel() {
+                            mine.chans.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        mine.len.store(q.len(), Ordering::SeqCst);
+                        drop(q);
+                        mine.wake_writers();
+                        drop(m); // the handles are released outside the queue lock
+                        return Err(RecvError::Code(super::syscalls::ERROR_ACCESS_DENIED));
+                    }
                     if front.data.len() > cap || front.handles.len() > hcap {
                         return Err(RecvError::TooSmall(front.data.len(), front.handles.len()));
                     }

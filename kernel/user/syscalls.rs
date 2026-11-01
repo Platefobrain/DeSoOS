@@ -464,6 +464,10 @@ fn sys_write(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
     write_fd(p, fd, &data)
 }
 
+/// Messages refused to sandboxed receivers because they carried a file or directory
+/// handle (tests).
+pub static SANDBOX_RECV_DENIED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Captured output kept per program (see write_fd).
 const CAPTURE_MAX: usize = 1024 * 1024;
 
@@ -909,7 +913,16 @@ fn sys_chan_recv(p: &mut Process, f: &SyscallFrame) -> SysResult {
         b[16..].copy_from_slice(&sender.to_le_bytes());
         copy_to_user(p, info, &b)
     };
-    match end.recv(cap as usize, hcap, room, flags & CHAN_NONBLOCK != 0) {
+    // A process in the file sandbox (SPAWN_NO_FILES, `files none` in a manifest) has only
+    // the file / directory handles it was started with: a message carrying a FILE or DIR
+    // handle is refused and dropped by the channel (not left in the queue – a client must
+    // not be able to block a service that way).  Otherwise a client could hand a sandboxed
+    // driver a directory over its service channel.
+    match end.recv(cap as usize, hcap, room, flags & CHAN_NONBLOCK != 0, p.no_files) {
+        Err(RecvError::Code(ERROR_ACCESS_DENIED)) => {
+            SANDBOX_RECV_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Err(ERROR_ACCESS_DENIED)
+        }
         Ok(m) => {
             let (len, nh, sender) = (m.data.len() as u64, m.handles.len() as u64, m.sender);
             copy_to_user(p, buf, &m.data)?;

@@ -13,11 +13,19 @@ include!("../build/user/initrd.rs");
 pub fn install() -> usize {
     use crate::fs;
     for (dir, files) in [("/etc", &[][..]), ("/etc/services", ETC_SERVICES)] {
-        if fs::stat(dir).is_err() && fs::mkdir(dir).is_err() {
-            continue;
+        if fs::stat(dir).is_err() {
+            if let Err(e) = fs::mkdir(dir) {
+                // Without the manifests init starts no services (no network, no USB) –
+                // say why instead of booting quietly without them.
+                crate::serial_println!("[FS] cannot create {}: {} - init will start no services", dir, e);
+                continue;
+            }
         }
         for (name, data) in files {
-            let _ = fs::write_file(&alloc::format!("{}/{}", dir, name), data);
+            let path = alloc::format!("{}/{}", dir, name);
+            if let Err(e) = fs::write_file(&path, data) {
+                crate::serial_println!("[FS] cannot write {}: {} - that service will not start", path, e);
+            }
         }
     }
     if fs::stat("/bin").is_err() && fs::mkdir("/bin").is_err() {

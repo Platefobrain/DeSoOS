@@ -2,6 +2,32 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.58.1 — 2026-11-01
+
+### Service sandbox and manifests tightened (a fourth code review)
+- **`files none` now also means "no files handed over later".** A sandboxed process could not open a path, but a
+  client could still send it a file or directory handle over its service channel. Now a process in the file sandbox
+  keeps only the file / directory handles it was started with: a message carrying a `FILE` or `DIR` handle is
+  removed from its queue and dropped, and `chan_recv` gives `ERROR_ACCESS_DENIED` (checked before the size checks, so
+  such a message can neither be taken nor block the queue; the refusal is in `dcp audit`). `nofiles --dir` still
+  works – the directory is given at start.
+- **Init: a refused device is not retried.** Every `dev_claim` error except "no device" was treated as "busy" and
+  retried every 100 ms – a device a kernel driver owns (`ERROR_ACCESS_DENIED`) was tried forever. Now only `ERROR_BUSY`
+  is retried; anything else is "cannot claim device … - not started" and the service is broken.
+- **Manifests:** a key (`name`, `title`, `program`, `device`, `instances`, `files`) or a grant given twice is refused,
+  and so is a service name already used (also by a class instance such as `usb0`). A class manifest whose devices
+  would exceed the 16 services is not started at all instead of being cut off silently; more devices than
+  `instances` are reported.
+- **Boot:** a manifest that cannot be written to `/etc/services` is reported (`[FS] cannot write …`) instead of
+  ignored.
+- `echod` answers a refused message with `"refused"`.
+- Tests: SVC TEST 6/7 – a directory and a file handle sent to `echo` are refused and echo keeps answering; four bad
+  manifests (unknown grant, a key given twice, a name already used, a kernel-owned device) each refused with its
+  reason, the device one reported once (no retrying).
+- Tests: FILE TEST 9/9 waits (up to 5 s) for the killed `oomtest` children to be reaped before checking that the
+  kernel heap is back – on fast KVM it was measured before the reaper freed their area lists (not a leak).
+- Docs: ARCHITECTURE (file sandbox, manifests), ROADMAP.
+
 ## v0.58.0 — 2026-11-01
 
 ### Service manifests: every service gets exactly what its manifest grants

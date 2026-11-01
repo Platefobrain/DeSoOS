@@ -314,8 +314,10 @@ reaches only the files and directories it was given.
 **File sandbox:** `spawn` / `spawn_ex` with `SPAWN_NO_FILES` starts a process with no file system access by
 path. `open` (every mode), `stat`, `readdir`, `mkdir`, `unlink`, `chdir`, `spawn` and `spawn_ex` give `ERROR_ACCESS_DENIED`,
 refused in one place before the call is decoded (the `path` column of the rights table; a new path syscall
-must be marked there). File handles it was given keep working with their rights. The flag is inherited by every child and can
-never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
+must be marked there). File handles it was given **at start** keep working with their rights; it cannot receive new
+ones: a message carrying a `FILE` or `DIR` handle is removed from its queue and dropped, and its `chan_recv` gives
+`ERROR_ACCESS_DENIED` (checked before the size checks, so such a message can neither be taken nor block the queue).
+The flag is inherited by every child and can never be cleared. Shell: `nofiles <program> [args]` – e.g. `nofiles cat < file` works (the shell opens the file and
 passes the handle), `nofiles cat file` gets "access denied". Half of the `sysfuzz` children run in it.
 
 **Directory handles** (`dir_open` → kind 12 `DIR`): a process works inside one directory by paths relative to the
@@ -698,8 +700,12 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   ```
 
   Shipped: `edu` (pci 00:06.0), `echo` (no device), `usb` (class 0C0330, input + blk), `net` (class 020000) – all
-  with `files none`. An unknown key or grant, or a missing name / program / files line → "bad manifest (line N:
-  …)", the service is not started, the others are. For each instance: `dev_claim` from `HW_ROOT` → `spawn_ex`
+  with `files none` (no path calls, and no file or directory handle can be handed to them later). An unknown key or
+  grant, a key or grant given twice, a missing name / program / files line, or a service name already used (also by
+  an instance like `usb0`) → "bad manifest (…)", the service is not started, the others are. A class manifest whose
+  devices would exceed the 16 services is not started at all (no device silently left without its driver); more
+  devices than `instances` are reported. `dev_claim` refused for any reason other than `ERROR_BUSY` (e.g. a device a
+  kernel driver owns – `ERROR_ACCESS_DENIED`) → "cannot claim device … - not started", state broken, no retrying. For each instance: `dev_claim` from `HW_ROOT` → `spawn_ex`
   (slot 1 console, 3 device, 4 connection channel, plus its grants). No device (`ERROR_NO_DEVICE`) → state "no
   device", no attempts.
 - **Restart:** after the process ends, a 100 ms delay, doubled up to 5 s (back to 100 ms after 10 s of stable

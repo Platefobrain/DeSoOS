@@ -162,6 +162,18 @@ fn main(_args: Args) -> i32 {
     let r = echo(c, b"files", &mut out);
     let txt = r.map(|l| core::str::from_utf8(&out[..l]).unwrap_or(""));
     check!(n, txt == Ok("ERROR_ACCESS_DENIED"), "echo (files none in its manifest) opening /bin/sh: {:?}", txt);
+    // Nor can it be given files: a directory or a file handle sent to it over its
+    // channel is refused by the kernel (the message is dropped, the service goes on).
+    let d = dir_open("/", O_READ);
+    let f = open("/bin/sh", O_READ);
+    check!(n, d >= 0 && f >= 0, "dir_open / open for the hand-over test");
+    for (what, h) in [("directory", d), ("file", f)] {
+        let sent = chan_send_h(c, b"take this", &[h as u64], 0);
+        let r = chan_recv(c, &mut out, 0, &mut info);
+        let reply = if r > 0 { core::str::from_utf8(&out[..r as usize]).unwrap_or("") } else { "" };
+        check!(n, sent == 0 && reply == "refused", "echo was handed a {} handle: sent {}, reply {:?}", what, sent, reply);
+    }
+    check!(n, matches!(echo(c, b"still here", &mut out), Ok(10)), "echo answers after the refused hand-overs");
 
     // 4. Service crash: the client gets ERROR_CLOSED, init restarts it (new pid, restarts+1).
     check!(n, chan_send(c, b"crash", 0) == 0, "send crash");

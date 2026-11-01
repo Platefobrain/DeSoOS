@@ -137,6 +137,9 @@ fn hex(s: &str) -> Option<u64> {
 fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
     let mut m = Manifest { def: Def::EMPTY, device: Device::None, instances: 1 };
     let (mut has_name, mut has_files) = (false, false);
+    // Keys allowed once (bit per key).
+    let mut seen = 0u32;
+    const ONCE: [&str; 6] = ["name", "title", "program", "device", "instances", "files"];
     for (i, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -144,6 +147,12 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
         }
         let err = |what| Err((i + 1, what));
         let (key, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(k, r)| (k, r.trim()));
+        if let Some(k) = ONCE.iter().position(|&o| o == key) {
+            if seen & (1 << k) != 0 {
+                return err("key given twice");
+            }
+            seen |= 1 << k;
+        }
         match key {
             "name" => match Text::from(rest) {
                 Some(t) if rest.len() <= 14 && rest.bytes().all(|c| c.is_ascii_alphanumeric()) => {
@@ -175,11 +184,17 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
                 Ok(n) if (1..=8).contains(&n) => m.instances = n,
                 _ => return err("instances: 1-8"),
             },
-            "grant" => match rest {
-                "input" => m.def.grants |= G_INPUT,
-                "blk" => m.def.grants |= G_BLK,
-                _ => return err("unknown grant (known: input, blk)"),
-            },
+            "grant" => {
+                let g = match rest {
+                    "input" => G_INPUT,
+                    "blk" => G_BLK,
+                    _ => return err("unknown grant (known: input, blk)"),
+                };
+                if m.def.grants & g != 0 {
+                    return err("grant given twice");
+                }
+                m.def.grants |= g;
+            }
             "files" => match rest {
                 "none" => (m.def.files, has_files) = (false, true),
                 "all" => (m.def.files, has_files) = (true, true),
@@ -244,8 +259,18 @@ fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
                 continue;
             }
         };
+        // Names must be unique – also against the instances of class services (usb0…).
+        let taken = |defs: &[Def], name: &str| defs.iter().any(|d| d.name() == name);
         match m.device {
-            Device::None | Device::Pci(..) if n < MAX_SERVICES => {
+            Device::None | Device::Pci(..) => {
+                if taken(&defs[..n], m.def.name()) {
+                    println!("init: {}: bad manifest (service name {} already used) - not started", path, m.def.name());
+                    continue;
+                }
+                if n == MAX_SERVICES {
+                    println!("init: {}: more than {} services - not started", path, MAX_SERVICES);
+                    continue;
+                }
                 defs[n] = m.def;
                 if let Device::Pci(b, d, f) = m.device {
                     defs[n].dev = Some((b, d, f));
@@ -253,9 +278,22 @@ fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
                 n += 1;
             }
             Device::Class(class) => {
-                for i in 0..m.instances {
+                // All its devices first: the whole manifest fits or none of it is started
+                // (no device silently left without its driver).
+                let found = (0..m.instances).take_while(|&i| dev_find(HW_ROOT, class, i) >= 0).count();
+                if n + found > MAX_SERVICES {
+                    println!("init: {}: {} devices would exceed {} services - not started", path, found, MAX_SERVICES);
+                    continue;
+                }
+                let more = dev_find(HW_ROOT, class, m.instances);
+                if more >= 0 {
+                    println!("init: {}: more than {} devices of class {:06x} - only the first {} get a service", path, m.instances, class, m.instances);
+                }
+                let first = n;
+                let mut clash = false;
+                for i in 0..found as u64 {
                     let bdf = dev_find(HW_ROOT, class, i);
-                    if bdf < 0 || n == MAX_SERVICES {
+                    if bdf < 0 {
                         break;
                     }
                     let b = bdf as u64;
@@ -268,14 +306,21 @@ fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
                         o.len
                     };
                     d.name = Text::from(core::str::from_utf8(&nm[..k]).unwrap_or("")).unwrap_or(m.def.name);
+                    if taken(&defs[..n], d.name()) {
+                        clash = true;
+                        break;
+                    }
                     d.dev = Some(dev);
                     let title = if d.title.n > 0 { d.title.as_str() } else { "device" };
                     println!("init: {} = {} {:02x}:{:02x}.{}", d.name(), title, dev.0, dev.1, dev.2);
                     defs[n] = d;
                     n += 1;
                 }
+                if clash {
+                    n = first;
+                    println!("init: {}: bad manifest (a service name it makes is already used) - not started", path);
+                }
             }
-            _ => println!("init: {}: more than {} services - not started", path, MAX_SERVICES),
         }
     }
     n
@@ -323,10 +368,16 @@ fn start_service(d: &Def, s: &mut Svc) {
             println!("init: service {}: no device {:02x}:{:02x}.{} - not started", d.name(), b, dv, f);
             return;
         }
-        if h < 0 {
-            // ERROR_BUSY: the previous instance is still exiting – try again shortly.
+        if h == ERROR_BUSY {
+            // The previous instance is still exiting – try again shortly.
             s.state = State::Waiting;
             s.next_start = uptime_ms() + 100;
+            return;
+        }
+        if h < 0 {
+            // Anything else (refused, invalid address...) will not go away by retrying.
+            s.state = State::Broken;
+            println!("init: service {}: cannot claim device {:02x}:{:02x}.{}: {} - not started", d.name(), b, dv, f, error_name(h));
             return;
         }
         dev = h as u64;

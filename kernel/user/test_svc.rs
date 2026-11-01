@@ -128,23 +128,43 @@ pub fn self_test() {
     // svctest's code.  Then: edu is free, vectors and frames are back.
     // Services come from /etc/services manifests: a broken one (an unknown grant) is
     // refused with its line, the others start.
-    check!(crate::fs::write_file("/etc/services/zz-bad.svc", b"name bad\nprogram /bin/echod\ngrant root\nfiles none\n").is_ok(), "write a bad manifest");
+    // Bad manifests, each refused with its reason while the others start: an unknown
+    // grant, a key given twice, a name already used, and a device the kernel itself drives
+    // (dev_claim -> ERROR_ACCESS_DENIED: "not started" once, no retrying).
+    const BAD: [(&str, &[u8]); 4] = [
+        ("/etc/services/zz-bad.svc", b"name bad\nprogram /bin/echod\ngrant root\nfiles none\n"),
+        ("/etc/services/zz-dup.svc", b"name dup\nprogram /bin/echod\nfiles none\nfiles all\n"),
+        ("/etc/services/zz-name.svc", b"name echo\nprogram /bin/echod\nfiles none\n"),
+        ("/etc/services/zz-kern.svc", b"name kern\nprogram /bin/echod\ndevice pci 00:04.0\nfiles none\n"),
+    ];
+    for (path, text) in BAD {
+        check!(crate::fs::write_file(path, text).is_ok(), "write {}", path);
+    }
     let free0 = crate::selftest::settled_free_frames();
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let r = run_ex("/bin/init", &["init", "test", "/bin/svctest"], 60_000, true, true);
-    let _ = crate::fs::remove("/etc/services/zz-bad.svc");
+    for (path, _) in BAD {
+        let _ = crate::fs::remove(path);
+    }
     check!(r.is_some(), "init test /bin/svctest did not finish");
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("svctest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "svctest via init: {:?} {:?}", kind, out.trim());
     check!(out.contains("init: service edu started") && out.contains("init: service echo started"), "init did not report service start: {:?}", out.trim());
     check!(out.contains("zz-bad.svc: bad manifest (line 3: unknown grant") && !out.contains("service bad started"), "a manifest with an unknown grant must be refused: {:?}", out.trim());
+    check!(out.contains("zz-dup.svc: bad manifest (line 4: key given twice)") && !out.contains("service dup started"), "a manifest with a key given twice must be refused: {:?}", out.trim());
+    check!(out.contains("zz-name.svc: bad manifest (service name echo already used)"), "a second service named echo must be refused: {:?}", out.trim());
+    check!(
+        out.matches("service kern: cannot claim device 00:04.0: ERROR_ACCESS_DENIED - not started").count() == 1,
+        "a device the kernel drives must be refused once, without retrying: {:?}",
+        out.trim()
+    );
     check!(pci::owner(edu.unwrap()) == pci::OWNER_FREE, "edu still claimed after init stopped its services");
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after init stopped edud");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by init services");
     let free1 = crate::selftest::settled_free_frames();
     check!(free1 >= free0, "frames leaked by init services ({} -> {})", free0, free1);
-    serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL, services from manifests (files none = no file access, a bad manifest refused): {} PASS", line);
+    serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL, services from manifests (files none = no file access and no file or directory handed over, 4 bad manifests refused with their reason, a refused device not retried): {} PASS", line);
 
     // 7. Measurement – the same work in the kernel and in user space on edu:
     // interrupt -> driver woken up, factorial completed by an interrupt; in user

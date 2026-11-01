@@ -10,6 +10,62 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.58.1 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); fixes only, not yet tried on the test laptop.**
+
+### What is new since the last report (v0.58.0)
+
+| Version | Change |
+|---|---|
+| v0.58.1 | a sandboxed service (`files none`) cannot be handed a file or directory over a channel; init does not retry a device a kernel driver owns; duplicate manifest keys, grants and service names are refused; FILE TEST 9/9 waits for reaping before the heap check |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 238 tests PASS | 90 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 238 tests PASS | 73 s |
+
+New in SVC TEST 6/7: a directory and a file handle sent to `echo` are refused and echo keeps answering; four bad
+manifests each refused with its reason. The first KVM run failed FILE TEST 9/9 ("kernel heap not given back") – the
+test measured before the killed `oomtest` children were reaped; it now waits up to 5 s (`LOOP=files:5` 5/5 on the
+build server).
+
+### Known problems
+
+- As in v0.58.0.
+
+### Performance against the previous release (v0.58.0 → v0.58.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.58.0 | TCG v0.58.1 | KVM v0.58.0 | KVM v0.58.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 157 | 3 172 | 35 644 | 32 965 |
+| irq_user_ns | 9 087 | 7 814 | 62 972 | 67 046 |
+| fact_kernel_ns | 30 539 | 29 686 | 52 700 | 54 274 |
+| fact_user_ns | 78 339 | 74 074 | 86 994 | 91 407 |
+| fact_svc_ns | 205 128 | 207 253 | 107 584 | 104 931 |
+| ping_svc_ns | 127 795 | 120 918 | 22 408 | 22 461 |
+| restart_us | 4 800 | 5 400 | 1 300 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.58.0 | TCG v0.58.1 | KVM v0.58.0 | KVM v0.58.1 |
+|---|---|---|---|---|
+| start_ms | 442 | 402 | 400 | 399 |
+| enum_avg_ms | 25 | 26 | 23 | 23 |
+| read_kbs (usbd) | 102 400 | 99 902 | 117 028 | 77 283 |
+| kread_kbs (kernel) | 69 847 | 72 617 | 104 107 | 95 085 |
+| kcat_kbs (kernel, cat) | 58 667 | 50 442 | 96 688 | 95 517 |
+| hid_avg_us (keyboard) | 774 | 691 | 344 | 272 |
+
+Verdict: no regression. The extra check in `chan_recv` (sandboxed receiver only) does not show in `ping_svc_ns`;
+the KVM `read_kbs` drop is the usual run-to-run swing of the emulated USB stick (v0.57.3 had 69 423).
+
+---
+
 ## v0.58.0 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM) and on the test laptop with the drivers sandboxed.**

@@ -236,6 +236,13 @@ nofiles --dir-ro /nd cp x.txt y.txt\nnofiles --dir /nd cp x.txt y.txt\ncat /nd/y
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "oomtest: {:?} {:?}", kind, out.trim());
     let refused = super::syscalls::HEAP_REFUSED.load(core::sync::atomic::Ordering::Relaxed) - refused0;
     check!(refused >= 5, "only {} calls refused by the heap reserve", refused);
+    // Killed children are reaped lazily (their area lists are freed then), so wait
+    // for the reaper instead of measuring at once.
+    let limit = heap0 + 2 * 1024 * 1024;
+    let _ = wait_for(5_000, || {
+        crate::sched::reap();
+        crate::memory::heap::used_bytes() <= limit
+    });
     let heap1 = crate::memory::heap::used_bytes();
     check!(heap1 <= heap0 + 2 * 1024 * 1024, "kernel heap not given back: {} KiB before, {} KiB after", heap0 / 1024, heap1 / 1024);
     let line = out.lines().find(|l| l.starts_with("oomtest:")).unwrap_or("").trim();
