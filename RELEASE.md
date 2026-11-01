@@ -10,6 +10,69 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.59.1 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); fixes only (DeSoCrypto 0.1.1).**
+
+### What is new since the last report (v0.59.0)
+
+| Version | Change |
+|---|---|
+| v0.59.1 | DeSoCrypto: test-only `assume_length` only in test builds (kernel `selftest`, `cryptotest`); SHA-256 and HMAC wipe their whole state on drop (the HMAC inner state is a hash of the key) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 31/31 suites, 242 tests PASS | 90 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 31/31 suites, 242 tests PASS | 73 s |
+
+On the build server: a program calling `assume_length` without the test flag does not compile.
+
+### Known problems
+
+- As in v0.59.0 (stack temporaries inside SHA-256 are still not wiped – documented).
+
+### Performance against the previous release (v0.59.0 → v0.59.1, same machine)
+
+`[RESULT-CRYPTO]` (KiB/s):
+
+| | TCG v0.59.0 | TCG v0.59.1 | KVM v0.59.0 | KVM v0.59.1 |
+|---|---|---|---|---|
+| sha256_kernel_kbs | 47 360 | 47 921 | 175 761 | 174 487 |
+| sha256_user_kbs | 52 160 | 51 200 | 213 120 | 197 120 |
+| hmac_user_kbs | 48 716 | 50 880 | 211 520 | 208 320 |
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.59.0 | TCG v0.59.1 | KVM v0.59.0 | KVM v0.59.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 218 | 3 238 | 32 154 | 33 653 |
+| irq_user_ns | 12 826 | 6 148 | 65 659 | 41 169 |
+| fact_kernel_ns | 26 260 | 31 525 | 56 385 | 57 736 |
+| fact_user_ns | 74 487 | 77 041 | 93 283 | 144 404 |
+| fact_svc_ns | 176 678 | 205 549 | 103 788 | 105 318 |
+| ping_svc_ns | 104 766 | 119 760 | 23 518 | 18 850 |
+| restart_us | 4 900 | 3 700 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.59.0 | TCG v0.59.1 | KVM v0.59.0 | KVM v0.59.1 |
+|---|---|---|---|---|
+| start_ms | 407 | 410 | 378 | 365 |
+| enum_avg_ms | 29 | 29 | 27 | 25 |
+| read_kbs (usbd) | 70 620 | 66 064 | 65 015 | 93 090 |
+| kread_kbs (kernel) | 62 904 | 64 341 | 99 482 | 85 559 |
+| kcat_kbs (kernel, cat) | 64 081 | 45 807 | 84 389 | 96 542 |
+| hid_avg_us (keyboard) | 803 | 592 | 225 | 232 |
+
+Verdict: no regression. DeSoCrypto speed unchanged within noise (KVM user SHA-256 −7.5 %, HMAC −1.5 %, kernel −0.7 %;
+the bulk path – whole 64-byte blocks straight from the input – did not change). KVM `fact_user_ns` 144 404 with
+`irq_user_ns` 41 169 in the same run is the known two-state behaviour of the emulated `edu` device on the host (seen in
+v0.55.1: 183 823 / then 97 656 on a rerun; v0.56.0) – nothing on that path changed in this release.
+
+---
+
 ## v0.59.0 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); DeSoCrypto v0.1.0 added. Not yet tried on the test laptop.**

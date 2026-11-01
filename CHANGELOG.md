@@ -2,6 +2,20 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.59.1 — 2026-11-01
+
+### DeSoCrypto 0.1.1 – two fixes from a code review
+- **Test-only code out of normal builds.** `Sha256::assume_length` / `HmacSha256::assume_length` (pretend a length
+  counter, for the 2^61-byte limit tests) were public in every build – any program including the library could skip
+  the length check. They now exist only with `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test`,
+  which `build.sh` passes to `cryptotest` alone; `--check-cfg` knows both names.
+- **Keys wiped completely.** HMAC cleared the key and `ikey`, but the inner SHA-256 state (a hash of the key – as
+  good as the key for forging tags) stayed in memory, and so did `okey` when an object was dropped without `finish`.
+  Now `Sha256` and `HmacSha256` clear their whole state on drop (`Drop`, volatile writes; `Sha256::wipe`), the inner
+  hash in `finish` is wiped, and SHA-256 no longer copies a partial block to the stack before compressing it.
+  Stack temporaries (the message schedule) are still not wiped – documented as a limit.
+- Docs: ARCHITECTURE (DeSoCrypto rules), ROADMAP (Known gaps), README, `common/desocrypto/README.md`.
+
 ## v0.59.0 — 2026-11-01
 
 ### DeSoCrypto v0.1.0 – DeSoOS's own cryptographic library

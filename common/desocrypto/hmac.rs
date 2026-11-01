@@ -58,12 +58,13 @@ impl HmacSha256 {
     }
 
     /// The tag; Error::LengthOverflow if the message passed the SHA-256 limit.
-    pub fn finish(mut self) -> Result<[u8; OUT_LEN], Error> {
-        let ihash = self.inner.clone().finish()?;
+    pub fn finish(self) -> Result<[u8; OUT_LEN], Error> {
+        // `inner` and `outer` are wiped when dropped (Sha256's Drop), `okey` by our Drop.
+        let mut ihash = self.inner.clone().finish()?;
         let mut outer = Sha256::new();
         outer.update(&self.okey);
         outer.update(&ihash);
-        wipe(&mut self.okey);
+        wipe(&mut ihash);
         outer.finish()
     }
 
@@ -78,10 +79,18 @@ impl HmacSha256 {
         if equal_ct(&full[..tag.len()], tag) { Ok(()) } else { Err(Error::Mismatch) }
     }
 
-    /// For tests only: see Sha256::assume_length (counts the 64-byte key block too).
-    #[doc(hidden)]
+    /// Tests only: see Sha256::assume_length (counts the 64-byte key block too).
+    #[cfg(any(selftest, desocrypto_test))]
     pub fn assume_length(&mut self, bytes: u64) {
         self.inner.assume_length(bytes);
+    }
+}
+
+/// The key XOR opad and the inner state (a hash of the key) are as good as the key:
+/// both cleared when the object goes away, also without `finish` (an error path).
+impl Drop for HmacSha256 {
+    fn drop(&mut self) {
+        wipe(&mut self.okey);
     }
 }
 

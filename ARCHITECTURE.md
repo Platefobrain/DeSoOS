@@ -1362,8 +1362,14 @@ Rules of the code:
   (`Error::LengthOverflow`) instead of wrapping; HKDF refuses more than 255 × 32 = 8160 bytes (`OutputTooLong`) and a
   PRK under 32 bytes (`KeyTooShort`) without touching the output; `verify` accepts tags of 16–32 bytes only.
 - **Arithmetic** is explicitly wrapping (`wrapping_add`, `rotate_right`) – correct with or without overflow checks.
-- **Keys** are wiped (volatile writes) from the HMAC/HKDF internals when done; tags are compared in constant time.
-  Nothing else is hardened against timing side channels yet.
+- **Keys** are wiped (volatile writes): `Sha256` and `HmacSha256` clear their whole state when dropped (also
+  without `finish`, e.g. on an error path) – the inner SHA-256 state of HMAC is a hash of the key and as good as the
+  key; HKDF wipes its PRK and blocks. Temporary copies on the stack (the message schedule in `compress`) are not
+  wiped – no full guarantee yet. Tags are compared in constant time. Nothing else is hardened against timing side
+  channels yet.
+- **Test-only code stays out:** `assume_length` (a pretended length counter for the limit tests) exists only with
+  `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
+  ordinary programs and the normal kernel do not have it.
 
 Tests: `common/desocrypto/tests.rs` (92 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869 vectors; block-edge lengths;
 every split of a message; length limits with a pretended counter; wrong tags and parameters). `mod.rs` does not

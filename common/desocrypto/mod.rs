@@ -13,15 +13,17 @@
 // /bin/cryptotest and the kernel CRYPTO TEST include it, next to this module.
 //
 // Limits: the code is not hardened against timing side channels beyond the
-// constant-time tag comparison; it is not audited.  Fine for checksums and for
-// learning, not yet for protecting secrets.
+// constant-time tag comparison; it is not audited.  Key material is wiped when the
+// HMAC / SHA-256 objects are dropped, but Rust may leave temporary copies on the
+// stack (e.g. the message schedule in `compress`) – no full guarantee.  Fine for
+// checksums and for learning, not yet for protecting secrets.
 #![allow(dead_code)]
 
 pub mod hkdf;
 pub mod hmac;
 pub mod sha256;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.1.1";
 
 /// What can go wrong.  Every function returns one of these instead of panicking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

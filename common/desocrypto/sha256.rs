@@ -78,8 +78,7 @@ impl Sha256 {
             if self.buf_len < BLOCK_LEN {
                 return;
             }
-            let block = self.buf;
-            compress(&mut self.state, &block);
+            compress(&mut self.state, &self.buf);
             self.buf_len = 0;
         }
         // Whole blocks straight from the input.
@@ -109,8 +108,7 @@ impl Sha256 {
         let mut data = &pad[..len];
         let take = BLOCK_LEN - self.buf_len;
         self.buf[self.buf_len..].copy_from_slice(&data[..take]);
-        let block = self.buf;
-        compress(&mut self.state, &block);
+        compress(&mut self.state, &self.buf);
         data = &data[take..];
         if !data.is_empty() {
             // Exactly one more block.
@@ -123,11 +121,34 @@ impl Sha256 {
         Ok(out)
     }
 
-    /// For tests only: pretends `bytes` were already hashed (the length-limit
-    /// checks need a count near 2^61 without hashing 2 EiB).
-    #[doc(hidden)]
+    /// Zeroes the whole state (volatile writes the compiler keeps).  Called on drop;
+    /// a wiped hasher must not be used again.
+    pub fn wipe(&mut self) {
+        for w in self.state.iter_mut() {
+            // SAFETY: `w` is a valid, aligned &mut u32.
+            unsafe { core::ptr::write_volatile(w, 0) };
+        }
+        super::hmac::wipe(&mut self.buf);
+        // SAFETY: valid, aligned fields of self.
+        unsafe {
+            core::ptr::write_volatile(&mut self.buf_len, 0);
+            core::ptr::write_volatile(&mut self.total, 0);
+        }
+    }
+
+    /// Tests only (not in the normal kernel or programs – `selftest` / `desocrypto_test`
+    /// builds): pretends `bytes` were already hashed, so the length limit can be
+    /// checked without hashing 2 EiB.
+    #[cfg(any(selftest, desocrypto_test))]
     pub fn assume_length(&mut self, bytes: u64) {
         self.total = bytes;
+    }
+}
+
+/// The state can hold key material (HMAC keys pass through it): cleared when dropped.
+impl Drop for Sha256 {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 

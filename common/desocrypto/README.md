@@ -1,4 +1,4 @@
-# DeSoCrypto v0.1.0
+# DeSoCrypto v0.1.1
 
 DeSoOS's own cryptographic library (DecodeSoft), used only inside DeSoOS – by the
 kernel and by user programs. Plain Rust with `core` only: no heap, no syscalls,
@@ -22,5 +22,9 @@ let digest = desocrypto::sha256::sha256(b"abc");
 ```
 
 Status: not audited and not hardened against timing side channels (beyond the
-tag check). Fine for checksums; not yet for protecting secrets.
+tag check). Keys are wiped when HMAC / SHA-256 objects are dropped, but stack
+temporaries are not. Fine for checksums; not yet for protecting secrets.
+
+Test-only code (`assume_length`) exists only in `--cfg selftest` /
+`--cfg desocrypto_test` builds (the kernel test build and `cryptotest`).
 Details: `ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".
