@@ -1398,6 +1398,22 @@ position (operation fails, volume read-only, remount shows old or new). After ev
 volume with exact counts, contents equal a model, no operation exceeded its bound, and **no block reachable from
 either superblock is free in the allocator** (this invariant catches freeing one commit too early).
 
+Power loss (stage 2b, v0.62.0, `test_crash.rs`, tests 15–18). A test disk (`CrashDev`) keeps an image and records
+every write (address, 512-byte sectors) and flush of one operation; crash images are rebuilt from that log on top of
+the image the disk held before the operation – the way a disk cache behaves: what was flushed stays, anything since
+the last flush may or may not land, in any order, sector by sector.
+- every write point: the first k writes landed, nothing after – every write boundary and every sector inside a
+  superblock write (a torn superblock), over 21 operations on a 96-block volume (blocks freed earlier are reused) and
+  on a 64-block volume at the edge of full (refused operations must write nothing);
+- reordered: random subsets of the sectors, or of whole writes, since the last flush (fixed seed);
+- write / flush errors at each position: the operation fails, the volume turns read-only; any part of the unflushed
+  writes may have landed;
+- the reference image's snapshot: no write of any operation touches one of its blocks.
+Each image must mount read-write with exact counts, at the generation before (g) or after (g + 1) the operation, with
+the matching contents (the model); where the state can change (at a flush, inside / after a superblock) it must also
+take a new file, pass the allocator check and survive a remount. Checked by mutation: dropping the flush between the
+new blocks and the superblock is caught (a superblock lands before its tree).
+
 ## Cryptography – DeSoCrypto (`common/desocrypto/`)
 
 DeSoOS's own cryptographic library, written for DeSoOS only (no Cargo crate, no outside code). It is a library,

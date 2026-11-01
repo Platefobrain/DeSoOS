@@ -2,6 +2,28 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.62.0 — 2026-11-01
+
+### DeSoFS stage 2b – power-loss tests
+- **New: `kernel/fs/desofs/test_crash.rs`** (DESOFS TEST 15–18). A test disk records every write (address,
+  512-byte sectors) and flush of one operation; crash images are rebuilt from the log over the image before the
+  operation, the way a disk cache behaves: flushed data stays, anything after the last flush may land or not, in any
+  order, sector by sector.
+  - 15: a crash after every write and inside every superblock write (torn superblocks) – 21 operations on a 96-block
+    volume (directories, a file from depth 0 to 2 with a hole, overwrite, shrink, rename with replace, a directory
+    moved, removes; blocks freed earlier are reused), and a 64-block volume at the edge of full (an operation refused
+    for space writes nothing);
+  - 16: random subsets of the unflushed sectors or of whole writes (fixed seed);
+  - 17: a write or a flush failing at each position of four operations – the operation fails, the volume turns
+    read-only and refuses a create; any part of the unflushed writes may have landed;
+  - 18: the reference image's snapshot through crashes – no write of any operation touches one of its blocks.
+  Every image must mount read-write with exact counts, at generation g or g + 1 with the matching contents; at a
+  flush and inside / after a superblock it must also take a new file, pass the allocator check and survive a remount.
+  Mutation: without the flush between the new blocks and the superblock the test fails.
+- Tests compare file contents byte for byte instead of by SHA-256 (faster, same strength).
+- `tests/test.sh`: default timeout 240 s (was 180 s) – the new tests add time in TCG.
+- Docs: ARCHITECTURE (power-loss tests), ROADMAP (stage 2b done, known gaps), README (32 suites, 260 tests).
+
 ## v0.61.0 — 2026-11-01
 
 ### DeSoFS stage 2a – writing

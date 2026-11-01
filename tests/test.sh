@@ -22,7 +22,7 @@ BUILD=1
 VERBOSE=0
 LOOP="${LOOP:-}"
 # Loop mode takes longer – a larger default timeout (set TIMEOUT to change it).
-if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-180}"; fi
+if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-240}"; fi
 # Number of QEMU cores.  More virtual CPUs than host threads =
 # long stalls (the host suspends the virtual CPU whose turn it is to take
 # the Big Kernel Lock; the watchdog reports it) – on a weak host: SMP=2 ./test.sh

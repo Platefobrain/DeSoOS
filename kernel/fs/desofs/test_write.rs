@@ -1,4 +1,4 @@
-// DESOFS TEST, stage 2a – writing: format (byte for byte against tests/mkdesofs.py),
+// DESOFS TEST – writing: format (byte for byte against tests/mkdesofs.py),
 // files, directories, rename, a full disk with the reserve, a snapshot that must stay
 // untouched, the VFS and programs, and a failing disk (read-only, old or new state).
 //
@@ -33,7 +33,7 @@ macro_rules! ensure {
 
 const TIME: u64 = 1_700_000_000;
 
-fn params() -> Params<'static> {
+pub(super) fn params() -> Params<'static> {
     Params { uuid: core::array::from_fn(|i| 0xA0 + i as u8), time: TIME, label: "DESOFS-FMT" }
 }
 
@@ -47,23 +47,23 @@ fn formatted(blocks: u64) -> Result<usize, String> {
     Ok(d)
 }
 
-fn mount(d: usize) -> Result<Volume, String> {
+pub(super) fn mount(d: usize) -> Result<Volume, String> {
     Volume::mount(d).map_err(|e| format!("mount: {}", e))
 }
 
 /// The stage-1 walk accepts the volume read-write with exact counts.
-fn walk_ok(d: usize, what: &str) -> Result<(), String> {
+pub(super) fn walk_ok(d: usize, what: &str) -> Result<(), String> {
     let r = probe(d);
     ensure!(r.state == State::ReadWrite, "{}: walk says {:?}", what, r.state);
     ensure!(r.used_counted == Some(r.used_stored) && r.warnings.is_empty(), "{}: used {:?} vs {} {:?}", what, r.used_counted, r.used_stored, r.warnings);
     Ok(())
 }
 
-fn pattern(n: usize, seed: u32) -> Vec<u8> {
+pub(super) fn pattern(n: usize, seed: u32) -> Vec<u8> {
     (0..n).map(|i| ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 13) as u8).collect()
 }
 
-fn read_all(v: &mut Volume, path: &str) -> Result<Vec<u8>, String> {
+pub(super) fn read_all(v: &mut Volume, path: &str) -> Result<Vec<u8>, String> {
     let m = v.stat(path).map_err(|e| format!("stat {}: {}", path, e))?;
     let mut buf = vec![0u8; m.size as usize];
     let mut done = 0;
@@ -83,10 +83,10 @@ fn write_all(v: &mut Volume, path: &str, off: u64, data: &[u8]) -> Result<(), St
 }
 
 /// Model: path -> Some(contents) for a file, None for a directory.
-type Model = BTreeMap<String, Option<Vec<u8>>>;
+pub(super) type Model = BTreeMap<String, Option<Vec<u8>>>;
 
 /// Everything on the volume equals the model (walks every directory).
-fn same_as(v: &mut Volume, m: &Model, what: &str) -> Result<(), String> {
+pub(super) fn same_as(v: &mut Volume, m: &Model, what: &str) -> Result<(), String> {
     let mut seen = 0;
     let mut stack = vec![String::from("/")];
     while let Some(dir) = stack.pop() {
@@ -98,7 +98,7 @@ fn same_as(v: &mut Volume, m: &Model, what: &str) -> Result<(), String> {
                 (FileType::Directory, None) => stack.push(p),
                 (FileType::File, Some(data)) => {
                     let got = read_all(v, &p)?;
-                    ensure!(e.size == data.len() as u64 && sha256(&got) == sha256(data), "{}: {} differs ({} vs {} bytes)", what, p, got.len(), data.len());
+                    ensure!(e.size == data.len() as u64 && got == *data, "{}: {} differs ({} vs {} bytes)", what, p, got.len(), data.len());
                 }
                 _ => return Err(format!("{}: {} has the wrong type", what, p)),
             }
@@ -109,7 +109,7 @@ fn same_as(v: &mut Volume, m: &Model, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check(v: &mut Volume, d: usize, m: &Model, what: &str) -> Result<(), String> {
+pub(super) fn check(v: &mut Volume, d: usize, m: &Model, what: &str) -> Result<(), String> {
     walk_ok(d, what)?;
     let bad = v.map_violations()?;
     ensure!(bad == 0, "{}: {} blocks reachable from a superblock are free in the allocator", what, bad);
@@ -394,7 +394,7 @@ pub fn t_full() -> T {
 // ---------------- 13. a snapshot stays untouched ----------------
 
 /// Every block reachable from root entry `entry` of the root block `rt` (addr -> bytes hash).
-fn snapshot_blocks(d: usize, rt: u64, entry: usize) -> BTreeMap<u64, [u8; 32]> {
+pub(super) fn snapshot_blocks(d: usize, rt: u64, entry: usize) -> BTreeMap<u64, [u8; 32]> {
     let mut out = BTreeMap::new();
     let rd = |a: u64| {
         let mut b = vec![0u8; BLOCK];
@@ -430,6 +430,24 @@ fn snapshot_blocks(d: usize, rt: u64, entry: usize) -> BTreeMap<u64, [u8; 32]> {
     out
 }
 
+/// The live tree of the reference image from tests/mkdesofs.py.
+pub(super) fn ref_model() -> Model {
+    let mut m = Model::new();
+    m.insert("/hello.txt".into(), Some(b"Hello DeSoFS v5\n".to_vec()));
+    let mut big = Vec::new();
+    for k in 0..25u32 {
+        if (5..=9).contains(&k) {
+            big.extend_from_slice(&[0u8; BLOCK]);
+        } else {
+            big.extend((0..BLOCK as u32).map(|i| ((k * 31 + i * 7) & 0xFF) as u8));
+        }
+    }
+    m.insert("/big.bin".into(), Some(big));
+    m.insert("/sub".into(), None);
+    m.insert("/sub/a.txt".into(), Some(b"abc\n".to_vec()));
+    m
+}
+
 pub fn t_snapshot() -> T {
     let img = crate::initrd::DESOFS_REF;
     let d = new_disk((img.len() / BLOCK) as u64);
@@ -447,19 +465,7 @@ pub fn t_snapshot() -> T {
             Ok(())
         };
         let mut v = mount(d)?;
-        let mut m = Model::new();
-        m.insert("/hello.txt".into(), Some(b"Hello DeSoFS v5\n".to_vec()));
-        let mut big = Vec::new();
-        for k in 0..25u32 {
-            if (5..=9).contains(&k) {
-                big.extend_from_slice(&[0u8; BLOCK]);
-            } else {
-                big.extend((0..BLOCK as u32).map(|i| ((k * 31 + i * 7) & 0xFF) as u8));
-            }
-        }
-        m.insert("/big.bin".into(), Some(big));
-        m.insert("/sub".into(), None);
-        m.insert("/sub/a.txt".into(), Some(b"abc\n".to_vec()));
+        let mut m = ref_model();
         check(&mut v, d, &m, "reference image mounted")?;
         write_all(&mut v, "/hello.txt", 0, b"Rewritten!")?;
         let mut x = b"Hello DeSoFS v5\n".to_vec();

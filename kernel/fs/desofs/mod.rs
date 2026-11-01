@@ -27,6 +27,8 @@ pub mod vol;
 pub mod test;
 #[cfg(selftest)]
 pub mod test_write;
+#[cfg(selftest)]
+pub mod test_crash;
 
 #[path = "../../../common/desocrypto/mod.rs"]
 mod desocrypto;

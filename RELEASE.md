@@ -10,6 +10,72 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.62.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); DeSoFS stage 2b – every operation tested against power loss. Not yet tried
+on the test laptop.**
+
+### What is new since the last report (v0.61.0)
+
+| Version | Change |
+|---|---|
+| v0.62.0 | DeSoFS power-loss tests (`kernel/fs/desofs/test_crash.rs`, DESOFS TEST 15–18): a crash after every write and inside every superblock write, unflushed writes landing in any order, a write / flush error at each position, a snapshot through crashes; `tests/test.sh` default timeout 240 s |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 32/32 suites, 260 tests PASS | 123 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 32/32 suites, 260 tests PASS | 83 s |
+
+DESOFS TEST grows from 14 to 18 tests. A test disk records every write (512-byte sectors) and flush of one
+operation; about 1 400 crash images are rebuilt from those logs and mounted from scratch – each must mount
+read-write with exact counts and hold the state before or after the operation (generation g or g + 1, whole tree and
+file contents), and where the state can change it must also take a new file and survive a remount. The new tests cost
+26 s in TCG and 8 s in KVM (v0.61.0: 97 s / 75 s). Checked by mutation on the build server: without the flush between
+the new blocks and the superblock the suite fails. All images live in RAM; nothing is written to any disk.
+
+### Known problems
+
+- DeSoFS: `desofs check` / `repair` not yet (v0.63.0); a mount lasts until reboot (`/desofs`); no snapshots from the
+  shell. The power-loss tests model a disk cache that honours flushes; a disk that ignores them is not covered.
+- Otherwise as in v0.61.0.
+
+### Performance against the previous release (v0.61.0 → v0.62.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.61.0 | TCG v0.62.0 | KVM v0.61.0 | KVM v0.62.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 2 991 | 3 169 | 31 510 | 32 035 |
+| irq_user_ns | 6 355 | 8 851 | 64 641 | 65 189 |
+| fact_kernel_ns | 26 556 | 26 171 | 51 773 | 57 686 |
+| fact_user_ns | 70 721 | 71 787 | 88 613 | 96 015 |
+| fact_svc_ns | 177 147 | 201 005 | 103 252 | 104 821 |
+| ping_svc_ns | 109 950 | 119 545 | 19 743 | 20 502 |
+| restart_us | 6 600 | 3 500 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.61.0 | TCG v0.62.0 | KVM v0.61.0 | KVM v0.62.0 |
+|---|---|---|---|---|
+| start_ms | 396 | 416 | 376 | 382 |
+| enum_avg_ms | 31 | 25 | 26 | 23 |
+| read_kbs (usbd) | 78 769 | 78 769 | 74 472 | 85 333 |
+| kread_kbs (kernel) | 56 699 | 55 949 | 82 775 | 129 284 |
+| kcat_kbs (kernel, cat) | 44 565 | 59 933 | 72 396 | 116 053 |
+| hid_avg_us (keyboard) | 696 | 796 | 275 | 280 |
+
+`[RESULT-RIGHTS]` gate_ns: TCG 62 → 43, KVM 5 → 4. `[RESULT-CRYPTO]` (KiB/s): TCG 47 124 / 49 600 / 49 920 →
+48 941 / 52 160 / 51 840; KVM 181 760 / 217 600 / 218 240 → 176 640 / 206 720 / 207 360.
+
+Verdict: no regression. Only test code changed in this release (the kernel's DeSoFS code is the same as in v0.61.0).
+TCG `fact_svc_ns` 201 005 (+13 %) is inside its known spread (205 549 in v0.59.1); KVM crypto −3 to −5 % is run-to-run
+noise (174 487 – 181 760 kernel over the last four releases). KVM `kread_kbs` 129 284 and `kcat_kbs` 116 053 are the
+highest so far – the emulated USB stick on the host (earlier 77 000 – 117 000).
+
+---
+
 ## v0.61.0 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); DeSoFS stage 2a (format, mount, files and directories, rename). Not yet tried

@@ -1,4 +1,4 @@
-# DeSoOS v0.61.0
+# DeSoOS v0.62.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -47,11 +47,11 @@ More documentation:
 - File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`); DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/DESOFS-FORMAT.md`); volumes can be formatted, checked and mounted with files and directories (kernel shell
-  `desofs`), the power-loss tests come next.
+  `desofs`), and every operation is tested against power loss at each write.
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (32 suites, 256 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (32 suites, 260 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -144,7 +144,7 @@ Disks attached by `run-qemu.sh`:
 tests/test.sh                # build --selftest + run tests in headless QEMU
 tests/test.sh --no-build     # run only (after your own ./build.sh --selftest)
 tests/test.sh --verbose      # show the whole log live
-TIMEOUT=300 tests/test.sh    # change the timeout (default 180 s)
+TIMEOUT=300 tests/test.sh    # change the timeout (default 240 s)
 ACCEL=kvm tests/test.sh      # with KVM; SMP=N also works (default 4)
 LOOP=nobkl:400 tests/test.sh # loop mode: one suite 400 times, stops at the first failure
 ```
