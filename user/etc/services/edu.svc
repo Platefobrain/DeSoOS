@@ -1,0 +1,5 @@
+# The edu test device driver (QEMU's educational PCI device) as a service.
+name     edu
+program  /bin/edud
+device   pci 00:06.0
+files    none

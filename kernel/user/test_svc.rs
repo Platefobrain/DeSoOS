@@ -126,20 +126,25 @@ pub fn self_test() {
     // them after a crash / kill, connects clients by name, `services` via the shell,
     // 5 crashes -> broken; after the test init shuts the services down and exits with
     // svctest's code.  Then: edu is free, vectors and frames are back.
+    // Services come from /etc/services manifests: a broken one (an unknown grant) is
+    // refused with its line, the others start.
+    check!(crate::fs::write_file("/etc/services/zz-bad.svc", b"name bad\nprogram /bin/echod\ngrant root\nfiles none\n").is_ok(), "write a bad manifest");
     let free0 = crate::selftest::settled_free_frames();
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let r = run_ex("/bin/init", &["init", "test", "/bin/svctest"], 60_000, true, true);
+    let _ = crate::fs::remove("/etc/services/zz-bad.svc");
     check!(r.is_some(), "init test /bin/svctest did not finish");
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("svctest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "svctest via init: {:?} {:?}", kind, out.trim());
     check!(out.contains("init: service edu started") && out.contains("init: service echo started"), "init did not report service start: {:?}", out.trim());
+    check!(out.contains("zz-bad.svc: bad manifest (line 3: unknown grant") && !out.contains("service bad started"), "a manifest with an unknown grant must be refused: {:?}", out.trim());
     check!(pci::owner(edu.unwrap()) == pci::OWNER_FREE, "edu still claimed after init stopped its services");
     check!(d.command() & pci::CMD_BUS_MASTER == 0, "edu bus mastering still on after init stopped edud");
     check!(crate::arch::x86_64::msi::free_count() == vectors0, "MSI vectors leaked by init services");
     let free1 = crate::selftest::settled_free_frames();
     check!(free1 >= free0, "frames leaked by init services ({} -> {})", free0, free1);
-    serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL: {} PASS", line);
+    serial_println!("[SVC TEST] 6/7 service manager in init: edud + echod started by init, restart with backoff after crash / kill, connect by name, 'services' via sh, broken after 5 failures, services stopped cleanly, sysinfo / SYSCTL, services from manifests (files none = no file access, a bad manifest refused): {} PASS", line);
 
     // 7. Measurement – the same work in the kernel and in user space on edu:
     // interrupt -> driver woken up, factorial completed by an interrupt; in user

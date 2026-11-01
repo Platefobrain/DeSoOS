@@ -682,10 +682,26 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
 
 ### Service manager in init
 
-- Init has a service table (`SERVICES` in init's code), e.g. `edu` → `/bin/edud` with device 00:06.0, `echo` →
-  `/bin/echod` without a device, `usbN` → `/bin/usbd` for each xHCI controller found with `dev_find` (class
-  0C0330, at most 4). For each: `dev_claim` from `HW_ROOT` → `spawn_ex` (slot 1 console, 3 device, 4 connection
-  channel; usbd also gets 4 `INPUT` and 5 `BLK`). No device (`ERROR_NO_DEVICE`) → state "no device", no attempts.
+- **Manifests:** init reads `/etc/services/*.svc` once at its start (built into the kernel image from
+  `user/etc/services/`, written to ramfs at boot – a file changed later has no effect: init does not read it again, and every boot writes the files anew from the image). A manifest says
+  exactly what a service gets – nothing is given by program name any more:
+
+  ```
+  name       usb                  # usb0, usb1… with `instances`
+  title      xHCI USB controller  # messages only
+  program    /bin/usbd
+  device     class 0c0330         # every device of the class (dev_find); or `device pci 00:06.0`; or none
+  instances  4
+  grant      input                # INPUT handle, slot 5
+  grant      blk                  # BLK handle, slot 6
+  files      none                 # SPAWN_NO_FILES – no path calls at all; or `all`
+  ```
+
+  Shipped: `edu` (pci 00:06.0), `echo` (no device), `usb` (class 0C0330, input + blk), `net` (class 020000) – all
+  with `files none`. An unknown key or grant, or a missing name / program / files line → "bad manifest (line N:
+  …)", the service is not started, the others are. For each instance: `dev_claim` from `HW_ROOT` → `spawn_ex`
+  (slot 1 console, 3 device, 4 connection channel, plus its grants). No device (`ERROR_NO_DEVICE`) → state "no
+  device", no attempts.
 - **Restart:** after the process ends, a 100 ms delay, doubled up to 5 s (back to 100 ms after 10 s of stable
   running); 5 failures within 30 s → "broken", no more restarts. `ERROR_BUSY` at start (the old instance is still
   being cleaned up) → retry in 100 ms.

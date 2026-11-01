@@ -1,0 +1,4 @@
+# The simplest service: answers every message with the same message (tests, template).
+name     echo
+program  /bin/echod
+files    none

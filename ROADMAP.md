@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-11-01 – **v0.57.3.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3). 30/30 suites (238 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-11-01 – **v0.58.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3), service manifests – every service gets exactly what its manifest grants, drivers without file access (v0.58.0). 30/30 suites (238 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -9,7 +9,7 @@ Phase 2  Userland         M16–M16b  ✅  init + shell in user space, boot on a
 Phase 3  Scaling          M17–M17b  ✅  multiple cores ✅, fine-grained locks ✅ (M17a), file objects and process memory ✅ (M17b)
 Phase 4  Hybrid           M18–M20   ✅  IPC ✅, user-space services ✅, USB ✅
 Phase 5  Network + DCP    N, DCP    ✅  network service netd ✅, capabilities and the rights table ✅
-Phase 6  Stable base      next          no known hangs ✅ (v0.52.1), DCP finished (kill ✅, directories ✅, manifests), TLS
+Phase 6  Stable base      next          no known hangs ✅ (v0.52.1), DCP finished (kill ✅, directories ✅, manifests ✅), TLS
 ```
 
 Order matters: SMP before IPC (IPC is written once, with spinlocks from the start),
@@ -727,7 +727,10 @@ DeSoOS's own model instead of Linux users/`rwx` or Windows ACLs: a process may d
       `statat`, `mkdirat`, `unlinkat` relative to it, never above it; rows in the rights table (`openat` needs `READ`
       / `WRITE` by its flags). Shell `nofiles --dir` / `--dir-ro`; the library retries refused relative path calls
       inside the directory. FILE TEST 8/8 (`/bin/dirtest`, 42 checks) and 3/8. Limit: the handle holds a path.
-- [ ] **9.** A manifest for init (what each service gets) – later the `.eso` manifest.
+- [x] **9.** (v0.58.0) Service manifests: init reads `/etc/services/*.svc` (name, program, device class / pci,
+      instances, grants input / blk, files none / all) – nothing given by program name; all shipped services run
+      without file access; a bad manifest is refused with its line. SVC TEST 6/7. Later: the `.eso` manifest,
+      `/etc` write-protected (DeSoFS), starting a program from a handle.
 
 ### Clock gaps (v0.35.3–v0.35.5, 2026-10-18)
 
@@ -882,7 +885,8 @@ comes back, and the stress test does not regress.
    test runs (TCG / KVM, 1–8 CPUs) as a habit, ~~a loop mode for any suite~~ ✅ (v0.56.0, `LOOP=suite:rounds`); ~~the rare
    "199 of 200 orphans" failure of NOBKL TEST~~ ✅ (v0.56.1 – a lost exit status in the kernel, found with the loop); scheduler measurements (wake-up
    latency, starvation) before any rewrite.
-2. **DCP finished:** ~~`kill` rights~~ ✅ (v0.52.0), ~~directory handles~~ ✅ (v0.53.0), a manifest for init.
+2. **DCP finished:** ~~`kill` rights~~ ✅ (v0.52.0), ~~directory handles~~ ✅ (v0.53.0), ~~a manifest for init~~ ✅
+   (v0.58.0).
 3. ~~**Release report**~~ ✅ (v0.52.2, `RELEASE.md`): one page per release – tests passed, QEMU / KVM configuration, results on the test laptop,
    known problems, performance against the previous release.
 4. **TLS** (HTTPS in `netget`) – first a decision on cryptography (no home-made crypto).

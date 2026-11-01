@@ -2,7 +2,9 @@
 // in init and as a template service.  Handles: 1 = console, 4 = connection channel.
 // Every client (a channel end from a message on the connection channel) gets
 // back what it sent; "pid" -> the service's process number (text);
-// "crash" -> the service exits with code 7 (restart test).
+// "crash" -> the service exits with code 7 (restart test); "files" -> what opening
+// /bin/sh gives ("ok" or the error name – a service started with `files none` in its
+// manifest must get ERROR_ACCESS_DENIED).
 // Exit: connection channel closed and no clients left -> code 0.
 #![no_std]
 #![no_main]
@@ -72,6 +74,16 @@ fn main(_args: Args) -> i32 {
             let r = r as usize;
             match &msg[..r] {
                 b"crash" => return 7,
+                b"files" => {
+                    let fd = open("/bin/sh", O_READ);
+                    let reply = if fd >= 0 {
+                        close(fd as u64);
+                        "ok"
+                    } else {
+                        error_name(fd)
+                    };
+                    chan_send(c, reply.as_bytes(), CHAN_NONBLOCK);
+                }
                 b"pid" => {
                     let mut out = [0u8; 24];
                     let mut n = 0;

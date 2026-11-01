@@ -1,0 +1,10 @@
+# USB host controller driver: one service per xHCI controller (usb0, usb1, ...).
+name       usb
+title      xHCI USB controller
+program    /bin/usbd
+device     class 0c0330
+instances  4
+# Keyboard and mouse events to the kernel; USB flash drives as kernel disks.
+grant      input
+grant      blk
+files      none

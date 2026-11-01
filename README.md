@@ -1,4 +1,4 @@
-# DeSoOS v0.57.3
+# DeSoOS v0.58.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -29,7 +29,8 @@ More documentation:
 - User processes in ring 3: static Rust ELF programs, syscalls, FPU/SSE state per process,
   faults that kill only the offending process, background jobs, Ctrl+C.
 - IPC: handles, channels and shared memory; drivers and services run in user space and are
-  supervised by `init`.
+  supervised by `init`, each with exactly what its manifest (`/etc/services/*.svc`) grants – the
+  drivers have no file access at all.
 - ACPI (MADT etc.), PCI enumeration.
 - Storage: virtio-blk, NVMe (read-only on real hardware), GPT partitions, block layer with
   read-only enforcement.

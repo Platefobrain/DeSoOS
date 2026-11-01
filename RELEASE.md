@@ -10,6 +10,75 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.58.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM) and on the test laptop with the drivers sandboxed.**
+
+### What is new since the last report (v0.57.3)
+
+| Version | Change |
+|---|---|
+| v0.58.0 | service manifests (`/etc/services/*.svc`): every service gets exactly what its manifest grants, nothing by program name; all shipped services (edu, echo, usb, net) run without file access; a bad manifest is refused with its line |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 30/30 suites, 238 tests PASS | 98 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 30/30 suites, 238 tests PASS | 72 s |
+
+New in SVC TEST 6/7: services started from manifests, `echo` (files none) opening a file gets
+`ERROR_ACCESS_DENIED`, a manifest with an unknown grant refused with its line number. USB TEST and NET TEST pass with
+usbd and netd sandboxed. A plain (non-test) boot in QEMU on the build server: echo, edu, net0, usb0 started, DHCP,
+USB keyboard.
+
+### Real hardware (test laptop) – v0.58.0, drivers sandboxed
+
+| What | Result |
+|---|---|
+| Services from manifests | `echo`, `net0` (Realtek RTL8168h), `usb0`–`usb2` (three xHCI controllers) running; `edu` "no device" (QEMU-only device) – as expected |
+| `dcp` | `netd` and all three `usbd` with FILES `none`; `usbd`: its controller, interrupts, DMA memory, `INPUT_SEND`, `DISK_ATTACH` – exactly its manifest |
+| USB keyboard, mouse, flash drive | work; `/usb0` mounted (FAT32, read-only) by the sandboxed usbd |
+| Network | DHCP address; `netget` 10 MiB: 7 529 KiB/s (first after boot), then **9 534 KiB/s** – as on v0.55.0 |
+
+### Known problems
+
+- `/etc` lives in ramfs and is writable by programs with file access; harmless for the manifests (init reads them
+  once, every boot writes them anew from the image), write protection with DeSoFS.
+- Otherwise as in v0.57.3.
+
+### Performance against the previous release (v0.57.3 → v0.58.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.57.3 | TCG v0.58.0 | KVM v0.57.3 | KVM v0.58.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 411 | 3 157 | 35 784 | 35 644 |
+| irq_user_ns | 10 908 | 9 087 | 65 767 | 62 972 |
+| fact_kernel_ns | 23 223 | 30 539 | 52 015 | 52 700 |
+| fact_user_ns | 85 543 | 78 339 | 87 989 | 86 994 |
+| fact_svc_ns | 207 900 | 205 128 | 102 880 | 107 584 |
+| ping_svc_ns | 122 399 | 127 795 | 21 172 | 22 408 |
+| restart_us | 4 000 | 4 800 | 1 200 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.57.3 | TCG v0.58.0 | KVM v0.57.3 | KVM v0.58.0 |
+|---|---|---|---|---|
+| start_ms | 354 | 442 | 383 | 400 |
+| enum_avg_ms | 24 | 25 | 27 | 23 |
+| read_kbs (usbd) | 91 022 | 102 400 | 69 423 | 117 028 |
+| kread_kbs (kernel) | 56 212 | 69 847 | 115 075 | 104 107 |
+| kcat_kbs (kernel, cat) | 42 923 | 58 667 | 110 559 | 96 688 |
+| hid_avg_us (keyboard) | 544 | 774 | 327 | 344 |
+
+Verdict: no regression. Init now reads four small manifests at its start; the service paths themselves are
+unchanged (the sandbox only refuses path calls the drivers never make). KVM is equal or better (usbd reads 117 028
+KiB/s – the best so far). The TCG run took 98 s (91 s before) with every suite passing – within the 84 – 98 s seen over
+the last releases; TCG `start_ms` 442 and `hid_avg_us` 774 are within their spread.
+
+---
+
 ## v0.57.3 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); real hardware as measured on v0.55.0.**

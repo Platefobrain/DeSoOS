@@ -8,9 +8,18 @@
 
 include!("../build/user/initrd.rs");
 
-/// Creates /bin and writes the programs.  Returns their count.
+/// Creates /bin and writes the programs, and /etc/services with the service manifests
+/// (init reads them once at its start).  Returns the number of programs.
 pub fn install() -> usize {
     use crate::fs;
+    for (dir, files) in [("/etc", &[][..]), ("/etc/services", ETC_SERVICES)] {
+        if fs::stat(dir).is_err() && fs::mkdir(dir).is_err() {
+            continue;
+        }
+        for (name, data) in files {
+            let _ = fs::write_file(&alloc::format!("{}/{}", dir, name), data);
+        }
+    }
     if fs::stat("/bin").is_err() && fs::mkdir("/bin").is_err() {
         return 0;
     }

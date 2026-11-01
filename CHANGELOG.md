@@ -2,6 +2,25 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.58.0 — 2026-11-01
+
+### Service manifests: every service gets exactly what its manifest grants
+- Init's services were fixed in its code, and two grants were given by program name (`if path == "/bin/usbd"` →
+  INPUT, BLK). Every service also had full file access, though none of them uses files.
+- Now init reads **`/etc/services/*.svc`** once at its start (built into the kernel image from
+  `user/etc/services/`, written to ramfs at boot). Keys: `name`, `title`, `program`, `device class <hex>` / `device
+  pci <bb:dd.f>`, `instances`, `grant input|blk`, `files none|all`. Nothing is given by program name any more.
+  Unknown key or grant, a missing name / program / files line → "bad manifest (line N: …)", not started; the other
+  services start.
+- **All shipped services run without file access** (`files none` = `SPAWN_NO_FILES`): `edu`, `echo`, `usb` (usbd:
+  device + input + blk) and `net` (netd: device only). A taken-over driver can no longer read or change files.
+- `echod` answers `"files"` with what opening `/bin/sh` gives (`ERROR_ACCESS_DENIED` under `files none`).
+- Tests: SVC TEST 6/7 – services from manifests, echo opening a file gets `ERROR_ACCESS_DENIED`, a manifest with an
+  unknown grant is refused with its line number while the others start; USB TEST and NET TEST pass with the drivers
+  sandboxed.
+- Build: `build.sh` embeds `user/etc/services/*.svc` (`ETC_SERVICES` in the generated initrd list).
+- Docs: ARCHITECTURE (service manager: manifests), README, ROADMAP (DCP 9 done).
+
 ## v0.57.3 — 2026-11-01
 
 ### Directory listings bounded by what the caller can take (found by a third code review)

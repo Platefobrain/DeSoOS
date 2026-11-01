@@ -1,0 +1,7 @@
+# Network card driver and network stack: one service per card (net0, net1).
+name       net
+title      network card
+program    /bin/netd
+device     class 020000
+instances  2
+files      none

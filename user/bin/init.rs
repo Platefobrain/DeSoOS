@@ -7,9 +7,22 @@
 //
 // Service manager (variant A – inside init; variant B, a separate /bin/svcmgr,
 // is described in ARCHITECTURE.md for later).
-//   * Service table below: name, program, PCI device (or none).  A service
-//     gets: 1 console, 3 device (dev_claim from HW_ROOT – init's slot 3),
-//     4 connection channel.
+//   * Services come from manifests, /etc/services/*.svc (read once, at init's start –
+//     a file changed later has no effect; every boot writes them anew from the image).  A manifest says exactly what
+//     a service gets; nothing else is given:
+//         name       usb                 service name (usb0, usb1… with `instances`)
+//         title      xHCI USB controller what the device is (messages only)
+//         program    /bin/usbd
+//         device     class 0c0330        every device of a PCI class (dev_find) …
+//         device     pci 00:06.0         … or one PCI device, or no line – no device
+//         instances  4                   at most this many devices of the class (default 1)
+//         grant      input               the INPUT handle (slot 5: keyboard / mouse events)
+//         grant      blk                 the BLK handle (slot 6: USB disk registration)
+//         files      none                no file access at all (SPAWN_NO_FILES) | all
+//     An unknown key or grant, a missing name / program / files line: the manifest is
+//     refused ("bad manifest") and the service is not started.
+//   * A service gets: 1 console, 3 device (dev_claim from HW_ROOT – init's slot 3),
+//     4 connection channel, and the grants of its manifest.
 //   * Restart after exit with a 100 ms delay, doubled up to 5 s (after 10 s of running –
 //     back to 100 ms); 5 failures within 30 s -> service broken (no more restarts).
 //     No device (ERROR_NO_DEVICE) -> "no device", no restarts.
@@ -20,13 +33,12 @@
 //     Unknown / non-running service – handle closed (client: ERROR_CLOSED).
 //   * Init waits on the svc channel (wait_many, 100 ms) and reaps children (WNOHANG).
 //
-// USB xHCI controllers are found by class (dev_find 0C0330), and for
-// each one a service usb0, usb1, … is added (/bin/usbd with that controller).
-// Network cards likewise (class 020000) – net0, net1 (/bin/netd); a card netd has
-// no driver for ends with exit code 78 and is not restarted ("no driver").
+// USB xHCI controllers (usb.svc: class 0C0330) give usb0, usb1, … and network cards
+// (net.svc: class 020000) net0, net1; a card netd has no driver for ends with exit
+// code 78 and is not restarted ("no driver").
 //
-// The kernel gives init an INPUT handle (slot 5) – init passes it only to usbd.
-// And a BLK handle (slot 6: USB disk registration) – also only for usbd.
+// The kernel gives init an INPUT handle (slot 5) and a BLK handle (slot 6: USB disk
+// registration) – init passes them only to services whose manifest grants them.
 //
 // The kernel gives init a SYSCTL handle (slot 4: reboot, halt, sync, stress);
 // init passes it only to the shell.
@@ -47,56 +59,224 @@ entry!(main);
 
 const SHELL: &str = "/bin/sh";
 
+/// Grants a manifest can give (bits of `Def::grants`).
+const G_INPUT: u8 = 1;
+const G_BLK: u8 = 2;
+
+/// A short text kept in place (no heap in init).
 #[derive(Clone, Copy)]
-struct Def {
-    name: &'static str,
-    path: &'static str,
-    /// PCI device (bus, dev, fn) or none.
-    dev: Option<(u64, u64, u64)>,
+struct Text<const N: usize> {
+    b: [u8; N],
+    n: u8,
 }
 
-/// Services started by init (fixed).
-const SERVICES: [Def; 2] = [
-    Def { name: "edu", path: "/bin/edud", dev: Some((0, 6, 0)) },
-    Def { name: "echo", path: "/bin/echod", dev: None },
-];
+impl<const N: usize> Text<N> {
+    const EMPTY: Self = Text { b: [0; N], n: 0 };
+    fn from(s: &str) -> Option<Self> {
+        if s.is_empty() || s.len() > N {
+            return None;
+        }
+        let mut t = Self::EMPTY;
+        t.b[..s.len()].copy_from_slice(s.as_bytes());
+        t.n = s.len() as u8;
+        Some(t)
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.b[..self.n as usize]).unwrap_or("")
+    }
+}
 
-/// Maximum number of USB controllers (services usb0..usb3).
-const USB_NAMES: [&str; 4] = ["usb0", "usb1", "usb2", "usb3"];
-/// Maximum number of network cards (services net0, net1).
-const NET_NAMES: [&str; 2] = ["net0", "net1"];
-const MAX_SERVICES: usize = SERVICES.len() + USB_NAMES.len() + NET_NAMES.len();
+/// One service instance, from a manifest.
+#[derive(Clone, Copy)]
+struct Def {
+    name: Text<16>,
+    path: Text<48>,
+    title: Text<32>,
+    /// PCI device (bus, dev, fn) or none.
+    dev: Option<(u64, u64, u64)>,
+    grants: u8,
+    /// `files all` – otherwise the service is started without file access.
+    files: bool,
+}
+
+impl Def {
+    const EMPTY: Def = Def { name: Text::EMPTY, path: Text::EMPTY, title: Text::EMPTY, dev: None, grants: 0, files: false };
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+    fn path(&self) -> &str {
+        self.path.as_str()
+    }
+}
+
+/// Where the manifests are.
+const MANIFESTS: &str = "/etc/services";
+/// At most this many service instances.
+const MAX_SERVICES: usize = 16;
 /// Exit code of a service that has no driver for its device – not restarted.
 const EXIT_NO_DRIVER: u64 = 78;
 
-/// Service table: fixed services + one usbd per xHCI controller.
+enum Device {
+    None,
+    Pci(u64, u64, u64),
+    Class(u64),
+}
+
+/// A parsed manifest.
+struct Manifest {
+    def: Def,
+    device: Device,
+    instances: u64,
+}
+
+fn hex(s: &str) -> Option<u64> {
+    u64::from_str_radix(s, 16).ok()
+}
+
+/// Parses a manifest; Err((line, what is wrong)).
+fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
+    let mut m = Manifest { def: Def::EMPTY, device: Device::None, instances: 1 };
+    let (mut has_name, mut has_files) = (false, false);
+    for (i, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let err = |what| Err((i + 1, what));
+        let (key, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(k, r)| (k, r.trim()));
+        match key {
+            "name" => match Text::from(rest) {
+                Some(t) if rest.len() <= 14 && rest.bytes().all(|c| c.is_ascii_alphanumeric()) => {
+                    m.def.name = t;
+                    has_name = true;
+                }
+                _ => return err("name: 1-14 letters or digits"),
+            },
+            "title" => m.def.title = Text::from(rest).ok_or((i + 1, "title: 1-32 characters"))?,
+            "program" => match Text::from(rest) {
+                Some(t) if rest.starts_with('/') => m.def.path = t,
+                _ => return err("program: an absolute path of at most 48 characters"),
+            },
+            "device" => {
+                m.device = match rest.split_once(char::is_whitespace).map(|(a, b)| (a, b.trim())) {
+                    Some(("class", c)) if c.len() == 6 => Device::Class(hex(c).ok_or((i + 1, "device class: 6 hex digits"))?),
+                    Some(("pci", a)) => {
+                        // bb:dd.f
+                        let p = a.split_once(':').and_then(|(b, df)| df.split_once('.').map(|(d, f)| (b, d, f)));
+                        match p.and_then(|(b, d, f)| Some((hex(b)?, hex(d)?, hex(f)?))) {
+                            Some((b, d, f)) if b < 256 && d < 32 && f < 8 => Device::Pci(b, d, f),
+                            _ => return err("device pci: bus:device.function, e.g. 00:06.0"),
+                        }
+                    }
+                    _ => return err("device: class <6 hex digits> or pci <bb:dd.f>"),
+                }
+            }
+            "instances" => match rest.parse::<u64>() {
+                Ok(n) if (1..=8).contains(&n) => m.instances = n,
+                _ => return err("instances: 1-8"),
+            },
+            "grant" => match rest {
+                "input" => m.def.grants |= G_INPUT,
+                "blk" => m.def.grants |= G_BLK,
+                _ => return err("unknown grant (known: input, blk)"),
+            },
+            "files" => match rest {
+                "none" => (m.def.files, has_files) = (false, true),
+                "all" => (m.def.files, has_files) = (true, true),
+                _ => return err("files: none or all"),
+            },
+            _ => return err("unknown key"),
+        }
+    }
+    if !has_name {
+        return Err((0, "no name"));
+    }
+    if m.def.path.n == 0 {
+        return Err((0, "no program"));
+    }
+    if !has_files {
+        return Err((0, "no files line (none or all)"));
+    }
+    if m.instances > 1 && !matches!(m.device, Device::Class(_)) {
+        return Err((0, "instances need a device class"));
+    }
+    Ok(m)
+}
+
+/// Service table from the manifests in /etc/services (in name order): one entry per
+/// service, or per device of its class.
 fn service_table(defs: &mut [Def; MAX_SERVICES]) -> usize {
+    static mut LIST: [u8; 4096] = [0; 4096];
+    let list = unsafe { &mut *core::ptr::addr_of_mut!(LIST) };
+    let len = readdir(MANIFESTS, list);
+    if len < 0 {
+        println!("init: {}: {} - no services", MANIFESTS, strerror(len));
+        return 0;
+    }
     let mut n = 0;
-    for d in SERVICES {
-        defs[n] = d;
-        n += 1;
-    }
-    for (i, name) in USB_NAMES.iter().enumerate() {
-        let bdf = dev_find(HW_ROOT, CLASS_XHCI, i as u64);
-        if bdf < 0 {
-            break;
+    let text = core::str::from_utf8(&list[..len as usize]).unwrap_or("");
+    for line in text.lines() {
+        let file = line.rsplit('\t').next().unwrap_or("");
+        if !line.starts_with('f') || !file.ends_with(".svc") {
+            continue;
         }
-        let b = bdf as u64;
-        let dev = (b >> 8, (b >> 3) & 31, b & 7);
-        println!("init: {} = xHCI USB controller {:02x}:{:02x}.{}", name, dev.0, dev.1, dev.2);
-        defs[n] = Def { name, path: "/bin/usbd", dev: Some(dev) };
-        n += 1;
-    }
-    for (i, name) in NET_NAMES.iter().enumerate() {
-        let bdf = dev_find(HW_ROOT, CLASS_ETHERNET, i as u64);
-        if bdf < 0 {
-            break;
+        let mut path = [0u8; 80];
+        let p = {
+            let mut o = Out2::new(&mut path);
+            let _ = core::fmt::write(&mut o, format_args!("{}/{}", MANIFESTS, file));
+            o.len
+        };
+        let path = core::str::from_utf8(&path[..p]).unwrap_or("");
+        let mut buf = [0u8; 2048];
+        let fd = open(path, O_READ);
+        let r = if fd >= 0 { read(fd as u64, &mut buf) } else { fd };
+        if fd >= 0 {
+            close(fd as u64);
         }
-        let b = bdf as u64;
-        let dev = (b >> 8, (b >> 3) & 31, b & 7);
-        println!("init: {} = network card {:02x}:{:02x}.{}", name, dev.0, dev.1, dev.2);
-        defs[n] = Def { name, path: "/bin/netd", dev: Some(dev) };
-        n += 1;
+        if r < 0 || r as usize == buf.len() {
+            println!("init: {}: cannot read ({}) - not started", path, if r < 0 { strerror(r) } else { "too long" });
+            continue;
+        }
+        let m = match parse_manifest(core::str::from_utf8(&buf[..r as usize]).unwrap_or("")) {
+            Ok(m) => m,
+            Err((line, what)) => {
+                println!("init: {}: bad manifest (line {}: {}) - not started", path, line, what);
+                continue;
+            }
+        };
+        match m.device {
+            Device::None | Device::Pci(..) if n < MAX_SERVICES => {
+                defs[n] = m.def;
+                if let Device::Pci(b, d, f) = m.device {
+                    defs[n].dev = Some((b, d, f));
+                }
+                n += 1;
+            }
+            Device::Class(class) => {
+                for i in 0..m.instances {
+                    let bdf = dev_find(HW_ROOT, class, i);
+                    if bdf < 0 || n == MAX_SERVICES {
+                        break;
+                    }
+                    let b = bdf as u64;
+                    let dev = (b >> 8, (b >> 3) & 31, b & 7);
+                    let mut d = m.def;
+                    let mut nm = [0u8; 16];
+                    let k = {
+                        let mut o = Out2::new(&mut nm);
+                        let _ = core::fmt::write(&mut o, format_args!("{}{}", m.def.name(), i));
+                        o.len
+                    };
+                    d.name = Text::from(core::str::from_utf8(&nm[..k]).unwrap_or("")).unwrap_or(m.def.name);
+                    d.dev = Some(dev);
+                    let title = if d.title.n > 0 { d.title.as_str() } else { "device" };
+                    println!("init: {} = {} {:02x}:{:02x}.{}", d.name(), title, dev.0, dev.1, dev.2);
+                    defs[n] = d;
+                    n += 1;
+                }
+            }
+            _ => println!("init: {}: more than {} services - not started", path, MAX_SERVICES),
+        }
     }
     n
 }
@@ -140,7 +320,7 @@ fn start_service(d: &Def, s: &mut Svc) {
         let h = dev_claim(HW_ROOT, bdf(b, dv, f));
         if h == ERROR_NO_DEVICE {
             s.state = State::NoDevice;
-            println!("init: service {}: no device {:02x}:{:02x}.{} - not started", d.name, b, dv, f);
+            println!("init: service {}: no device {:02x}:{:02x}.{} - not started", d.name(), b, dv, f);
             return;
         }
         if h < 0 {
@@ -161,25 +341,27 @@ fn start_service(d: &Def, s: &mut Svc) {
         map[n] = (dev, 3);
         n += 1;
     }
-    // usbd gets a copy of the INPUT handle (slot 5) – keyboard /
-    // mouse events to the kernel.  Each copy is a separate source (usbd exiting releases keys).
-    if d.path == "/bin/usbd" && handle_info(INPUT).map(|(k, _)| k) == Ok(KIND_INPUT) {
+    // `grant input`: a copy of the INPUT handle (slot 5) – keyboard / mouse events to the
+    // kernel.  Each copy is a separate source (the service exiting releases its keys).
+    if d.grants & G_INPUT != 0 && handle_info(INPUT).map(|(k, _)| k) == Ok(KIND_INPUT) {
         map[n] = (INPUT, 5);
         n += 1;
     }
-    // And a copy of the BLK handle (slot 6) – USB flash drives as kernel disks.
-    if d.path == "/bin/usbd" && handle_info(BLK).map(|(k, _)| k) == Ok(KIND_BLK) {
+    // `grant blk`: a copy of the BLK handle (slot 6) – USB flash drives as kernel disks.
+    if d.grants & G_BLK != 0 && handle_info(BLK).map(|(k, _)| k) == Ok(KIND_BLK) {
         map[n] = (BLK, 6);
         n += 1;
     }
-    let pid = spawn_ex(d.path, &[d.name], &map[..n], 0);
+    // `files none`: no file access at all – only the handles above.
+    let flags = if d.files { 0 } else { SPAWN_NO_FILES };
+    let pid = spawn_ex(d.path(), &[d.name()], &map[..n], flags);
     if dev != 0 {
         close(dev);
     }
     close(listen_srv);
     if pid <= 0 {
         close(listen);
-        println!("init: service {}: cannot start {}: {}", d.name, d.path, strerror(pid));
+        println!("init: service {}: cannot start {}: {}", d.name(), d.path(), strerror(pid));
         s.state = State::Broken;
         return;
     }
@@ -188,12 +370,12 @@ fn start_service(d: &Def, s: &mut Svc) {
     s.state = State::Running;
     s.started_at = uptime_ms();
     if s.restarts == 0 {
-        println!("init: service {} started (pid {})", d.name, pid);
+        println!("init: service {} started (pid {})", d.name(), pid);
     } else {
-        println!("init: service {} restarted (pid {}, restart {})", d.name, pid, s.restarts);
-        if d.path == "/bin/usbd" {
+        println!("init: service {} restarted (pid {}, restart {})", d.name(), pid, s.restarts);
+        if d.grants & G_INPUT != 0 {
             // What the user sees – the USB keyboard will come back after enumeration.
-            println!("init: {}: USB keyboard and disks back in a moment", d.name);
+            println!("init: {}: USB keyboard and disks back in a moment", d.name());
         }
     }
 }
@@ -210,7 +392,7 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     }
     if status == EXIT_NO_DRIVER {
         s.state = State::NoDriver;
-        println!("init: service {}: no driver for this device - not restarting", d.name);
+        println!("init: service {}: no driver for this device - not restarting", d.name());
         return;
     }
     let now = uptime_ms();
@@ -232,14 +414,14 @@ fn service_ended(d: &Def, s: &mut Svc, status: u64) {
     }
     if s.nfails >= FAIL_LIMIT {
         s.state = State::Broken;
-        println!("init: service {} {} - {} failures in 30 s, not restarting", d.name, describe_status(status), FAIL_LIMIT);
-        if d.path == "/bin/usbd" {
+        println!("init: service {} {} - {} failures in 30 s, not restarting", d.name(), describe_status(status), FAIL_LIMIT);
+        if d.grants & G_INPUT != 0 {
             // A clear message – without it a laptop without PS/2 "just" loses its keyboard.
-            println!("init: USB controller {} disabled after {} failures - its USB keyboard and disks are unavailable until reboot (PS/2 still works)", d.name, FAIL_LIMIT);
+            println!("init: USB controller {} disabled after {} failures - its USB keyboard and disks are unavailable until reboot (PS/2 still works)", d.name(), FAIL_LIMIT);
         }
         return;
     }
-    println!("init: service {} {} - restart in {} ms", d.name, describe_status(status), s.delay);
+    println!("init: service {} {} - restart in {} ms", d.name(), describe_status(status), s.delay);
     s.state = State::Waiting;
     s.next_start = now + s.delay;
     s.delay = (s.delay * 2).min(5000);
@@ -332,7 +514,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
         let h = hs[0];
         let text = core::str::from_utf8(&msg[..r as usize]).unwrap_or("");
         if let Some(name) = text.strip_prefix("connect ") {
-            let found = defs.iter().position(|d| d.name == name);
+            let found = defs.iter().position(|d| d.name() == name);
             let net = name.starts_with("net");
             let allowed = grants & if net { G_NET } else { G_OTHER } != 0;
             match found {
@@ -386,7 +568,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
             }
             close(h);
         } else if let Some(name) = text.strip_prefix("kill ") {
-            let reply = match defs.iter().position(|d| d.name == name.trim()) {
+            let reply = match defs.iter().position(|d| d.name() == name.trim()) {
                 _ if grants & G_SVCADMIN == 0 => Reply::Denied,
                 None => Reply::Unknown,
                 Some(i) if svcs[i].pid == 0 || svcs[i].state != State::Running => Reply::NotRunning,
@@ -412,7 +594,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
                 let mut line = Out2::new(&mut out[n..]);
                 let _ = core::fmt::write(
                     &mut line,
-                    format_args!("{} {} pid {} restarts {} ({})\n", d.name, state_name(s.state), s.pid, s.restarts, d.path),
+                    format_args!("{} {} pid {} restarts {} ({})\n", d.name(), state_name(s.state), s.pid, s.restarts, d.path()),
                 );
                 n += line.len;
             }
@@ -497,7 +679,7 @@ fn main(args: Args) -> i32 {
     let prog_client = if psvc_any != 0 { handle_dup(psvc_any, R_SEND | R_DUP) as u64 } else { 0 };
     close(psvc_any);
 
-    let mut table = [SERVICES[0]; MAX_SERVICES];
+    let mut table = [Def::EMPTY; MAX_SERVICES];
     let nsvc = service_table(&mut table);
     let defs = &table[..nsvc];
     let mut svcs_all = [const { Svc::new() }; MAX_SERVICES];

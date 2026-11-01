@@ -158,6 +158,10 @@ fn main(_args: Args) -> i32 {
     let r = echo(c, b"pid", &mut out);
     let pid_txt = r.map(|l| core::str::from_utf8(&out[..l]).unwrap_or("").parse::<u64>().unwrap_or(0));
     check!(n, pid_txt == Ok(echo_pid), "echo pid {:?} vs list {}", pid_txt, echo_pid);
+    // The manifest says `files none`: the service has no file access at all.
+    let r = echo(c, b"files", &mut out);
+    let txt = r.map(|l| core::str::from_utf8(&out[..l]).unwrap_or(""));
+    check!(n, txt == Ok("ERROR_ACCESS_DENIED"), "echo (files none in its manifest) opening /bin/sh: {:?}", txt);
 
     // 4. Service crash: the client gets ERROR_CLOSED, init restarts it (new pid, restarts+1).
     check!(n, chan_send(c, b"crash", 0) == 0, "send crash");

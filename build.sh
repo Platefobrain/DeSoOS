@@ -98,6 +98,14 @@ for src in user/bin/*.rs; do
   echo "user/bin/$name.rs -> build/user/$name ($(stat -c %s "build/user/$name") B)"
 done
 echo "];" >> "$INITRD"
+# Service manifests (user/etc/services/*.svc) -> /etc/services at boot: what init
+# gives each service (device, grants, file access).
+echo "pub static ETC_SERVICES: &[(&str, &[u8])] = &[" >> "$INITRD"
+for svc in user/etc/services/*.svc; do
+  [ -e "$svc" ] || continue
+  echo "    (\"$(basename "$svc")\", include_bytes!(\"$ROOT/$svc\"))," >> "$INITRD"
+done
+echo "];" >> "$INITRD"
 mv "$INITRD" build/user/initrd.rs
 
 rustc \
