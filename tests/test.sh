@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights crypto
+#                              suites: smp lock tlb alloc nobkl files ipc rights crypto desofs
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
 #             3 = QEMU exited otherwise (e.g. triple fault / reboot).

@@ -10,6 +10,71 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.60.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); DeSoFS stage 1 (read-only check of a volume). Not yet tried on the test laptop.**
+
+### What is new since the last report (v0.59.1)
+
+| Version | Change |
+|---|---|
+| v0.60.0 | DeSoFS format 1 closed (`docs/DESOFS-FORMAT.md`, errata E1–E3); `kernel/fs/desofs/` – read-only check of a volume (both superblocks, every metadata block and node, mount decision); `desofs info <disk>` in the kernel shell; `tests/mkdesofs.py` – reference image from an independent implementation; new suite DESOFS TEST |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 32/32 suites, 249 tests PASS | 91 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 32/32 suites, 249 tests PASS | 73 s |
+
+New DESOFS TEST (7 tests, 93 cases): the reference image built by `tests/mkdesofs.py` accepted (two superblocks,
+a snapshot, a shared pointer block, used blocks counted once); superblock rules, pointers and headers, tree structure,
+nodes and root entries, damage in one / both trees, shared metadata re-read with a wrong birth / checksum / kind,
+directory blocks – most cases resealed so the rule itself must catch them. On the build server also
+`LOOP=desofs:5` 5/5, and the suite fails when any of three rules is removed from the code. All DeSoFS images live in
+RAM disks; nothing is written to any disk.
+
+### Known problems
+
+- DeSoFS is stage 1 only: volumes are checked, not mounted; no writing, no files (stage 2).
+- Otherwise as in v0.59.1.
+
+### Performance against the previous release (v0.59.1 → v0.60.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.59.1 | TCG v0.60.0 | KVM v0.59.1 | KVM v0.60.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 238 | 2 764 | 33 653 | 35 517 |
+| irq_user_ns | 6 148 | 11 758 | 41 169 | 64 829 |
+| fact_kernel_ns | 31 525 | 25 461 | 57 736 | 52 798 |
+| fact_user_ns | 77 041 | 70 997 | 144 404 | 94 517 |
+| fact_svc_ns | 205 549 | 193 610 | 105 318 | 104 329 |
+| ping_svc_ns | 119 760 | 118 273 | 18 850 | 22 182 |
+| restart_us | 3 700 | 6 700 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.59.1 | TCG v0.60.0 | KVM v0.59.1 | KVM v0.60.0 |
+|---|---|---|---|---|
+| start_ms | 410 | 414 | 365 | 380 |
+| enum_avg_ms | 29 | 26 | 25 | 25 |
+| read_kbs (usbd) | 66 064 | 89 043 | 93 090 | 85 333 |
+| kread_kbs (kernel) | 64 341 | 64 198 | 85 559 | 73 602 |
+| kcat_kbs (kernel, cat) | 45 807 | 50 678 | 96 542 | 69 779 |
+| hid_avg_us (keyboard) | 592 | 695 | 232 | 172 |
+
+`[RESULT-RIGHTS]` gate_ns: TCG 26 → 79, KVM 4 → 5. `[RESULT-CRYPTO]` (KiB/s): TCG 47 921 / 51 200 / 50 880 →
+45 320 / 48 000 / 50 880; KVM 174 487 / 197 120 / 208 320 → 179 200 / 215 360 / 214 400.
+
+Verdict: no regression. Nothing on these paths changed – DeSoFS runs only in its test and the `desofs` command. KVM
+`fact_user_ns` / `irq_user_ns` are back in their usual state (94 517 / 64 829 after the `edu` two-state run of v0.59.1).
+TCG `gate_ns` 79 is one sample of a ~1 µs measurement on an emulated CPU (24–59 over recent releases; KVM unchanged at
+5); TCG `restart_us` 6 700 and KVM `kcat_kbs` 69 779 are within their known run-to-run spread (v0.54.0 TCG restart 6 200;
+KVM kcat 84 389 – 110 559, the emulated USB stick).
+
+---
+
 ## v0.59.1 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); fixes only (DeSoCrypto 0.1.1).**

@@ -298,6 +298,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
     Command { name: "mkfs", usage: "mkfs <disk> [yes]", help: "format a disk as FAT32 (erases it!)", run: cmd_mkfs },
+    Command { name: "desofs", usage: "desofs info <disk>", help: "DeSoFS: check a volume (read-only)", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1476,6 +1477,46 @@ fn cmd_df(_: &str, out: &mut dyn Write, _: &mut Context) {
                 human_size(st.total_bytes - st.free_bytes),
                 human_size(st.free_bytes)
             );
+        }
+    }
+}
+
+/// `desofs info <disk>` – reads a DeSoFS volume and says what a mount would be
+/// allowed to do.  Only reads; `format`, `check` and `repair` come with later stages.
+fn cmd_desofs(args: &str, out: &mut dyn Write, _ctx: &mut Context) {
+    let mut parts = args.split_whitespace();
+    let sub = parts.next().unwrap_or("");
+    let disk = parts.next().and_then(|s| s.parse::<usize>().ok());
+    match (sub, disk) {
+        ("info", Some(disk)) => {
+            let r = crate::fs::desofs::probe(disk);
+            use crate::fs::desofs::State;
+            match &r.state {
+                State::Refused(why) => {
+                    let _ = writeln!(out, "disk {}: not mountable as DeSoFS: {}", disk, why);
+                    return;
+                }
+                State::ReadWrite => {
+                    let _ = writeln!(out, "disk {}: DeSoFS, read-write", disk);
+                }
+                State::ReadOnly(why) => {
+                    let _ = writeln!(out, "disk {}: DeSoFS, read-only: {}", disk, why);
+                }
+            }
+            let u = &r.uuid;
+            let _ = writeln!(out, "  label {:?}, uuid {:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-..., {} blocks ({} KiB)", r.label, u[0], u[1], u[2], u[3], u[4], u[5], r.total_blocks, r.total_blocks * 4);
+            let slot = |s: u8| if s == 1 { "A" } else { "B" };
+            let _ = writeln!(out, "  superblock {} generation {}, next commit to {}", slot(r.slot), r.generation, slot(r.next_slot));
+            let _ = writeln!(out, "  {} nodes, {} snapshots, {} blocks used (counted {:?}), maps {} B", r.nodes, r.snapshots, r.used_stored, r.used_counted, r.map_bytes);
+            for w in &r.warnings {
+                let _ = writeln!(out, "  warning: {}", w);
+            }
+        }
+        ("format" | "check" | "repair", _) => {
+            let _ = writeln!(out, "desofs {}: not yet (format/check/repair come with later DeSoFS stages)", sub);
+        }
+        _ => {
+            let _ = writeln!(out, "usage: desofs info <disk>   (disk numbers: 'disk')");
         }
     }
 }

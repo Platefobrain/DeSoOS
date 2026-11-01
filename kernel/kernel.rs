@@ -221,6 +221,9 @@ pub extern "sysv64" fn kernel_main(
     // DeSoCrypto – SHA-256, HMAC, HKDF in the kernel and in user space.
     #[cfg(selftest)]
     selftest::suite("crypto", user::crypto_self_test);
+    // DeSoFS – read-only check of a volume (format 1, stage 1).
+    #[cfg(selftest)]
+    selftest::suite("desofs", fs::desofs::test::self_test);
     // User-space services.
     #[cfg(selftest)]
     if !selftest::looping() {

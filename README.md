@@ -1,4 +1,4 @@
-# DeSoOS v0.59.1
+# DeSoOS v0.60.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -44,11 +44,13 @@ More documentation:
   administration only for `netconfig`.
 - Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
   HMAC-SHA256, HKDF-SHA256 (no heap, no syscalls); tool `sha256sum`.
-- File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`).
+- File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`); DeSoFS, DeSoOS's own
+  copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
+  (`docs/DESOFS-FORMAT.md`) and volumes can be checked read-only (`desofs info`), files come next.
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (31 suites, 242 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (32 suites, 249 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -331,7 +333,8 @@ Line editing and console:
   mounted at `/disk` immediately). Until then `/disk` does not exist. `df` then shows two lines
   (`/` and `/disk`).
 - Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, plus kernel
-  commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`.
+  commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`, `desofs info <disk>` (read-only check of a
+  DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write).
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
 - Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.
@@ -367,7 +370,8 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
 - `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel) and DeSoCrypto
   (`common/desocrypto/`, kernel and programs).
-- `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `qemu-hotplug.py`.
+- `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
+- `docs/` - specifications (`DESOFS-FORMAT.md` – the DeSoFS on-disk format).
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
 - `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.
 - `build/` - build output; `logs/` - test and build logs.

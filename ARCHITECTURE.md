@@ -1341,6 +1341,35 @@ needed):
 - netd never writes to disk; it only sends packets the user asked for (plus DHCP, ARP and TCP control packets).
   Nothing listens unless a program asked for `listen` (and has the right).
 
+## DeSoFS (`kernel/fs/desofs/`)
+
+DeSoOS's own file system, format 1 – the full specification is `docs/DESOFS-FORMAT.md` (closed; changes only as
+numbered errata until stage 4). In short: copy-on-write, two superblocks written alternately (the next commit goes to
+the one with the older generation), every pointer carries the SHA-256 of the block it points to (a Merkle tree), fixed
+fan-out trees of 84 pointers, 256-byte nodes with permanent numbers, directories as blocks of entries like ext2. There
+is no journal and no allocation structure on disk: free space is what no tree reaches.
+
+Stage 1 (v0.60.0) is read-only: `desofs::probe(disk)` (`mod.rs`, structures in `layout.rs`)
+- reads both superblocks and applies the selection rules (uuid, size, generation, tie, features);
+- walks everything reachable from the newer superblock first (its live root first – complete duplicate check), then
+  from the older one, with a one-byte-per-block map (free / reserved / DATA / METADATA kind+level) and a one-bit map
+  per root; a metadata block met again from another root is re-read and checked with the new pointer (checksum,
+  birth, kind, level) and its subtree skipped; data blocks are only marked;
+- checks every header (kind, level, count, generation = birth, own address, uuid, zero padding), every pointer
+  (range, reserved blocks, the one empty form, 1 ≤ birth ≤ generation), every node (format-1 field values, the
+  smallest depth for the size, pointers past the size empty, no directory holes), every root entry and the node
+  numbers against `next_node`;
+- decides: read-write (both trees known), read-only (one tree damaged, or an unknown ro_compat feature) or refused –
+  never writes and never panics on a hostile image; the maps are allocated fallibly in 64 KiB pieces.
+Directory blocks are checked by `layout::check_dir_block` (used from stage 2 when directories are read). SHA-256
+comes from DeSoCrypto – its first use in the kernel. Kernel shell: `desofs info <disk>`.
+
+Testing: `tests/mkdesofs.py` is an independent implementation of the format (written from the specification) and
+builds the reference image – two superblocks (generations 4 and 5), a snapshot, a file with a hole, a subdirectory, a
+DSPT shared between the trees; `build.sh --selftest` embeds it. DESOFS TEST checks that the kernel accepts exactly
+that image, then runs 93 cases, nearly all copies broken in a way the specification forbids – most "resealed" (all checksums above the change
+recomputed), so the rule itself must catch it. Every image lives in a RAM disk; nothing touches a real disk.
+
 ## Cryptography – DeSoCrypto (`common/desocrypto/`)
 
 DeSoOS's own cryptographic library, written for DeSoOS only (no Cargo crate, no outside code). It is a library,
@@ -1404,10 +1433,10 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 31 self-test suites (242 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 32 self-test suites (249 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
-  files, IPC, the rights table, cryptography, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
+  files, IPC, the rights table, cryptography, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test

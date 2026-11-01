@@ -12,6 +12,7 @@
 // The API here is path-based (no file descriptors) – the open file
 // table belongs to processes and syscalls.
 
+pub mod desofs;
 pub mod fat32;
 pub mod ramfs;
 

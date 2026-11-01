@@ -2,6 +2,32 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.60.0 — 2026-11-01
+
+### DeSoFS stage 1 – format 1 closed, read-only check of a volume
+- **Format 1 specification:** `docs/DESOFS-FORMAT.md` – closed after seven review rounds (design version 8, errata
+  E1–E3): copy-on-write, two superblocks, SHA-256 of every block in its parent's pointer, free space derived from the
+  trees at mount, commit after every operation, snapshots specified for later. The binary layout does not change in
+  stages 1–4; problems found while implementing go to numbered errata.
+- **New: `kernel/fs/desofs/`** – `layout.rs` (on-disk structures and their checks: superblock, pointer, header,
+  node, root entry, directory block) and `mod.rs` (`probe(disk)`): reads both superblocks, walks every tree reachable
+  from them and decides read-write / read-only / refused. One-byte-per-block map with the role of every block (free,
+  reserved, data, metadata kind and level), one bit per block for the root being walked, shared metadata re-read and
+  checked with the new pointer (errata E1). Read only – no allocator, no writing, no files yet. Maps allocated
+  fallibly; a hostile image is refused, never a panic.
+- **Kernel shell: `desofs info <disk>`** – superblock, generation, next commit slot, nodes, snapshots, used blocks
+  (stored and counted), the mount decision. `format`, `check` and `repair` answer "not yet".
+- **New: `tests/mkdesofs.py`** – an independent Python implementation of the format that builds the reference image
+  (two superblocks, a snapshot, a file with a hole, a subdirectory, a shared pointer block); `build.sh --selftest`
+  runs it and embeds the image (python3 now needed for the self-test build).
+- Tests: **DESOFS TEST** (new suite, 7 tests, 93 cases; also `LOOP=desofs:N`) – the reference image accepted
+  byte for byte; superblock rules (17), pointers and headers (15), tree structure incl. data/metadata conflicts in both
+  orders and loops (8), nodes and root entries (31), two superblocks incl. shared metadata re-read with a wrong birth,
+  checksum or kind (7), directory blocks (15). Checked that the suite catches three deliberately removed rules.
+  32 suites, 249 tests.
+- Docs: `docs/DESOFS-FORMAT.md` (new), ARCHITECTURE (new section DeSoFS), ROADMAP (Next 5 with the stages, Known
+  gaps), README.
+
 ## v0.59.1 — 2026-11-01
 
 ### DeSoCrypto 0.1.1 – two fixes from a code review

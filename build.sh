@@ -112,6 +112,17 @@ for svc in user/etc/services/*.svc; do
   echo "    (\"$(basename "$svc")\", include_bytes!(\"$ROOT/$svc\"))," >> "$INITRD"
 done
 echo "];" >> "$INITRD"
+# DeSoFS reference image (tests/mkdesofs.py – an independent implementation of the
+# format) for DESOFS TEST; only in the self-test build.
+if [ "$MODE" = "selftest" ]; then
+  command -v python3 >/dev/null 2>&1 || { echo "python3 not found (needed for the self-test build: tests/mkdesofs.py)."; exit 1; }
+  python3 tests/mkdesofs.py build/user/desofs-ref.img
+  echo "#[allow(dead_code)]" >> "$INITRD"
+  echo "pub static DESOFS_REF: &[u8] = include_bytes!(\"$ROOT/build/user/desofs-ref.img\");" >> "$INITRD"
+else
+  echo "#[allow(dead_code)]" >> "$INITRD"
+  echo "pub static DESOFS_REF: &[u8] = &[];" >> "$INITRD"
+fi
 mv "$INITRD" build/user/initrd.rs
 
 rustc \
