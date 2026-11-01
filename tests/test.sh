@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights
+#                              suites: smp lock tlb alloc nobkl files ipc rights crypto
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
 #             3 = QEMU exited otherwise (e.g. triple fault / reboot).
@@ -163,6 +163,8 @@ grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-USB\]" "$LOG" | tail -n1 || true
 # The syscall rights table – the [RESULT-RIGHTS] line from RIGHTS TEST.
 grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
+# DeSoCrypto – the [RESULT-CRYPTO] line from CRYPTO TEST.
+grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # Loop mode – rounds passed and round times.
 grep -a "^\[RESULT-LOOP\]" "$LOG" | tail -n1 || true
 grep -a "^\[LOOP\] .*FAILED" "$LOG" | tail -n1 || true

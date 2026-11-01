@@ -66,6 +66,9 @@ mod test_ipc;
 // The syscall rights table.
 #[cfg(selftest)]
 mod test_rights;
+// DeSoCrypto (common/desocrypto) in the kernel and in user space.
+#[cfg(selftest)]
+mod test_crypto;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -747,6 +750,8 @@ pub use test_files::self_test as files_self_test;
 pub use test_ipc::self_test as ipc_self_test;
 #[cfg(selftest)]
 pub use test_rights::self_test as rights_self_test;
+#[cfg(selftest)]
+pub use test_crypto::self_test as crypto_self_test;
 #[cfg(selftest)]
 pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]

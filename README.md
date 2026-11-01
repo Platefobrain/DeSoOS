@@ -1,4 +1,4 @@
-# DeSoOS v0.58.1
+# DeSoOS v0.59.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -42,11 +42,13 @@ More documentation:
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
+- Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
+  HMAC-SHA256, HKDF-SHA256 (no heap, no syscalls); tool `sha256sum`.
 - File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`).
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (30 suites, 238 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (31 suites, 242 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -328,7 +330,7 @@ Line editing and console:
 - A new `disk.img` is empty: format it once in DeSoOS with `mkfs 0`, then `mkfs 0 yes` (it is
   mounted at `/disk` immediately). Until then `/disk` does not exist. `df` then shows two lines
   (`/` and `/disk`).
-- Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, plus kernel
+- Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, plus kernel
   commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`.
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
@@ -363,7 +365,8 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
   syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
 - `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
-- `common/` - code shared by the boot loader and kernel (ELF parsing).
+- `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel) and DeSoCrypto
+  (`common/desocrypto/`, kernel and programs).
 - `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `qemu-hotplug.py`.
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
 - `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.

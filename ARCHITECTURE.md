@@ -1341,6 +1341,39 @@ needed):
 - netd never writes to disk; it only sends packets the user asked for (plus DHCP, ARP and TCP control packets).
   Nothing listens unless a program asked for `listen` (and has the right).
 
+## Cryptography – DeSoCrypto (`common/desocrypto/`)
+
+DeSoOS's own cryptographic library, written for DeSoOS only (no Cargo crate, no outside code). It is a library,
+not a service and not a kernel module: whoever needs a hash includes the code (`#[path]`) and calls it directly – no
+syscall per operation, and a mistake in it can only hurt the program that uses it.
+
+| Module | What | Standard |
+|---|---|---|
+| `sha256` | `Sha256::new / update / finish`, `sha256(data)` | FIPS 180-4 |
+| `hmac` | `HmacSha256::new / update / finish / verify`, `hmac_sha256(key, data)` | RFC 2104, vectors RFC 4231 |
+| `hkdf` | `extract`, `expand`, `hkdf` | RFC 5869 |
+| `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `VERSION` | – |
+
+Rules of the code:
+- **Only `core`:** no heap, no syscalls, no `std`. Results go into memory the caller owns (an array returned by
+  value or a slice passed in). The same files build in the kernel (code model `kernel`, overflow checks on) and in
+  ring-3 programs.
+- **No silent wrong results:** SHA-256 counts the message length and refuses past 2^61 − 1 bytes
+  (`Error::LengthOverflow`) instead of wrapping; HKDF refuses more than 255 × 32 = 8160 bytes (`OutputTooLong`) and a
+  PRK under 32 bytes (`KeyTooShort`) without touching the output; `verify` accepts tags of 16–32 bytes only.
+- **Arithmetic** is explicitly wrapping (`wrapping_add`, `rotate_right`) – correct with or without overflow checks.
+- **Keys** are wiped (volatile writes) from the HMAC/HKDF internals when done; tags are compared in constant time.
+  Nothing else is hardened against timing side channels yet.
+
+Tests: `common/desocrypto/tests.rs` (92 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869 vectors; block-edge lengths;
+every split of a message; length limits with a pretended counter; wrong tags and parameters). `mod.rs` does not
+include it, so it is not in the kernel or ordinary programs: only `/bin/cryptotest` and CRYPTO TEST (selftest build)
+include it. CRYPTO TEST runs it in the kernel and in user space, checks `sha256sum` against the kernel's own result
+and measures the speed (`[RESULT-CRYPTO]`).
+
+Next (DeSoCrypto v0.2.0, after DeSoFS): `getrandom` from a kernel generator fed by several sources,
+ChaCha20-Poly1305, X25519, AES-128-GCM; then DeSoTLS (TLS 1.3) on top of it.
+
 ## Resource limits
 
 No program can take resources the kernel depends on – it gets an error or dies itself.
@@ -1365,10 +1398,10 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 30 self-test suites (238 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 31 self-test suites (242 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
-  files, IPC, the rights table, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
+  files, IPC, the rights table, cryptography, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test

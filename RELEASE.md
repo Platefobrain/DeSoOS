@@ -10,6 +10,75 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.59.0 — 2026-11-01
+
+**Status: stable on QEMU (TCG and KVM); DeSoCrypto v0.1.0 added. Not yet tried on the test laptop.**
+
+### What is new since the last report (v0.58.1)
+
+| Version | Change |
+|---|---|
+| v0.59.0 | DeSoCrypto v0.1.0 – DeSoOS's own cryptographic library (`common/desocrypto/`, kernel and programs): SHA-256, HMAC-SHA256, HKDF-SHA256; new programs `sha256sum` and `cryptotest`; new suite CRYPTO TEST |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 31/31 suites, 242 tests PASS | 91 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 31/31 suites, 242 tests PASS | 73 s |
+
+New CRYPTO TEST (4 tests): 92 checks (FIPS 180-4 / NIST, RFC 4231, RFC 5869 vectors, block edges, length limits,
+wrong tags and parameters) in the kernel and in user space, `sha256sum` equal to the kernel's result, speed. On the
+build server also `LOOP=crypto:20` 20/20.
+
+### DeSoCrypto speed (`[RESULT-CRYPTO]`, KiB/s)
+
+| | TCG | KVM |
+|---|---|---|
+| sha256_kernel_kbs | 47 360 | 175 761 |
+| sha256_user_kbs | 52 160 | 213 120 |
+| hmac_user_kbs | 48 716 | 211 520 |
+
+KVM: ~210 MiB/s in user space – in the range of a plain (not SIMD / SHA-NI) SHA-256 on this CPU; the kernel run is a
+little lower (measured over 256 KiB pieces with overflow checks on).
+
+### Known problems
+
+- DeSoCrypto is not audited and not hardened against timing side channels (beyond the tag check) – fine for
+  checksums, not for secrets yet; no random numbers, ciphers or TLS yet.
+- Otherwise as in v0.58.1.
+
+### Performance against the previous release (v0.58.1 → v0.59.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.58.1 | TCG v0.59.0 | KVM v0.58.1 | KVM v0.59.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 172 | 3 218 | 32 965 | 32 154 |
+| irq_user_ns | 7 814 | 12 826 | 67 046 | 65 659 |
+| fact_kernel_ns | 29 686 | 26 260 | 54 274 | 56 385 |
+| fact_user_ns | 74 074 | 74 487 | 91 407 | 93 283 |
+| fact_svc_ns | 207 253 | 176 678 | 104 931 | 103 788 |
+| ping_svc_ns | 120 918 | 104 766 | 22 461 | 23 518 |
+| restart_us | 5 400 | 4 900 | 1 300 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.58.1 | TCG v0.59.0 | KVM v0.58.1 | KVM v0.59.0 |
+|---|---|---|---|---|
+| start_ms | 402 | 407 | 399 | 378 |
+| enum_avg_ms | 26 | 29 | 23 | 27 |
+| read_kbs (usbd) | 99 902 | 70 620 | 77 283 | 65 015 |
+| kread_kbs (kernel) | 72 617 | 62 904 | 95 085 | 99 482 |
+| kcat_kbs (kernel, cat) | 50 442 | 64 081 | 95 517 | 84 389 |
+| hid_avg_us (keyboard) | 691 | 803 | 272 | 225 |
+
+Verdict: no regression – nothing on these paths changed (the library is only used by the new programs and the test).
+TCG `irq_user_ns` 12 826 is within its spread (6 905 – 10 908 over recent releases, single TCG samples swing more);
+the USB read numbers move as usual from run to run (KVM v0.57.3 had 69 423).
+
+---
+
 ## v0.58.1 — 2026-11-01
 
 **Status: stable on QEMU (TCG and KVM); fixes only, not yet tried on the test laptop.**

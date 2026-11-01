@@ -218,6 +218,9 @@ pub extern "sysv64" fn kernel_main(
     // The syscall rights table – every right taken away in turn.
     #[cfg(selftest)]
     selftest::suite("rights", user::rights_self_test);
+    // DeSoCrypto – SHA-256, HMAC, HKDF in the kernel and in user space.
+    #[cfg(selftest)]
+    selftest::suite("crypto", user::crypto_self_test);
     // User-space services.
     #[cfg(selftest)]
     if !selftest::looping() {

@@ -1,6 +1,6 @@
 # DeSoOS Roadmap
 
-Status: 2026-11-01 – **v0.58.1.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3), service manifests – every service gets exactly what its manifest grants, drivers without file access (v0.58.0), sandboxed services cannot be handed files either, stricter manifests (v0.58.1). 30/30 suites (238 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
+Status: 2026-11-01 – **v0.59.0.** Network done (**N1–N8**: card drivers for QEMU's Intel and the test laptop's Realtek, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback; on the test laptop 10 MiB at 7579 KiB/s). Permissions: network administration only for `netconfig` (v0.48.0), **one rights table for every syscall** with RIGHTS TEST (v0.49.0), DeSoOS error names `ERROR_*` (v0.50.0), program names `usblist`, `netarp`, `netweb` (v0.51.0), `kill` only for own descendants (v0.52.0), the rare TCG stall fixed (v0.52.1: `yield_now` kept the BKL), a release report `RELEASE.md` (v0.52.2), directory handles – a program sees one directory only (v0.53.0), process memory hardened after a code review – area limit, freed ranges reused, `PROT_NONE` (v0.54.0), FAT32 kept inside its partition and `dcp audit` over the whole tree (v0.55.0), small fixes from a second review (v0.55.1), a loop mode for the self-tests (v0.56.0), a lost orphan exit status found with it and fixed (v0.56.1), a kernel heap reserve – a program can no longer crash the kernel by filling its heap (v0.57.0), pipe writes and empty files fixed at the source (v0.57.1), sizes from a disk allocated fallibly (v0.57.2), directory listings bounded by the caller's buffer (v0.57.3), service manifests – every service gets exactly what its manifest grants, drivers without file access (v0.58.0), sandboxed services cannot be handed files either, stricter manifests (v0.58.1), **DeSoCrypto v0.1.0** – DeSoOS's own cryptographic library: SHA-256, HMAC, HKDF, `sha256sum` (v0.59.0). 31/31 suites (242 tests) in TCG and KVM. **Fixed:** the rare TCG stall in ALLOC TEST 4/5 (v0.52.1). Next: section "Next". Earlier: M20 (USB) done (v0.29.1), P4 (v0.33.0), stage P (v0.22.0), M19 (v0.19.7), M18 (v0.18.4), M17b (v0.17.35), M17a (v0.17.27). Architecture: `ARCHITECTURE.md`.
 Details of completed stages: `CHANGELOG.md`.
 
 ```
@@ -889,8 +889,15 @@ comes back, and the stress test does not regress.
    (v0.58.0).
 3. ~~**Release report**~~ ✅ (v0.52.2, `RELEASE.md`): one page per release – tests passed, QEMU / KVM configuration, results on the test laptop,
    known problems, performance against the previous release.
-4. **TLS** (HTTPS in `netget`) – first a decision on cryptography (no home-made crypto).
-5. **Native file system** (DeSoFS) with crash recovery; FAT32 stays for boot and exchange. Directory handles
+4. **DeSoCrypto and DeSoTLS** – DeSoOS's own cryptography (decision 2026-11-01: a hobby system, its own library
+   rather than an outside one; not treated as safe for real secrets until well tested): ~~DeSoCrypto v0.1.0 – SHA-256,
+   HMAC-SHA256, HKDF-SHA256, `sha256sum`, CRYPTO TEST~~ ✅ (v0.59.0); after DeSoFS: DeSoCrypto v0.2.0 – a random number
+   generator in the kernel fed from several sources (`getrandom`; RDSEED/RDRAND only as one of them),
+   ChaCha20-Poly1305, X25519, AES-128-GCM; then DeSoTLS (`common/desotls` or a user library) – TLS 1.3, X.509,
+   RSA-PSS and ECDSA P-256 verification (real servers rarely use Ed25519), host name check, DeSoOS's own updatable
+   store of trusted CAs (e.g. `/etc/certs`), HTTPS in `netget`; a mode without certificate checks only for tests.
+5. **Native file system** (DeSoFS, next) with crash recovery and SHA-256 checksums (DeSoCrypto) – they find damage,
+   not deliberate changes; FAT32 stays for boot and exchange. Directory handles
    then hold the directory itself (a node number), not its path – needed before the GUI file manager.
 6. **GUI** – virtio-gpu, a compositor on shared memory, windows as processes.
 7. Later: audio, XSAVE/AVX, IOMMU, shared libraries, service manager as a separate program (`/bin/svcmgr`).
@@ -946,6 +953,12 @@ Number in parentheses = the stage in which the gap goes away.
 - at most 16 CPUs (Ryzen 7 4800H = 16 threads); SMP requires RDTSCP, MADT and I/O APIC
 - no priorities; `kill` of a kernel task is cooperative (the task itself checks `should_exit`)
 - kernel without preemption in the middle of a syscall (only sleeping locks)
+
+**Cryptography (DeSoCrypto)**
+- only SHA-256, HMAC-SHA256 and HKDF-SHA256 (v0.59.0); no random numbers, ciphers, key exchange or signatures yet
+  (DeSoCrypto v0.2.0), no TLS (DeSoTLS) – `netget https://` is refused
+- not hardened against timing side channels beyond the constant-time tag check, not audited – fine for
+  checksums, not yet for protecting secrets
 
 **Hardware**
 - INTx interrupts on real hardware: a device's IRQ line requires ACPI AML (_PRT) – drivers use MSI/MSI-X

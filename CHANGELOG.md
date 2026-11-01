@@ -2,6 +2,30 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.59.0 — 2026-11-01
+
+### DeSoCrypto v0.1.0 – DeSoOS's own cryptographic library
+- **New: `common/desocrypto/`** – a library for DeSoOS only, shared by the kernel and programs (included with
+  `#[path]`, no Cargo crate, no outside code). Only `core`: no heap, no syscalls, results in caller memory.
+  - `sha256` – SHA-256 (FIPS 180-4): `Sha256::new / update / finish` (any number of pieces, also empty) and
+    `sha256(data)`; more than 2^61 − 1 bytes is `Error::LengthOverflow`, never a wrapped length.
+  - `hmac` – HMAC-SHA256 (RFC 2104): any key length (also empty; over 64 bytes hashed first), `verify` with a
+    constant-time compare, truncated tags of 16–32 bytes.
+  - `hkdf` – HKDF-SHA256 (RFC 5869): `extract` (empty salt = 32 zero bytes), `expand` (at most 8160 bytes –
+    `OutputTooLong`; PRK under 32 bytes – `KeyTooShort`; the output untouched on an error), `hkdf`.
+  - `hex`, `equal_ct`, `Error`, `VERSION`; key material wiped after use.
+- **New program `sha256sum [file...]`** – one line per file in the Linux format (`<hex>  <name>`), standard input
+  without arguments, exit 1 if a file cannot be read.
+- **New program `cryptotest`** – all library tests in user space plus the speed of SHA-256 and HMAC.
+- Tests: **CRYPTO TEST** (new suite, 4 tests; also in loop mode, `LOOP=crypto:N`) – 92 checks from
+  `common/desocrypto/tests.rs` (FIPS 180-4 / NIST, RFC 4231, RFC 5869 vectors; lengths around the block edges; every
+  split of a message; the length limit with a pretended counter; wrong tags, too long outputs, too short keys) run in
+  the kernel (overflow checks on) and in `cryptotest`; `sha256sum` against the kernel's own result; speed in
+  `[RESULT-CRYPTO]` (printed by `tests/test.sh`). `tests.rs` is not part of the library – only the tests include it.
+  31 suites, 242 tests.
+- Docs: ARCHITECTURE (new section "Cryptography – DeSoCrypto"), ROADMAP (Next 4: DeSoCrypto and DeSoTLS plan, Known
+  gaps), README, `common/desocrypto/README.md`.
+
 ## v0.58.1 — 2026-11-01
 
 ### Service sandbox and manifests tightened (a fourth code review)
