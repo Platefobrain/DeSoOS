@@ -1,4 +1,4 @@
-# DeSoOS v0.63.0
+# DeSoOS v0.64.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -44,7 +44,7 @@ More documentation:
   administration only for `netconfig`.
 - Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
   HMAC-SHA256, HKDF-SHA256 (no heap, no syscalls); tool `sha256sum`.
-- File systems: VFS with ramfs (`/`) and FAT32 (`/disk`, `/usb0`, the EFI partition at `/esp`); DeSoFS, DeSoOS's own
+- File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/DESOFS-FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
@@ -52,7 +52,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (32 suites, 264 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (33 suites and a restart phase, 272 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -132,7 +132,7 @@ Options (environment variables):
 
 Disks attached by `run-qemu.sh`:
 
-- `disk.img` - virtio-blk data disk (64 MiB, created on first run), FAT32 at `/disk`.
+- `disk.img` - virtio-blk data disk (64 MiB, created on first run), DeSoFS or FAT32 at `/disk`.
 - `nvme.img` - disk on QEMU's emulated NVMe controller (created on first run). This is the only
   NVMe device DeSoOS ever writes to.
 - `build/` - presented as a read-only USB stick, like a real boot from a USB stick.
@@ -330,15 +330,17 @@ Line editing and console:
 
 ### Files
 
-- `/` is a ramfs (in memory, lost on reboot); `/disk` is the FAT32 disk `disk.img` (persistent).
-- A new `disk.img` is empty: format it once in DeSoOS with `mkfs 0`, then `mkfs 0 yes` (it is
-  mounted at `/disk` immediately). Until then `/disk` does not exist. `df` then shows two lines
-  (`/` and `/disk`).
+- `/` is a ramfs (in memory, lost on reboot); `/disk` is the disk `disk.img` (persistent). At start the kernel
+  looks at it: the DeSoFS marker → DeSoFS (read-write, or read-only with a message if a tree is damaged, or not
+  mounted – never FAT32 instead); otherwise FAT32.
+- A new `disk.img` is empty: format it once in DeSoOS with `desofs format 0 yes` (DeSoFS) or `mkfs 0 yes` (FAT32);
+  it is mounted at `/disk` immediately and at every start. Until then `/disk` does not exist. `df` then shows two
+  lines (`/` and `/disk`).
 - Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, plus kernel
   commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`, `desofs info <disk>` (read-only check of a
   DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write),
   `desofs format <disk> [yes]` (erases the disk; refused on a read-only disk or a whole disk with a partition table),
-  `desofs mount <disk>` (mounts it at `/desofs` until reboot), `desofs unmount`, `desofs check <disk>` (unmounted
+  `desofs mount <disk>` (disk 0 at `/disk`, others at `/desofs` until reboot), `desofs unmount`, `desofs check <disk>` (unmounted
   volume: every block's checksum, directories, relations; errors with file names) and `desofs repair <disk> [yes]`
   (a volume left read-only by a damaged tree goes back to the other superblock's whole state). In QEMU: `desofs format 0 yes`
   turns `disk.img` into DeSoFS (your FAT32 files on it are gone – copy them first). `mv` inside DeSoFS is one atomic

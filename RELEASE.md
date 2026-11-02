@@ -10,6 +10,149 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.64.0 — 2026-11-02
+
+**Status: stable on QEMU (TCG and KVM); DeSoFS stage 4 – `/disk` as DeSoFS recognised at start, data checked after a
+real restart, `readdir_part` for programs, first DeSoFS speed figures. Not yet tried on the test laptop.**
+
+### What is new since the last report (v0.63.1)
+
+| Version | Change |
+|---|---|
+| v0.64.0 | `fs::mount_disk` – the DeSoFS marker on disk 0 means DeSoFS rules only (read-write / read-only / not mounted, never FAT32 instead), otherwise FAT32; `desofs format 0 yes` mounts `/disk` at once; syscall 57 `readdir_part` (a directory in parts through a directory handle) and `/bin/ls` in parts; `tests/test.sh` starts QEMU a second time on the same test disk (RESTART TEST); `[RESULT-FS]` |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 272 tests PASS | 165 s (restart 36 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 272 tests PASS | 101 s (restart 16 s) |
+
+New: DESOFS TEST 23 (automatic mount: sound / one tree damaged / FAT32 / the DeSoFS marker over a valid FAT32 → not
+mounted / an empty disk untouched), `readdir_part` in FILE TEST (dirtest: 42 entries through a 64-byte buffer,
+wrong position, too small a buffer, no READ right, above the handle, in the sandbox), RESTART TEST 1–5: part 1 at the
+end of the first start writes a fixed set to a freshly formatted test disk; after a normal power-off and a second
+start the kernel mounted `/disk` as DeSoFS read-write by itself, every file equal byte for byte, removed files gone,
+`sha256sum` and `ls` on `/disk`, `desofs check` 0 errors / complete. The first start takes 4 s more than v0.63.1 (the
+fixed set), the second start is new.
+
+### DeSoFS speed `[RESULT-FS]` (first figures – no block cache yet)
+
+Volume 64 MiB on virtio-blk, after the restart; 8 MiB file in 64 KiB pieces (each piece one commit with two flushes);
+1000 files of 100 B (create + write = two commits each).
+
+| | TCG | KVM |
+|---|---|---|
+| 8 MiB write | 5 688 KiB/s | 17 138 KiB/s |
+| 8 MiB read | 5 523 KiB/s | 19 883 KiB/s |
+| 1000 small files – create + write | 18 779 ms | 9 290 ms |
+| 1000 small files – read | 7 141 ms | 2 204 ms |
+| `desofs check` (3 384 data blocks) | 796 ms | 262 ms |
+
+Every block read verifies its SHA-256 and a name is found by reading the directory block by block – a block cache and
+a directory index are the obvious next gains; these numbers are the reference.
+
+### Known problems
+
+- DeSoFS is slow without a cache (above); only disk 0 is mounted at start; `rename` is not yet a syscall.
+- Otherwise as in v0.63.1.
+
+### Performance against the previous release (v0.63.1 → v0.64.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.63.1 | TCG v0.64.0 | KVM v0.63.1 | KVM v0.64.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 329 | 2 983 | 36 062 | 32 878 |
+| irq_user_ns | 7 130 | 8 792 | 36 692 | 67 613 |
+| fact_kernel_ns | 25 348 | 29 511 | 56 195 | 53 461 |
+| fact_user_ns | 62 480 | 74 128 | 231 481 | 92 123 |
+| fact_svc_ns | 182 315 | 192 122 | 110 192 | 104 766 |
+| ping_svc_ns | 118 553 | 119 545 | 18 013 | 22 522 |
+| restart_us | 3 800 | 4 000 | 1 500 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.63.1 | TCG v0.64.0 | KVM v0.63.1 | KVM v0.64.0 |
+|---|---|---|---|---|
+| start_ms | 412 | 361 | 379 | 369 |
+| enum_avg_ms | 25 | 23 | 25 | 26 |
+| read_kbs (usbd) | 81 920 | 61 134 | 102 400 | 66 064 |
+| kread_kbs (kernel) | 42 226 | 64 531 | 93 073 | 87 872 |
+| kcat_kbs (kernel, cat) | 34 225 | 61 784 | 131 793 | 74 951 |
+| hid_avg_us (keyboard) | 910 | 685 | 311 | 96 |
+
+`[RESULT-RIGHTS]` rows 56 → 57 (`readdir_part`), refused 28 → 29; gate_ns: TCG 24 → 25, KVM 4 → 4.
+`[RESULT-CRYPTO]` (KiB/s): TCG 47 686 / 47 040 / 50 240 → 48 941 / 52 160 / 50 240; KVM 179 200 / 190 080 / 205 760 →
+182 129 / 217 280 / 217 920.
+
+Verdict: no regression. KVM `irq_user_ns` / `fact_user_ns` are back in their usual state (67 613 / 92 123 after the
+`edu` two-state run of v0.63.1); the USB figures move within the known spread of the emulated stick (KVM read 66 064
+after 102 400 – 65 015 in v0.59.0; KVM hid 96 µs one run of a short measurement); the rights gate is unchanged with
+one more row.
+
+---
+
+## v0.63.1 — 2026-11-02
+
+**Status: stable on QEMU (TCG and KVM); fix only – `desofs repair` refuses after a check that did not run in full.**
+
+### What is new since the last report (v0.63.0)
+
+| Version | Change |
+|---|---|
+| v0.63.1 | `desofs check` marks a superblock INCOMPLETE when a limit (16 M node numbers for relations, 65 536 shared blocks for E3) skipped a check; `desofs repair` refuses an incomplete superblock (found in a code review) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 32/32 suites, 264 tests PASS | 125 s |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 32/32 suites, 264 tests PASS | 81 s |
+
+DESOFS TEST 21 lowers both limits (test builds only) so that the reference image reaches them: check warns and says
+INCOMPLETE, repair refuses, the disk stays unchanged. On the build server three mutations of the fix each make it fail.
+
+### Known problems
+
+- As in v0.63.0.
+
+### Performance against the previous release (v0.63.0 → v0.63.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.63.0 | TCG v0.63.1 | KVM v0.63.0 | KVM v0.63.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 2 883 | 3 329 | 36 238 | 36 062 |
+| irq_user_ns | 5 774 | 7 130 | 66 006 | 36 692 |
+| fact_kernel_ns | 24 878 | 25 348 | 52 659 | 56 195 |
+| fact_user_ns | 68 096 | 62 480 | 89 928 | 231 481 |
+| fact_svc_ns | 170 502 | 182 315 | 104 493 | 110 192 |
+| ping_svc_ns | 125 786 | 118 553 | 20 483 | 18 013 |
+| restart_us | 3 900 | 3 800 | 1 400 | 1 500 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.63.0 | TCG v0.63.1 | KVM v0.63.0 | KVM v0.63.1 |
+|---|---|---|---|---|
+| start_ms | 456 | 412 | 391 | 379 |
+| enum_avg_ms | 25 | 25 | 26 | 25 |
+| read_kbs (usbd) | 71 859 | 81 920 | 110 702 | 102 400 |
+| kread_kbs (kernel) | 91 960 | 42 226 | 73 278 | 93 073 |
+| kcat_kbs (kernel, cat) | 48 774 | 34 225 | 88 681 | 131 793 |
+| hid_avg_us (keyboard) | 816 | 910 | 167 | 311 |
+
+`[RESULT-RIGHTS]` gate_ns: TCG 25 → 24, KVM 4 → 4. `[RESULT-CRYPTO]` (KiB/s): TCG 47 921 / 50 560 / 50 560 →
+47 686 / 47 040 / 50 240; KVM 180 480 / 235 840 / 235 840 → 179 200 / 190 080 / 205 760.
+
+Verdict: no regression – only `desofs check` / `repair` changed, which nothing measured here runs. KVM
+`fact_user_ns` 231 481 with `irq_user_ns` 36 692 in the same run is the known two-state behaviour of the emulated
+`edu` device on the host (v0.55.1: 183 823, v0.59.1: 144 404 with irq_user 41 169). TCG kread 42 226 / kcat 34 225
+are inside the spread of the emulated stick (TCG kcat 32 150 in v0.55.1); KVM user SHA-256 190 080 is back in its
+usual range after the 235 840 of v0.63.0 (same library code).
+
+---
+
 ## v0.63.0 — 2026-11-02
 
 **Status: stable on QEMU (TCG and KVM); DeSoFS stage 3 – `desofs check`, `desofs repair`, directories read in parts.

@@ -8,9 +8,13 @@
 #                              the named suite 400 times (stops at the first failure);
 #                              suites: smp lock tlb alloc nobkl files ipc rights crypto desofs
 #
+# After a passing run QEMU starts a second time on the same test disk (fw_cfg
+# opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
+# by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Not in loop mode.
+#
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
 #             3 = QEMU exited otherwise (e.g. triple fault / reboot).
-# The log stays in logs/test.log.
+# The logs stay in logs/test.log and logs/test-restart.log.
 set -uo pipefail
 
 # Tests live in tests/, the rest of the project one directory up.
@@ -151,12 +155,33 @@ else
 fi
 kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
 wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
+
+# Second start on the same test disk (only after a passing first one, not in loop mode).
+LOG2="$ROOT/logs/test-restart.log"
+: > "$LOG2"
+CODE2=33
+TIME2=0
+if [ "$CODE" = 33 ] && [ -z "$LOOP" ]; then
+  echo "Restarting QEMU on the same test disk (RESTART TEST part 2)..."
+  START2=$(date +%s)
+  QEMU+=(-fw_cfg name=opt/desoos/phase,string=restart)
+  if [ "$VERBOSE" = 1 ]; then
+    timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG2"
+    CODE2=${PIPESTATUS[0]}
+  else
+    timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG2" 2>&1
+    CODE2=$?
+  fi
+  TIME2=$(( $(date +%s) - START2 ))
+fi
 rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(grep -c " PASS" "$LOG" || true)
-SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | sed 's/^.*Self-tests: //')
-echo "Log: logs/test.log (${TIME} s, ${PASSED} tests PASS)"
+PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) ))
+# The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
+SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
+SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
+echo "Log: logs/test.log + logs/test-restart.log (${TIME} s, restart ${TIME2} s, ${PASSED} tests PASS)"
 # Service benchmark (kernel vs user space) – the [RESULT-SVC] line from the SVC self-test.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
@@ -165,13 +190,33 @@ grep -a "^\[RESULT-USB\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 # DeSoCrypto – the [RESULT-CRYPTO] line from CRYPTO TEST.
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
+# DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
+grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
 # Loop mode – rounds passed and round times.
 grep -a "^\[RESULT-LOOP\]" "$LOG" | tail -n1 || true
 grep -a "^\[LOOP\] .*FAILED" "$LOG" | tail -n1 || true
 
+if [ "$CODE" = 33 ] && [ "$CODE2" != 33 ]; then
+  case "$CODE2" in
+    35) echo "FAIL - restart: ${SUMMARY2:-kernel reported an error}"
+        grep -a -E "FAIL|PANIC|\[EXC\]" "$LOG2" | head -n 20
+        exit 1 ;;
+    124) echo "TIMEOUT - the restart did not finish within ${TIMEOUT} s. Last lines:"
+        tail -n 15 "$LOG2"
+        exit 2 ;;
+    *) echo "ERROR - restart: QEMU exited with code $CODE2. Last lines:"
+        tail -n 15 "$LOG2"
+        exit 3 ;;
+  esac
+fi
+
 case "$CODE" in
   33)
-    echo "PASS - ${SUMMARY}"
+    if [ -n "$SUMMARY2" ]; then
+      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}"
+    else
+      echo "PASS - ${SUMMARY}"
+    fi
     exit 0 ;;
   35)
     echo "FAIL - ${SUMMARY:-kernel reported an error}"

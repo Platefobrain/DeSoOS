@@ -32,6 +32,8 @@ pub mod test_write;
 pub mod test_crash;
 #[cfg(selftest)]
 pub mod test_check;
+#[cfg(selftest)]
+pub mod restart;
 
 #[path = "../../../common/desocrypto/mod.rs"]
 mod desocrypto;
@@ -538,6 +540,17 @@ struct RootStats {
     has_root: bool,
     /// Part of the node table was shared with a root walked before (not fully counted).
     shared: bool,
+}
+
+/// Does either superblock slot of the disk carry the DeSoFS marker (whatever the rest of
+/// it says)?  Such a disk is handled only by DeSoFS rules (`fs::mount_disk`).
+pub fn has_marker(index: usize) -> bool {
+    let Ok(dev) = Dev::open(index) else { return false };
+    if dev.blocks < 3 {
+        return false;
+    }
+    let mut b = alloc::vec![0u8; BLOCK];
+    (1..=2).any(|s| dev.read(s, &mut b).is_ok() && &b[0..8] == MAGIC)
 }
 
 /// One superblock's tree on its own (`desofs check` / `repair`): every metadata block

@@ -121,10 +121,10 @@ pub trait FileSystem {
         let v = self.read_dir(path)?;
         if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
     }
-    /// A directory in parts: at most `max` entries from position `cursor` (0 = start)
-    /// and the position of the next part (None = end).  DeSoFS: a byte position in the
+    /// A directory in parts: at most `max` entries from position `cursor` (0 = start),
+    /// each with its own position, and the position of the next part (None = end).  DeSoFS: a byte position in the
     /// directory (stable while the directory changes); default: an index into the list.
-    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<DirPart> {
         dir_page(self.read_dir(path)?, cursor, max)
     }
     /// Reads from `offset`; returns the number of bytes read (0 = end of file).
@@ -171,7 +171,7 @@ pub trait ConcurrentFs {
         if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
     }
     /// As FileSystem::read_dir_at.
-    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<DirPart> {
         dir_page(self.read_dir(path)?, cursor, max)
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
@@ -233,7 +233,7 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir_max(path, max)
     }
-    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<DirPart> {
         self.fs.lock().read_dir_at(path, cursor, max)
     }
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -281,7 +281,7 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
     fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir_max(path, max)
     }
-    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<DirPart> {
         self.fs.lock().read_dir_at(path, cursor, max)
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -584,21 +584,25 @@ pub fn read_dir_max(path: &str, max: usize) -> Result<Vec<DirEntry>> {
     Ok(entries)
 }
 
+/// Part of a directory: (position of each entry, entry) and the position of the next part
+/// (None = end).
+pub type DirPart = (Vec<(u64, DirEntry)>, Option<u64>);
+
 /// A directory in parts (see FileSystem::read_dir_at) – not sorted: the order of the
 /// file system, so that the parts fit together.
-pub fn read_dir_at(path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+pub fn read_dir_at(path: &str, cursor: u64, max: usize) -> Result<DirPart> {
     with_fs(path, |c, p| c.read_dir_at(p, cursor, max), |fs, p| fs.read_dir_at(p, cursor, max))
 }
 
 /// The default read_dir_at: `cursor` is an index into the whole list.
-pub fn dir_page(mut v: Vec<DirEntry>, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+pub fn dir_page(mut v: Vec<DirEntry>, cursor: u64, max: usize) -> Result<DirPart> {
     let len = v.len() as u64;
     if cursor > len {
         return Err(FsError::BadCursor);
     }
     let end = cursor.saturating_add(max.max(1) as u64).min(len);
     v.truncate(end as usize);
-    let page = v.split_off(cursor as usize);
+    let page = v.split_off(cursor as usize).into_iter().enumerate().map(|(i, e)| (cursor + i as u64, e)).collect();
     Ok((page, if end < len { Some(end) } else { None }))
 }
 
@@ -780,7 +784,7 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<()> {
 // Startup
 // ------------------------------------------------------------
 
-/// Mounts ramfs at "/" and FAT32 from the first disk at "/disk".
+/// Mounts ramfs at "/" and the first disk at "/disk" (DeSoFS or FAT32, see `mount_disk`).
 pub fn init() {
     use crate::serial_println;
 
@@ -799,24 +803,61 @@ pub fn init() {
         serial_println!("[FS] / = ramfs (no disk)");
         return;
     }
-    match fat32::Fat32::open(0) {
+    match mount_disk(0, "/disk") {
+        DiskMount::DeSoFs(None) => serial_println!("[FS] / = ramfs, /disk = desofs (disk 0, read-write)"),
+        DiskMount::DeSoFs(Some(why)) => serial_println!("[FS] / = ramfs, /disk = desofs (disk 0) READ-ONLY: {} - see 'desofs check 0' / 'desofs repair 0'", why),
+        DiskMount::Fat32(desc) => serial_println!("[FS] / = ramfs, /disk = fat32 ({})", desc),
+        DiskMount::Nothing(why) => serial_println!("[FS] / = ramfs; disk 0: {} - /disk not available", why),
+    }
+    mount_esp();
+}
+
+/// What `mount_disk` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiskMount {
+    /// DeSoFS; Some(reason) = mounted read-only.
+    DeSoFs(Option<String>),
+    /// FAT32 (description).
+    Fat32(String),
+    /// Nothing mounted (why, and what the user can do).
+    Nothing(String),
+}
+
+/// Mounts disk `disk` at `path` by what is on it.  A DeSoFS marker in either superblock
+/// slot (even with a bad checksum) means only the DeSoFS rules apply – read-write,
+/// read-only or not mounted – never a fallback to FAT32.  Without the marker: FAT32 as
+/// before.  Never formats anything.
+pub fn mount_disk(disk: usize, path: &str) -> DiskMount {
+    if desofs::has_marker(disk) {
+        return match desofs::vol::Volume::mount(disk) {
+            Ok(v) => {
+                let ro = v.read_only_reason().map(String::from);
+                let _ = mkdir(path);
+                match mount(path, Box::new(Locked::new(v))) {
+                    Ok(()) => DiskMount::DeSoFs(ro),
+                    Err(e) => DiskMount::Nothing(alloc::format!("DeSoFS volume, mount {}: {}", path, e)),
+                }
+            }
+            Err(e) => DiskMount::Nothing(alloc::format!("DeSoFS volume that cannot be mounted ({}) - see 'desofs check {}'", e, disk)),
+        };
+    }
+    match fat32::Fat32::open(disk) {
         Ok(fs) => {
             let desc = fs.source();
-            let _ = mkdir("/disk");
-            match mount("/disk", Box::new(fs)) {
-                Ok(()) => serial_println!("[FS] / = ramfs, /disk = fat32 ({})", desc),
-                Err(e) => serial_println!("[FS] mount /disk: {}", e),
+            let _ = mkdir(path);
+            match mount(path, Box::new(fs)) {
+                Ok(()) => DiskMount::Fat32(desc),
+                Err(e) => DiskMount::Nothing(alloc::format!("mount {}: {}", path, e)),
             }
         }
         Err(e) => {
-            if crate::block::is_read_only(0) {
-                serial_println!("[FS] / = ramfs; disk 0 (read-only): {} - /disk not available", e);
+            if crate::block::is_read_only(disk) {
+                DiskMount::Nothing(alloc::format!("{} (read-only disk)", e))
             } else {
-                serial_println!("[FS] / = ramfs; disk 0: {} - /disk not available, format it with 'mkfs 0'", e);
+                DiskMount::Nothing(alloc::format!("{} - format it with 'mkfs {}' (FAT32) or 'desofs format {} yes' (DeSoFS)", e, disk, disk))
             }
         }
     }
-    mount_esp();
 }
 
 /// The first "EFI System" partition (GPT) with FAT32 -> /esp.  On a

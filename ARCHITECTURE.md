@@ -220,8 +220,9 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 49 | `input_inject` |
 | 50 | `blk_attach` |
 | 51–56 | `dir_open`, `openat`, `readdirat`, `statat`, `mkdirat`, `unlinkat` (directory handles) |
+| 57 | `readdir_part` (a directory in parts through a directory handle, see DeSoFS) |
 
-The syscall profiler (`prof.rs`) tracks all 57 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
+The syscall profiler (`prof.rs`) tracks all 58 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
 
 ### Errors
 
@@ -1427,14 +1428,17 @@ fresh maps, `walk_one`), and its data. For every sound tree (once if both superb
 - E3: a data block met from two different pointer blocks – a second walk compares the 48-byte pointers (up to 65 536
   such blocks, more → a warning);
 - `used_blocks` differing from the count is a WARNING, never an error.
+- **Completeness:** a limit (16 M node numbers for the relations, 65 536 shared blocks for E3) skips a check – a
+  WARNING, the superblock is marked incomplete ("data OK as far as checked (INCOMPLETE)", INCOMPLETE in the result
+  line), and `repair` refuses to copy an incomplete superblock (since v0.63.1).
 Errors name the path (found by following parents and searching the parent directory); at most 64 error lines.
 
 `desofs repair <disk> [yes]` runs the whole check first and writes nothing before it ends. It needs exactly one
 superblock whose checksum, tree and data are all sound; that superblock is only read. Its copy – same uuid, same root,
 `used_blocks` as counted, generation = highest valid + 1 – goes to the other slot, then a flush; then `probe` must
 say read-write. Without `yes` it only states the plan (including "the changes of generation N are lost" when the
-newer state is the damaged one). Refused: nothing to repair, no sound tree, a sound tree with damaged data, the
-generation at its maximum, a read-only disk, a mounted volume. A write or flush error leaves the good superblock as
+newer state is the damaged one). Refused: nothing to repair, no sound tree, a sound tree with damaged data, a check
+that did not run in full (a limit reached), the generation at its maximum, a read-only disk, a mounted volume. A write or flush error leaves the good superblock as
 it was; an interrupted repair leaves a mountable volume and can be repeated.
 
 ### Directories in parts
@@ -1445,6 +1449,40 @@ the start of an entry (found by stepping over `rec_len` from the block start; de
 length under 16 is a damaged block), otherwise `FsError::BadCursor`. An entry present during the whole listing and
 not moved appears exactly once. Default (ramfs, FAT32): an index into the full list. The kernel-shell `ls` reads in
 parts of 1024 (one part: sorted as before; more: shown part by part in the file system's order).
+
+### `/disk` as DeSoFS, programs, the restart test (v0.64.0)
+
+**Mounting at start** – `fs::mount_disk(disk, path)`, used by `fs::init` for disk 0 → `/disk`: the DeSoFS marker in
+superblock A or B (whatever its checksum) means only DeSoFS rules – read-write, read-only with the reason (the
+kernel log says "desofs check 0 / desofs repair 0"), or not mounted with the reason – never a fallback to FAT32;
+without the marker FAT32 as before; nothing is ever formatted here. `desofs format 0 yes` mounts the new volume at
+`/disk` at once; `desofs mount <disk>` puts disk 0 at `/disk`, others at `/desofs`; `desofs unmount` unmounts
+every DeSoFS mount (check / repair need that). A FAT32 `mkfs` zeroes the reserved sectors, so the marker of an
+earlier DeSoFS volume goes with it.
+
+**`readdir_part(dir, path, len, buf, buflen, cursor)`** (syscall 57): a directory in parts through a directory handle
+(`READ` – one row in the rights table, like `readdirat`; in the file sandbox the handle given to the program, paths
+never above it). Entries in `readdir`'s text form as far as they fit in `buf`; `*cursor` in / out – the byte
+position of the next entry in DeSoFS (an index in ramfs / FAT32), `u64::MAX` = end. Every entry carries its own
+position (`read_dir_at` returns them), so a part that does not fit resumes exactly at the first entry left out; a
+first entry that does not fit = `ERROR_BUFFER_TOO_SMALL`, a wrong position = `ERROR_INVALID_ARGUMENT`. The library
+has `dir_for_listing` (a new READ handle, or the sandbox's one) and `readdir_part`; `/bin/ls` reads in parts of
+4 KiB (one part: sorted as before; more: part by part in the file system's order).
+
+**Restart test** – `tests/test.sh` starts QEMU twice on the same test disk (`build-test-disk.img`, new for every
+run). The last step of the first start (RESTART TEST part 1, `restart.rs`; only in the automatic test mode and only
+on an empty disk 0) formats disk 0, mounts it as at start and writes a fixed set: files of 0 B to 1 MiB with a hole,
+three directory levels, a 300-entry directory with ten removed, a rename replacing a file, a removed file. The
+second start (fw_cfg `opt/desoos/phase=restart`) skips every other self-test and checks: `/disk` mounted as DeSoFS
+read-write by the kernel itself; every file and directory byte for byte, nothing removed came back, the big
+directory read in parts by byte position; `/bin/sha256sum` and `/bin/ls` (`readdir_part`) on `/disk`; a new file
+written and read; then `[RESULT-FS]` – 8 MiB written in 64 KiB pieces and read, 1000 files of 100 B created and read,
+`desofs check` of the whole volume (0 errors, 0 warnings, complete) – and `test.sh` adds the QEMU mode and
+configuration to that line.
+
+Test 23 (`test_check.rs`): `mount_disk` on RAM disks – sound DeSoFS read-write, a damaged tree read-only, FAT32,
+the marker over a valid FAT32 with both superblocks broken → not mounted (never the FAT32), an empty disk → not
+mounted and untouched.
 
 Tests 19–22 (`test_check.rs`): check on a fresh volume, after work and on the reference image (0 errors; the disk's
 SHA-256 unchanged); ten damage cases (file / directory data unresealed – the mount stays read-write; a node in two

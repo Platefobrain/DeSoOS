@@ -104,8 +104,8 @@ const fn with(name: &'static str, args: &'static [Arg]) -> Option<Rule> {
 }
 
 /// Indexed by syscall number.
-pub static TABLE: [Option<Rule>; 57] = {
-    let mut t = [const { None }; 57];
+pub static TABLE: [Option<Rule>; 58] = {
+    let mut t = [const { None }; 58];
     t[SYS_EXIT as usize] = plain("exit");
     t[SYS_WRITE as usize] = with("write", &[h(0, STREAM, WRITE)]);
     t[SYS_READ as usize] = with("read", &[h(0, STREAM, READ)]);
@@ -164,6 +164,7 @@ pub static TABLE: [Option<Rule>; 57] = {
     t[SYS_STATAT as usize] = with("statat", &[h(0, DIR, READ)]);
     t[SYS_MKDIRAT as usize] = with("mkdirat", &[h(0, DIR, WRITE)]);
     t[SYS_UNLINKAT as usize] = with("unlinkat", &[h(0, DIR, WRITE)]);
+    t[SYS_READDIR_PART as usize] = with("readdir_part", &[h(0, DIR, READ)]);
     t
 };
 

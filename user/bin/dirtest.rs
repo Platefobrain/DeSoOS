@@ -14,6 +14,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[path = "../lib/desoos.rs"]
 #[macro_use]
 mod desoos;
@@ -36,6 +38,9 @@ macro_rules! check {
 }
 
 fn cleanup() {
+    for i in 0..40 {
+        unlink(&alloc::format!("/dirtest/p{:02}", i));
+    }
     unlink("/dirtest/sub/deep.txt");
     unlink("/dirtest/sub");
     unlink("/dirtest/a.txt");
@@ -103,6 +108,17 @@ fn child() -> i32 {
     }
     if dir_open("/", O_READ) != ERROR_ACCESS_DENIED {
         return 20;
+    }
+    // A directory in parts through the handle; never above it.
+    let mut cur = 0u64;
+    let mut part = [0u8; 256];
+    let pn = readdir_part(d, "", &mut part, &mut cur);
+    if pn <= 0 || !core::str::from_utf8(&part[..pn as usize]).unwrap_or("").contains("a.txt") {
+        return 21;
+    }
+    let mut cur = 0u64;
+    if readdir_part(d, "..", &mut part, &mut cur) != ERROR_ACCESS_DENIED {
+        return 22;
     }
     0
 }
@@ -176,6 +192,47 @@ fn main(args: Args) -> i32 {
         close(up as u64);
     }
 
+    // 4b. readdir_part: 42 entries read through a 64-byte buffer (many parts), the same
+    // names as one readdirat; wrong position, too small a buffer, no READ right, above
+    // the directory.
+    for i in 0..40 {
+        check!(n, write_file(openat(d, &alloc::format!("p{:02}", i), O_WRITE | O_CREATE), b"x"), "create p{:02}", i);
+    }
+    let mut whole = [0u8; 2048];
+    let wn = readdirat(ro, "", &mut whole);
+    check!(n, wn > 0, "readdirat of 42 entries: {}", strerror(wn));
+    let mut names_whole: alloc::vec::Vec<alloc::string::String> = core::str::from_utf8(&whole[..wn as usize]).unwrap_or("").lines().map(alloc::string::String::from).collect();
+    let mut names_parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut cur = 0u64;
+    let mut parts = 0;
+    let mut small = [0u8; 64];
+    while cur != DIR_END && parts < 1000 {
+        let pn = readdir_part(ro, "", &mut small, &mut cur);
+        check!(n, pn > 0, "readdir_part part {}: {}", parts, strerror(pn));
+        for l in core::str::from_utf8(&small[..pn as usize]).unwrap_or("").lines() {
+            names_parts.push(alloc::string::String::from(l));
+        }
+        parts += 1;
+    }
+    names_whole.sort();
+    names_parts.sort();
+    check!(n, parts > 5 && names_parts.len() == 42 && names_parts == names_whole, "readdir_part: {} parts, {} entries vs {}", parts, names_parts.len(), names_whole.len());
+    let mut cur = 1_000_000u64;
+    check!(n, readdir_part(ro, "", &mut small, &mut cur) == ERROR_INVALID_ARGUMENT, "readdir_part from a position past the end");
+    let mut cur = 0u64;
+    check!(n, readdir_part(ro, "", &mut small[..4], &mut cur) == ERROR_BUFFER_TOO_SMALL && cur == 0, "readdir_part with a 4-byte buffer");
+    let wo2 = handle_dup(d, R_WRITE);
+    let mut cur = 0u64;
+    check!(n, wo2 >= 0 && readdir_part(wo2 as u64, "", &mut small, &mut cur) == ERROR_ACCESS_DENIED, "readdir_part through a write-only handle");
+    if wo2 >= 0 {
+        close(wo2 as u64);
+    }
+    let mut cur = 0u64;
+    check!(n, readdir_part(ro, "..", &mut small, &mut cur) == ERROR_ACCESS_DENIED, "readdir_part above the directory");
+    for i in 0..40 {
+        check!(n, unlinkat(d, &alloc::format!("p{:02}", i)) == 0, "unlink p{:02}", i);
+    }
+
     // 5. A sandboxed child with only the read-only directory.
     let pid = spawn_ex("/bin/dirtest", &["dirtest", "child"], &[(1, 1), (1, 2), (ro, 4)], SPAWN_NO_FILES);
     check!(n, pid > 0, "spawn sandboxed child: {}", strerror(pid));
@@ -186,7 +243,7 @@ fn main(args: Args) -> i32 {
     cleanup();
     check!(n, stat(ROOT).is_err(), "cleanup");
     println!(
-        "dirtest: {} checks OK (inside a directory by relative paths, 7 ways out refused, read-only / write-only rights, a sandboxed child reads only inside its directory - also through plain open / readdir / stat)",
+        "dirtest: {} checks OK (inside a directory by relative paths, 7 ways out refused, read-only / write-only rights, readdir_part in parts through a 64-byte buffer, a sandboxed child reads only inside its directory - also through plain open / readdir / stat / readdir_part)",
         n
     );
     0

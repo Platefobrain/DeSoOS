@@ -76,7 +76,7 @@ pub fn t_check_clean() -> T {
     block::remove(d);
     let r = r?;
     ensure!(r.errors == 0 && r.warnings == 0, "fresh volume: {}", text(&r));
-    ensure!(r.slots.iter().all(|s| s.sb_ok && s.tree == Some(Ok(())) && s.data_ok == Some(true)), "fresh volume slots: {}", text(&r));
+    ensure!(r.slots.iter().all(|s| s.sb_ok && s.tree == Some(Ok(())) && s.data_ok == Some(true) && s.complete), "fresh volume slots: {}", text(&r));
     // After real work: files from depth 0 to 2, a hole, directories.
     let d = formatted(1024)?;
     let res = (|| -> T {
@@ -344,6 +344,26 @@ pub fn t_repair() -> T {
     block::remove(ro);
     ensure!(matches!(&r, Err(e) if e.contains("read-only")), "read-only disk: {:?}", r);
     done.push("refused: both sound, both damaged, a sound tree with damaged data, generation u64::MAX, a read-only disk, a mounted volume (test 19) - nothing written");
+    // A check that could not run in full (a limit reached) never lets repair write: the
+    // limits lowered so that the reference image reaches them – 6 node numbers > 4, and
+    // the data blocks the live tree and the snapshot reach through different node blocks.
+    for (what, nodes, shared, warn) in [("node limit", Some(4u64), None, "relations not checked"), ("shared-data limit", None, Some(0u64), "not compared")] {
+        let img = older_damaged();
+        let d = disk_of(&img);
+        check::set_limits(nodes, shared);
+        let rep = check::check(d, &mut |_, _| {});
+        let rp = check::repair(d, true);
+        check::set_limits(None, None);
+        let after = image(d, (img.len() / BLOCK) as u64);
+        block::remove(d);
+        let rep = rep?;
+        ensure!(!rep.slots[1].complete && rep.slots[1].data_ok == Some(true), "{}: slot B should be incomplete: {}", what, text(&rep));
+        ensure!(rep.lines.iter().any(|(lv, l)| *lv == check::Level::Warning && l.contains(warn)), "{}: no warning: {}", what, text(&rep));
+        ensure!(rep.lines.iter().any(|(_, l)| l.starts_with("result:") && l.contains("INCOMPLETE")), "{}: result line without INCOMPLETE: {}", what, text(&rep));
+        ensure!(matches!(&rp, Err(e) if e.contains("incomplete")), "{}: repair after an incomplete check: {:?}", what, rp);
+        ensure!(after == img, "{}: repair refused but the disk changed", what);
+    }
+    done.push("a check stopped by a limit (node numbers / shared data, lowered for the test) -> WARNING, INCOMPLETE in the result, repair refused, nothing written");
     // Interrupted at every sector of the superblock write (and a random part of it).
     let img = older_damaged();
     let base: Image = Rc::new(img.chunks(BLOCK).map(|c| if c.iter().all(|&x| x == 0) { Vec::new() } else { c.to_vec() }).collect());
@@ -413,7 +433,7 @@ pub fn t_cursor() -> T {
         loop {
             let (part, next) = v.read_dir_at("/d", cursor, 7).map_err(|e| format!("read_dir_at {}: {}", cursor, e))?;
             ensure!(part.len() <= 7, "part of {} entries", part.len());
-            for e in part {
+            for (_, e) in part {
                 *seen.entry(e.name).or_insert(0) += 1;
             }
             parts += 1;
@@ -448,7 +468,8 @@ pub fn t_cursor() -> T {
         let mut c = 0;
         loop {
             let (p, n) = v.read_dir_at("/d", c, 11).map_err(|e| format!("{}", e))?;
-            for e in p {
+            for (pos, e) in p {
+                ensure!(pos >= c, "entry position {} before the cursor {}", pos, c);
                 ensure!(parts_set.insert(e.name), "duplicate in a quiet listing");
             }
             match n {
@@ -470,7 +491,7 @@ pub fn t_cursor() -> T {
     let mut c = 0;
     loop {
         let (p, n) = crate::fs::read_dir_at("/tmp/curtest", c, 7).map_err(|e| format!("ramfs: {}", e))?;
-        got.extend(p);
+        got.extend(p.into_iter().map(|x| x.1));
         match n {
             Some(x) => c = x,
             None => break,
@@ -484,4 +505,48 @@ pub fn t_cursor() -> T {
     ensure!(got.len() == 20, "ramfs in parts: {} entries", got.len());
     ensure!(matches!(bad, Err(FsError::BadCursor)), "ramfs: position past the end accepted");
     Ok(format!("DeSoFS: {}; ramfs through the VFS (default: a list index): 20 entries in parts of 7, a position past the end refused", desofs))
+}
+
+// ---------------- 23. automatic mount ----------------
+
+pub fn t_mount() -> T {
+    use crate::fs::DiskMount;
+    let at = "/mt-desofs";
+    let try_mount = |d: usize| -> DiskMount {
+        let r = crate::fs::mount_disk(d, at);
+        let _ = crate::fs::unmount(at);
+        let _ = crate::fs::remove(at);
+        r
+    };
+    // A sound DeSoFS volume -> read-write.
+    let d = formatted(256)?;
+    let r = try_mount(d);
+    block::remove(d);
+    ensure!(r == DiskMount::DeSoFs(None), "sound volume: {:?}", r);
+    // One tree damaged -> read-only, with the reason.
+    let d = disk_of(&older_damaged());
+    let r = try_mount(d);
+    block::remove(d);
+    ensure!(matches!(&r, DiskMount::DeSoFs(Some(w)) if w.contains("older")), "older tree damaged: {:?}", r);
+    // FAT32 -> FAT32.
+    let d = block::register(Box::new(RamDisk::new("dsfm", 16 * 1024)));
+    let r = crate::fs::fat32::mkfs(d, "MTEST", true).map(|_| try_mount(d));
+    ensure!(matches!(&r, Ok(DiskMount::Fat32(_))), "FAT32: {:?}", r);
+    // The DeSoFS marker over a valid FAT32 (both superblocks broken): DeSoFS rules only –
+    // nothing mounted, never the FAT32 under it.
+    let mut sb = vec![0u8; BLOCK];
+    sb[0..8].copy_from_slice(MAGIC);
+    sb[100] = 0x5A;
+    let _ = block::write(d, 8, &sb);
+    let r = try_mount(d);
+    block::remove(d);
+    ensure!(matches!(&r, DiskMount::Nothing(w) if w.contains("DeSoFS")), "marker over FAT32: {:?}", r);
+    // An empty disk: nothing mounted, nothing written (never a format).
+    let d = block::register(Box::new(RamDisk::new("dsfe", 512)));
+    let r = try_mount(d);
+    let img = image(d, 64);
+    block::remove(d);
+    ensure!(matches!(&r, DiskMount::Nothing(_)), "empty disk: {:?}", r);
+    ensure!(img.iter().all(|&b| b == 0), "an empty disk was written to");
+    Ok(String::from("sound DeSoFS -> read-write; one tree damaged -> read-only with the reason; FAT32 -> FAT32; the DeSoFS marker over a valid FAT32 with both superblocks broken -> not mounted (never the FAT32 under it); an empty disk -> not mounted and untouched (never formatted)"))
 }

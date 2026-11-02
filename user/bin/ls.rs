@@ -10,7 +10,7 @@ mod desoos;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use desoos::{ERROR_BUFFER_TOO_SMALL, readdir, stat, strerror};
+use desoos::{close, dir_for_listing, readdir_part, stat, strerror, DIR_END};
 
 entry!(main);
 
@@ -36,45 +36,63 @@ fn list(path: &str, header: bool) -> i32 {
         }
         _ => {}
     }
-    let mut buf = vec![0u8; 4096];
-    let n = loop {
-        let n = readdir(path, &mut buf);
-        if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
-            buf.resize(buf.len() * 2, 0);
-            continue;
+    // The directory in parts (readdir_part): one part = sorted as before; a larger
+    // directory is shown part by part in the file system's order.
+    let (dir, rel, owned) = match dir_for_listing(path) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("ls: {}: {}", path, strerror(e));
+            return 1;
         }
-        break n;
     };
-    if n < 0 {
-        eprintln!("ls: {}: {}", path, strerror(n));
-        return 1;
-    }
+    let mut buf = vec![0u8; 4096];
+    let mut cursor = 0u64;
+    let mut first = true;
+    let mut status = 0;
+    let mut count = 0usize;
     if header {
         println!("{}:", path);
     }
-    let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
-    let mut entries: Vec<(bool, u64, &str)> = text
-        .lines()
-        .filter_map(|l| {
-            let mut p = l.splitn(3, '\t');
-            let kind = p.next()?;
-            let size = p.next()?.parse().unwrap_or(0);
-            Some((kind == "d", size, p.next()?))
-        })
-        .collect();
-    // Directories first, then alphabetically.
-    entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(b.2)));
-    for (dir, size, name) in &entries {
-        if *dir {
-            println!("{:>10}  \x1b[1;34m{}/\x1b[0m", "<dir>", name);
-        } else {
-            println!("{:>10}  {}", human(*size), name);
+    while cursor != DIR_END {
+        let n = readdir_part(dir, rel, &mut buf, &mut cursor);
+        if n < 0 {
+            eprintln!("ls: {}: {}", path, strerror(n));
+            status = 1;
+            break;
         }
+        let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
+        let mut entries: Vec<(bool, u64, &str)> = text
+            .lines()
+            .filter_map(|l| {
+                let mut p = l.splitn(3, '\t');
+                let kind = p.next()?;
+                let size = p.next()?.parse().unwrap_or(0);
+                Some((kind == "d", size, p.next()?))
+            })
+            .collect();
+        if first && cursor == DIR_END {
+            // Directories first, then alphabetically.
+            entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(b.2)));
+        } else if first {
+            println!("(large directory - in the file system's order)");
+        }
+        first = false;
+        for (d, size, name) in &entries {
+            if *d {
+                println!("{:>10}  \x1b[1;34m{}/\x1b[0m", "<dir>", name);
+            } else {
+                println!("{:>10}  {}", human(*size), name);
+            }
+        }
+        count += entries.len();
     }
-    if entries.is_empty() {
+    if owned {
+        close(dir);
+    }
+    if count == 0 && status == 0 {
         println!("(empty)");
     }
-    0
+    status
 }
 
 fn main(args: desoos::Args) -> i32 {

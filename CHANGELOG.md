@@ -2,6 +2,45 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.64.0 — 2026-11-02
+
+### DeSoFS stage 4 – `/disk` as DeSoFS, programs, a real restart
+- **Mounting at start:** `fs::mount_disk` – disk 0 with the DeSoFS marker in either superblock (whatever its
+  checksum) is handled only by DeSoFS rules: read-write, read-only with the reason, or not mounted with the reason –
+  never a fallback to FAT32; without the marker FAT32 as before; never a format. `desofs format 0 yes` mounts the new
+  volume at `/disk` at once (and at every start); `desofs mount 0` → `/disk` (other disks `/desofs`); `desofs
+  unmount` unmounts every DeSoFS mount.
+- **New syscall 57 `readdir_part(dir, path, len, buf, buflen, cursor)`** – a directory in parts through a directory
+  handle (rights row like `readdirat`; sandbox: only below the given handle). DeSoFS: the byte position of Format 1;
+  ramfs / FAT32: an index. `read_dir_at` now returns each entry's position, so a part resumes exactly at the first
+  entry that did not fit. Library: `readdir_part`, `dir_for_listing`; **`/bin/ls`** reads in parts. Profiler: 58
+  syscall categories.
+- **Restart test:** `tests/test.sh` starts QEMU a second time on the same test disk (fw_cfg
+  `opt/desoos/phase=restart`). RESTART TEST part 1 (last step of the normal run, only on an empty disk 0 in the
+  automatic mode) formats disk 0 and writes a fixed set; part 2 (the second start, every other test skipped) checks
+  the automatic mount, every byte, the 300-entry directory in parts, `sha256sum` and `ls` on `/disk`, a new file, and
+  `desofs check` (0 errors, complete). Logs: `logs/test.log` and `logs/test-restart.log`.
+- **`[RESULT-FS]`** – 8 MiB in 64 KiB pieces written and read, 1000 files of 100 B created and read, `desofs check`
+  time; `test.sh` adds `accel=`, `cpus=`, `mem=`, `restart_s=`.
+- Tests: DESOFS TEST 23 (automatic mount: sound / damaged / FAT32 / marker over FAT32 / empty disk untouched), FILE
+  TEST dirtest + `readdir_part` (42 entries through a 64-byte buffer, wrong position, too small a buffer, no READ
+  right, above the handle, in the sandbox), RESTART TEST 1–5. 33 suites and a restart phase, 272 tests. Mutations: a
+  FAT32 fallback under a broken DeSoFS, a part resuming past entries left out – each caught.
+- Docs: ARCHITECTURE (mounting, `readdir_part`, restart test), ROADMAP (stage 4 done, speed as a known gap), README.
+
+## v0.63.1 — 2026-11-02
+
+### Fixed – repair after an incomplete check
+- `desofs check` skipped the relation check above 16 M node numbers and the E3 comparison above 65 536 shared blocks
+  with only a warning, while the superblock still counted as fully sound – `desofs repair` could then copy a state
+  that was not checked in full (found in a code review). Now each superblock in the report says whether every check
+  ran (`complete`); a skipped check marks it incomplete ("data OK as far as checked (INCOMPLETE)", INCOMPLETE in the
+  result line), and repair refuses: "the check was incomplete (a limit was reached) - repair refused; nothing changed".
+- Test: DESOFS TEST 21 lowers both limits (test builds only) so the reference image reaches them – check warns and
+  says INCOMPLETE, repair refuses and the disk is unchanged. Three mutations (repair ignoring completeness, either
+  limit not marking incompleteness) each make it fail.
+- Docs: ARCHITECTURE, ROADMAP (known gaps), README.
+
 ## v0.63.0 — 2026-11-02
 
 ### DeSoFS stage 3 – check, repair, directories in parts

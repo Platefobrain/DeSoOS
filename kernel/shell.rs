@@ -1265,13 +1265,13 @@ fn cmd_ls(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         }
     };
     if next.is_none() {
-        part.sort_by(|a, b| a.name.chars().flat_map(char::to_lowercase).cmp(b.name.chars().flat_map(char::to_lowercase)));
+        part.sort_by(|a, b| a.1.name.chars().flat_map(char::to_lowercase).cmp(b.1.name.chars().flat_map(char::to_lowercase)));
     } else {
         let _ = writeln!(out, "(large directory - in the file system's order)");
     }
     let (mut files, mut dirs, mut bytes) = (0usize, 0usize, 0u64);
     loop {
-        for e in &part {
+        for (_, e) in &part {
             show(out, e);
             if e.kind == FileType::File { files += 1 } else { dirs += 1 }
             bytes += e.size;
@@ -1558,6 +1558,13 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             let _ = crate::fs::unmount("/desofs");
             let p = crate::fs::desofs::format::Params { uuid: crate::fs::desofs::format::random_uuid(), time: crate::drivers::rtc::now().to_unix(), label: "DESOFS" };
             match crate::fs::desofs::format::format(disk, &p) {
+                Ok(blocks) if disk == 0 => {
+                    let _ = writeln!(out, "disk 0 ({}): DeSoFS, {} blocks ({} KiB)", name, blocks, blocks * 4);
+                    let _ = match crate::fs::mount_disk(0, "/disk") {
+                        crate::fs::DiskMount::DeSoFs(None) => writeln!(out, "mounted at /disk (from now on also at every start)"),
+                        r => writeln!(out, "mount /disk: {:?}", r),
+                    };
+                }
                 Ok(blocks) => {
                     let _ = writeln!(out, "disk {} ({}): DeSoFS, {} blocks ({} KiB) - 'desofs mount {}' to use it", disk, name, blocks, blocks * 4, disk);
                 }
@@ -1567,15 +1574,17 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             }
         }
         ("mount", Some(disk)) => {
+            // Disk 0 is /disk (mounted at every start); other disks /desofs until reboot.
+            let at = if disk == 0 { "/disk" } else { "/desofs" };
             match crate::fs::desofs::vol::Volume::mount(disk) {
                 Ok(v) => {
                     let ro = v.read_only_reason().map(String::from);
-                    let _ = crate::fs::mkdir("/desofs");
-                    match crate::fs::mount("/desofs", alloc::boxed::Box::new(crate::fs::Locked::new(v))) {
+                    let _ = crate::fs::mkdir(at);
+                    match crate::fs::mount(at, alloc::boxed::Box::new(crate::fs::Locked::new(v))) {
                         Ok(()) => {
                             let _ = match ro {
-                                None => writeln!(out, "disk {} mounted at /desofs (DeSoFS, read-write; until reboot)", disk),
-                                Some(w) => writeln!(out, "disk {} mounted at /desofs read-only: {}", disk, w),
+                                None => writeln!(out, "disk {} mounted at {} (DeSoFS, read-write)", disk, at),
+                                Some(w) => writeln!(out, "disk {} mounted at {} read-only: {}", disk, at, w),
                             };
                         }
                         Err(e) => {
@@ -1589,13 +1598,20 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             }
         }
         ("unmount", _) => {
-            if ctx.cwd.starts_with("/desofs") {
-                *ctx.cwd = String::from("/");
+            // Every DeSoFS mount (/disk and / or /desofs).
+            let paths: alloc::vec::Vec<String> = crate::fs::mount_list().into_iter().filter(|(_, kind, _)| *kind == "desofs").map(|(p, _, _)| p).collect();
+            if paths.is_empty() {
+                let _ = writeln!(out, "desofs unmount: no DeSoFS volume is mounted");
             }
-            let _ = match crate::fs::unmount("/desofs") {
-                Ok(()) => writeln!(out, "/desofs unmounted"),
-                Err(e) => writeln!(out, "desofs unmount: {}", e),
-            };
+            for p in paths {
+                if ctx.cwd.starts_with(p.as_str()) {
+                    *ctx.cwd = String::from("/");
+                }
+                let _ = match crate::fs::unmount(&p) {
+                    Ok(()) => writeln!(out, "{} unmounted", p),
+                    Err(e) => writeln!(out, "desofs unmount {}: {}", p, e),
+                };
+            }
         }
         ("check", Some(disk)) => {
             use crate::fs::desofs::check::Level;

@@ -9,6 +9,9 @@
 //   QEMU down itself with an exit code: PASS -> 33, FAIL -> 35 ((value << 1) | 1).
 //   Without that file (plain ./run-qemu.sh, real hardware) nothing
 //   changes – the shell starts after the tests.
+// * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
+//   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
+//   (DeSoFS written in the first start must be there, mounted at /disk by itself).
 // * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/desoos/loop`
 //   holds "suite:rounds".  The suites up to SMP start run once (the system needs
 //   them), then only the named suite runs, round after round, until a round fails;
@@ -23,6 +26,7 @@ use crate::serial_println;
 static STARTED: AtomicU32 = AtomicU32::new(0);
 static PASSED: AtomicU32 = AtomicU32::new(0);
 static AUTOTEST: AtomicBool = AtomicBool::new(false);
+static RESTART: AtomicBool = AtomicBool::new(false);
 
 pub fn begin() {
     STARTED.fetch_add(1, Ordering::SeqCst);
@@ -85,6 +89,8 @@ const FW_CFG_SIGNATURE: u16 = 0x0000;
 const FW_CFG_FILE_DIR: u16 = 0x0019;
 const AUTOTEST_FILE: &[u8] = b"opt/desoos/autotest";
 const LOOP_FILE: &[u8] = b"opt/desoos/loop";
+/// "restart": the second start of tests/test.sh – only RESTART TEST part 2 runs.
+const PHASE_FILE: &[u8] = b"opt/desoos/phase";
 
 const DEBUG_EXIT_PORT: u16 = 0xf4;
 const EXIT_PASS: u8 = 0x10; // QEMU exits with code 33
@@ -234,7 +240,26 @@ pub fn detect_autotest() {
     if on {
         serial_println!("[TEST] Automatic test mode (QEMU will exit after the self-tests)");
         detect_loop();
+        detect_phase();
     }
+}
+
+/// Reads `opt/desoos/phase` – "restart" = the second start (tests/test.sh).
+fn detect_phase() {
+    let Some((size, select)) = fw_cfg_find(PHASE_FILE) else { return };
+    let mut buf = [0u8; 16];
+    let n = (size as usize).min(buf.len());
+    unsafe { outw(FW_CFG_SELECTOR, select) };
+    fw_cfg_bytes(&mut buf[..n]);
+    if core::str::from_utf8(&buf[..n]).unwrap_or("").trim_matches(|c: char| c == '\0' || c.is_whitespace()) == "restart" {
+        RESTART.store(true, Ordering::SeqCst);
+        serial_println!("[TEST] Restart phase: only RESTART TEST part 2 (the disk from the first start)");
+    }
+}
+
+/// The second start of tests/test.sh: the other self-tests are skipped.
+pub fn restart() -> bool {
+    RESTART.load(Ordering::SeqCst)
 }
 
 pub fn autotest() -> bool {

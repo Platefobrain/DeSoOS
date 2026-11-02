@@ -84,22 +84,30 @@ pub extern "sysv64" fn kernel_main(
     // GDT/IDT as early as possible – after that every fault gets a readable report.
     arch::x86_64::init();
     #[cfg(selftest)]
-    arch::x86_64::self_test();
+    if !selftest::restart() {
+        arch::x86_64::self_test();
+    }
 
     // Physical memory (frame allocator).
     memory::init(boot);
     #[cfg(selftest)]
-    memory::self_test();
+    if !selftest::restart() {
+        memory::self_test();
+    }
 
     // Paging.
     memory::paging_init();
     #[cfg(selftest)]
-    memory::paging_self_test();
+    if !selftest::restart() {
+        memory::paging_self_test();
+    }
 
     // Kernel heap.
     memory::heap_init();
     #[cfg(selftest)]
-    memory::heap_self_test();
+    if !selftest::restart() {
+        memory::heap_self_test();
+    }
     // Per-CPU block lists – after the self-test (it checks exact counters).
     memory::heap::enable_cpu_caches();
     memory::enable_frame_caches(); // per-CPU frame caches
@@ -110,7 +118,9 @@ pub extern "sysv64" fn kernel_main(
     // On-demand mapping (needs #PF + frame allocator + paging)
     // – always active, the test runs only in the selftest build.
     #[cfg(selftest)]
-    memory::demand_self_test();
+    if !selftest::restart() {
+        memory::demand_self_test();
+    }
 
     // Framebuffer console (from now on logs also go to the screen).
     console::init(boot);
@@ -129,31 +139,39 @@ pub extern "sysv64" fn kernel_main(
     arch::x86_64::interrupts::enable();
     serial_println!("[ARCH] Interrupts enabled");
     #[cfg(selftest)]
-    time::self_test();
+    if !selftest::restart() {
+        time::self_test();
+    }
 
     // Scheduler – from now on this code is task 1 ("kernel"), next to
     // the idle task; the PIT tick preempts tasks.
     sched::init();
     #[cfg(selftest)]
-    sched::self_test();
+    if !selftest::restart() {
+        sched::self_test();
+    }
 
     // Ring 3 (FPU/SSE, SMEP, SMAP, SYSCALL); process, FPU and syscall tests.
     user::init();
     #[cfg(selftest)]
-    user::self_test();
+    if !selftest::restart() {
+        user::self_test();
+    }
     #[cfg(selftest)]
-    user::fpu_self_test();
+    if !selftest::restart() {
+        user::fpu_self_test();
+    }
 
     // PS/2 controller + keyboard (IRQ1) -> input (event queue).
     let keyboard = drivers::keyboard::init();
     #[cfg(selftest)]
-    if keyboard {
+    if keyboard && !selftest::restart() {
         drivers::keyboard::self_test();
     }
     // PS/2 mouse (the wheel scrolls the console).
     let mouse = keyboard && drivers::mouse::init();
     #[cfg(selftest)]
-    if mouse {
+    if mouse && !selftest::restart() {
         drivers::mouse::self_test();
     }
     let _ = mouse;
@@ -163,37 +181,58 @@ pub extern "sysv64" fn kernel_main(
         serial_println!("[CON] WARNING: serial input not available");
     }
     #[cfg(selftest)]
-    shell::self_test();
+    if !selftest::restart() {
+        shell::self_test();
+    }
 
     // PCI -> virtio-blk -> block layer, plus NVMe (a real SSD,
     // read-only) and GPT partitions.
     drivers::pci::init();
     drivers::virtio_blk::init();
     #[cfg(selftest)]
-    drivers::virtio_blk::self_test();
+    if !selftest::restart() {
+        drivers::virtio_blk::self_test();
+    }
     drivers::nvme::init();
 
-    // VFS – ramfs at "/", FAT32 from disk at "/disk".
+    // VFS – ramfs at "/", disk 0 at "/disk" (DeSoFS or FAT32).
     fs::init();
     #[cfg(selftest)]
-    fs::self_test();
+    if !selftest::restart() {
+        fs::self_test();
+    }
     // ACPI, ECAM, MSI-X, NVMe, GPT (needs the VFS – the /esp partition).
     #[cfg(selftest)]
-    drivers::nvme::self_test();
+    if !selftest::restart() {
+        drivers::nvme::self_test();
+    }
 
     // Syscalls (they need the VFS – file test); ELF programs from /bin.
     #[cfg(selftest)]
-    user::syscall_self_test();
+    if !selftest::restart() {
+        user::syscall_self_test();
+    }
     #[cfg(selftest)]
-    user::elf_self_test();
+    if !selftest::restart() {
+        user::elf_self_test();
+    }
     // spawn/wait/parent, user-space shell, init.
     #[cfg(selftest)]
-    user::init_self_test();
+    if !selftest::restart() {
+        user::init_self_test();
+    }
 
     // Remaining cores (INIT-SIPI-SIPI); from now on processes run
     // in parallel, the kernel under the Big Kernel Lock.  The suites from here on
     // can be repeated in loop mode (`selftest::suite`); USB, network and stress
     // are skipped then.
+    // tests/test.sh, second start: DeSoFS written by the first start must be at /disk.
+    #[cfg(selftest)]
+    if selftest::restart() {
+        fs::desofs::restart::verify();
+        let ok = selftest::finish();
+        selftest::exit_if_autotest(ok);
+    }
     arch::x86_64::smp::init();
     #[cfg(selftest)]
     selftest::suite("smp", user::smp_self_test);
@@ -250,6 +289,10 @@ pub extern "sysv64" fn kernel_main(
 
     #[cfg(selftest)]
     {
+        // Last: DeSoFS on the test disk for the second start (tests/test.sh).
+        if !selftest::looping() {
+            fs::desofs::restart::prepare();
+        }
         serial_println!("[DeSoOS] Self-tests finished");
         selftest::check_loop_name();
         let ok = selftest::finish();

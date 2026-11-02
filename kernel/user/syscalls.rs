@@ -67,6 +67,11 @@
 //  54  statat(dir, path, len, out)
 //  55  mkdirat(dir, path, len)
 //  56  unlinkat(dir, path, len)
+//  57  readdir_part(dir, path, len, buf, buflen, cursor) -> n
+//        a directory in parts: entries as readdir from position *cursor (0 = start) as
+//        far as they fit in buf; *cursor = the next position (u64::MAX = end).  The
+//        position is a byte position in DeSoFS (stable while the directory changes),
+//        an index elsewhere; a wrong one -> ERROR_INVALID_ARGUMENT
 //      A path through a directory handle is relative and never leaves the directory
 //      (absolute, or ".." above it -> ERROR_ACCESS_DENIED); "" / "." = the directory
 //      itself (readdirat, statat).  Rights: the table in sysrights.rs.
@@ -297,6 +302,9 @@ pub const SYS_READDIRAT: u64 = 53;
 pub const SYS_STATAT: u64 = 54;
 pub const SYS_MKDIRAT: u64 = 55;
 pub const SYS_UNLINKAT: u64 = 56;
+pub const SYS_READDIR_PART: u64 = 57;
+/// readdir_part: the cursor value after the last part.
+pub const DIR_END: u64 = u64::MAX;
 /// Maximum number of entries in the spawn_ex map.
 pub const SPAWN_EX_MAX: u64 = 16;
 
@@ -1295,6 +1303,39 @@ fn readdir_path(p: &mut Process, path: &str, buf: u64, cap: u64) -> SysResult {
     text_to_user(p, buf, cap as u64, &text)
 }
 
+/// readdir_part(dir, path, len, buf, buflen, cursor): entries from *cursor that fit in buf.
+fn sys_readdir_part(p: &mut Process, f: &SyscallFrame) -> SysResult {
+    use core::fmt::Write;
+    let path = dir_path(p, f.rdi, f.rsi, f.rdx, true)?;
+    let (buf, cur_ptr) = (f.r10, f.r9);
+    let cap = f.r8.min(MAX_IO) as usize;
+    let raw = copy_from_user(p, cur_ptr, 8)?;
+    let cursor = u64::from_le_bytes(raw[..8].try_into().map_err(|_| ERROR_INVALID_ARGUMENT)?);
+    if cursor == DIR_END {
+        return text_to_user(p, buf, cap as u64, "");
+    }
+    // At most what can fit (a line is at least 7 bytes), never a whole huge directory.
+    let (part, next) = fs::read_dir_at(&path, cursor, (cap / 7 + 1).min(4096)).map_err(fs_error)?;
+    let mut text = String::new();
+    let mut resume = next.unwrap_or(DIR_END);
+    let mut line = String::new();
+    for (i, (pos, e)) in part.iter().enumerate() {
+        line.clear();
+        let _ = writeln!(line, "{}\t{}\t{}", if e.kind == FileType::Directory { 'd' } else { 'f' }, e.size, e.name);
+        if text.len() + line.len() > cap {
+            if i == 0 {
+                return Err(ERROR_BUFFER_TOO_SMALL);
+            }
+            resume = *pos;
+            break;
+        }
+        text.push_str(&line);
+    }
+    let n = text_to_user(p, buf, cap as u64, &text)?;
+    copy_to_user(p, cur_ptr, &resume.to_le_bytes())?;
+    Ok(n)
+}
+
 fn sys_stat(p: &mut Process, ptr: u64, len: u64, out: u64) -> SysResult {
     let path = user_path(p, ptr, len)?;
     stat_path(p, &path, out)
@@ -1560,7 +1601,7 @@ fn bkl_free_slot(frame: &SyscallFrame) -> Option<usize> {
         // Process memory – changed only by the process itself, frames without the BKL.
         SYS_BRK | SYS_MMAP | SYS_MUNMAP => Some(4),
         SYS_OPEN | SYS_CLOSE | SYS_STAT | SYS_READDIR | SYS_MKDIR | SYS_UNLINK | SYS_CHDIR | SYS_GETCWD => Some(3),
-        SYS_DIR_OPEN | SYS_OPENAT | SYS_READDIRAT | SYS_STATAT | SYS_MKDIRAT | SYS_UNLINKAT => Some(3),
+        SYS_DIR_OPEN | SYS_OPENAT | SYS_READDIRAT | SYS_STATAT | SYS_MKDIRAT | SYS_UNLINKAT | SYS_READDIR_PART => Some(3),
         // Processes – zombie table under its own lock
         // (task list: under the scheduler lock).
         SYS_SPAWN | SYS_SPAWN_EX | SYS_WAIT | SYS_KILL | SYS_GETPPID => Some(4),
@@ -1653,6 +1694,7 @@ fn allocates(nr: u64) -> bool {
             | SYS_READDIRAT
             | SYS_STATAT
             | SYS_MKDIRAT
+            | SYS_READDIR_PART
     )
 }
 
@@ -1733,6 +1775,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_DIR_OPEN => sys_dir_open(p, a0, a1, a2),
         SYS_OPENAT => sys_openat(p, frame),
         SYS_READDIRAT => dir_path(p, a0, a1, a2, true).and_then(|path| readdir_path(p, &path, frame.r10, frame.r8)),
+        SYS_READDIR_PART => sys_readdir_part(p, frame),
         SYS_STATAT => dir_path(p, a0, a1, a2, true).and_then(|path| stat_path(p, &path, frame.r10)),
         SYS_MKDIRAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
         SYS_UNLINKAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),

@@ -55,6 +55,9 @@ pub struct Slot {
     pub used_stored: u64,
     /// Data, directories and relations of its roots: None = not checked.
     pub data_ok: Option<bool>,
+    /// Every check of its roots ran (false: a limit was reached and something was skipped
+    /// – data_ok then covers only what ran, and repair refuses this superblock).
+    pub complete: bool,
 }
 
 pub struct CheckReport {
@@ -73,7 +76,25 @@ const MAX_ERROR_LINES: u64 = 64;
 /// Highest node number the relation check takes (memory: 9 bytes per number).
 const MAX_NODES: u64 = 1 << 24;
 /// Data blocks met from two different pointer blocks that are compared (E3).
-const MAX_SHARED: usize = 65536;
+const MAX_SHARED: u64 = 65536;
+
+/// The two limits (tests lower them to reach the "incomplete" paths on small images).
+static LIMIT_NODES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(MAX_NODES);
+static LIMIT_SHARED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(MAX_SHARED);
+
+fn limit_nodes() -> u64 {
+    LIMIT_NODES.load(core::sync::atomic::Ordering::Relaxed)
+}
+fn limit_shared() -> u64 {
+    LIMIT_SHARED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Tests: set the limits (None = the normal ones).
+#[cfg(selftest)]
+pub fn set_limits(nodes: Option<u64>, shared: Option<u64>) {
+    LIMIT_NODES.store(nodes.unwrap_or(MAX_NODES), core::sync::atomic::Ordering::Relaxed);
+    LIMIT_SHARED.store(shared.unwrap_or(MAX_SHARED), core::sync::atomic::Ordering::Relaxed);
+}
 
 impl CheckReport {
     fn new() -> Self {
@@ -159,6 +180,8 @@ struct Ck<'a> {
     multi: u64,
     shared: BTreeMap<u64, (u64, [u8; 32])>,
     shared_skipped: u64,
+    /// Roots whose relations were not checked (node limit).
+    skipped_roots: u64,
     mode: Mode,
     done: u64,
     goal: u64,
@@ -290,7 +313,7 @@ impl<'a> Ck<'a> {
                             self.rep.error(format!("data block {}: shared by two roots with different pointers (birth {} / {})", p.addr, birth, p.birth));
                         }
                     }
-                    None if self.shared.len() < MAX_SHARED => {
+                    None if (self.shared.len() as u64) < limit_shared() => {
                         self.shared.insert(p.addr, (p.birth, p.sha));
                     }
                     None => self.shared_skipped += 1,
@@ -397,8 +420,9 @@ impl<'a> Ck<'a> {
     /// Full check of one root: data, then directories and relations.
     fn root(&mut self, e: &RootEntry, name: &str) -> Res<()> {
         let errors0 = self.rep.errors;
-        if e.next_node > MAX_NODES {
-            self.rep.warning(format!("{}: {} node numbers - relations not checked (limit {})", name, e.next_node, MAX_NODES));
+        if e.next_node > limit_nodes() {
+            self.skipped_roots += 1;
+            self.rep.warning(format!("{}: {} node numbers - relations not checked (limit {})", name, e.next_node, limit_nodes()));
             self.data_errors.clear();
             self.root_data(e)?;
             self.name_data_errors(e, name);
@@ -630,6 +654,7 @@ pub fn check(index: usize, progress: &mut dyn FnMut(u64, u64)) -> Res<CheckRepor
         multi: 0,
         shared: BTreeMap::new(),
         shared_skipped: 0,
+        skipped_roots: 0,
         mode: Mode::Full,
         done: 0,
         goal,
@@ -648,14 +673,16 @@ pub fn check(index: usize, progress: &mut dyn FnMut(u64, u64)) -> Res<CheckRepor
         }
         if let Some(&(o, _)) = checked.iter().find(|(_, r)| *r == sb.root) {
             ck.rep.slots[s].data_ok = ck.rep.slots[o].data_ok;
+            ck.rep.slots[s].complete = ck.rep.slots[o].complete;
             continue;
         }
-        let errors0 = ck.rep.errors;
+        let (errors0, skipped0) = (ck.rep.errors, ck.skipped_roots);
         for e in roots(&ck, &sb)? {
             let name = format!("{} {}", slot_name(s), root_name(&e));
             ck.root(&e, &name)?;
         }
         ck.rep.slots[s].data_ok = Some(ck.rep.errors == errors0);
+        ck.rep.slots[s].complete = ck.skipped_roots == skipped0;
         checked.push((s, sb.root));
     }
     // 4. Data blocks met from two pointer blocks: the pointers must be identical.
@@ -684,7 +711,13 @@ pub fn check(index: usize, progress: &mut dyn FnMut(u64, u64)) -> Res<CheckRepor
         }
         if ck.shared_skipped > 0 {
             let n = ck.shared_skipped;
-            ck.rep.warning(format!("{} shared data pointers not compared (more than {} shared blocks)", n, MAX_SHARED));
+            ck.rep.warning(format!("{} shared data pointers not compared (more than {} shared blocks)", n, limit_shared()));
+            // E3 is one comparison over all checked trees: none of them is complete.
+            for s in 0..2 {
+                if ck.rep.slots[s].data_ok.is_some() {
+                    ck.rep.slots[s].complete = false;
+                }
+            }
         }
     }
     let mut rep = ck.rep;
@@ -699,10 +732,11 @@ pub fn check(index: usize, progress: &mut dyn FnMut(u64, u64)) -> Res<CheckRepor
                 Some(Err(_)) => String::from("tree damaged"),
                 None => String::from("tree not walked"),
             };
-            let data = match sl.data_ok {
-                Some(true) => "data OK",
-                Some(false) => "data damaged",
-                None => "data not checked",
+            let data = match (sl.data_ok, sl.complete) {
+                (Some(true), true) => "data OK",
+                (Some(true), false) => "data OK as far as checked (INCOMPLETE)",
+                (Some(false), _) => "data damaged",
+                (None, _) => "data not checked",
             };
             format!("superblock {}: generation {}, checksum OK, {}, {}", slot_name(s), sl.generation, tree, data)
         };
@@ -712,10 +746,17 @@ pub fn check(index: usize, progress: &mut dyn FnMut(u64, u64)) -> Res<CheckRepor
         let more = rep.errors - MAX_ERROR_LINES;
         rep.info(format!("... and {} more errors", more));
     }
+    let incomplete = rep.slots.iter().any(|s| s.data_ok.is_some() && !s.complete);
     let (e, w) = (rep.errors, rep.warnings);
     let (files, dirs, data) = (rep.files, rep.dirs, rep.data_blocks);
     rep.info(format!("{} files, {} directories, {} data blocks read", files, dirs, data));
-    rep.info(format!("result: {} errors, {} warnings{}", e, w, if e == 0 { "" } else { " - check changes nothing; see 'desofs repair'" }));
+    rep.info(format!(
+        "result: {} errors, {} warnings{}{}",
+        e,
+        w,
+        if incomplete { " - INCOMPLETE: a limit was reached, not every check ran" } else { "" },
+        if e == 0 { "" } else { " - check changes nothing; see 'desofs repair'" }
+    ));
     Ok(rep)
 }
 
@@ -734,6 +775,10 @@ pub fn repair(index: usize, apply: bool) -> Res<String> {
     let sound_trees = (0..2).filter(|&s| rep.slots[s].sb_ok && rep.slots[s].tree == Some(Ok(()))).count();
     if good.len() == 2 {
         return Err(String::from("nothing to repair - both superblocks and their trees are sound"));
+    }
+    // Only a superblock whose check ran in full can be the source of a repair.
+    if good.len() == 1 && !rep.slots[good[0]].complete {
+        return Err(String::from("the check was incomplete (a limit was reached) - repair refused; nothing changed"));
     }
     if good.is_empty() {
         return Err(if sound_trees > 0 {

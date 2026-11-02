@@ -1009,7 +1009,7 @@ impl<'a> Tx<'a> {
     /// an entry (DESOFS-FORMAT chapter 13): up to `max` entries and the position of the
     /// next active entry (None = end).  The position must be the start of an entry
     /// (FsError::BadCursor otherwise); deleted entries are stepped over by their length.
-    fn dir_list_at(&mut self, dir_n: u64, dir: &NodeBuf, cursor: u64, max: usize) -> R<(Vec<DirEntry>, Option<u64>)> {
+    fn dir_list_at(&mut self, dir_n: u64, dir: &NodeBuf, cursor: u64, max: usize) -> R<crate::fs::DirPart> {
         let blocks = dir.blocks();
         let (bi0, off0) = (cursor / BLOCK as u64, (cursor % BLOCK as u64) as usize);
         if bi0 > blocks || (bi0 == blocks && off0 != 0) {
@@ -1045,7 +1045,7 @@ impl<'a> Tx<'a> {
                         size: nb.size(),
                         modified: Some(crate::drivers::rtc::DateTime::from_unix(nb.modified())),
                     };
-                    crate::fs::try_push(&mut out, e)?;
+                    crate::fs::try_push(&mut out, (bi * BLOCK as u64 + off as u64, e))?;
                 }
                 off += rec;
             }
@@ -1448,7 +1448,7 @@ impl FileSystem for Volume {
             tx.dir_list(n, &nb, max)
         })
     }
-    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> R<(Vec<DirEntry>, Option<u64>)> {
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> R<crate::fs::DirPart> {
         self.read_op(|tx| {
             let (n, nb, _) = tx.lookup(path)?;
             if !nb.is_dir() {

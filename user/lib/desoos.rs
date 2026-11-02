@@ -78,6 +78,9 @@ pub const SYS_READDIRAT: u64 = 53;
 pub const SYS_STATAT: u64 = 54;
 pub const SYS_MKDIRAT: u64 = 55;
 pub const SYS_UNLINKAT: u64 = 56;
+pub const SYS_READDIR_PART: u64 = 57;
+/// readdir_part: the cursor after the last part.
+pub const DIR_END: u64 = u64::MAX;
 
 /// wait_many signals.
 pub const W_READABLE: u64 = 1;
@@ -280,6 +283,27 @@ pub fn openat(dir: u64, path: &str, flags: u64) -> i64 {
 }
 
 /// `readdir` inside `dir` ("" = the directory itself).
+/// A directory in parts: entries ("d|f\t<size>\t<name>\n") from position `*cursor` (0 =
+/// start) as far as they fit in `buf`; `*cursor` becomes the next position (DIR_END =
+/// done).  `dir` is a directory handle (READ), `path` relative to it ("" = itself).
+pub fn readdir_part(dir: u64, path: &str, buf: &mut [u8], cursor: &mut u64) -> i64 {
+    syscall6(SYS_READDIR_PART, dir, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, cursor as *mut u64 as u64)
+}
+
+/// A handle for reading directory `path` in parts: (handle, path relative to it, whether
+/// the caller must close it).  Normally a new READ handle; in the file sandbox the
+/// directory handle given to the program (a relative `path` inside it).
+pub fn dir_for_listing(path: &str) -> Result<(u64, &str, bool), i64> {
+    let h = dir_open(path, O_READ);
+    if h >= 0 {
+        return Ok((h as u64, "", true));
+    }
+    match in_dir(h, path) {
+        Some(d) => Ok((d, path, false)),
+        None => Err(h),
+    }
+}
+
 pub fn readdirat(dir: u64, path: &str, buf: &mut [u8]) -> i64 {
     syscall6(SYS_READDIRAT, dir, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
