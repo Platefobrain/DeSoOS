@@ -42,6 +42,8 @@ pub enum FsError {
     Io(BlockError),
     /// More directory entries than the caller can take (read_dir_max).
     TooMany,
+    /// A directory position (read_dir_at) that is not the start of an entry.
+    BadCursor,
 }
 
 impl From<BlockError> for FsError {
@@ -71,6 +73,7 @@ impl core::fmt::Display for FsError {
             FsError::Corrupt(what) => write!(f, "file system corrupt: {}", what),
             FsError::Io(e) => write!(f, "I/O error: {}", e),
             FsError::TooMany => f.write_str("too many directory entries"),
+            FsError::BadCursor => f.write_str("invalid directory position"),
         }
     }
 }
@@ -118,6 +121,12 @@ pub trait FileSystem {
         let v = self.read_dir(path)?;
         if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
     }
+    /// A directory in parts: at most `max` entries from position `cursor` (0 = start)
+    /// and the position of the next part (None = end).  DeSoFS: a byte position in the
+    /// directory (stable while the directory changes); default: an index into the list.
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+        dir_page(self.read_dir(path)?, cursor, max)
+    }
     /// Reads from `offset`; returns the number of bytes read (0 = end of file).
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     /// Writes from `offset` (the file grows as needed, holes are zero-filled).
@@ -160,6 +169,10 @@ pub trait ConcurrentFs {
     fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         let v = self.read_dir(path)?;
         if v.len() > max { Err(FsError::TooMany) } else { Ok(v) }
+    }
+    /// As FileSystem::read_dir_at.
+    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+        dir_page(self.read_dir(path)?, cursor, max)
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     fn read_all(&self, path: &str) -> Result<Vec<u8>>;
@@ -220,6 +233,9 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     fn read_dir_max(&mut self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir_max(path, max)
     }
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+        self.fs.lock().read_dir_at(path, cursor, max)
+    }
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.fs.lock().read(path, offset, buf)
     }
@@ -264,6 +280,9 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
     }
     fn read_dir_max(&self, path: &str, max: usize) -> Result<Vec<DirEntry>> {
         self.fs.lock().read_dir_max(path, max)
+    }
+    fn read_dir_at(&self, path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+        self.fs.lock().read_dir_at(path, cursor, max)
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.fs.lock().read(path, offset, buf)
@@ -563,6 +582,24 @@ pub fn read_dir_max(path: &str, max: usize) -> Result<Vec<DirEntry>> {
     // Compared character by character – no lowercase copies per comparison.
     entries.sort_by(|a, b| a.name.chars().flat_map(char::to_lowercase).cmp(b.name.chars().flat_map(char::to_lowercase)));
     Ok(entries)
+}
+
+/// A directory in parts (see FileSystem::read_dir_at) – not sorted: the order of the
+/// file system, so that the parts fit together.
+pub fn read_dir_at(path: &str, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    with_fs(path, |c, p| c.read_dir_at(p, cursor, max), |fs, p| fs.read_dir_at(p, cursor, max))
+}
+
+/// The default read_dir_at: `cursor` is an index into the whole list.
+pub fn dir_page(mut v: Vec<DirEntry>, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, Option<u64>)> {
+    let len = v.len() as u64;
+    if cursor > len {
+        return Err(FsError::BadCursor);
+    }
+    let end = cursor.saturating_add(max.max(1) as u64).min(len);
+    v.truncate(end as usize);
+    let page = v.split_off(cursor as usize);
+    Ok((page, if end < len { Some(end) } else { None }))
 }
 
 /// Pushes onto a list that grows with fallible allocation (lists sized by data from a disk).

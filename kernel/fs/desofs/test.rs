@@ -27,19 +27,19 @@ macro_rules! check {
 
 // ---------------- image helpers ----------------
 
-fn blk(img: &mut [u8], n: u64) -> &mut [u8] {
+pub(super) fn blk(img: &mut [u8], n: u64) -> &mut [u8] {
     &mut img[n as usize * BLOCK..(n as usize + 1) * BLOCK]
 }
-fn rd(img: &[u8], n: u64) -> &[u8] {
+pub(super) fn rd(img: &[u8], n: u64) -> &[u8] {
     &img[n as usize * BLOCK..(n as usize + 1) * BLOCK]
 }
-fn put64(b: &mut [u8], o: usize, v: u64) {
+pub(super) fn put64(b: &mut [u8], o: usize, v: u64) {
     b[o..o + 8].copy_from_slice(&v.to_le_bytes());
 }
 fn put32(b: &mut [u8], o: usize, v: u32) {
     b[o..o + 4].copy_from_slice(&v.to_le_bytes());
 }
-fn ptr_addr(img: &[u8], n: u64, off: usize) -> u64 {
+pub(super) fn ptr_addr(img: &[u8], n: u64, off: usize) -> u64 {
     u64_at(rd(img, n), off)
 }
 /// A correct pointer to block `addr` with `birth`.
@@ -52,7 +52,7 @@ fn make_ptr(img: &[u8], addr: u64, birth: u64) -> [u8; 48] {
 }
 
 /// Superblock checksum and root-pointer checksum of `slot` (1 or 2), nothing else.
-fn seal_sb(img: &mut [u8], slot: u64) {
+pub(super) fn seal_sb(img: &mut [u8], slot: u64) {
     let root = ptr_addr(img, slot, 80);
     if root > 0 && (root as usize) < img.len() / BLOCK {
         let h = sha256(rd(img, root));
@@ -109,7 +109,7 @@ fn fix(img: &mut [u8], addr: u64, guard: u32) {
 }
 
 /// Reseals both superblocks (those that still carry the marker).
-fn reseal(img: &mut [u8]) {
+pub(super) fn reseal(img: &mut [u8]) {
     for slot in [1u64, 2] {
         if &rd(img, slot)[0..8] == MAGIC {
             let root = ptr_addr(img, slot, 80);
@@ -147,24 +147,24 @@ fn why(r: &Report) -> String {
 }
 
 /// Where things are in the reference image (found by following its pointers).
-struct Map {
-    rt4: u64,
-    rt5: u64,
-    nt5: u64,
-    nd4: u64,
-    nd5: u64,
-    big: u64,
-    hello5: u64,
-    a_txt: u64,
-    root_dir: u64,
-    sub_dir: u64,
+pub(super) struct Map {
+    pub(super) rt4: u64,
+    pub(super) rt5: u64,
+    pub(super) nt5: u64,
+    pub(super) nd4: u64,
+    pub(super) nd5: u64,
+    pub(super) big: u64,
+    pub(super) hello5: u64,
+    pub(super) a_txt: u64,
+    pub(super) root_dir: u64,
+    pub(super) sub_dir: u64,
 }
 
-fn node_off(slot: usize) -> usize {
+pub(super) fn node_off(slot: usize) -> usize {
     HDR_SIZE + slot * NODE_SIZE
 }
 
-fn locate(img: &[u8]) -> Map {
+pub(super) fn locate(img: &[u8]) -> Map {
     let rt4 = ptr_addr(img, 1, 80);
     let rt5 = ptr_addr(img, 2, 80);
     let nt5 = ptr_addr(img, rt5, HDR_SIZE);
@@ -204,7 +204,7 @@ pub fn self_test() {
     blk(&mut img, 1).copy_from_slice(&b2);
     let r = run(&img);
     check!(r.state == State::ReadWrite && r.slot == 2 && r.next_slot == 2, "tie: {} slot {} next {}", why(&r), r.slot, r.next_slot);
-    serial_println!("[DESOFS TEST] 1/18 reference image (tests/mkdesofs.py): read-write, generation 5 in B, {} nodes, {} snapshot, {} blocks used, next commit to A; tie -> next to B PASS", 5, 1, 31);
+    serial_println!("[DESOFS TEST] 1/22 reference image (tests/mkdesofs.py): read-write, generation 5 in B, {} nodes, {} snapshot, {} blocks used, next commit to A; tie -> next to B PASS", 5, 1, 31);
 
     // 2. Superblocks.
     let mut cases: u32 = 0;
@@ -239,7 +239,7 @@ pub fn self_test() {
     let r = run_dev(base, 48 * 8);
     check!(refused(&r, "larger than the device"), "volume > device: {}", why(&r));
     cases += 1;
-    serial_println!("[DESOFS TEST] 2/18 superblocks: {} cases (marker, checksum, uuid, same generation, version, block size, features, size limits, label, reserved bytes, empty root) PASS", cases);
+    serial_println!("[DESOFS TEST] 2/22 superblocks: {} cases (marker, checksum, uuid, same generation, version, block size, features, size limits, label, reserved bytes, empty root) PASS", cases);
 
     // 3. Pointers and block headers (single superblock: damage = refusal).
     cases = 0;
@@ -269,7 +269,7 @@ pub fn self_test() {
     case!("header reserved bytes", "reserved bytes", |i: &mut Vec<u8>| { blk(i, m.nd5)[50] = 1; reseal(i) });
     case!("checksum (not resealed)", "checksum does not match", |i: &mut Vec<u8>| blk(i, m.nd5)[node_off(2) + 24] ^= 1);
     case!("pointer block without pointers", "without any pointer", |i: &mut Vec<u8>| { blk(i, m.big)[HDR_SIZE..].fill(0); blk(i, m.big)[6] = 0; reseal(i) });
-    serial_println!("[DESOFS TEST] 3/18 pointers and headers: {} cases (range, reserved blocks, empty-pointer form, birth for data and metadata, kind, level, count, self address, uuid, generation, padding, checksum, empty pointer block) PASS", cases);
+    serial_println!("[DESOFS TEST] 3/22 pointers and headers: {} cases (range, reserved blocks, empty-pointer form, birth for data and metadata, kind, level, count, self address, uuid, generation, padding, checksum, empty pointer block) PASS", cases);
 
     // 4. Tree structure: a block twice in one tree, the same block as data and metadata
     // (both orders), a loop, a shared block of another kind, holes, pointers past the size.
@@ -283,7 +283,7 @@ pub fn self_test() {
     case!("hole in a directory", "hole in a directory", |i: &mut Vec<u8>| { let o = node_off(1) + 56; blk(i, m.nd5)[o..o + 48].fill(0); reseal(i) });
     case!("direct pointer past the size", "beyond the file size", |i: &mut Vec<u8>| { let p = make_ptr(i, m.a_txt, 4); blk(i, m.nd5)[n2 + 48..n2 + 96].copy_from_slice(&p); reseal(i) });
     case!("tree pointer past the size", "beyond the file size", |i: &mut Vec<u8>| { let src = HDR_SIZE; let dst = HDR_SIZE + 30 * PTR_SIZE; let p: [u8; 48] = rd(i, m.big)[src..src + 48].try_into().unwrap(); blk(i, m.big)[dst..dst + 48].copy_from_slice(&p); blk(i, m.big)[6] += 1; reseal(i) });
-    serial_println!("[DESOFS TEST] 4/18 tree structure: {} cases (block twice in a tree, data/metadata in both orders, loop, shared block of another kind, directory hole, pointers past the size at depth 0 and 1) PASS", cases);
+    serial_println!("[DESOFS TEST] 4/22 tree structure: {} cases (block twice in a tree, data/metadata in both orders, loop, shared block of another kind, directory hole, pointers past the size at depth 0 and 1) PASS", cases);
 
     // 5. Nodes and root entries.
     cases = 0;
@@ -335,7 +335,7 @@ pub fn self_test() {
     case!("snapshot from the future", "created_gen", |i: &mut Vec<u8>| { put64(blk(i, m.rt5), e1 + 64, 6); reseal(i) });
     case!("live root with a name", "live root entry", |i: &mut Vec<u8>| { blk(i, m.rt5)[HDR_SIZE + 72] = b'x'; reseal(i) });
     case!("root block tail", "tail not zero", |i: &mut Vec<u8>| { blk(i, m.rt5)[4090] = 1; reseal(i) });
-    serial_println!("[DESOFS TEST] 5/18 nodes and root entries: {} cases (flags, links, node_gen, depth, size, number, type, directory size, padding, node 0/1, parent, next_node, root-entry kinds, table depth, snapshot names, tails) PASS", cases);
+    serial_println!("[DESOFS TEST] 5/22 nodes and root entries: {} cases (flags, links, node_gen, depth, size, number, type, directory size, padding, node 0/1, parent, next_node, root-entry kinds, table depth, snapshot names, tails) PASS", cases);
 
     // 6. Two superblocks: damage in one tree only, in both, and metadata shared with
     // the older superblock met again with a wrong birth, a wrong checksum, or as
@@ -362,7 +362,7 @@ pub fn self_test() {
     let r = run(base);
     check!(r.used_counted == Some(31), "shared subtrees counted more than once: {:?}", r.used_counted);
     cases += 1;
-    serial_println!("[DESOFS TEST] 6/18 two superblocks: {} cases (older / newer / both trees damaged -> read-only newer / read-only older / refused; shared metadata from the older superblock re-read: wrong birth, wrong checksum, another kind -> read-only; shared blocks counted once) PASS", cases);
+    serial_println!("[DESOFS TEST] 6/22 two superblocks: {} cases (older / newer / both trees damaged -> read-only newer / read-only older / refused; shared metadata from the older superblock re-read: wrong birth, wrong checksum, another kind -> read-only; shared blocks counted once) PASS", cases);
 
     // 7. Directory blocks (checked when a directory is used) and the map budget.
     let mut names: Vec<Vec<u8>> = Vec::new();
@@ -402,10 +402,10 @@ pub fn self_test() {
     // Errata E1: the two maps for the largest volume of format 1 now (64 GiB).
     let max_maps = MAX_BLOCKS_V1 + MAX_BLOCKS_V1.div_ceil(8);
     check!(max_maps == 18 << 20, "64 GiB map budget {} bytes (expected 18 MiB)", max_maps);
-    serial_println!("[DESOFS TEST] 7/18 directory blocks: {} cases (valid blocks, lengths, coverage, . and .., '/', NUL, UTF-8, padding, deleted entry, type, caller refusal); maps: 144 B for 128 blocks, 18 MiB for 64 GiB PASS", cases);
+    serial_println!("[DESOFS TEST] 7/22 directory blocks: {} cases (valid blocks, lengths, coverage, . and .., '/', NUL, UTF-8, padding, deleted entry, type, caller refusal); maps: 144 B for 128 blocks, 18 MiB for 64 GiB PASS", cases);
 
-    // 8-14: writing; 15-18: power loss.
-    let steps: [(&str, fn() -> super::test_write::T); 11] = [
+    // 8-14: writing; 15-18: power loss; 19-22: check, repair, directories in parts.
+    let steps: [(&str, fn() -> super::test_write::T); 15] = [
         ("format", super::test_write::t_format),
         ("files", super::test_write::t_files),
         ("directories", super::test_write::t_dirs),
@@ -417,10 +417,14 @@ pub fn self_test() {
         ("power loss, writes reordered", super::test_crash::t_reorder),
         ("write / flush errors", super::test_crash::t_failures),
         ("power loss with a snapshot", super::test_crash::t_crash_snapshot),
+        ("check, sound volumes", super::test_check::t_check_clean),
+        ("check finds damage", super::test_check::t_check_damage),
+        ("repair", super::test_check::t_repair),
+        ("directories in parts", super::test_check::t_cursor),
     ];
     for (k, (name, f)) in steps.iter().enumerate() {
         match f() {
-            Ok(line) => serial_println!("[DESOFS TEST] {}/18 {}: {} PASS", 8 + k, name, line),
+            Ok(line) => serial_println!("[DESOFS TEST] {}/22 {}: {} PASS", 8 + k, name, line),
             Err(e) => {
                 serial_println!("[DESOFS TEST] FAIL: {}: {}", name, e);
                 return;

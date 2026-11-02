@@ -23,12 +23,15 @@
 pub mod layout;
 pub mod format;
 pub mod vol;
+pub mod check;
 #[cfg(selftest)]
 pub mod test;
 #[cfg(selftest)]
 pub mod test_write;
 #[cfg(selftest)]
 pub mod test_crash;
+#[cfg(selftest)]
+pub mod test_check;
 
 #[path = "../../../common/desocrypto/mod.rs"]
 mod desocrypto;
@@ -142,7 +145,7 @@ pub(crate) struct ByteMap {
 }
 
 impl ByteMap {
-    fn new(len: u64) -> Option<ByteMap> {
+    pub(crate) fn new(len: u64) -> Option<ByteMap> {
         let n = (len as usize).div_ceil(CHUNK);
         let mut chunks = Vec::new();
         chunks.try_reserve_exact(n).ok()?;
@@ -168,6 +171,9 @@ impl ByteMap {
     }
     fn bytes(&self) -> usize {
         self.chunks.iter().map(|c| c.len()).sum()
+    }
+    pub(crate) fn len(&self) -> u64 {
+        self.bytes() as u64
     }
 }
 
@@ -532,6 +538,66 @@ struct RootStats {
     has_root: bool,
     /// Part of the node table was shared with a root walked before (not fully counted).
     shared: bool,
+}
+
+/// One superblock's tree on its own (`desofs check` / `repair`): every metadata block
+/// and node of every root in it, with fresh maps.  Returns (blocks marked, live nodes,
+/// snapshots).
+pub(crate) fn walk_one(dev: &Dev, sb: &Superblock) -> Res<(u64, u64, u32)> {
+    if sb.total_blocks < MIN_BLOCKS || sb.total_blocks > dev.blocks || sb.total_blocks > MAX_BLOCKS_V1 {
+        return Err(String::from("volume size outside the device or the format-1 limits"));
+    }
+    if sb.incompat != 0 {
+        return Err(String::from("unknown incompatible feature"));
+    }
+    let (Some(mut map), Some(mut bits)) = (ByteMap::new(sb.total_blocks), BitMap::new(sb.total_blocks)) else {
+        return Err(String::from("not enough memory for the block maps"));
+    };
+    for i in 0..RESERVED {
+        map.set(i, M_RESERVED);
+    }
+    let mut scan = Scan {
+        dev,
+        total: sb.total_blocks,
+        sb_gen: 0,
+        uuid: sb.uuid,
+        map: &mut map,
+        root_bits: &mut bits,
+        bufs: Vec::new(),
+        marked: 0,
+        collect: None,
+        free_nodes: Vec::new(),
+        collect_free: false,
+        first_root: true,
+        next_node_limit: 0,
+    };
+    let w = scan.superblock(sb)?;
+    Ok((w.marked, w.nodes, w.snapshots))
+}
+
+// ------------------------------------------------------------
+// Mounted volumes – `desofs check` and `repair` refuse a mounted disk.
+// ------------------------------------------------------------
+
+const MOUNT_SLOTS: usize = 64;
+static MOUNTED: [core::sync::atomic::AtomicU32; MOUNT_SLOTS] = [const { core::sync::atomic::AtomicU32::new(0) }; MOUNT_SLOTS];
+
+pub(crate) fn mounted_inc(disk: usize) {
+    if let Some(c) = MOUNTED.get(disk) {
+        c.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn mounted_dec(disk: usize) {
+    if let Some(c) = MOUNTED.get(disk) {
+        c.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Is a DeSoFS volume of this disk mounted (a `Volume` alive)?  Disks numbered 64 and up
+/// are never tracked – treated as mounted, so nothing writes to them from here.
+pub fn is_mounted(disk: usize) -> bool {
+    MOUNTED.get(disk).map(|c| c.load(core::sync::atomic::Ordering::SeqCst) != 0).unwrap_or(true)
 }
 
 // ------------------------------------------------------------

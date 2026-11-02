@@ -364,7 +364,7 @@ fn fs_error(e: FsError) -> i64 {
         FsError::IsADirectory => ERROR_IS_DIRECTORY,
         FsError::AlreadyExists => ERROR_ALREADY_EXISTS,
         FsError::NoSpace => ERROR_NO_SPACE,
-        FsError::InvalidName => ERROR_INVALID_ARGUMENT,
+        FsError::InvalidName | FsError::BadCursor => ERROR_INVALID_ARGUMENT,
         FsError::NotEmpty => ERROR_NOT_EMPTY,
         FsError::ReadOnly => ERROR_READ_ONLY,
         _ => ERROR_IO,

@@ -85,6 +85,12 @@ fn nomem<T>(_: T) -> FsError {
     FsError::NoSpace
 }
 
+impl Drop for Volume {
+    fn drop(&mut self) {
+        super::mounted_dec(self.disk);
+    }
+}
+
 impl Volume {
     /// Mounts disk `index` (after the stage-1 walk).  A volume the walk allows only
     /// read-only is mounted read-only.
@@ -118,6 +124,7 @@ impl Volume {
             }
         }
         let (slot_gen, older_only) = if ro.is_some() { (sc.slot_gen, Vec::new()) } else { (sc.slot_gen, sc.older_only) };
+        super::mounted_inc(index);
         Ok(Volume {
             disk: index,
             total: sb.total_blocks,
@@ -998,6 +1005,54 @@ impl<'a> Tx<'a> {
         Ok(out)
     }
 
+    /// Part of a directory from byte position `cursor` = logical block × 4096 + offset of
+    /// an entry (DESOFS-FORMAT chapter 13): up to `max` entries and the position of the
+    /// next active entry (None = end).  The position must be the start of an entry
+    /// (FsError::BadCursor otherwise); deleted entries are stepped over by their length.
+    fn dir_list_at(&mut self, dir_n: u64, dir: &NodeBuf, cursor: u64, max: usize) -> R<(Vec<DirEntry>, Option<u64>)> {
+        let blocks = dir.blocks();
+        let (bi0, off0) = (cursor / BLOCK as u64, (cursor % BLOCK as u64) as usize);
+        if bi0 > blocks || (bi0 == blocks && off0 != 0) {
+            return Err(FsError::BadCursor);
+        }
+        let max = max.max(1);
+        let mut out = Vec::new();
+        for bi in bi0..blocks {
+            let b = self.dir_block(dir, bi)?;
+            let mut off = 0;
+            if bi == bi0 {
+                // Step from the block start to the cursor: it must land on an entry.
+                while off < off0 {
+                    off += u16_at(&b, off + 10) as usize;
+                }
+                if off != off0 {
+                    return Err(FsError::BadCursor);
+                }
+            }
+            while off < BLOCK {
+                let rec = u16_at(&b, off + 10) as usize;
+                let node = u64_at(&b, off);
+                if node != 0 {
+                    if out.len() >= max {
+                        return Ok((out, Some(bi * BLOCK as u64 + off as u64)));
+                    }
+                    let len = b[off + 9] as usize;
+                    let name = core::str::from_utf8(&b[off + 12..off + 12 + len]).map_err(|_| FsError::Corrupt("name"))?;
+                    let nb = self.entry_node(dir_n, node, b[off + 8])?;
+                    let e = DirEntry {
+                        name: String::from(name),
+                        kind: if nb.is_dir() { FileType::Directory } else { FileType::File },
+                        size: nb.size(),
+                        modified: Some(crate::drivers::rtc::DateTime::from_unix(nb.modified())),
+                    };
+                    crate::fs::try_push(&mut out, e)?;
+                }
+                off += rec;
+            }
+        }
+        Ok((out, None))
+    }
+
     // ---------------- paths ----------------
 
     /// Node of `path` ("/" = 1): (number, node, parent number, name, block, offset).
@@ -1391,6 +1446,15 @@ impl FileSystem for Volume {
                 return Err(FsError::NotADirectory);
             }
             tx.dir_list(n, &nb, max)
+        })
+    }
+    fn read_dir_at(&mut self, path: &str, cursor: u64, max: usize) -> R<(Vec<DirEntry>, Option<u64>)> {
+        self.read_op(|tx| {
+            let (n, nb, _) = tx.lookup(path)?;
+            if !nb.is_dir() {
+                return Err(FsError::NotADirectory);
+            }
+            tx.dir_list_at(n, &nb, cursor, max)
         })
     }
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> R<usize> {

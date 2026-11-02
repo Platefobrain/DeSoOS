@@ -37,11 +37,11 @@ pub(super) fn params() -> Params<'static> {
     Params { uuid: core::array::from_fn(|i| 0xA0 + i as u8), time: TIME, label: "DESOFS-FMT" }
 }
 
-fn new_disk(blocks: u64) -> usize {
+pub(super) fn new_disk(blocks: u64) -> usize {
     block::register(Box::new(RamDisk::new("dsfw", blocks * 8)))
 }
 
-fn formatted(blocks: u64) -> Result<usize, String> {
+pub(super) fn formatted(blocks: u64) -> Result<usize, String> {
     let d = new_disk(blocks);
     fmt::format(d, &params()).map_err(|e| format!("format: {}", e))?;
     Ok(d)
@@ -75,7 +75,7 @@ pub(super) fn read_all(v: &mut Volume, path: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn write_all(v: &mut Volume, path: &str, off: u64, data: &[u8]) -> Result<(), String> {
+pub(super) fn write_all(v: &mut Volume, path: &str, off: u64, data: &[u8]) -> Result<(), String> {
     for (k, c) in data.chunks(64 * 1024).enumerate() {
         v.write(path, off + (k * 64 * 1024) as u64, c).map_err(|e| format!("write {}: {}", path, e))?;
     }

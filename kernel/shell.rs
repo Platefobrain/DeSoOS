@@ -298,7 +298,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
     Command { name: "mkfs", usage: "mkfs <disk> [yes]", help: "format a disk as FAT32 (erases it!)", run: cmd_mkfs },
-    Command { name: "desofs", usage: "desofs info|format|mount|unmount <disk>", help: "DeSoFS: check, format, mount at /desofs", run: cmd_desofs },
+    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair <disk>", help: "DeSoFS: info, format, mount at /desofs, check, repair", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1247,27 +1247,48 @@ fn cmd_ls(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         }
         _ => {}
     }
-    match fs::read_dir(&path) {
-        Ok(entries) => {
-            for e in &entries {
-                let date = e.modified.map(|d| alloc::format!("{}", d)).unwrap_or_else(|| String::from("-                  "));
-                match e.kind {
-                    FileType::Directory => {
-                        let _ = writeln!(out, "{:>10}  {}  \x1b[1;34m{}/\x1b[0m", "<DIR>", date, e.name);
-                    }
-                    FileType::File => {
-                        let _ = writeln!(out, "{:>10}  {}  {}", e.size, date, e.name);
-                    }
-                }
-            }
-            let files = entries.iter().filter(|e| e.kind == FileType::File).count();
-            let bytes: u64 = entries.iter().map(|e| e.size).sum();
-            let _ = writeln!(out, "{} file(s), {} dir(s), {}", files, entries.len() - files, human_size(bytes));
-        }
+    // The directory in parts (a cursor): one part = sorted as usual; a larger directory
+    // is shown part by part in the file system's order, never held in memory whole.
+    const PART: usize = 1024;
+    let show = |out: &mut dyn Write, e: &fs::DirEntry| {
+        let date = e.modified.map(|d| alloc::format!("{}", d)).unwrap_or_else(|| String::from("-                  "));
+        let _ = match e.kind {
+            FileType::Directory => writeln!(out, "{:>10}  {}  \x1b[1;34m{}/\x1b[0m", "<DIR>", date, e.name),
+            FileType::File => writeln!(out, "{:>10}  {}  {}", e.size, date, e.name),
+        };
+    };
+    let (mut part, mut next) = match fs::read_dir_at(&path, 0, PART) {
+        Ok(r) => r,
         Err(e) => {
             let _ = writeln!(out, "ls: {}: {}", path, e);
+            return;
+        }
+    };
+    if next.is_none() {
+        part.sort_by(|a, b| a.name.chars().flat_map(char::to_lowercase).cmp(b.name.chars().flat_map(char::to_lowercase)));
+    } else {
+        let _ = writeln!(out, "(large directory - in the file system's order)");
+    }
+    let (mut files, mut dirs, mut bytes) = (0usize, 0usize, 0u64);
+    loop {
+        for e in &part {
+            show(out, e);
+            if e.kind == FileType::File { files += 1 } else { dirs += 1 }
+            bytes += e.size;
+        }
+        let Some(c) = next else { break };
+        match fs::read_dir_at(&path, c, PART) {
+            Ok((p, n)) => {
+                part = p;
+                next = n;
+            }
+            Err(e) => {
+                let _ = writeln!(out, "ls: {}: {}", path, e);
+                return;
+            }
         }
     }
+    let _ = writeln!(out, "{} file(s), {} dir(s), {}", files, dirs, human_size(bytes));
 }
 
 fn cmd_cd(args: &str, out: &mut dyn Write, ctx: &mut Context) {
@@ -1490,8 +1511,7 @@ fn cmd_df(_: &str, out: &mut dyn Write, _: &mut Context) {
     }
 }
 
-/// `desofs info <disk>` – reads a DeSoFS volume and says what a mount would be
-/// allowed to do.  Only reads; `format`, `check` and `repair` come with later stages.
+/// `desofs info | format | mount | unmount | check | repair` – the DeSoFS tool.
 fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     let mut parts = args.split_whitespace();
     let sub = parts.next().unwrap_or("");
@@ -1577,11 +1597,49 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
                 Err(e) => writeln!(out, "desofs unmount: {}", e),
             };
         }
-        ("check" | "repair", _) => {
-            let _ = writeln!(out, "desofs {}: not yet (comes with a later DeSoFS stage)", sub);
+        ("check", Some(disk)) => {
+            use crate::fs::desofs::check::Level;
+            let mut last = 0;
+            let r = crate::fs::desofs::check::check(disk, &mut |done, total| {
+                let pct = if total == 0 { 100 } else { (done * 100 / total).min(100) };
+                if pct >= last + 10 {
+                    last = pct - pct % 10;
+                    let _ = writeln!(out, "  ... {} %", last);
+                }
+            });
+            match r {
+                Ok(rep) => {
+                    let _ = writeln!(out, "desofs check {}", disk);
+                    for (level, text) in &rep.lines {
+                        let _ = match level {
+                            Level::Error => writeln!(out, "  ERROR {}", text),
+                            Level::Warning => writeln!(out, "  WARNING {}", text),
+                            Level::Info => writeln!(out, "  {}", text),
+                        };
+                    }
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "desofs check: {}", e);
+                }
+            }
+        }
+        ("repair", Some(disk)) => {
+            let apply = parts.next() == Some("yes");
+            match crate::fs::desofs::check::repair(disk, apply) {
+                Ok(msg) if apply => {
+                    let _ = writeln!(out, "desofs repair: {}", msg);
+                }
+                Ok(plan) => {
+                    let _ = writeln!(out, "desofs repair: {}", plan);
+                    let _ = writeln!(out, "To continue type: desofs repair {} yes", disk);
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "desofs repair: {}", e);
+                }
+            }
         }
         _ => {
-            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount   (disk numbers: 'disk')");
+            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes]   (disk numbers: 'disk')");
         }
     }
 }

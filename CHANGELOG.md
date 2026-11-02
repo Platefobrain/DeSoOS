@@ -2,6 +2,28 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.63.0 — 2026-11-02
+
+### DeSoFS stage 3 – check, repair, directories in parts
+- **New: `kernel/fs/desofs/check.rs`.** `desofs check <disk>` – reads only, refuses a mounted volume ("unmount
+  first"). Each superblock reported apart: its checksum, its metadata tree, its data. For every sound tree: SHA-256 of
+  every data block of every file and directory (live and snapshots), directories and relations (each node listed
+  once, right type and parent, node 1 nowhere, no orphans, no cycles), data shared through two pointer blocks with
+  identical pointers (E3), `used_blocks` (a WARNING, not an error). ERROR / WARNING / INFO lines, errors with the
+  file's path, at most 64 error lines, progress every 10 %.
+- `desofs repair <disk> [yes]` – the whole check first; then a copy of the one fully sound superblock (same root,
+  generation = highest valid + 1) into the other slot and a flush. The good superblock is only read; without `yes`
+  only the plan ("the changes of generation N are lost" when the newer state is the damaged one). Refuses: nothing to
+  repair, no sound tree, a sound tree with damaged data, generation at its maximum, a read-only disk, a mounted volume.
+- **Directories in parts:** `read_dir_at(path, cursor, max)` in `FileSystem` / `ConcurrentFs` / `Locked` / VFS, new
+  `FsError::BadCursor`. DeSoFS: cursor = logical block × 4096 + entry offset, must be the start of an entry. Default
+  (ramfs, FAT32): a list index. The kernel-shell `ls` reads in parts of 1024.
+- `walk_one` (one superblock's tree with fresh maps), a count of mounted volumes per disk.
+- Tests: DESOFS TEST 19–22 (32 suites, 264 tests) – check on sound volumes (writes nothing), ten damage cases, repair
+  of either tree with every refusal and an interrupted repair at every superblock sector, directories in parts with
+  removes and creates in between. Seven mutations of the new code, each caught.
+- Docs: ARCHITECTURE (check, repair, directories in parts), ROADMAP (stage 3 done, known gaps), README.
+
 ## v0.62.0 — 2026-11-01
 
 ### DeSoFS stage 2b – power-loss tests

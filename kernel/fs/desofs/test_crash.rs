@@ -42,17 +42,17 @@ const SECTORS_PER_BLOCK: u64 = (BLOCK / SECTOR_SIZE) as u64;
 static ZERO: [u8; BLOCK] = [0u8; BLOCK];
 
 /// A disk image: one entry per block, empty = all zeros.
-type Image = Rc<Vec<Vec<u8>>>;
+pub(super) type Image = Rc<Vec<Vec<u8>>>;
 
-enum Ev {
+pub(super) enum Ev {
     Write(u64, Vec<u8>),
     Flush,
 }
 
 #[derive(Default)]
-struct Log {
-    on: bool,
-    ev: Vec<Ev>,
+pub(super) struct Log {
+    pub(super) on: bool,
+    pub(super) ev: Vec<Ev>,
     writes: u64,
     flushes: u64,
     /// Fail the n-th write / flush (0 = never); after a failure everything fails.
@@ -149,12 +149,12 @@ fn put(over: &mut BTreeMap<u64, Vec<u8>>, base: &Image, lba: u64, buf: &[u8]) {
     }
 }
 
-fn attach(base: &Image, blocks: u64, over: BTreeMap<u64, Vec<u8>>, log: Option<Rc<RefCell<Log>>>) -> usize {
+pub(super) fn attach(base: &Image, blocks: u64, over: BTreeMap<u64, Vec<u8>>, log: Option<Rc<RefCell<Log>>>) -> usize {
     block::register(Box::new(CrashDev { base: base.clone(), over, blocks, log }))
 }
 
 /// The whole disk as an image (zero blocks stored empty).
-fn snapshot(d: usize, blocks: u64) -> Result<Image, String> {
+pub(super) fn snapshot(d: usize, blocks: u64) -> Result<Image, String> {
     let mut img = Vec::with_capacity(blocks as usize);
     let mut b = vec![0u8; BLOCK];
     for i in 0..blocks {
@@ -226,14 +226,14 @@ fn apply(op: Op, v: &mut Volume, m: &mut Model) -> Result<(), FsError> {
 // ---------------- crash images ----------------
 
 /// One 512-byte sector write from the log.
-struct Sw<'a> {
+pub(super) struct Sw<'a> {
     epoch: u32,
     call: u32,
     lba: u64,
     data: &'a [u8],
 }
 
-fn sectors(ev: &[Ev]) -> Vec<Sw<'_>> {
+pub(super) fn sectors(ev: &[Ev]) -> Vec<Sw<'_>> {
     let mut out = Vec::new();
     let (mut epoch, mut call) = (0u32, 0u32);
     for e in ev {
@@ -250,7 +250,7 @@ fn sectors(ev: &[Ev]) -> Vec<Sw<'_>> {
     out
 }
 
-fn build(base: &Image, sw: &[Sw], pick: impl Fn(usize) -> bool) -> BTreeMap<u64, Vec<u8>> {
+pub(super) fn build(base: &Image, sw: &[Sw], pick: impl Fn(usize) -> bool) -> BTreeMap<u64, Vec<u8>> {
     let mut over = BTreeMap::new();
     for (i, s) in sw.iter().enumerate() {
         if pick(i) {
@@ -265,9 +265,9 @@ fn is_superblock(lba: u64) -> bool {
     b == 1 || b == 2
 }
 
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;

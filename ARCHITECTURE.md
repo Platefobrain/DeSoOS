@@ -1414,6 +1414,47 @@ the matching contents (the model); where the state can change (at a flush, insid
 take a new file, pass the allocator check and survive a remount. Checked by mutation: dropping the flush between the
 new blocks and the superblock is caught (a superblock lands before its tree).
 
+### Check and repair (`check.rs`, v0.63.0)
+
+`desofs check <disk>` reads, never writes, and refuses a mounted volume ("unmount first" – a count of live `Volume`s
+per disk). Per superblock it reports three things apart: its own checksum, its metadata tree (the mount walk with
+fresh maps, `walk_one`), and its data. For every sound tree (once if both superblocks point to the same root):
+- every data block of every file and directory, in the live root and in each snapshot, against its pointer's
+  SHA-256 – a block reached through a metadata block met before is not read again;
+- directories and relations per root in two passes: node types and parents (9 bytes per node number), then every
+  directory entry – names an existing node of the same type whose parent is that directory; every node but 1 listed
+  exactly once (0 = orphan), node 1 nowhere; parents followed up to node 1 (a cycle is not reachable from `/`);
+- E3: a data block met from two different pointer blocks – a second walk compares the 48-byte pointers (up to 65 536
+  such blocks, more → a warning);
+- `used_blocks` differing from the count is a WARNING, never an error.
+Errors name the path (found by following parents and searching the parent directory); at most 64 error lines.
+
+`desofs repair <disk> [yes]` runs the whole check first and writes nothing before it ends. It needs exactly one
+superblock whose checksum, tree and data are all sound; that superblock is only read. Its copy – same uuid, same root,
+`used_blocks` as counted, generation = highest valid + 1 – goes to the other slot, then a flush; then `probe` must
+say read-write. Without `yes` it only states the plan (including "the changes of generation N are lost" when the
+newer state is the damaged one). Refused: nothing to repair, no sound tree, a sound tree with damaged data, the
+generation at its maximum, a read-only disk, a mounted volume. A write or flush error leaves the good superblock as
+it was; an interrupted repair leaves a mountable volume and can be repeated.
+
+### Directories in parts
+
+`read_dir_at(path, cursor, max) -> (entries, next)` in `FileSystem`, `ConcurrentFs`, `Locked` and the VFS. DeSoFS:
+the cursor is a byte position (logical directory block × 4096 + entry offset, DESOFS-FORMAT chapter 13) – it must be
+the start of an entry (found by stepping over `rec_len` from the block start; deleted entries keep their length, a
+length under 16 is a damaged block), otherwise `FsError::BadCursor`. An entry present during the whole listing and
+not moved appears exactly once. Default (ramfs, FAT32): an index into the full list. The kernel-shell `ls` reads in
+parts of 1024 (one part: sorted as before; more: shown part by part in the file system's order).
+
+Tests 19–22 (`test_check.rs`): check on a fresh volume, after work and on the reference image (0 errors; the disk's
+SHA-256 unchanged); ten damage cases (file / directory data unresealed – the mount stays read-write; a node in two
+entries, an orphan, wrong parent, entry type, a cycle, a removed entry, E3 – resealed), used_blocks → one warning;
+repair of the older / newer tree, every refusal (disk unchanged), an interrupted repair after each of the 8
+superblock sectors and 16 random parts (mountable, good superblock untouched, repair again works); 150 entries read
+in parts of 7 with 50 removes and 50 creates in between, wrong cursors refused, ramfs through the VFS. Checked by
+mutation: no data checksum, no orphan rule, no E3 pass, repair into the good slot, repair without the full check, a
+cursor that skips an entry, no cursor validation – each makes the suite fail.
+
 ## Cryptography – DeSoCrypto (`common/desocrypto/`)
 
 DeSoOS's own cryptographic library, written for DeSoOS only (no Cargo crate, no outside code). It is a library,
