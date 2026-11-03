@@ -11,11 +11,11 @@
 // * Pipelines `a | b | c` (programs from /bin; of the built-ins echo, pwd,
 //   help, history).
 // * Built-in commands: cd, pwd, echo, exit, help, history, clear, wait;
-//   sync, reboot, halt, stress – the sysctl syscall, only when the shell got the
+//   sync, reboot, halt, stress, desofs – the sysctl syscall, only when the shell got the
 //   SYSCTL handle from init (slot 4; it is not passed on to programs).
 // * Other names: the program /bin/<name> or a path (containing '/'), and if there is none –
 //   information from the kernel (sysinfo syscall, read-only: mem, lspci,
-//   cpus, disk...).  mkfs, writing to disk and run – only in the kernel's emergency shell.
+//   cpus, disk...).  Writing to disk and run – only in the kernel's emergency shell.
 // * Ctrl+C while a program runs ends the program (not the shell) – the kernel knows
 //   the foreground process (spawn with SPAWN_FOREGROUND).
 #![no_std]
@@ -57,16 +57,17 @@ const BUILTINS: &[(&str, &str)] = &[
     ("reboot", "reboot             restart the computer"),
     ("halt", "halt               stop the computer"),
     ("stress", "stress [s]         SMP stress test in the kernel (1..600 s, default 10)"),
+    ("desofs", "desofs <cmd> <disk> DeSoFS: info, format [yes], mount (0 at /disk, others at /desofs), unmount, check, repair [yes]"),
 ];
 
 /// System actions (sysctl syscall) – only with the SYSCTL handle from init.
-const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress"];
+const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress", "desofs"];
 
 /// Information from the kernel (sysinfo syscall, read-only).
 const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "dcp"];
 
 /// Commands that remain only in the kernel's emergency shell.
-const KERNEL_ONLY: &[&str] = &["mkfs", "run", "hexdump", "write", "spawn", "colors", "keys", "k"];
+const KERNEL_ONLY: &[&str] = &["run", "hexdump", "write", "spawn", "colors", "keys", "k"];
 
 // ------------------------------------------------------------
 // Output
@@ -526,6 +527,23 @@ fn close_redirects(fin: u64, fout: u64) {
 static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The program channel in slot 5 (from init) – what programs get in slot 3.
 static PROG_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// `desofs` words -> (sysctl action, argument); None – not a valid command line.
+fn desofs_action(words: &[String]) -> Option<(u64, u64)> {
+    let w: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+    let disk = |s: &str| s.parse::<u32>().ok().map(u64::from);
+    Some(match w.as_slice() {
+        ["unmount"] => (desoos::SYSCTL_DESOFS_UNMOUNT, 0),
+        ["info", d] => (desoos::SYSCTL_DESOFS_INFO, disk(d)?),
+        ["mount", d] => (desoos::SYSCTL_DESOFS_MOUNT, disk(d)?),
+        ["check", d] => (desoos::SYSCTL_DESOFS_CHECK, disk(d)?),
+        ["format", d] => (desoos::SYSCTL_DESOFS_FORMAT, disk(d)?),
+        ["format", d, "yes"] => (desoos::SYSCTL_DESOFS_FORMAT, disk(d)? | desoos::SYSCTL_YES),
+        ["repair", d] => (desoos::SYSCTL_DESOFS_REPAIR, disk(d)?),
+        ["repair", d, "yes"] => (desoos::SYSCTL_DESOFS_REPAIR, disk(d)? | desoos::SYSCTL_YES),
+        _ => return None,
+    })
+}
+
 /// The SYSCTL handle in slot 4 (from init) – shell only, children do not get it.
 static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -874,7 +892,7 @@ impl Shell {
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
                 let _ = writeln!(o, "File sandbox: nofiles <program> [args] - no file access by path, only < > redirections");
                 let _ = writeln!(o, "  nofiles --net <program> - plus network connections; --listen - plus servers (no other services)");
-                let _ = writeln!(o, "Only in the kernel emergency shell: mkfs, disk read/write, run");
+                let _ = writeln!(o, "Only in the kernel emergency shell: disk read/write, run");
                 let _ = writeln!(o, "Syntax: cmd args  > file  >> file  < file  a | b  &   (\"quotes\" group words)");
             }
             "history" => {
@@ -916,7 +934,7 @@ impl Shell {
         close_redirects(fin, fout);
     }
 
-    /// sync / reboot / halt / stress via sysctl (SYSCTL handle from init).
+    /// sync / reboot / halt / stress / desofs via sysctl (SYSCTL handle from init).
     fn sysctl(&mut self, cmd: &Command, fout: u64) {
         let name = cmd.args[0].as_str();
         if !SYSCTL_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
@@ -927,6 +945,13 @@ impl Shell {
             "sync" => (desoos::SYSCTL_SYNC, 0),
             "reboot" => (desoos::SYSCTL_REBOOT, 0),
             "halt" => (desoos::SYSCTL_HALT, 0),
+            "desofs" => match desofs_action(&cmd.args[1..]) {
+                Some(a) => a,
+                None => {
+                    eprintln!("usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes]   (disk numbers: 'disk')");
+                    return;
+                }
+            },
             _ => match cmd.args.get(1).map(|a| a.parse::<u64>()) {
                 None => (desoos::SYSCTL_STRESS, 0),
                 Some(Ok(s)) if (1..=600).contains(&s) => (desoos::SYSCTL_STRESS, s),
@@ -940,6 +965,8 @@ impl Shell {
         if r < 0 {
             eprintln!("{}: {}", name, strerror(r));
         }
+        // An unmount may have moved this shell out of the disk (to "/").
+        self.refresh_cwd();
     }
 
     /// `kill <pid | service>...` – a program: the kernel allows only the shell's

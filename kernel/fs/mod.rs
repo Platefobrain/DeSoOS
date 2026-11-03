@@ -19,6 +19,8 @@ pub mod ramfs;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::block::BlockError;
 use crate::drivers::rtc::DateTime;
@@ -44,6 +46,9 @@ pub enum FsError {
     TooMany,
     /// A directory position (read_dir_at) that is not the start of an entry.
     BadCursor,
+    /// Unmount refused: processes still use the mount point (open files,
+    /// directory handles, current directories) – the number of pins.
+    InUse(usize),
 }
 
 impl From<BlockError> for FsError {
@@ -74,6 +79,7 @@ impl core::fmt::Display for FsError {
             FsError::Io(e) => write!(f, "I/O error: {}", e),
             FsError::TooMany => f.write_str("too many directory entries"),
             FsError::BadCursor => f.write_str("invalid directory position"),
+            FsError::InUse(n) => write!(f, "in use ({} open file{} / director{})", n, if *n == 1 { "" } else { "s" }, if *n == 1 { "y" } else { "ies" }),
         }
     }
 }
@@ -157,6 +163,11 @@ pub trait FileSystem {
     fn read_only(&self) -> bool {
         false
     }
+    /// The block device it lives on (None: in memory) – formatting refuses a disk that
+    /// is still mounted (`mounts_of_disk`).
+    fn disk(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// File system operations safe to call from many tasks at once
@@ -208,12 +219,13 @@ pub struct Locked<F: FileSystem> {
     kind: &'static str,
     source: String,
     read_only: bool,
+    disk: Option<usize>,
 }
 
 impl<F: FileSystem + Send> Locked<F> {
     pub fn new(fs: F) -> Self {
-        let (kind, source, read_only) = (fs.kind(), fs.source(), fs.read_only());
-        Locked { fs: crate::sched::sync::Mutex::new(fs), kind, source, read_only }
+        let (kind, source, read_only, disk) = (fs.kind(), fs.source(), fs.read_only(), fs.disk());
+        Locked { fs: crate::sched::sync::Mutex::new(fs), kind, source, read_only, disk }
     }
 }
 
@@ -268,6 +280,9 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     }
     fn read_only(&self) -> bool {
         self.read_only
+    }
+    fn disk(&self) -> Option<usize> {
+        self.disk
     }
 }
 
@@ -400,6 +415,66 @@ pub fn split_parent(path: &str) -> (&str, &str) {
 struct Mount {
     path: String,
     fs: Box<dyn FileSystem>,
+    /// Pins: open files, directory handles and current directories of
+    /// processes on this mount.  `unmount` refuses while it is not zero.
+    users: Arc<AtomicUsize>,
+}
+
+/// A pin on the mount a path lies on (taken when a process opens a file or a
+/// directory or changes its current directory; dropped with the handle or the
+/// directory).  While any pin exists the mount cannot be unmounted, so a handle
+/// (which remembers a path) can never end up on another file system.
+///
+/// Taken under FS_LOCK for reading, checked by `unmount` under FS_LOCK for
+/// writing – a pin is either visible to the unmount or taken after it (and then
+/// on whatever is mounted there now).  Dropping is a plain atomic decrement (no
+/// lock), so `close` and process exit never wait for the VFS.
+pub struct MountPin(Option<Arc<AtomicUsize>>);
+
+impl MountPin {
+    /// No pin (a process that has not been given a directory yet).
+    pub const fn none() -> Self {
+        MountPin(None)
+    }
+
+    /// Pins the mount that `path` (absolute) lies on.  The root ("/") is never
+    /// unmounted, so it is not counted.
+    pub fn take(path: &str) -> Self {
+        let _g = FS_LOCK.read();
+        match find_mount(path) {
+            Ok((i, _)) if mounts()[i].path != "/" => {
+                let u = mounts()[i].users.clone();
+                u.fetch_add(1, Ordering::SeqCst);
+                MountPin(Some(u))
+            }
+            _ => MountPin(None),
+        }
+    }
+}
+
+impl Clone for MountPin {
+    fn clone(&self) -> Self {
+        if let Some(u) = &self.0 {
+            u.fetch_add(1, Ordering::SeqCst);
+        }
+        MountPin(self.0.clone())
+    }
+}
+
+impl Drop for MountPin {
+    fn drop(&mut self) {
+        if let Some(u) = self.0.take() {
+            u.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Pins on the file system mounted exactly at `path` (None – not a mount point).
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn mount_users(path: &str) -> Option<usize> {
+    let _g = FS_LOCK.read();
+    let path = normalize("/", path);
+    mounts().iter().find(|m| m.path == path).map(|m| m.users.load(Ordering::SeqCst))
 }
 
 static mut MOUNTS: Vec<Mount> = Vec::new();
@@ -489,7 +564,7 @@ pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
             Err(e) => return Err(e),
         }
     }
-    mounts().push(Mount { path, fs });
+    mounts().push(Mount { path, fs, users: Arc::new(AtomicUsize::new(0)) });
     Ok(())
 }
 
@@ -501,6 +576,12 @@ pub fn unmount(path: &str) -> Result<()> {
     }
     let m = mounts();
     let i = m.iter().position(|m| m.path == path).ok_or(FsError::NotFound)?;
+    // Processes still use it: refuse before anything is written (new pins wait for
+    // FS_LOCK, so the count cannot grow while we hold it for writing).
+    let users = m[i].users.load(Ordering::SeqCst);
+    if users > 0 {
+        return Err(FsError::InUse(users));
+    }
     m[i].fs.sync()?;
     m.remove(i);
     Ok(())
@@ -533,6 +614,42 @@ pub fn is_read_only(path: &str) -> bool {
 pub fn mount_list() -> Vec<(String, &'static str, String)> {
     let _g = FS_LOCK.read();
     mounts().iter().map(|m| (m.path.clone(), m.fs.kind(), m.fs.source())).collect()
+}
+
+/// Mount points of file systems on disk `disk` or on one of its partitions.
+pub fn mounts_of_disk(disk: usize) -> Vec<String> {
+    let on: Vec<(String, usize)> = {
+        let _g = FS_LOCK.read();
+        mounts().iter().filter_map(|m| m.fs.disk().map(|d| (m.path.clone(), d))).collect()
+    };
+    on.into_iter()
+        .filter(|(_, d)| *d == disk || crate::block::with_device(*d, |x| x.parent()).ok().flatten() == Some(disk))
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Unmounts every file system on disk `disk` (before formatting it).  Stops at the first
+/// one that cannot be unmounted (e.g. its buffers cannot be written – `sync` failed):
+/// that one stays mounted and the caller must not touch the disk.  Ok: the paths unmounted.
+pub fn unmount_disk(disk: usize) -> core::result::Result<Vec<String>, String> {
+    // All or nothing, under one write lock: every mount on the disk unused, then every one
+    // synced, only then all removed – a refusal leaves every mount (and the disk) as it was.
+    let _g = FsWrite::lock();
+    let paths = mounts_of_disk(disk);
+    let nothing = |p: &str, e: FsError| alloc::format!("cannot unmount {} ({}) - nothing changed", p, e);
+    for p in &paths {
+        let m = mounts().iter().find(|m| &m.path == p).ok_or_else(|| nothing(p, FsError::NotFound))?;
+        let users = m.users.load(Ordering::SeqCst);
+        if users > 0 {
+            return Err(nothing(p, FsError::InUse(users)));
+        }
+    }
+    for p in &paths {
+        let m = mounts().iter_mut().find(|m| &m.path == p).ok_or_else(|| nothing(p, FsError::NotFound))?;
+        m.fs.sync().map_err(|e| nothing(p, e))?;
+    }
+    mounts().retain(|m| !paths.contains(&m.path));
+    Ok(paths)
 }
 
 /// Statistics of the file system mounted exactly at `path`.
@@ -854,7 +971,7 @@ pub fn mount_disk(disk: usize, path: &str) -> DiskMount {
             if crate::block::is_read_only(disk) {
                 DiskMount::Nothing(alloc::format!("{} (read-only disk)", e))
             } else {
-                DiskMount::Nothing(alloc::format!("{} - format it with 'mkfs {}' (FAT32) or 'desofs format {} yes' (DeSoFS)", e, disk, disk))
+                DiskMount::Nothing(alloc::format!("{} - format it with 'desofs format {} yes'", e, disk))
             }
         }
     }

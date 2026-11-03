@@ -67,7 +67,7 @@ pub fn self_test() {
     let rsp: u64;
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
     check!(!gdt::on_ist_stack(rsp), "task stack {:#x} reported as IST", rsp);
-    serial_println!("[INIT TEST] 1/9 IST stacks in guarded slots, schedule() guard PASS");
+    serial_println!("[INIT TEST] 1/10 IST stacks in guarded slots, schedule() guard PASS");
 
     // 2. Splitting a 2 MiB direct-map page into 4 KiB pages (map_mmio with RAM next to it).
     let frame = crate::memory::alloc_frame();
@@ -93,7 +93,7 @@ pub fn self_test() {
     check!(crate::memory::split_direct_map_huge(frame), "second split should be a no-op");
     check!(crate::memory::map_mmio(frame, 4096).is_none(), "map_mmio accepted RAM");
     crate::memory::free_frame(frame);
-    serial_println!("[INIT TEST] 2/9 direct map 2 MiB -> 4 KiB split (map_mmio) PASS");
+    serial_println!("[INIT TEST] 2/10 direct map 2 MiB -> 4 KiB split (map_mmio) PASS");
 
     // 3. Foreground stack (Ctrl+C terminates the topmost process).
     crate::console::push_foreground(1001);
@@ -103,7 +103,7 @@ pub fn self_test() {
     check!(crate::console::top_foreground() == 1001, "top after remove {}", crate::console::top_foreground());
     crate::console::remove_foreground(1001);
     check!(crate::console::top_foreground() == 0, "stack not empty");
-    serial_println!("[INIT TEST] 3/9 foreground stack (Ctrl+C target) PASS");
+    serial_println!("[INIT TEST] 3/10 foreground stack (Ctrl+C target) PASS");
 
     // 4. User-space shell: builtins, programs, redirections, line editing.
     let script: &[u8] = b"echo hello world\n\
@@ -157,7 +157,7 @@ exit 7\n";
         "/m16/up: file,",
         "kill: 1: no such process",
         "kill: net0: not a number (services need the shell started by init)",
-        "sh: mkfs: only in the kernel emergency shell",
+        "sh: mkfs: command not found",
         "sh: k: only in the kernel emergency shell",
         "disk: only the list here",
         "reboot: not allowed - this shell has no system control handle",
@@ -169,11 +169,11 @@ exit 7\n";
     check!(out.matches("\naXbc\n").count() == 2, "history (Up) did not repeat the line:\n{}", out);
     check!(kind == ExitKind::Exit(7), "sh ended with {:?}", kind);
     check!(crate::fs::read_file("/m16/c").ok().as_deref() == Some(b"text\nmore\n".as_slice()), "cp content");
-    serial_println!("[INIT TEST] 4/9 user shell: builtins, /bin programs, > >> <, quotes, line editing, sysinfo, mkfs / reboot refused PASS");
+    serial_println!("[INIT TEST] 4/10 user shell: builtins, /bin programs, > >> <, quotes, line editing, sysinfo, kernel-only commands / reboot refused PASS");
 
     // 5. No zombies: the shell collected the status of every child.
     check!(procs::zombies().is_empty(), "zombies left: {:?}", procs::zombies());
-    serial_println!("[INIT TEST] 5/9 no zombies after the shell PASS");
+    serial_println!("[INIT TEST] 5/10 no zombies after the shell PASS");
 
     // 6. Orphan without init: the child of a terminating process is reparented to the kernel.
     let sh = start("/bin/sh", &["sh", "-c", "sleep", "400", "&"], b"");
@@ -187,7 +187,7 @@ exit 7\n";
     check!(orphan.ppid == 0, "orphan ppid {} (want 0 = kernel)", orphan.ppid);
     check!(finish(orphan.id, 2_000).is_some(), "orphan did not end");
     check!(procs::zombies().is_empty(), "orphan left a zombie");
-    serial_println!("[INIT TEST] 6/9 orphan without init goes to the kernel PASS");
+    serial_println!("[INIT TEST] 6/10 orphan without init goes to the kernel PASS");
 
     // 7. Orphan with init: the "init" process (shell) gets the grandchild and reaps it.
     // "sleep 200" at the start: set_init_pid is called only after the shell starts –
@@ -205,7 +205,7 @@ exit 7\n";
     check!(matches!(r, Some((ExitKind::Exit(3), _))), "init shell: {:?}", r);
     check!(task_named("sleep").is_none(), "adopted sleep still running");
     check!(procs::zombies().is_empty(), "zombies after init: {:?}", procs::zombies());
-    serial_println!("[INIT TEST] 7/9 orphan adopted and reaped by init, kill(init) = ERROR_NOT_PERMITTED PASS");
+    serial_println!("[INIT TEST] 7/10 orphan adopted and reaped by init, kill(init) = ERROR_NOT_PERMITTED PASS");
 
     // 8. Ctrl+C (kill) of the foreground program ends the program, not the shell.
     let sh = start("/bin/sh", &["sh"], b"primes 50000000\necho after\n");
@@ -222,9 +222,16 @@ exit 7\n";
     let r = finish(sh, 5_000);
     check!(matches!(&r, Some((ExitKind::Exit(0), o)) if o.contains("after\n")), "shell after Ctrl+C: {:?}", r);
     check!(crate::console::top_foreground() == 0, "foreground stack not empty");
-    serial_println!("[INIT TEST] 8/9 Ctrl+C ends the foreground program, the shell continues PASS");
+    serial_println!("[INIT TEST] 8/10 Ctrl+C ends the foreground program, the shell continues PASS");
 
-    // 9. Cleanup: files and frames.  Heap frames (the heap grows when loading
+    // 9. `desofs` from the user shell (sysctl behind the SYSCTL handle) and busy mounts –
+    // /bin/dsfstest gets the SYSCTL handle as init does; a RAM disk of 1 MiB.
+    if let Err(e) = desofs_in_user_shell() {
+        check!(false, "{}", e);
+    }
+    serial_println!("[INIT TEST] 9/10 desofs in the user shell: refused without the SYSCTL handle (raw sysctl with a missing number, the console, a pipe, a directory handle; sh without it; a shell's child shell), 'yes' checked by the kernel, the whole disk's SHA-256 unchanged; format / info / mount / check / repair through sh; unmount and format refused while an open file, an open directory, another process's current directory or a child's inherited file uses the mount, allowed once let go (closed or killed); the caller's own current directory does not block it and ends in /; output limit 64 KiB with a truncation line PASS");
+
+    // 10. Cleanup: files and frames.  Heap frames (the heap grows when loading
     // a program and returns pages only from the end) and the PT table from test 2 are not
     // a leak – we count them separately.
     for f in ["/m16/b", "/m16/c", "/m16/up"] {
@@ -240,7 +247,69 @@ exit 7\n";
         accounted() >= frames
     });
     check!(back, "frames leaked ({} -> {} incl. heap growth)", frames, accounted());
-    serial_println!("[INIT TEST] 9/9 no frame leak PASS");
+    serial_println!("[INIT TEST] 10/10 no frame leak PASS");
     crate::selftest::pass();
     serial_println!("[INIT TEST] All init / process / shell tests passed");
+}
+
+/// Step 9 – see self_test.
+fn desofs_in_user_shell() -> Result<(), String> {
+    use crate::shell::{sysctl, Capped, SYSCTL_DESOFS_FORMAT, SYSCTL_YES};
+    use core::fmt::Write;
+    let sum = |d: usize| {
+        let mut v = alloc::vec![0u8; 1024 * 1024];
+        let _ = crate::block::read(d, 0, &mut v);
+        crate::fs::desofs::sha256(&v)
+    };
+    // The output limit: cut with a line that says how much is missing.
+    let mut c = Capped::new(100);
+    let _ = c.write_str(&"x".repeat(60));
+    let _ = c.write_str(&"y".repeat(60));
+    let _ = c.write_str("z");
+    let t = c.finish();
+    if t != alloc::format!("{}{}\n... output truncated: 21 bytes more\n", "x".repeat(60), "y".repeat(40)) {
+        return Err(alloc::format!("output limit: {:?}", t));
+    }
+
+    let d = crate::block::register(alloc::boxed::Box::new(crate::block::RamDisk::new("dsfu", 2048)));
+    let r = (|| -> Result<(), String> {
+        // A pattern, so that "unchanged" means something.
+        let pattern: alloc::vec::Vec<u8> = (0..1024 * 1024u32).map(|i| (i * 7 + i / 4096) as u8).collect();
+        crate::block::write(d, 0, &pattern).map_err(|e| alloc::format!("write pattern: {:?}", e))?;
+        let before = sum(d);
+        // "yes" is checked in the kernel: without it format only describes.
+        let mut cwd = String::from("/");
+        let t = sysctl(SYSCTL_DESOFS_FORMAT, d as u64, &mut cwd).unwrap_or_default();
+        if !t.contains("To continue type") || sum(d) != before {
+            return Err(alloc::format!("format without yes: {:?}, disk changed: {}", t, sum(d) != before));
+        }
+        if sysctl(SYSCTL_DESOFS_FORMAT, d as u64 | SYSCTL_YES << 1, &mut cwd).is_some() {
+            return Err(String::from("format with an unknown bit accepted"));
+        }
+        let run = |mode: &str| -> Result<String, String> {
+            let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, sysctl: true, ..SpawnOptions::default() };
+            let ds = alloc::format!("{}", d);
+            let id = exec("/bin/dsfstest", &["dsfstest", mode, &ds], "/", &opts).map_err(|e| alloc::format!("exec dsfstest: {:?}", e))?;
+            let (kind, out) = finish(id, 60_000).ok_or_else(|| alloc::format!("dsfstest {} timeout", mode))?;
+            if kind != ExitKind::Exit(0) || !out.contains("checks OK") {
+                return Err(alloc::format!("dsfstest {}: {:?} {}", mode, kind, out.trim()));
+            }
+            Ok(String::from(out.trim()))
+        };
+        let out = run("refuse")?;
+        if sum(d) != before {
+            return Err(alloc::format!("the disk changed during the refusals ({})", out));
+        }
+        run("work")?;
+        if !crate::fs::mounts_of_disk(d).is_empty() || crate::fs::mount_users("/desofs").is_some() {
+            return Err(String::from("something still mounted after dsfstest work"));
+        }
+        if !matches!(crate::fs::desofs::probe(d).state, crate::fs::desofs::State::ReadWrite) {
+            return Err(String::from("the disk is not a sound DeSoFS volume after dsfstest work"));
+        }
+        Ok(())
+    })();
+    let _ = crate::fs::unmount("/desofs");
+    crate::block::remove(d);
+    r
 }

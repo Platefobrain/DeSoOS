@@ -1188,6 +1188,10 @@ impl FileSystem for Fat32 {
         "fat32"
     }
 
+    fn disk(&self) -> Option<usize> {
+        Some(self.disk)
+    }
+
     fn read_only(&self) -> bool {
         self.read_only
     }
@@ -1434,7 +1438,12 @@ impl FileSystem for Fat32 {
 /// Formats the whole disk as FAT32 (without a partition table).  All data
 /// on the disk is lost.  `allow_small` allows fewer than 65525 clusters
 /// (tests only – such a volume does not conform to the specification).
+#[cfg_attr(not(selftest), allow(dead_code))] // only tests make FAT32 volumes (RAM disks, the test NVMe's ESP)
 pub fn mkfs(disk: usize, label: &str, allow_small: bool) -> Result<String> {
+    // Never under a mounted file system (DeSoFS or FAT32 on the disk or a partition of it).
+    if !crate::fs::mounts_of_disk(disk).is_empty() || crate::fs::desofs::is_mounted(disk) {
+        return Err(FsError::Busy);
+    }
     let sectors = block::with_device(disk, |d| {
         if d.read_only() { Err(FsError::ReadOnly) } else { Ok(d.sector_count()) }
     })??;

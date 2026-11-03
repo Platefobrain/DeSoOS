@@ -1426,6 +1426,9 @@ impl FileSystem for Volume {
     fn source(&self) -> String {
         alloc::format!("disk {}", self.disk)
     }
+    fn disk(&self) -> Option<usize> {
+        Some(self.disk)
+    }
     fn stat(&mut self, path: &str) -> R<Metadata> {
         self.read_op(|tx| {
             let (_, nb, _) = tx.lookup(path)?;

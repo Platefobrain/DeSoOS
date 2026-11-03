@@ -37,6 +37,10 @@ pub struct OpenFile {
     pub write: bool,
     pub append: bool,
     pub offset: Mutex<u64>,
+    /// Keeps the file's mount mounted while the object exists (fs::MountPin) – held
+    /// only for its Drop.
+    #[allow(dead_code)]
+    pub pin: crate::fs::MountPin,
 }
 
 /// A directory handle (`dir_open`): the process may work inside this directory
@@ -44,6 +48,9 @@ pub struct OpenFile {
 /// normalized and absolute; nothing resolved through the handle leaves it.
 pub struct DirObj {
     pub path: String,
+    /// Keeps the directory's mount mounted while the handle exists (held for its Drop).
+    #[allow(dead_code)]
+    pub pin: crate::fs::MountPin,
 }
 
 /// Handle rights (bits).  Rights can only be reduced (handle_dup); a missing
@@ -277,6 +284,8 @@ pub struct Process {
     /// (relative paths in open).
     pub initial_rsp: u64,
     pub cwd: String,
+    /// Pin on the mount of `cwd` (set only through `set_cwd`).
+    pub cwd_pin: crate::fs::MountPin,
     /// Foreground process: Ctrl+C kills it; a normal exit prints no
     /// kernel message.
     pub foreground: bool,
@@ -329,6 +338,14 @@ impl Drop for Process {
 const _: () = assert!(core::mem::align_of::<Process>() <= 16 && core::mem::size_of::<Process>() <= 2048);
 
 impl Process {
+    /// Current directory (absolute, normalized) – the new mount is pinned before the
+    /// old pin is dropped.
+    pub fn set_cwd(&mut self, path: String) {
+        let pin = crate::fs::MountPin::take(&path);
+        self.cwd = path;
+        self.cwd_pin = pin;
+    }
+
     pub fn new(space: AddressSpace) -> Self {
         let mut fds = FdTable::new();
         fds.push(Some(Handle::new(Fd::Console))); // 0 stdin
@@ -346,6 +363,7 @@ impl Process {
             syscalls: 0,
             initial_rsp: super::USER_STACK_TOP,
             cwd: String::from("/"),
+            cwd_pin: crate::fs::MountPin::none(),
             foreground: false,
             ppid: AtomicU64::new(0),
             exiting: AtomicBool::new(false),

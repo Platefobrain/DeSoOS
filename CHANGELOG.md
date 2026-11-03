@@ -2,6 +2,57 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.65.0 — 2026-11-03
+
+### Added – `desofs` in the normal shell
+- `desofs info | format | mount | unmount | check | repair` in `/bin/sh` started by init: sysctl actions 5–10
+  behind the `SYSCTL` handle (argument = disk number, bit 32 = "yes" for format / repair, checked by the kernel –
+  without it nothing is written even when a program calls sysctl directly). The kernel runs the same code as the
+  emergency shell. A shell without the handle, and every program started from the shell, gets "not allowed" /
+  `ERROR_INVALID_HANDLE`.
+- sysctl output is limited to 64 KiB; more ends with "... output truncated: N bytes more".
+
+### Changed – a mount in use is not unmounted
+- Every mount counts pins: open files, directory handles and processes' current directories on it (taken when the
+  file / directory is opened or the directory changed, dropped with the handle, at process exit and when a child
+  that inherited it ends). `unmount`, `desofs unmount` and `desofs format` refuse while there are any: "in use (N
+  open files / directories) - nothing changed" – before, a handle (which remembers a path) would have reached
+  whatever was mounted there next. Unmounting a whole disk is all or nothing. The caller's own current directory
+  does not block it; after a successful unmount it is "/". The kernel shell moves its directory only after a
+  successful unmount.
+
+### Tests
+- INIT TEST 9/10 (`/bin/dsfstest`, started with the `SYSCTL` handle, on a 1 MiB RAM disk): raw sysctl format + yes
+  with a missing handle number, the console, a pipe, a directory handle; sh without the handle and a shell started by
+  the shell; format / repair without "yes"; bad arguments – the whole disk's SHA-256 unchanged. Then format, info,
+  mount, check (refused while mounted, then 0 errors), repair through sh; unmount refused under an open file, an open
+  directory, another process's current directory and a child's inherited file, and allowed once each is closed or
+  the process killed; format refused under an open file (the file still reads); the caller's own directory.
+  Mutations caught: "yes" ignored by the kernel, unmount ignoring pins, `chdir` without a pin, the handle check
+  removed from both the rights table and `sys_sysctl` (either one alone still refuses). 33 suites and a restart
+  phase, 274 tests.
+
+## v0.64.1 — 2026-11-03
+
+### Fixed – formatting never runs under a mounted file system
+- The kernel-shell `desofs format` ignored a failed unmount of `/disk` / `/desofs` (`unmount` syncs first and stays
+  mounted when that fails) and formatted anyway – a FAT32 `/disk` whose buffers could not be written would have been
+  overwritten under itself (found in a code review); `mkfs` had the same pattern. Now both unmount only the file
+  systems on the target disk (`fs::mounts_of_disk`, `fs::unmount_disk`) and stop with "cannot unmount … nothing
+  changed" when one cannot be unmounted; `desofs::format::format` and `fat32::mkfs` themselves refuse a mounted disk
+  (or one with a live DeSoFS `Volume`). New `FileSystem::disk()` (FAT32, DeSoFS, `Locked`).
+- `desofs` help: disk 0 mounts at `/disk`, others at `/desofs`.
+
+### Removed
+- The kernel-shell `mkfs` command (FAT32 formatter): DeSoOS formats disks only as DeSoFS (`desofs format`). Existing
+  FAT32 volumes (`/esp`, USB sticks, an old `disk.img`) are still read and written as before; `fat32::mkfs` stays
+  only for tests. `/bin/sh` answers `mkfs` with "command not found"; the mistyped-command hint test now uses
+  `dsofs` → `desofs`.
+- Test: DESOFS TEST 24 (a mounted DeSoFS and a live `Volume` refused by format and `fat32::mkfs`; FAT32 with a failing
+  flush – the shell's `desofs format` stops, the file system stays mounted, the whole disk's SHA-256 before = after).
+  Three mutations (the shell ignoring the failed unmount, either function without its own guard) each make it fail.
+  33 suites and a restart phase, 273 tests.
+
 ## v0.64.0 — 2026-11-02
 
 ### DeSoFS stage 4 – `/disk` as DeSoFS, programs, a real restart

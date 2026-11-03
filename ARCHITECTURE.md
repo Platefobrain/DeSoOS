@@ -215,7 +215,7 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 39–41 | `dev_claim`, `dev_info`, `dev_map` |
 | 42–43 | `irq_bind`, `irq_read` |
 | 44–45 | `dma_alloc`, `dma_phys` |
-| 46–47 | `sysinfo` (read-only), `sysctl` (reboot, halt, sync, stress – requires a `SYSCTL` handle) |
+| 46–47 | `sysinfo` (read-only), `sysctl` (reboot, halt, sync, stress, `desofs` – requires a `SYSCTL` handle) |
 | 48 | `dev_find` |
 | 49 | `input_inject` |
 | 50 | `blk_attach` |
@@ -276,7 +276,7 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 | 6 `HW_ROOT` | the root of hardware access – only init has it |
 | 7 `DEVICE` | one claimed PCI device |
 | 8 `IRQ` | an interrupt bound to a device |
-| 9 `SYSCTL` | permission for system actions (reboot, halt, sync, stress) |
+| 9 `SYSCTL` | permission for system actions (reboot, halt, sync, stress, `desofs`) |
 | 10 `INPUT` | an input event source (keyboard/mouse) |
 | 11 `BLK` | permission to register a block device |
 | 12 `DIR` | a directory: work inside it by relative paths (`READ` – read and list, `WRITE` – create, change, remove) |
@@ -544,7 +544,7 @@ execute `hlt`.
   slow pendrive blocks only that filesystem. `kind` / `source` / `read_only` are copied at mount time (so `mount`
   and `open` do not wait for the disk); `df` (`mount_stats`) goes through the concurrent path. Mount and unmount
   (write side) wait for in-flight reads – at most the ublk timeout (5 s).
-- **FAT32:** long file names (including Polish characters), `mkfs`, cluster-leak check. **Volume bounds:** on an MBR
+- **FAT32:** long file names (including Polish characters), cluster-leak check; `fat32::mkfs` is used only by tests (the shell command was removed in v0.64.1 – DeSoOS formats only as DeSoFS). **Volume bounds:** on an MBR
   partition the length comes from the partition table; a BPB claiming more sectors than the partition (or the
   disk) does not mount (`file system corrupt`), and every sector read or written is checked against the volume –
   a lying or damaged FAT32 never reaches the next partition. A volume with more clusters than FAT32 can number
@@ -563,8 +563,9 @@ execute `hlt`.
   for lookup; each `Disk` has its own `KMutex`, so a slow USB disk does not stall NVMe or virtio. Partition →
   parent disk, always in that order; `partitions_of` takes no disk locks. Disks can be removed; a block-layer
   number returns to the pool only after unmount, and `sdX` names keep increasing and are never reused.
-- Disk changes (`mkfs`, `disk read/write`) and asm test programs (`run`) are available only in the kernel
-  emergency shell; `/bin/sh` answers "only in the kernel emergency shell". Future: a service with a disk handle.
+- `desofs` works in the shell started by init (sysctl, `SYSCTL` handle). Raw disk writes (`disk read/write`) and
+  asm test programs (`run`) are available only in the kernel emergency shell; `/bin/sh` answers "only in the kernel
+  emergency shell".
 
 ## Hardware and data safety
 
@@ -578,7 +579,7 @@ execute `hlt`.
 **Data protection on real hardware** – independent barriers:
 
 1. the NVMe driver writes only to a controller emulated by QEMU; a real SSD is read-only,
-2. the block layer rejects every write to a read-only disk (partitions, `mkfs`, files → `ERROR_READ_ONLY`),
+2. the block layer rejects every write to a read-only disk (partitions, formatting, files → `ERROR_READ_ONLY`),
 3. FAT32 on a read-only disk rejects changes up front,
 4. USB storage is read-only end to end (see "USB").
 
@@ -739,7 +740,16 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
 - **`sysinfo(topic, buffer)`** (46) – read-only text: `ver`, `uptime`, `date`, `mem`, `irq`, `cpus`, `lspci`
   (`-v`), `acpi`, `disk` (list only), `mount`, `df`. Any program may ask. The shell runs these by name (`mem`,
   `lspci -v > file`).
-- **`sysctl(handle, action, arg, fd)`** (47) – `reboot`, `halt`, `sync`, `stress [s]`; works only with a `SYSCTL`
+- **`sysctl(handle, action, arg, fd)`** (47) – `reboot`, `halt`, `sync`, `stress [s]` (actions 1–4) and `desofs`
+  (5 info, 6 format, 7 mount, 8 unmount, 9 check, 10 repair; `arg` = disk number in bits 0–31, bit 32 = "yes" for
+  format / repair – checked by the kernel, so without it nothing is written even for a program calling sysctl
+  directly; any other bit or "yes" elsewhere → `ERROR_INVALID_ARGUMENT`). The text goes to `fd`, at most 64 KiB
+  (`shell::Capped`: more ends with "... output truncated: N bytes more", never a silent cut). The `desofs` actions
+  run the same code as the kernel emergency shell; the result comes at the end (no progress while it runs; the
+  syscall holds the BKL, which is released while it waits for the disk). The caller's own current directory does
+  not keep a mount busy for it: its pin is dropped for the action and taken again (on "/" if the unmount moved it).
+  The handle is checked twice: by the rights table (argument 0 must be a `SYSCTL` handle) and in `sys_sysctl`.
+  Works only with a `SYSCTL`
   handle (kind 9, right `DUP` only: it can be given to a child via `spawn_ex`, but not sent in a message). The
   kernel creates it only for init (slot 4); init gives a copy to the shell (slot 4), and the shell does **not**
   pass it to programs – a program started from the shell cannot reboot the computer. System actions sit behind a
@@ -1457,8 +1467,33 @@ superblock A or B (whatever its checksum) means only DeSoFS rules – read-write
 kernel log says "desofs check 0 / desofs repair 0"), or not mounted with the reason – never a fallback to FAT32;
 without the marker FAT32 as before; nothing is ever formatted here. `desofs format 0 yes` mounts the new volume at
 `/disk` at once; `desofs mount <disk>` puts disk 0 at `/disk`, others at `/desofs`; `desofs unmount` unmounts
-every DeSoFS mount (check / repair need that). A FAT32 `mkfs` zeroes the reserved sectors, so the marker of an
-earlier DeSoFS volume goes with it.
+every DeSoFS mount (check / repair need that). A FAT32 `fat32::mkfs` (tests only) zeroes the reserved sectors, so the marker
+of an earlier DeSoFS volume goes with it.
+
+**No format under a mounted file system** (v0.64.1): every file system tells its disk (`FileSystem::disk`);
+`fs::mounts_of_disk(d)` lists the mount points on disk `d` or its partitions, `fs::unmount_disk(d)` unmounts them
+and stops at the first that cannot be unmounted (`unmount` syncs first – a failed sync keeps it mounted). The
+kernel-shell `desofs format` unmounts only what is on the target disk and stop with "cannot unmount …
+nothing changed" when that fails; `desofs::format::format` and `fat32::mkfs` themselves refuse a disk that is still
+mounted (or has a live `Volume`) – a second guard. Test 24: a mounted DeSoFS and a live `Volume` refused (disk
+SHA-256 before = after, format works after the unmount); FAT32 whose flush fails – the shell command stops, the file
+system stays mounted with its file, the whole disk's SHA-256 is unchanged.
+
+**A mount in use is not unmounted** (v0.65.0): file handles remember a path, not a file system, so unmounting under
+them would let them reach whatever is mounted there next (after `desofs format`: a new, empty volume). Every mount
+has a pin counter (`users`, atomic); `fs::MountPin::take(path)` – under `FS_LOCK` for reading, the mount the VFS
+resolves the path to (longest mount point by whole components, as for every call; "/" is not counted) – is held by
+an open file (`OpenFile.pin`, taken before the open does anything), a directory handle (`DirObj.pin`) and a process's
+current directory (`Process::set_cwd`, the only way to change it; a child's `spawn` copies the parent's pin). Drop
+is a plain atomic decrement, without a lock: `close`, a handle leaving with a message, process exit (`exit_current`
+drops the descriptors and the directory pin at once – a zombie holds nothing) never wait for the VFS. `unmount`
+under `FS_LOCK` for writing: pins > 0 → `FsError::InUse(n)` "in use (n open files / directories)" before anything
+is written; new pins wait for the lock, so the count cannot grow meanwhile. `unmount_disk` is all or nothing under
+one write lock: every mount on the disk unused, then every one synced, only then all removed. Lock order: only
+`FS_LOCK` (no process table, no other process's descriptors – `open`, `close`, `chdir` run without the BKL and
+change only their own table, so scanning other tables would race). The message has no pid for the same reason; `ps`
+and `dcp` show who. The kernel shell moves its directory to "/" only after a successful unmount. `unmount_lost`
+(a USB stick pulled out) ignores pins: the disk is gone anyway. INIT TEST 9 (`/bin/dsfstest`).
 
 **`readdir_part(dir, path, len, buf, buflen, cursor)`** (syscall 57): a directory in parts through a directory handle
 (`READ` – one row in the rights table, like `readdirat`; in the file sandbox the handle given to the program, paths

@@ -96,6 +96,10 @@ pub fn format(index: usize, p: &Params) -> Result<u64, String> {
     if crate::block::is_read_only(index) {
         return Err(String::from("the disk is read-only - nothing changed"));
     }
+    // Never under a mounted file system – a second guard behind the shell's unmount.
+    if super::is_mounted(index) || !crate::fs::mounts_of_disk(index).is_empty() {
+        return Err(String::from("the disk is mounted - unmount it first; nothing changed"));
+    }
     let partition = crate::block::with_device(index, |d| d.parent().is_some() || d.partition_kind().is_some()).map_err(|e| alloc::format!("disk {}: {}", index, e))?;
     if !partition && has_partition_table(index)? {
         return Err(String::from("the disk has a partition table - format a partition, not the whole disk"));

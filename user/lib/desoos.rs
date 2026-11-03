@@ -134,6 +134,15 @@ pub const SYSCTL_REBOOT: u64 = 1;
 pub const SYSCTL_HALT: u64 = 2;
 pub const SYSCTL_SYNC: u64 = 3;
 pub const SYSCTL_STRESS: u64 = 4;
+/// `desofs` actions: `arg` = disk number; `SYSCTL_YES` added for format / repair
+/// (without it the kernel only says what would happen).  Unmount: `arg` 0.
+pub const SYSCTL_DESOFS_INFO: u64 = 5;
+pub const SYSCTL_DESOFS_FORMAT: u64 = 6;
+pub const SYSCTL_DESOFS_MOUNT: u64 = 7;
+pub const SYSCTL_DESOFS_UNMOUNT: u64 = 8;
+pub const SYSCTL_DESOFS_CHECK: u64 = 9;
+pub const SYSCTL_DESOFS_REPAIR: u64 = 10;
+pub const SYSCTL_YES: u64 = 1 << 32;
 
 /// mmap: region protection.
 pub const PROT_READ: u64 = 1;

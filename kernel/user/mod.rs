@@ -247,7 +247,7 @@ pub fn spawn_elf(
     let mut process = alloc::boxed::Box::new(Process::new(loaded.space));
     process.mem = vm::ProcMem::new(loaded.image_end);
     process.initial_rsp = loaded.rsp;
-    process.cwd = alloc::string::String::from(cwd);
+    process.set_cwd(alloc::string::String::from(cwd));
     process.foreground = opts.foreground;
     if opts.hw_root {
         // The only place where HW_ROOT is created (slot 3).
@@ -357,6 +357,7 @@ pub fn spawn_child(
     child.mem = vm::ProcMem::new(loaded.image_end);
     child.initial_rsp = loaded.rsp;
     child.cwd = parent.cwd.clone();
+    child.cwd_pin = parent.cwd_pin.clone();
     child.foreground = foreground;
     // The sandbox is inherited and can only be added, never removed.
     child.no_files = parent.no_files || no_files;
@@ -584,6 +585,8 @@ pub(crate) fn exit_current() -> ! {
         // Descriptors are closed immediately (not at reap) – a reader of a
         // pipe gets end-of-data when the last writer exits.
         p.fds.clear();
+        // The current directory's pin too – a zombie must not keep a mount busy.
+        p.cwd_pin = crate::fs::MountPin::none();
         // Shared mappings (shared memory, device registers) are also released
         // immediately – a claimed device is returned before the parent gets the status from
         // wait (otherwise only at reap; a service restart would get ERROR_BUSY).

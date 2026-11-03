@@ -550,3 +550,104 @@ pub fn t_mount() -> T {
     ensure!(img.iter().all(|&b| b == 0), "an empty disk was written to");
     Ok(String::from("sound DeSoFS -> read-write; one tree damaged -> read-only with the reason; FAT32 -> FAT32; the DeSoFS marker over a valid FAT32 with both superblocks broken -> not mounted (never the FAT32 under it); an empty disk -> not mounted and untouched (never formatted)"))
 }
+
+// ---------------- 24. formatting never runs under a mounted file system ----------------
+
+static FAIL_FLUSH: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A RAM disk whose flush fails while FAIL_FLUSH is set (a FAT32 `sync` then fails, so
+/// the file system cannot be unmounted).
+struct FlushFailDisk {
+    inner: RamDisk,
+}
+
+impl BlockDevice for FlushFailDisk {
+    fn name(&self) -> &str {
+        "flushfail"
+    }
+    fn description(&self) -> String {
+        String::from("RAM disk with a failing flush")
+    }
+    fn sector_count(&self) -> u64 {
+        self.inner.sector_count()
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        self.inner.read(lba, buf)
+    }
+    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        self.inner.write(lba, buf)
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        if FAIL_FLUSH.load(core::sync::atomic::Ordering::SeqCst) { Err(BlockError::Io) } else { Ok(()) }
+    }
+}
+
+fn disk_sum(d: usize) -> [u8; 32] {
+    let blocks = crate::block::with_device(d, |x| x.sector_count()).unwrap_or(0) / 8;
+    sha256(&image(d, blocks))
+}
+
+pub fn t_format_mounted() -> T {
+    use crate::fs::DiskMount;
+    let mut cases = 0;
+    // A mounted DeSoFS volume: format and mkfs refuse it, the disk stays as it was.
+    let d = formatted(256)?;
+    let r = (|| -> T {
+        ensure!(crate::fs::mount_disk(d, "/mt-fmt") == DiskMount::DeSoFs(None), "mount");
+        let before = disk_sum(d);
+        let f = super::format::format(d, &super::test_write::params());
+        let m = crate::fs::fat32::mkfs(d, "X", true);
+        ensure!(matches!(&f, Err(e) if e.contains("mounted")), "format of a mounted DeSoFS: {:?}", f);
+        ensure!(matches!(m, Err(FsError::Busy)), "mkfs of a mounted DeSoFS: {:?}", m.map(|_| ()));
+        ensure!(disk_sum(d) == before, "a refused format changed the disk");
+        cases += 2;
+        crate::fs::unmount("/mt-fmt").map_err(|e| format!("unmount: {}", e))?;
+        // A volume held outside the VFS (a `Volume` alive) counts as mounted too.
+        let v = mount(d)?;
+        let f = super::format::format(d, &super::test_write::params());
+        let same = disk_sum(d) == before;
+        drop(v);
+        ensure!(matches!(&f, Err(e) if e.contains("mounted")) && same, "format under a live Volume: {:?}", f);
+        cases += 1;
+        // Unmounted: formatting works again.
+        super::format::format(d, &super::test_write::params()).map_err(|e| format!("format after unmount: {}", e))?;
+        Ok(String::new())
+    })();
+    let _ = crate::fs::unmount("/mt-fmt");
+    let _ = crate::fs::remove("/mt-fmt");
+    block::remove(d);
+    r?;
+    // FAT32 whose buffers cannot be written (flush fails): the kernel-shell `desofs format`
+    // cannot unmount it, so it stops – the file system stays mounted and not
+    // one byte of the disk changes.
+    let f = block::register(Box::new(FlushFailDisk { inner: RamDisk::new("ff", 16 * 1024) }));
+    let r = (|| -> T {
+        crate::fs::fat32::mkfs(f, "FFTEST", true).map_err(|e| format!("mkfs: {}", e))?;
+        ensure!(matches!(crate::fs::mount_disk(f, "/mt-ff"), DiskMount::Fat32(_)), "FAT32 mount");
+        crate::fs::write_file("/mt-ff/keep.txt", b"must survive").map_err(|e| format!("write: {}", e))?;
+        FAIL_FLUSH.store(true, core::sync::atomic::Ordering::SeqCst);
+        let before = disk_sum(f);
+        let mut cwd = String::from("/mt-ff");
+        for cmd in [format!("desofs format {} yes", f)] {
+            let mut out = String::new();
+            let mut ctx = crate::shell::Context { history: &[], cwd: &mut cwd };
+            crate::shell::execute(&cmd, &mut out, &mut ctx);
+            ensure!(out.contains("cannot unmount /mt-ff") && out.contains("nothing changed"), "{}: {:?}", cmd, out.trim());
+            ensure!(disk_sum(f) == before, "{}: the disk changed after a failed unmount", cmd);
+            ensure!(crate::fs::mounts_of_disk(f) == ["/mt-ff"], "{}: the file system is no longer mounted", cmd);
+            cases += 1;
+        }
+        FAIL_FLUSH.store(false, core::sync::atomic::Ordering::SeqCst);
+        ensure!(crate::fs::read_file("/mt-ff/keep.txt").map_err(|e| format!("read: {}", e))? == b"must survive", "the file is gone");
+        Ok(String::new())
+    })();
+    FAIL_FLUSH.store(false, core::sync::atomic::Ordering::SeqCst);
+    let _ = crate::fs::unmount("/mt-ff");
+    let _ = crate::fs::remove("/mt-ff");
+    block::remove(f);
+    r?;
+    Ok(format!("{} cases: format and the FAT32 formatter refuse a mounted DeSoFS volume and a live Volume (disk SHA-256 before = after), and work after the unmount; FAT32 that cannot be unmounted (its flush fails): the kernel-shell 'desofs format' stops with 'cannot unmount ... nothing changed', the file system stays mounted, its file is intact and the whole disk's SHA-256 is unchanged", cases))
+}

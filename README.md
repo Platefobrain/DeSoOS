@@ -1,4 +1,4 @@
-# DeSoOS v0.64.0
+# DeSoOS v0.65.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -52,7 +52,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (33 suites and a restart phase, 272 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (33 suites and a restart phase, 274 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -193,13 +193,13 @@ Yes. On real hardware DeSoOS **does not write to any disk**:
    SSD is read-only: a write fails before anything reaches the device. Only read and queue
    setup commands are ever sent (no Write, TRIM, Format, Sanitize or firmware update).
 2. **Block layer** (`kernel/block.rs`) independently rejects every write to a read-only disk,
-   including `mkfs`, `disk write` and writing files on `/esp`.
+   including `desofs format`, `disk write` and writing files on `/esp`.
 3. **USB sticks are read-only**, with four independent locks: `usbd` contains no SCSI write
    command (checked at compile time), the kernel-`usbd` protocol has no write operation, the
    USB disk is read-only in the block layer, and FAT32 / `open` refuse writes (`ERROR_READ_ONLY`).
 4. Verified in QEMU on a copy of a typical Linux disk layout (GPT: ESP + swap + ext4) with a
    controller posing as a real SSD and NVMe command tracing: **0 write commands** after boot,
-   despite attempts such as `echo > /esp/...`, `rm`, `mkfs` and `disk write`.
+   despite attempts such as `echo > /esp/...`, `rm`, `mkfs` and `disk write` (`mkfs` was the FAT32 formatter, removed in v0.64.1).
 
 The only change outside the USB stick is the Secure Boot setting in the firmware (see below).
 
@@ -317,7 +317,9 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   `nofiles --dir-ro /notes cat ../secret.txt` is refused).
 - Ctrl+C ends the foreground program, not the shell. `exit` or killing the shell makes `init`
   start a new one.
-- `mkfs`, disk writes (`disk write`) and `run` are available only in the kernel emergency shell.
+- `sync`, `reboot`, `halt`, `stress` and `desofs` work only in the shell started by `init` (it holds the system
+  control handle; programs it starts do not get it). Disk writes (`disk write`) and `run` are available only in the
+  kernel emergency shell.
 
 Line editing and console:
 
@@ -333,18 +335,19 @@ Line editing and console:
 - `/` is a ramfs (in memory, lost on reboot); `/disk` is the disk `disk.img` (persistent). At start the kernel
   looks at it: the DeSoFS marker → DeSoFS (read-write, or read-only with a message if a tree is damaged, or not
   mounted – never FAT32 instead); otherwise FAT32.
-- A new `disk.img` is empty: format it once in DeSoOS with `desofs format 0 yes` (DeSoFS) or `mkfs 0 yes` (FAT32);
+- A new `disk.img` is empty: format it once in DeSoOS with `desofs format 0 yes` (DeSoFS; DeSoOS no longer creates FAT32);
   it is mounted at `/disk` immediately and at every start. Until then `/disk` does not exist. `df` then shows two
   lines (`/` and `/disk`).
-- Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, plus kernel
-  commands `hexdump`, `write`, `mount`, `df`, `mkfs`, `sync`, `date`, `desofs info <disk>` (read-only check of a
+- Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, `mount`, `df`,
+  `sync`, `date`, `desofs info <disk>` (read-only check of a
   DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write),
   `desofs format <disk> [yes]` (erases the disk; refused on a read-only disk or a whole disk with a partition table),
   `desofs mount <disk>` (disk 0 at `/disk`, others at `/desofs` until reboot), `desofs unmount`, `desofs check <disk>` (unmounted
   volume: every block's checksum, directories, relations; errors with file names) and `desofs repair <disk> [yes]`
   (a volume left read-only by a damaged tree goes back to the other superblock's whole state). In QEMU: `desofs format 0 yes`
   turns `disk.img` into DeSoFS (your FAT32 files on it are gone – copy them first). `mv` inside DeSoFS is one atomic
-  step (also directories).
+  step (also directories). A mount that a program still uses (an open file or directory, its current directory)
+  is not unmounted or formatted: "in use (N open files / directories) - nothing changed".
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
 - Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.

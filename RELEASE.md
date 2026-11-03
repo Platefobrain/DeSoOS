@@ -10,6 +10,160 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.65.0 — 2026-11-03
+
+**Status: stable on QEMU (TCG and KVM); `desofs` in the normal shell behind the `SYSCTL` handle; a mount that a
+program still uses is not unmounted or formatted.**
+
+### What is new since the last report (v0.64.1)
+
+| Version | Change |
+|---|---|
+| v0.65.0 | `desofs info / format / mount / unmount / check / repair` in `/bin/sh` started by init (sysctl actions 5–10, "yes" checked by the kernel, output at most 64 KiB); mount pins – an open file, a directory handle or a current directory on a mount makes `unmount` / `format` refuse with "in use (N open files / directories) - nothing changed"; unmounting a whole disk is all or nothing |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 274 tests PASS | 172 s (restart 38 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 274 tests PASS | 103 s (restart 17 s) |
+
+New: INIT TEST 9/10 (`/bin/dsfstest` with the `SYSCTL` handle on a 1 MiB RAM disk) – raw sysctl without the handle
+(missing number, console, pipe, directory handle), sh without it and a shell's child shell, format / repair without
+"yes": the whole disk's SHA-256 unchanged; then format, info, mount, check, repair through sh; unmount refused under
+an open file, an open directory, another process's current directory and a child's inherited file, allowed once
+each is closed or the process killed; format refused under an open file; the caller's own directory. On the build
+server four mutations each make it fail (the handle check only when removed from both the rights table and the
+syscall – either one alone still refuses).
+
+### DeSoFS speed `[RESULT-FS]`
+
+| | TCG v0.64.1 | TCG v0.65.0 | KVM v0.64.1 | KVM v0.65.0 |
+|---|---|---|---|---|
+| 8 MiB write (KiB/s) | 5 669 | 6 005 | 16 516 | 12 760 |
+| 8 MiB read (KiB/s) | 5 435 | 5 626 | 18 618 | 17 808 |
+| 1000 small files – create + write (ms) | 20 459 | 20 270 | 10 371 | 10 181 |
+| 1000 small files – read (ms) | 7 792 | 7 498 | 2 217 | 2 316 |
+| `desofs check` (ms) | 918 | 800 | 259 | 269 |
+
+### Known problems
+
+- `desofs check` runs inside one syscall: no progress until it ends and no Ctrl+C (64 MiB – under a second).
+- "in use" gives the number of handles, not the process (`ps`, `dcp` show it).
+- Otherwise as in v0.64.1.
+
+### Performance against the previous release (v0.64.1 → v0.65.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.64.1 | TCG v0.65.0 | KVM v0.64.1 | KVM v0.65.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 101 | 3 202 | 32 414 | 35 855 |
+| irq_user_ns | 11 665 | 8 078 | 65 963 | 69 881 |
+| fact_kernel_ns | 27 005 | 22 941 | 56 465 | 53 533 |
+| fact_user_ns | 78 740 | 69 808 | 94 161 | 94 652 |
+| fact_svc_ns | 204 498 | 231 213 | 103 199 | 106 269 |
+| ping_svc_ns | 116 346 | 126 903 | 21 824 | 23 727 |
+| restart_us | 4 100 | 5 000 | 1 300 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.64.1 | TCG v0.65.0 | KVM v0.64.1 | KVM v0.65.0 |
+|---|---|---|---|---|
+| start_ms | 405 | 418 | 376 | 354 |
+| enum_avg_ms | 29 | 27 | 22 | 27 |
+| read_kbs (usbd) | 77 283 | 69 423 | 99 902 | 113 777 |
+| kread_kbs (kernel) | 114 276 | 47 499 | 69 771 | 116 765 |
+| kcat_kbs (kernel, cat) | 59 291 | 50 596 | 85 841 | 96 958 |
+| hid_avg_us (keyboard) | 656 | 714 | 71 | 331 |
+
+`[RESULT-RIGHTS]` rows 57, refused 29; gate_ns: TCG 25 → 25, KVM 4 → 5.
+`[RESULT-CRYPTO]` (KiB/s): TCG 48 398 / 46 720 / 49 920 → 46 431 / 50 240 / 43 200; KVM 180 855 / 217 600 / 217 600 →
+178 308 / 212 480 / 212 160.
+
+Verdict: no regression. The `[RESULT-FS]` measurement runs in the kernel through the VFS directly, without file
+handles, so the pins are not on its path; KVM 8 MiB write 12 760 (−23%) is one run against an unchanged write path
+(TCG +6%, KVM reads and small files unchanged). TCG `irq_user_ns` is back to 8 078; the USB figures move within the
+known spread of the emulated stick (TCG kread 47 499 after the record 114 276; KVM hid 331 µs one run of a short
+measurement); the rights gate and crypto are unchanged.
+
+---
+
+## v0.64.1 — 2026-11-03
+
+**Status: stable on QEMU (TCG and KVM); fix – formatting never runs under a mounted file system; the FAT32
+formatter command `mkfs` removed (DeSoOS formats only as DeSoFS).**
+
+### What is new since the last report (v0.64.0)
+
+| Version | Change |
+|---|---|
+| v0.64.1 | `desofs format` unmounts only the file systems on the target disk and stops with "cannot unmount … nothing changed" when one cannot be unmounted (before, a failed unmount was ignored – found in a code review); `desofs::format::format` and `fat32::mkfs` refuse a mounted disk themselves; the kernel-shell `mkfs` command removed – existing FAT32 volumes (`/esp`, USB sticks) are read and written as before |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 273 tests PASS | 169 s (restart 38 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 273 tests PASS | 102 s (restart 17 s) |
+
+New: DESOFS TEST 24 – a mounted DeSoFS volume and a live `Volume` refused by both formatters, FAT32 whose flush fails:
+the shell's `desofs format` stops, the file system stays mounted with its file; in every case the SHA-256 of the whole
+disk before = after. On the build server three mutations (the shell ignoring the failed unmount, either function
+without its own guard) each make it fail.
+
+### DeSoFS speed `[RESULT-FS]`
+
+| | TCG v0.64.0 | TCG v0.64.1 | KVM v0.64.0 | KVM v0.64.1 |
+|---|---|---|---|---|
+| 8 MiB write (KiB/s) | 5 688 | 5 669 | 17 138 | 16 516 |
+| 8 MiB read (KiB/s) | 5 523 | 5 435 | 19 883 | 18 618 |
+| 1000 small files – create + write (ms) | 18 779 | 20 459 | 9 290 | 10 371 |
+| 1000 small files – read (ms) | 7 141 | 7 792 | 2 204 | 2 217 |
+| `desofs check` (ms) | 796 | 918 | 262 | 259 |
+
+### Known problems
+
+- `desofs` is only in the kernel emergency shell, so it cannot be reached in a normal start (next version: `desofs`
+  in `/bin/sh` behind the `SYSCTL` handle).
+- Otherwise as in v0.64.0.
+
+### Performance against the previous release (v0.64.0 → v0.64.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.64.0 | TCG v0.64.1 | KVM v0.64.0 | KVM v0.64.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 2 983 | 3 101 | 32 878 | 32 414 |
+| irq_user_ns | 8 792 | 11 665 | 67 613 | 65 963 |
+| fact_kernel_ns | 29 511 | 27 005 | 53 461 | 56 465 |
+| fact_user_ns | 74 128 | 78 740 | 92 123 | 94 161 |
+| fact_svc_ns | 192 122 | 204 498 | 104 766 | 103 199 |
+| ping_svc_ns | 119 545 | 116 346 | 22 522 | 21 824 |
+| restart_us | 4 000 | 4 100 | 1 200 | 1 300 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.64.0 | TCG v0.64.1 | KVM v0.64.0 | KVM v0.64.1 |
+|---|---|---|---|---|
+| start_ms | 361 | 405 | 369 | 376 |
+| enum_avg_ms | 23 | 29 | 26 | 22 |
+| read_kbs (usbd) | 61 134 | 77 283 | 66 064 | 99 902 |
+| kread_kbs (kernel) | 64 531 | 114 276 | 87 872 | 69 771 |
+| kcat_kbs (kernel, cat) | 61 784 | 59 291 | 74 951 | 85 841 |
+| hid_avg_us (keyboard) | 685 | 656 | 96 | 71 |
+
+`[RESULT-RIGHTS]` rows 57, refused 29; gate_ns: TCG 25 → 25, KVM 4 → 4.
+`[RESULT-CRYPTO]` (KiB/s): TCG 48 941 / 52 160 / 50 240 → 48 398 / 46 720 / 49 920; KVM 182 129 / 217 280 / 217 920 →
+180 855 / 217 600 / 217 600.
+
+Verdict: no regression. The change touches only formatting, which none of the measurements uses. TCG `irq_user_ns`
+11 665 (+33%) is one run of a short measurement (7 130 – 8 792 in the last releases); TCG small-file create +9% and
+check +15% are TCG run-to-run spread (KVM unchanged); the USB figures move within the known spread of the emulated
+stick (TCG kread 114 276 the highest so far).
+
+---
+
 ## v0.64.0 — 2026-11-02
 
 **Status: stable on QEMU (TCG and KVM); DeSoFS stage 4 – `/disk` as DeSoFS recognised at start, data checked after a

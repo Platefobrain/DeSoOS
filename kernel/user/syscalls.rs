@@ -375,6 +375,7 @@ fn fs_error(e: FsError) -> i64 {
         FsError::InvalidName | FsError::BadCursor => ERROR_INVALID_ARGUMENT,
         FsError::NotEmpty => ERROR_NOT_EMPTY,
         FsError::ReadOnly => ERROR_READ_ONLY,
+        FsError::InUse(_) => ERROR_BUSY,
         _ => ERROR_IO,
     }
 }
@@ -645,6 +646,8 @@ fn sys_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
 /// open / openat after the path is resolved (flags already checked).
 fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
     let write = flags & O_WRITE != 0;
+    // Pinned first: from here on the mount cannot be unmounted under the open.
+    let pin = fs::MountPin::take(&path);
     // Writes to a read-only file system (USB stick, SSD) fail immediately.
     if write && fs::is_read_only(&path) {
         return Err(ERROR_READ_ONLY);
@@ -667,6 +670,7 @@ fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
         write,
         append: flags & O_APPEND != 0,
         offset: Mutex::new(0),
+        pin,
     }));
     install_fd(p, 3, file)
 }
@@ -1263,7 +1267,7 @@ fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     let path = user_path(p, ptr, len)?;
     match fs::stat(&path) {
         Ok(m) if m.kind == FileType::Directory => {
-            p.cwd = path;
+            p.set_cwd(path);
             Ok(0)
         }
         Ok(_) => Err(ERROR_NOT_DIRECTORY),
@@ -1359,6 +1363,7 @@ fn sys_dir_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
         return Err(ERROR_INVALID_ARGUMENT);
     }
     let path = user_path(p, ptr, len)?;
+    let pin = fs::MountPin::take(&path);
     match fs::stat(&path) {
         Ok(m) if m.kind == FileType::Directory => {}
         Ok(_) => return Err(ERROR_NOT_DIRECTORY),
@@ -1371,7 +1376,7 @@ fn sys_dir_open(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
         | (if flags & O_WRITE != 0 { rights::WRITE } else { 0 })
         | rights::DUP
         | rights::TRANSFER;
-    install_handle(p, 3, Handle { obj: Fd::Dir(Arc::new(super::process::DirObj { path })), rights: r })
+    install_handle(p, 3, Handle { obj: Fd::Dir(Arc::new(super::process::DirObj { path, pin })), rights: r })
 }
 
 /// A path inside directory handle `h` (the handle's kind and rights: the table).
@@ -1532,12 +1537,19 @@ fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysRe
 }
 
 /// sysctl(SYSCTL handle, action, arg, fd) – reboot / halt / sync /
-/// stress; result text goes to `fd`.  ERROR_INVALID_HANDLE: not a SYSCTL handle; ERROR_INVALID_ARGUMENT: bad action.
+/// stress / desofs (shell::sysctl); result text (at most 64 KiB) goes to `fd`.  ERROR_INVALID_HANDLE: not a SYSCTL handle; ERROR_INVALID_ARGUMENT: bad action.
 fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult {
     if !matches!(p.fd(h)?, Fd::Sysctl) {
         return Err(ERROR_INVALID_HANDLE);
     }
-    let out = crate::shell::sysctl(op, arg).ok_or(ERROR_INVALID_ARGUMENT)?;
+    // The caller's own current directory does not keep a mount busy for it (`desofs
+    // unmount` from a shell standing in /disk): its pin is dropped for the action and taken
+    // again afterwards – on the same directory, or on "/" when a successful unmount moved it.
+    let mut cwd = p.cwd.clone();
+    p.cwd_pin = fs::MountPin::none();
+    let out = crate::shell::sysctl(op, arg, &mut cwd);
+    p.set_cwd(cwd);
+    let out = out.ok_or(ERROR_INVALID_ARGUMENT)?;
     if !out.is_empty() {
         // The output handle is not in the table (only used when there is text).
         if p.handle(fd)?.rights & rights::WRITE == 0 {

@@ -5,7 +5,7 @@
 //   * a fallback – when there is no /bin/init or init keeps crashing (user::run_init),
 //   * a text source for user space: the sysinfo syscall (read-only: mem,
 //     lspci, cpus...) and sysctl (reboot, halt, sync, stress – with the SYSCTL handle);
-//     mkfs, disk writes and run (test programs) – only here.
+//     disk writes and run (test programs) – only here.
 // Input from the PS/2 keyboard and from the terminal (serial), output to serial
 // and the screen (console.rs).
 //
@@ -297,8 +297,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "stat", usage: "stat <path>", help: "file information", run: cmd_stat },
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
-    Command { name: "mkfs", usage: "mkfs <disk> [yes]", help: "format a disk as FAT32 (erases it!)", run: cmd_mkfs },
-    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair <disk>", help: "DeSoFS: info, format, mount at /desofs, check, repair", run: cmd_desofs },
+    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair <disk>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1511,6 +1510,32 @@ fn cmd_df(_: &str, out: &mut dyn Write, _: &mut Context) {
     }
 }
 
+/// Before formatting disk `disk`: leaves any directory on it and unmounts every file
+/// system on it.  false (and a message) when one cannot be unmounted – the caller then
+/// must not touch the disk.
+fn leave_disk(disk: usize, out: &mut dyn Write, ctx: &mut Context, what: &str) -> bool {
+    match crate::fs::unmount_disk(disk) {
+        Ok(gone) => {
+            // Only after a successful unmount: a refusal leaves the directory as it was.
+            for p in &gone {
+                if under(ctx.cwd, p) {
+                    *ctx.cwd = String::from("/");
+                }
+            }
+            true
+        }
+        Err(e) => {
+            let _ = writeln!(out, "{}: {}", what, e);
+            false
+        }
+    }
+}
+
+/// `path` is `mount` or lies below it (by whole path components: /disk2 is not under /disk).
+fn under(path: &str, mount: &str) -> bool {
+    path == mount || path.len() > mount.len() && path.starts_with(mount) && path.as_bytes()[mount.len()] == b'/'
+}
+
 /// `desofs info | format | mount | unmount | check | repair` – the DeSoFS tool.
 fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     let mut parts = args.split_whitespace();
@@ -1548,14 +1573,11 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
                 let _ = writeln!(out, "To continue type: desofs format {} yes", disk);
                 return;
             }
-            // Whatever is mounted from that disk goes first.
-            if ctx.cwd.starts_with("/disk") || ctx.cwd.starts_with("/desofs") {
-                *ctx.cwd = String::from("/");
+            // Whatever is mounted from that disk goes first – and if it cannot be unmounted
+            // (its buffers cannot be written), nothing is formatted.
+            if !leave_disk(disk, out, ctx, "desofs format") {
+                return;
             }
-            if disk == 0 {
-                let _ = crate::fs::unmount("/disk");
-            }
-            let _ = crate::fs::unmount("/desofs");
             let p = crate::fs::desofs::format::Params { uuid: crate::fs::desofs::format::random_uuid(), time: crate::drivers::rtc::now().to_unix(), label: "DESOFS" };
             match crate::fs::desofs::format::format(disk, &p) {
                 Ok(blocks) if disk == 0 => {
@@ -1604,12 +1626,14 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
                 let _ = writeln!(out, "desofs unmount: no DeSoFS volume is mounted");
             }
             for p in paths {
-                if ctx.cwd.starts_with(p.as_str()) {
-                    *ctx.cwd = String::from("/");
-                }
                 let _ = match crate::fs::unmount(&p) {
-                    Ok(()) => writeln!(out, "{} unmounted", p),
-                    Err(e) => writeln!(out, "desofs unmount {}: {}", p, e),
+                    Ok(()) => {
+                        if under(ctx.cwd, &p) {
+                            *ctx.cwd = String::from("/");
+                        }
+                        writeln!(out, "{} unmounted", p)
+                    }
+                    Err(e) => writeln!(out, "desofs unmount {}: {} - nothing changed", p, e),
                 };
             }
         }
@@ -1656,61 +1680,6 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         }
         _ => {
             let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes]   (disk numbers: 'disk')");
-        }
-    }
-}
-
-fn cmd_mkfs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
-    let mut parts = args.split_whitespace();
-    let Some(disk) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
-        let _ = writeln!(out, "usage: mkfs <disk> yes   (disk numbers: 'disk')");
-        return;
-    };
-    let name = match crate::block::with_device(disk, |d| String::from(d.name())) {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = writeln!(out, "mkfs: {}", e);
-            return;
-        }
-    };
-    if crate::block::is_read_only(disk) {
-        let _ = writeln!(out, "mkfs: disk {} ({}) is read-only (write protection) - nothing changed", disk, name);
-        return;
-    }
-    if parts.next() != Some("yes") {
-        let _ = writeln!(out, "This ERASES everything on disk {} ({}).", disk, name);
-        let _ = writeln!(out, "To continue type: mkfs {} yes", disk);
-        return;
-    }
-    // Disk 0 is mounted at /disk – unmount it first.
-    if disk == 0 {
-        if ctx.cwd.starts_with("/disk") {
-            *ctx.cwd = String::from("/");
-        }
-        let _ = crate::fs::unmount("/disk");
-    }
-    match crate::fs::fat32::mkfs(disk, "DESOOS", false) {
-        Ok(info) => {
-            let _ = writeln!(out, "{}: {}", name, info);
-        }
-        Err(crate::fs::FsError::Unsupported) => {
-            let _ = writeln!(out, "mkfs: disk too small for FAT32 (needs at least ~33 MiB)");
-            return;
-        }
-        Err(e) => {
-            let _ = writeln!(out, "mkfs: {}", e);
-            return;
-        }
-    }
-    if disk == 0 {
-        let _ = crate::fs::mkdir("/disk");
-        match crate::fs::fat32::Fat32::open(0).and_then(|f| crate::fs::mount("/disk", alloc::boxed::Box::new(f))) {
-            Ok(()) => {
-                let _ = writeln!(out, "mounted at /disk");
-            }
-            Err(e) => {
-                let _ = writeln!(out, "mount /disk: {}", e);
-            }
         }
     }
 }
@@ -1767,7 +1736,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-/// Closest known command for a typo (e.g. "mfks" -> "mkfs").
+/// Closest known command for a typo (e.g. "dsofs" -> "desofs").
 /// Closest name (typo: at most 2 edits and fewer than the length).
 fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     candidates
@@ -1835,7 +1804,7 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 
 /// Read-only commands for user space (sysinfo syscall) –
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
-/// (sector read / write, mkfs, run – only in the kernel fallback shell).
+/// (sector read / write, run – only in the kernel fallback shell).
 pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
@@ -1858,13 +1827,29 @@ pub fn sysinfo(line: &str) -> Option<String> {
 
 /// System actions (sysctl syscall – only with the SYSCTL handle, which
 /// the kernel gives to init, and init to the shell).  1 reboot, 2 halt, 3 sync, 4 stress
-/// `arg` seconds (0 = default 10, at most 600).
+/// `arg` seconds (0 = default 10, at most 600); 5–10 `desofs` info / format / mount /
+/// unmount / check / repair, `arg` = disk number (bits 0–31), plus `SYSCTL_YES` for format
+/// and repair (without it they only say what they would do and write nothing – checked
+/// here, not in the shell).  unmount takes no argument.
 pub const SYSCTL_REBOOT: u64 = 1;
 pub const SYSCTL_HALT: u64 = 2;
 pub const SYSCTL_SYNC: u64 = 3;
 pub const SYSCTL_STRESS: u64 = 4;
+pub const SYSCTL_DESOFS_INFO: u64 = 5;
+pub const SYSCTL_DESOFS_FORMAT: u64 = 6;
+pub const SYSCTL_DESOFS_MOUNT: u64 = 7;
+pub const SYSCTL_DESOFS_UNMOUNT: u64 = 8;
+pub const SYSCTL_DESOFS_CHECK: u64 = 9;
+pub const SYSCTL_DESOFS_REPAIR: u64 = 10;
+pub const SYSCTL_YES: u64 = 1 << 32;
+/// Most text one sysctl action returns; more is cut with a line that says so.
+pub const SYSCTL_OUT_MAX: usize = 64 * 1024;
 
-pub fn sysctl(op: u64, arg: u64) -> Option<String> {
+/// `cwd`: the caller's current directory – moved to "/" when an unmount takes its mount
+/// away (and only then).
+pub fn sysctl(op: u64, arg: u64, cwd: &mut String) -> Option<String> {
+    let disk = arg & 0xFFFF_FFFF;
+    let yes = arg & SYSCTL_YES != 0;
     let line = match op {
         SYSCTL_REBOOT => String::from("reboot"),
         SYSCTL_HALT => String::from("halt"),
@@ -1872,9 +1857,68 @@ pub fn sysctl(op: u64, arg: u64) -> Option<String> {
         SYSCTL_STRESS if arg <= 600 => {
             if arg == 0 { String::from("stress") } else { alloc::format!("stress {}", arg) }
         }
+        SYSCTL_DESOFS_UNMOUNT if arg == 0 => String::from("desofs unmount"),
+        SYSCTL_DESOFS_INFO..=SYSCTL_DESOFS_REPAIR if arg & !(0xFFFF_FFFF | SYSCTL_YES) == 0 => {
+            let (sub, may_confirm) = match op {
+                SYSCTL_DESOFS_INFO => ("info", false),
+                SYSCTL_DESOFS_FORMAT => ("format", true),
+                SYSCTL_DESOFS_MOUNT => ("mount", false),
+                SYSCTL_DESOFS_CHECK => ("check", false),
+                SYSCTL_DESOFS_REPAIR => ("repair", true),
+                _ => return None,
+            };
+            if yes && !may_confirm {
+                return None;
+            }
+            alloc::format!("desofs {} {}{}", sub, disk, if yes { " yes" } else { "" })
+        }
         _ => return None,
     };
-    Some(run_to_string(&line))
+    let mut out = Capped::new(SYSCTL_OUT_MAX);
+    execute(&line, &mut out, &mut Context { history: &[], cwd });
+    Some(out.finish())
+}
+
+/// Text output with a limit: what does not fit is counted, not kept, and `finish` ends the
+/// text with "... output truncated: N bytes more" (never a silent cut).
+pub struct Capped {
+    text: String,
+    max: usize,
+    dropped: usize,
+}
+
+impl Capped {
+    pub fn new(max: usize) -> Self {
+        Capped { text: String::new(), max, dropped: 0 }
+    }
+
+    pub fn finish(mut self) -> String {
+        if self.dropped > 0 {
+            if !self.text.ends_with('\n') {
+                self.text.push('\n');
+            }
+            let _ = writeln!(self.text, "... output truncated: {} bytes more", self.dropped);
+        }
+        self.text
+    }
+}
+
+impl Write for Capped {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let room = self.max - self.text.len();
+        if self.dropped > 0 || s.len() > room {
+            // Cut at a character boundary.
+            let mut k = if self.dropped > 0 { 0 } else { room };
+            while k > 0 && !s.is_char_boundary(k) {
+                k -= 1;
+            }
+            self.text.push_str(&s[..k]);
+            self.dropped += s.len() - k;
+        } else {
+            self.text.push_str(s);
+        }
+        Ok(())
+    }
 }
 
 fn run_to_string(line: &str) -> String {
@@ -2135,7 +2179,7 @@ pub fn self_test() {
     s.clear();
     check!(!execute("nosuch", &mut s, ctx) && s.contains("unknown"), "unknown -> {:?}", s);
     s.clear();
-    check!(!execute("mfks 0 yes", &mut s, ctx) && s.contains("did you mean 'mkfs'"), "suggest -> {:?}", s);
+    check!(!execute("dsofs info 0", &mut s, ctx) && s.contains("did you mean 'desofs'"), "suggest -> {:?}", s);
     s.clear();
     check!(execute("run see", &mut s, ctx) && s.contains("did you mean 'sse'"), "run suggest -> {:?}", s);
     check!(
