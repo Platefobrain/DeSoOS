@@ -1502,6 +1502,38 @@ change only their own table, so scanning other tables would race). The message h
 and `dcp` show who. The kernel shell moves its directory to "/" only after a successful unmount. `unmount_lost`
 (a USB stick pulled out) ignores pins: the disk is gone anyway. INIT TEST 9 (`/bin/dsfstest`).
 
+### Snapshots (v0.66.0, stage 5 – format 1 unchanged)
+
+- **Create** (`Volume::snapshot_create`): one commit whose root block gets a new entry (the first free of 1–31) –
+  a copy of the live entry, kind 2, the name, `created_gen` = the generation of the frozen state. Nothing is copied:
+  copy-on-write never overwrites, so the old tree simply stays. From then on R1 keeps every block born no later than
+  the newest snapshot's `created_gen`; with one or more snapshots this is exact (a block of the live tree born before
+  a snapshot was in that snapshot), so `used_blocks` stays exact too.
+- **Names**: 1–24 bytes, no `/`, space, control character (NUL included) or DEL, not `.` / `..`, unique – stricter
+  than the format, because a name becomes `/snap/<name>` and a shell word. A snapshot with another name (another
+  tool) is read and listed but cannot be mounted.
+- **Delete**: one commit without the entry, its `used_blocks` lowered by what only that snapshot held, then **R3** –
+  the allocator's map from a fresh mount walk (`scan_volume`: both superblocks, every root of each); blocks reachable
+  only from the previous superblock wait for the next commit (N + 2) exactly as after a mount. A walk failure makes
+  the volume read-only. Refused while the snapshot is mounted as a view (`VIEWS` counter per disk and entry).
+- **Restore**: one commit whose live entry is a copy of the snapshot's; every snapshot (newer ones too) stays;
+  `used_blocks` lowered by what only the old live state held; then R3 as for delete – the old live state stays
+  reserved while the previous superblock reaches it. Only on an unmounted disk, with "yes".
+- **View** (`Volume::mount_snapshot`, `desofs snapshot mount` → `/snap/<name>`): a read-only `Volume` whose live
+  root is the snapshot's entry; no allocator use, writes refused; counts as a mounted volume (check, repair, format
+  refuse) and holds the snapshot against delete. `desofs unmount` takes views down too.
+- **List** (`snapshot_usage`): name, generation and the blocks only that snapshot holds – the other roots of the
+  current superblock walked first, then this one; what it marks anew is its own (one walk per snapshot). That is
+  what delete gives back (after two commits).
+- **Kernel interface**: `desofs snapshot create | list | mount | delete | restore` in both shells; sysctl actions
+  11–15, the name as pointer + length (copied, at most 24 bytes, checked by the kernel before the action; every
+  other action must pass none). Operations on a mounted volume run on it under `FS_LOCK` (`fs::with_mounted_desofs`,
+  `FileSystem::with_desofs`); on an unmounted disk on a volume mounted just for the call.
+- Tests: DESOFS TEST 25–28 (create, views, names, the limit; R1 through filling the whole volume, R3 giving back
+  exactly what only the snapshot held; restore; power loss at every write and every superblock sector of create,
+  delete and restore, each twice in a row so both slots are hit), INIT TEST 9 (`dsfstest`: through `/bin/sh`, raw
+  sysctl names), RESTART TEST 5 (a snapshot made before the restart, its view after).
+
 **`readdir_part(dir, path, len, buf, buflen, cursor)`** (syscall 57): a directory in parts through a directory handle
 (`READ` – one row in the rights table, like `readdirat`; in the file sandbox the handle given to the program, paths
 never above it). Entries in `readdir`'s text form as far as they fit in `buf`; `*cursor` in / out – the byte

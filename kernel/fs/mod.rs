@@ -168,6 +168,11 @@ pub trait FileSystem {
     fn disk(&self) -> Option<usize> {
         None
     }
+    /// Runs `f` on the DeSoFS volume itself (snapshots); false – not a writable DeSoFS
+    /// volume (another file system, or a snapshot view).
+    fn with_desofs(&mut self, _f: &mut dyn FnMut(&mut desofs::vol::Volume)) -> bool {
+        false
+    }
 }
 
 /// File system operations safe to call from many tasks at once
@@ -283,6 +288,9 @@ impl<F: FileSystem + Send> FileSystem for Locked<F> {
     }
     fn disk(&self) -> Option<usize> {
         self.disk
+    }
+    fn with_desofs(&mut self, f: &mut dyn FnMut(&mut desofs::vol::Volume)) -> bool {
+        self.fs.lock().with_desofs(f)
     }
 }
 
@@ -650,6 +658,19 @@ pub fn unmount_disk(disk: usize) -> core::result::Result<Vec<String>, String> {
     }
     mounts().retain(|m| !paths.contains(&m.path));
     Ok(paths)
+}
+
+/// Runs `f` on the DeSoFS volume of disk `disk` mounted in the VFS (not a snapshot view),
+/// under FS_LOCK for writing – no other operation runs on the volume meanwhile.  false –
+/// no such mount.
+pub fn with_mounted_desofs(disk: usize, f: &mut dyn FnMut(&mut desofs::vol::Volume)) -> bool {
+    let _g = FsWrite::lock();
+    for m in mounts().iter_mut() {
+        if m.fs.kind() == "desofs" && m.fs.disk() == Some(disk) && m.fs.with_desofs(f) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Statistics of the file system mounted exactly at `path`.

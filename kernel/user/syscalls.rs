@@ -1575,21 +1575,31 @@ fn sys_sysinfo(p: &mut Process, ptr: u64, len: u64, buf: u64, cap: u64) -> SysRe
     text_to_user(p, buf, cap, &text)
 }
 
-/// sysctl(SYSCTL handle, action, arg, fd) – reboot / halt / sync /
-/// stress / desofs (shell::sysctl); result text (at most 64 KiB) goes to `fd`.  ERROR_INVALID_HANDLE: not a SYSCTL handle; ERROR_INVALID_ARGUMENT: bad action.
-fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult {
+/// sysctl(SYSCTL handle, action, arg, fd, name, name_len) – reboot / halt / sync /
+/// stress / desofs / snapshots (shell::sysctl); result text (at most 64 KiB) goes to `fd`.  ERROR_INVALID_HANDLE: not a SYSCTL handle; ERROR_INVALID_ARGUMENT: bad action.
+fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64, name_ptr: u64, name_len: u64) -> SysResult {
     if !matches!(p.fd(h)?, Fd::Sysctl) {
         return Err(ERROR_INVALID_HANDLE);
     }
     // The output handle is checked BEFORE the action: a bad one must not let a format run
     // and only then report the error.
     output_handle_ok(p, fd)?;
+    // Snapshot name (actions that take one): copied and checked before anything runs.
+    let name = if name_ptr == 0 && name_len == 0 {
+        None
+    } else {
+        if name_len == 0 || name_len > 24 {
+            return Err(ERROR_INVALID_ARGUMENT);
+        }
+        let raw = copy_from_user(p, name_ptr, name_len)?;
+        Some(String::from(core::str::from_utf8(&raw).map_err(|_| ERROR_INVALID_ARGUMENT)?))
+    };
     // The caller's own current directory does not keep a mount busy for it (`desofs
     // unmount` from a shell standing in /disk): its pin is dropped for the action and taken
     // again afterwards – on the same directory, or on "/" when a successful unmount moved it.
     let mut cwd = p.cwd.clone();
     p.cwd_pin = fs::MountPin::none();
-    let out = crate::shell::sysctl(op, arg, &mut cwd);
+    let out = crate::shell::sysctl(op, arg, name.as_deref(), &mut cwd);
     p.set_cwd(cwd);
     let out = out.ok_or(ERROR_INVALID_ARGUMENT)?;
     if !out.is_empty() {
@@ -1850,7 +1860,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_READKEY => sys_readkey(p, a0, a1),
         SYS_TASKS => sys_tasks(p, a0, a1),
         SYS_SYSINFO => sys_sysinfo(p, a0, a1, a2, frame.r10),
-        SYS_SYSCTL => sys_sysctl(p, a0, a1, a2, frame.r10),
+        SYS_SYSCTL => sys_sysctl(p, a0, a1, a2, frame.r10, frame.r8, frame.r9),
         SYS_DUP => sys_dup(p, a0),
         SYS_DUP2 => sys_dup2(p, a0, a1),
         SYS_SEEK => sys_seek(p, a0, a1, a2),

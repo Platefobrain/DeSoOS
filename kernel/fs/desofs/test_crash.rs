@@ -38,7 +38,7 @@ macro_rules! ensure {
     };
 }
 
-const SECTORS_PER_BLOCK: u64 = (BLOCK / SECTOR_SIZE) as u64;
+pub(super) const SECTORS_PER_BLOCK: u64 = (BLOCK / SECTOR_SIZE) as u64;
 static ZERO: [u8; BLOCK] = [0u8; BLOCK];
 
 /// A disk image: one entry per block, empty = all zeros.
@@ -227,9 +227,9 @@ fn apply(op: Op, v: &mut Volume, m: &mut Model) -> Result<(), FsError> {
 
 /// One 512-byte sector write from the log.
 pub(super) struct Sw<'a> {
-    epoch: u32,
-    call: u32,
-    lba: u64,
+    pub(super) epoch: u32,
+    pub(super) call: u32,
+    pub(super) lba: u64,
     data: &'a [u8],
 }
 
@@ -260,7 +260,7 @@ pub(super) fn build(base: &Image, sw: &[Sw], pick: impl Fn(usize) -> bool) -> BT
     over
 }
 
-fn is_superblock(lba: u64) -> bool {
+pub(super) fn is_superblock(lba: u64) -> bool {
     let b = lba / SECTORS_PER_BLOCK;
     b == 1 || b == 2
 }
@@ -450,7 +450,7 @@ fn scenario(start: &Image, blocks: u64, mut m: Model, setup: &[Op], ops: &[Op], 
     res
 }
 
-fn formatted(blocks: u64) -> Result<Image, String> {
+pub(super) fn formatted(blocks: u64) -> Result<Image, String> {
     let d = attach(&Rc::new(Vec::new()), blocks, BTreeMap::new(), None);
     let r = super::format::format(d, &params()).map_err(|e| format!("format: {}", e)).and_then(|_| snapshot(d, blocks));
     block::remove(d);

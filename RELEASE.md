@@ -10,6 +10,85 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.66.0 — 2026-11-03
+
+**Status: stable on QEMU (TCG and KVM); DeSoFS stage 5 – snapshots: create, list, read-only view, delete, restore;
+format 1 unchanged.**
+
+### What is new since the last report (v0.65.1)
+
+| Version | Change |
+|---|---|
+| v0.66.0 | `desofs snapshot create / list / mount / delete / restore` in both shells (sysctl actions 11–15, the name checked by the kernel); a snapshot is one new root block (nothing copied); delete and restore recompute the block map over both superblocks (R3); a view at `/snap/<name>` is read-only; restore keeps every snapshot |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 279 tests PASS | 169 s (restart 35 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 279 tests PASS | 102 s (restart 16 s) |
+
+New: DESOFS TEST 25–28 – create, views, ten refused names and the 32nd snapshot without a write; a removed 1 MiB
+file held by a snapshot survives filling the whole volume, and delete gives back exactly the blocks only the
+snapshot held (265); restore; power loss at every write and every superblock sector of create / delete / restore,
+each twice in a row so both superblock slots are hit (70 images). INIT TEST 9 – snapshots through `/bin/sh` and raw
+sysctl names. RESTART TEST 5/6 – a snapshot made before the restart is listed afterwards and its view holds the old
+state. On the build server five mutations each make a test fail. The whole run is no slower (TCG 169 s, KVM 102 s).
+
+### DeSoFS speed `[RESULT-FS]`
+
+The volume now also holds the restart test's snapshot (3 387 data blocks checked instead of 3 384).
+
+| | TCG v0.65.1 | TCG v0.66.0 | KVM v0.65.1 | KVM v0.66.0 |
+|---|---|---|---|---|
+| 8 MiB write (KiB/s) | 5 843 | 6 099 | 12 982 | 13 721 |
+| 8 MiB read (KiB/s) | 4 838 | 5 688 | 17 102 | 16 384 |
+| 1000 small files – create + write (ms) | 20 266 | 19 150 | 8 040 | 9 159 |
+| 1000 small files – read (ms) | 7 653 | 6 878 | 2 195 | 2 264 |
+| `desofs check` (ms) | 857 | 915 | 266 | 297 |
+
+### Known problems
+
+- Snapshots have no creation time (the format stores only the generation); no automatic snapshots; no snapshot of a
+  single directory; `snapshot list`, `delete` and `restore` walk the volume (64 MiB – a fraction of a second).
+- As in v0.65.1 otherwise.
+
+### Performance against the previous release (v0.65.1 → v0.66.0, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.65.1 | TCG v0.66.0 | KVM v0.65.1 | KVM v0.66.0 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 109 | 3 110 | 34 352 | 35 932 |
+| irq_user_ns | 6 031 | 12 219 | 66 912 | 66 777 |
+| fact_kernel_ns | 24 813 | 30 097 | 58 633 | 52 356 |
+| fact_user_ns | 74 934 | 74 934 | 98 570 | 94 206 |
+| fact_svc_ns | 248 756 | 191 570 | 105 540 | 102 774 |
+| ping_svc_ns | 131 061 | 109 409 | 23 124 | 21 166 |
+| restart_us | 6 700 | 6 200 | 1 200 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.65.1 | TCG v0.66.0 | KVM v0.65.1 | KVM v0.66.0 |
+|---|---|---|---|---|
+| start_ms | 392 | 421 | 402 | 396 |
+| enum_avg_ms | 24 | 27 | 25 | 22 |
+| read_kbs (usbd) | 85 333 | 34 133 | 87 148 | 91 022 |
+| kread_kbs (kernel) | 84 111 | 68 155 | 113 863 | 82 169 |
+| kcat_kbs (kernel, cat) | 46 880 | 68 107 | 94 856 | 113 261 |
+| hid_avg_us (keyboard) | 855 | 771 | 203 | 195 |
+
+`[RESULT-RIGHTS]` rows 57, refused 29; gate_ns: TCG 25 → 75, KVM 5 → 5.
+`[RESULT-CRYPTO]` (KiB/s): TCG 34 388 / 48 398 / 48 000 → 47 921 / 51 200 / 51 840; KVM 180 480 / 205 120 / 211 840 →
+178 308 / 217 600 / 217 280.
+
+Verdict: no regression – the changes are DeSoFS snapshots and two sysctl actions, none on the measured paths. TCG
+`gate_ns` 75 is one sample of a ~25 ns measurement (62 and 79 seen before, KVM unchanged at 5); TCG `irq_user_ns`
+12 219 is the same one-run swing as in v0.64.1 (11 665); TCG usbd read 34 133 is within the emulated stick's spread
+(kcat in the same run 68 107, KVM read 91 022).
+
+---
+
 ## v0.65.1 — 2026-11-03
 
 **Status: stable on QEMU (TCG and KVM); two fixes from a code review of v0.65.0 – `chdir` pins its mount before
@@ -46,10 +125,19 @@ check – the error codes are the same).
 
 ### Known problems
 
-- **To watch:** KVM 8 MiB write is now ~13 000 KiB/s in two runs in a row (v0.64.0 17 138, v0.64.1 16 516). The
-  measurement goes through the VFS in the kernel without file handles, so the mount pins are not on its path, and
-  TCG (6 005 / 5 843 against 5 669) does not show it. Not explained yet – to be compared against a v0.64.1 build on
-  the same machine.
+- ~~KVM 8 MiB write ~13 000 KiB/s in two runs in a row~~ – **checked: the host, not the code.** v0.64.0 (built
+  from its commit) and v0.65.1 run alternately in KVM on the same machine, twice each:
+
+  | Run | Version | 8 MiB write | 8 MiB read | small create | small read | check |
+  |---|---|---|---|---|---|---|
+  | 1 | v0.64.0 | 14 051 | 16 031 | 7 319 ms | 1 772 ms | 202 ms |
+  | 2 | v0.65.1 | 18 367 | 23 676 | 9 329 ms | 2 258 ms | 274 ms |
+  | 3 | v0.64.0 | 13 698 | 15 875 | 8 649 ms | 2 241 ms | 247 ms |
+  | 4 | v0.65.1 | 15 114 | 17 731 | 9 401 ms | 2 346 ms | 271 ms |
+
+  The old version writes no faster (13 698 – 14 051 against 15 114 – 18 367); the KVM write moves by ±15–25 % from
+  run to run on this machine. Small files and check were faster for v0.64.0 in this session, but its own release run
+  (9 290 ms / 262 ms) matches v0.65.1 here – also within the host's spread.
 - As in v0.65.0 otherwise.
 
 ### Performance against the previous release (v0.65.0 → v0.65.1, same machine)
@@ -83,7 +171,7 @@ check – the error codes are the same).
 
 Verdict: no regression against v0.65.0 – the changes touch `chdir`, `sysctl` and messages only. TCG kernel SHA-256
 34 388 is one run (user space in the same run 48 398 – the same code); TCG `restart_us` 6 700 and `fact_svc_ns`
-within the TCG spread. The KVM 8 MiB write level since v0.65.0 is listed above as a point to check.
+within the TCG spread. The KVM 8 MiB write level since v0.65.0 was checked against v0.64.0 on the same machine (above): host spread.
 
 ---
 

@@ -353,6 +353,12 @@ hold it – kept conservatively (the R3 walk or `desofs check` reclaims it if no
 snapshots, the previous valid superblock and blocks 0–15; everything else that was used is freed logically, reused
 after N + 2. Refused if any of those trees is unreadable.
 
+*Implemented in v0.66.0 without any format change:* create = a new root block whose new entry is a copy of entry 0,
+`created_gen` = the generation of the frozen state (as in the reference image); delete = a root block without the
+entry; restore = a root block whose entry 0 is a copy of the snapshot's entry (every snapshot stays). After delete and
+restore the allocator's map is computed again by the mount walk over both superblocks (R3); `used_blocks` of the new
+superblock already leaves out what only the removed root held, so the count stays exact.
+
 ## 12. Recognition and refusals
 
 - Recognition: block 1 (or 2) = `DESOFS01` + a valid superblock checksum (no false hits on random data). DeSoFS is

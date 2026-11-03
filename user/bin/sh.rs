@@ -57,7 +57,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("reboot", "reboot             restart the computer"),
     ("halt", "halt               stop the computer"),
     ("stress", "stress [s]         SMP stress test in the kernel (1..600 s, default 10)"),
-    ("desofs", "desofs <cmd> <disk> DeSoFS: info, format [yes], mount (0 at /disk, others at /desofs), unmount, check, repair [yes]"),
+    ("desofs", "desofs <cmd> <disk> DeSoFS: info, format [yes], mount (0 at /disk, others at /desofs), unmount, check, repair [yes],\n                   snapshot create|mount <disk> <name>, snapshot list <disk>, snapshot delete|restore <disk> <name> [yes]"),
 ];
 
 /// System actions (sysctl syscall) – only with the SYSCTL handle from init.
@@ -527,10 +527,24 @@ fn close_redirects(fin: u64, fout: u64) {
 static SVC_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// The program channel in slot 5 (from init) – what programs get in slot 3.
 static PROG_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// `desofs` words -> (sysctl action, argument); None – not a valid command line.
-fn desofs_action(words: &[String]) -> Option<(u64, u64)> {
+/// `desofs` words -> (sysctl action, argument, snapshot name); None – not a valid command line.
+fn desofs_action(words: &[String]) -> Option<(u64, u64, Option<String>)> {
     let w: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
     let disk = |s: &str| s.parse::<u32>().ok().map(u64::from);
+    let named = |op: u64, d: &str, n: &str, yes: bool| -> Option<(u64, u64, Option<String>)> {
+        Some((op, disk(d)? | if yes { desoos::SYSCTL_YES } else { 0 }, Some(String::from(n))))
+    };
+    match w.as_slice() {
+        ["snapshot", "list", d] => return Some((desoos::SYSCTL_SNAPSHOT_LIST, disk(d)?, None)),
+        ["snapshot", "create", d, n] => return named(desoos::SYSCTL_SNAPSHOT_CREATE, d, n, false),
+        ["snapshot", "mount", d, n] => return named(desoos::SYSCTL_SNAPSHOT_MOUNT, d, n, false),
+        ["snapshot", "delete", d, n] => return named(desoos::SYSCTL_SNAPSHOT_DELETE, d, n, false),
+        ["snapshot", "delete", d, n, "yes"] => return named(desoos::SYSCTL_SNAPSHOT_DELETE, d, n, true),
+        ["snapshot", "restore", d, n] => return named(desoos::SYSCTL_SNAPSHOT_RESTORE, d, n, false),
+        ["snapshot", "restore", d, n, "yes"] => return named(desoos::SYSCTL_SNAPSHOT_RESTORE, d, n, true),
+        ["snapshot", ..] => return None,
+        _ => {}
+    }
     Some(match w.as_slice() {
         ["unmount"] => (desoos::SYSCTL_DESOFS_UNMOUNT, 0),
         ["info", d] => (desoos::SYSCTL_DESOFS_INFO, disk(d)?),
@@ -542,6 +556,7 @@ fn desofs_action(words: &[String]) -> Option<(u64, u64)> {
         ["repair", d, "yes"] => (desoos::SYSCTL_DESOFS_REPAIR, disk(d)? | desoos::SYSCTL_YES),
         _ => return None,
     })
+    .map(|(op, arg)| (op, arg, None))
 }
 
 /// The SYSCTL handle in slot 4 (from init) – shell only, children do not get it.
@@ -941,14 +956,22 @@ impl Shell {
             eprintln!("{}: not allowed - this shell has no system control handle (only the shell started by init has it)", name);
             return;
         }
+        let mut snap_name: Option<String> = None;
         let (op, arg) = match name {
             "sync" => (desoos::SYSCTL_SYNC, 0),
             "reboot" => (desoos::SYSCTL_REBOOT, 0),
             "halt" => (desoos::SYSCTL_HALT, 0),
             "desofs" => match desofs_action(&cmd.args[1..]) {
-                Some(a) => a,
+                Some((op, arg, n)) => {
+                    snap_name = n;
+                    (op, arg)
+                }
+                None if cmd.args.get(1).map(|s| s.as_str()) == Some("snapshot") => {
+                    eprintln!("usage: desofs snapshot create <disk> <name> | list <disk> | mount <disk> <name> | delete <disk> <name> [yes] | restore <disk> <name> [yes]");
+                    return;
+                }
                 None => {
-                    eprintln!("usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes]   (disk numbers: 'disk')");
+                    eprintln!("usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ...   (disk numbers: 'disk')");
                     return;
                 }
             },
@@ -961,8 +984,13 @@ impl Shell {
                 }
             },
         };
-        let r = desoos::sysctl(desoos::SYSCTL, op, arg, fout);
-        if r < 0 {
+        let r = match &snap_name {
+            Some(n) => desoos::sysctl_name(desoos::SYSCTL, op, arg, fout, n),
+            None => desoos::sysctl(desoos::SYSCTL, op, arg, fout),
+        };
+        if r == desoos::ERROR_INVALID_ARGUMENT && snap_name.is_some() {
+            eprintln!("desofs: a snapshot name has 1-24 bytes, no '/', spaces or control characters, and is not '.' or '..'");
+        } else if r < 0 {
             eprintln!("{}: {}", name, strerror(r));
         }
         // An unmount may have moved this shell out of the disk (to "/").

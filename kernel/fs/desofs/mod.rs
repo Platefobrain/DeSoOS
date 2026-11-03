@@ -33,6 +33,8 @@ pub mod test_crash;
 #[cfg(selftest)]
 pub mod test_check;
 #[cfg(selftest)]
+pub mod test_snap;
+#[cfg(selftest)]
 pub mod restart;
 
 #[path = "../../../common/desocrypto/mod.rs"]
@@ -586,6 +588,93 @@ pub(crate) fn walk_one(dev: &Dev, sb: &Superblock) -> Res<(u64, u64, u32)> {
     };
     let w = scan.superblock(sb)?;
     Ok((w.marked, w.nodes, w.snapshots))
+}
+
+/// One snapshot as `desofs snapshot list` shows it.
+pub struct SnapInfo {
+    pub index: usize,
+    pub name: String,
+    pub created_gen: u64,
+    /// Blocks reachable from this snapshot and from no other root of the current
+    /// superblock (live file system, other snapshots) – what `snapshot delete` gives back
+    /// (once the previous superblock is overwritten, two commits later).  None – not counted.
+    pub only: Option<u64>,
+}
+
+/// The snapshots of the volume's current superblock; with `count`, also the blocks only
+/// each of them holds (one walk per snapshot: the other roots first, then this one – what
+/// it marks anew is its own).  Reads only.
+pub fn snapshot_usage(index: usize, count: bool) -> Res<(u64, Vec<SnapInfo>)> {
+    let (sb, entries) = current_entries(index)?;
+    let mut out = Vec::new();
+    for (i, e) in entries.iter().filter(|(_, e)| e.kind == ROOT_SNAPSHOT) {
+        let end = e.name.iter().position(|&c| c == 0).unwrap_or(24);
+        out.push(SnapInfo { index: *i, name: String::from(core::str::from_utf8(&e.name[..end]).unwrap_or("?")), created_gen: e.created_gen, only: None });
+    }
+    if count {
+        let dev = Dev::open(index)?;
+        for s in out.iter_mut() {
+            s.only = Some(exclusive(&dev, &sb, &entries, s.index)?);
+        }
+    }
+    Ok((sb.generation, out))
+}
+
+/// Blocks only root entry `entry` of the current superblock holds (no other root of it
+/// does) – what removing or replacing that root gives back.
+pub(crate) fn exclusive_blocks(index: usize, entry: usize) -> Res<u64> {
+    let (sb, entries) = current_entries(index)?;
+    let dev = Dev::open(index)?;
+    exclusive(&dev, &sb, &entries, entry)
+}
+
+/// The superblock a mount would use and its root entries.
+fn current_entries(index: usize) -> Res<(Superblock, Vec<(usize, RootEntry)>)> {
+    let (_, sc) = scan_volume(index)?;
+    let sb = sc.sb;
+    drop(sc.map);
+    let dev = Dev::open(index)?;
+    let mut b = alloc::vec![0u8; BLOCK];
+    dev.read(sb.root.addr, &mut b)?;
+    let mut entries = Vec::new();
+    for i in 0..ROOT_ENTRIES {
+        if let Some(e) = RootEntry::parse(&b[HDR_SIZE + i * ROOT_ENTRY..], i, sb.generation).map_err(|w| at(sb.root.addr, w))? {
+            entries.push((i, e));
+        }
+    }
+    Ok((sb, entries))
+}
+
+/// The other roots first, then `entry`: what it marks anew is its own.
+fn exclusive(dev: &Dev, sb: &Superblock, entries: &[(usize, RootEntry)], entry: usize) -> Res<u64> {
+    let (Some(mut map), Some(mut bits)) = (ByteMap::new(sb.total_blocks), BitMap::new(sb.total_blocks)) else {
+        return Err(String::from("not enough memory for the block maps"));
+    };
+    for k in 0..RESERVED {
+        map.set(k, M_RESERVED);
+    }
+    let mut scan = Scan {
+        dev,
+        total: sb.total_blocks,
+        sb_gen: sb.generation,
+        uuid: sb.uuid,
+        map: &mut map,
+        root_bits: &mut bits,
+        bufs: Vec::new(),
+        marked: 0,
+        collect: None,
+        free_nodes: Vec::new(),
+        collect_free: false,
+        first_root: false,
+        next_node_limit: 0,
+    };
+    for (_, e) in entries.iter().filter(|(i, _)| *i != entry) {
+        scan.root(e)?;
+    }
+    let (_, e) = entries.iter().find(|(i, _)| *i == entry).ok_or_else(|| String::from("no such root entry"))?;
+    let before = scan.marked;
+    scan.root(e)?;
+    Ok(scan.marked - before)
 }
 
 // ------------------------------------------------------------

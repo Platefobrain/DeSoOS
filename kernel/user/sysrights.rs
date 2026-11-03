@@ -153,7 +153,7 @@ pub static TABLE: [Option<Rule>; 58] = {
     t[SYS_DMA_PHYS as usize] = with("dma_phys", &[h(0, SHM, 0)]);
     t[SYS_SYSINFO as usize] = plain("sysinfo");
     // The result text goes to the handle in r10 when there is any (checked by the call: WRITE).
-    t[SYS_SYSCTL as usize] = Some(Rule { name: "sysctl", path: false, args: &[h(0, SYSCTL, 0)], in_call: "output handle: WRITE" });
+    t[SYS_SYSCTL as usize] = Some(Rule { name: "sysctl", path: false, args: &[h(0, SYSCTL, 0)], in_call: "output handle: WRITE (checked before the action); snapshot name copied and checked" });
     t[SYS_DEV_FIND as usize] = with("dev_find", &[h(0, HW_ROOT, 0)]);
     t[SYS_INPUT_INJECT as usize] = with("input_inject", &[h(0, INPUT, WRITE)]);
     t[SYS_BLK_ATTACH as usize] =

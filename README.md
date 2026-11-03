@@ -1,4 +1,4 @@
-# DeSoOS v0.65.1
+# DeSoOS v0.66.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -52,7 +52,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (33 suites and a restart phase, 274 tests) and stress tests, runnable automatically in QEMU or on real
+- Built-in self-tests (33 suites and a restart phase, 279 tests) and stress tests, runnable automatically in QEMU or on real
   hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
@@ -348,6 +348,11 @@ Line editing and console:
   turns `disk.img` into DeSoFS (your FAT32 files on it are gone – copy them first). `mv` inside DeSoFS is one atomic
   step (also directories). A mount that a program still uses (an open file or directory, its current directory)
   is not unmounted or formatted: "in use (N open files / directories) - nothing changed".
+- Snapshots (DeSoFS): `desofs snapshot create <disk> <name>` freezes the whole volume in a moment without copying
+  anything (up to 31; a name has 1-24 bytes, no `/`, spaces or control characters); `desofs snapshot list <disk>`
+  shows each with the blocks only it holds (what deleting it gives back); `desofs snapshot mount <disk> <name>` shows
+  it read-only at `/snap/<name>`; `desofs snapshot restore <disk> <name> [yes]` brings every file back to it (disk
+  unmounted first; all snapshots stay); `desofs snapshot delete <disk> <name> [yes]` frees its space.
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
 - Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.

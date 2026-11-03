@@ -2,6 +2,36 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.66.0 — 2026-11-03
+
+### Added – DeSoFS snapshots (stage 5, format 1 unchanged)
+- `desofs snapshot create <disk> <name>`: the whole volume frozen in one commit (a new root entry copying the live
+  one; nothing copied). Up to 31; names of 1–24 bytes without `/`, spaces or control characters, not `.` / `..`.
+- `desofs snapshot list <disk>`: name, generation and the blocks only that snapshot holds (what deleting it gives
+  back – once the previous superblock is overwritten, two commits later).
+- `desofs snapshot mount <disk> <name>`: a read-only view at `/snap/<name>`; holds the snapshot against delete;
+  `desofs unmount` takes it down too.
+- `desofs snapshot delete <disk> <name> [yes]`: the entry removed, then R3 – the block map computed again by the
+  mount walk over both superblocks, so a block comes back only when neither superblock reaches it from any root.
+- `desofs snapshot restore <disk> <name> [yes]`: every file back to the snapshot (disk unmounted first); every
+  snapshot, newer ones too, stays; the old live state is kept while the previous superblock still points at it.
+- `desofs info` lists the snapshots. In both shells; sysctl actions 11–15, the name passed as pointer + length and
+  checked by the kernel (other actions must pass none).
+
+### Tests
+- DESOFS TEST 25–28: create, views, refused names (empty, 25 bytes, `/`, space, `.`, `..`, NUL, control, DEL) and
+  the 32nd snapshot without a write; R1 – a removed 1 MiB file held by a snapshot survives filling the whole volume;
+  R3 – delete gives back exactly the blocks only the snapshot held; restore (live = snapshot byte for byte, every
+  snapshot stays); power loss at every write and every superblock sector of create / delete / restore, each twice in
+  a row so both superblock slots are hit (70 crash images: the live tree and every snapshot of the state before or
+  after, no reachable block free).
+- INIT TEST 9 (`dsfstest`): snapshots through `/bin/sh` (create, a duplicate and a bad name refused, list, view,
+  delete / restore refused while mounted, restore, delete) and raw sysctl names (bad, too long, unmapped, given to
+  an action without one).
+- RESTART TEST 5/6: a snapshot made before the restart is listed afterwards and its view holds the old state.
+- Mutations caught: R1 off, delete without R3, restore without "yes", a writable view, `used_blocks` not lowered on
+  delete. 33 suites and a restart phase, 279 tests.
+
 ## v0.65.1 — 2026-11-03
 
 ### Fixed (found in a code review)

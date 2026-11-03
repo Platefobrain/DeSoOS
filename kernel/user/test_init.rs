@@ -280,11 +280,11 @@ fn desofs_in_user_shell() -> Result<(), String> {
         let before = sum(d);
         // "yes" is checked in the kernel: without it format only describes.
         let mut cwd = String::from("/");
-        let t = sysctl(SYSCTL_DESOFS_FORMAT, d as u64, &mut cwd).unwrap_or_default();
+        let t = sysctl(SYSCTL_DESOFS_FORMAT, d as u64, None, &mut cwd).unwrap_or_default();
         if !t.contains("To continue type") || sum(d) != before {
             return Err(alloc::format!("format without yes: {:?}, disk changed: {}", t, sum(d) != before));
         }
-        if sysctl(SYSCTL_DESOFS_FORMAT, d as u64 | SYSCTL_YES << 1, &mut cwd).is_some() {
+        if sysctl(SYSCTL_DESOFS_FORMAT, d as u64 | SYSCTL_YES << 1, None, &mut cwd).is_some() {
             return Err(String::from("format with an unknown bit accepted"));
         }
         let run = |mode: &str| -> Result<String, String> {
@@ -304,7 +304,7 @@ fn desofs_in_user_shell() -> Result<(), String> {
         run("work")?;
         // chdir against unmount: chdir stops after taking its pin and before checking the
         // directory (test hook); an unmount in that window must be refused.
-        let t = sysctl(crate::shell::SYSCTL_DESOFS_MOUNT, d as u64, &mut cwd).unwrap_or_default();
+        let t = sysctl(crate::shell::SYSCTL_DESOFS_MOUNT, d as u64, None, &mut cwd).unwrap_or_default();
         if !t.contains("mounted at /desofs") {
             return Err(alloc::format!("mount for the chdir race: {:?}", t));
         }

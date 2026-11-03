@@ -11,7 +11,9 @@
 //     something uses the mount and allowed again once it is let go: an open file, an open
 //     directory, the current directory of another process (killed, not closed), a file
 //     handed to a child; format refused under an open file (the file stays readable);
-//     the caller's own current directory does not block, it ends up in "/"; check (refused
+//     the caller's own current directory does not block, it ends up in "/";
+//     snapshots: create (twice / a bad name refused), list, mount (read-only view), delete
+//     and restore refused while mounted, restore, delete; check (refused
 //     while mounted, then 0 errors), repair (nothing to repair).
 // Result: "dsfstest: N checks OK" and code 0, or the first failure and code 1.
 #![no_std]
@@ -132,6 +134,16 @@ fn refuse(sys: u64, d: u64) -> i32 {
     check!(n, dw >= 0 && sysctl(sys, fmt, yes, dw as u64) == ERROR_INVALID_HANDLE, "format + yes into a directory handle (WRITE, but not an output): {}", dw);
     close(dw as u64);
 
+    // Snapshot names: checked by the kernel before anything runs.
+    let create = SYSCTL_SNAPSHOT_CREATE;
+    for bad in ["a/b", "a b", ".", "..", "x\u{1}y", "aaaaaaaaaaaaaaaaaaaaaaaaa"] {
+        check!(n, sysctl_name(sys, create, d, 1, bad) == ERROR_INVALID_ARGUMENT, "snapshot name {:?} accepted", bad);
+    }
+    check!(n, sysctl(sys, create, d, 1) == ERROR_INVALID_ARGUMENT, "snapshot create without a name");
+    check!(n, sysctl_name(sys, SYSCTL_SNAPSHOT_LIST, d, 1, "x") == ERROR_INVALID_ARGUMENT && sysctl_name(sys, SYSCTL_DESOFS_INFO, d, 1, "x") == ERROR_INVALID_ARGUMENT, "a name passed to an action without one");
+    check!(n, syscall6(SYS_SYSCTL, sys, create, d, 1, 0x10, 5) < 0, "a snapshot name at an unmapped address");
+    check!(n, sysctl_name(sys, SYSCTL_SNAPSHOT_CREATE, d | SYSCTL_YES, 1, "ok") == ERROR_INVALID_ARGUMENT, "snapshot create with yes");
+
     // Bad arguments with the right handle: refused, nothing done.
     check!(n, sysctl(sys, SYSCTL_DESOFS_INFO, yes, 1) == ERROR_INVALID_ARGUMENT, "info with yes");
     check!(n, sysctl(sys, fmt, d | 1 << 40, 1) == ERROR_INVALID_ARGUMENT, "format with unknown bits");
@@ -249,6 +261,54 @@ fn work(sys: u64, d: u64) -> i32 {
     check!(n, t.contains("result: 0 errors, 0 warnings"), "check: {:?}", t);
     let t = sh(&format!("desofs repair {} yes", d), s);
     check!(n, t.contains("nothing to repair"), "repair: {:?}", t);
+
+    // 8. Snapshots through the shell.
+    let _ = sh(&format!("desofs mount {}", d), s);
+    let fd = open("/desofs/s.txt", O_WRITE | O_CREATE);
+    check!(n, fd >= 0 && write(fd as u64, b"one") == 3, "write s.txt");
+    close(fd as u64);
+    let t = sh(&format!("desofs snapshot create {} before", d), s);
+    check!(n, t.contains(&format!("disk {}: snapshot before created", d)), "snapshot create: {:?}", t);
+    let t = sh(&format!("desofs snapshot create {} before", d), s);
+    check!(n, t.contains("already exists"), "snapshot create twice: {:?}", t);
+    let t = sh(&format!("desofs snapshot create {} a/b", d), s);
+    check!(n, t.contains("a snapshot name has 1-24 bytes"), "bad snapshot name through sh: {:?}", t);
+    let fd = open("/desofs/s.txt", O_WRITE | O_TRUNC);
+    check!(n, fd >= 0 && write(fd as u64, b"two") == 3, "rewrite s.txt");
+    close(fd as u64);
+    let t = sh(&format!("desofs snapshot list {}", d), s);
+    check!(n, t.contains("1 snapshot(s)") && t.contains("before") && t.contains("blocks"), "snapshot list: {:?}", t);
+    let t = sh(&format!("desofs snapshot mount {} before", d), s);
+    check!(n, t.contains("mounted at /snap/before (read-only)"), "snapshot mount: {:?}", t);
+    let mut buf = [0u8; 8];
+    let fd = open("/snap/before/s.txt", O_READ);
+    check!(n, fd >= 0 && read(fd as u64, &mut buf) == 3 && &buf[..3] == b"one", "the snapshot's s.txt");
+    close(fd as u64);
+    check!(n, open("/snap/before/new", O_WRITE | O_CREATE) < 0, "a file created in a snapshot view");
+    let t = sh(&format!("desofs snapshot delete {} before yes", d), s);
+    check!(n, t.contains("is mounted"), "delete of a mounted snapshot: {:?}", t);
+    let t = sh(&format!("desofs snapshot restore {} before yes", d), s);
+    check!(n, t.contains("the disk is mounted"), "restore of a mounted disk: {:?}", t);
+    let t = sh("desofs unmount", s);
+    check!(n, t.contains("/desofs unmounted") && t.contains("/snap/before unmounted"), "unmount with a view: {:?}", t);
+    let t = sh(&format!("desofs snapshot restore {} before", d), s);
+    check!(n, t.contains("To continue type: desofs snapshot restore"), "restore without yes: {:?}", t);
+    let t = sh(&format!("desofs snapshot restore {} before yes", d), s);
+    check!(n, t.contains("back to snapshot before"), "restore: {:?}", t);
+    let _ = sh(&format!("desofs mount {}", d), s);
+    let fd = open("/desofs/s.txt", O_READ);
+    check!(n, fd >= 0 && read(fd as u64, &mut buf) == 3 && &buf[..3] == b"one", "s.txt after restore");
+    close(fd as u64);
+    let t = sh(&format!("desofs snapshot delete {} before", d), s);
+    check!(n, t.contains("This deletes snapshot before") && t.contains("To continue type"), "delete without yes: {:?}", t);
+    let t = sh(&format!("desofs snapshot delete {} before yes", d), s);
+    check!(n, t.contains("snapshot before deleted"), "delete: {:?}", t);
+    let t = sh(&format!("desofs snapshot list {}", d), s);
+    check!(n, t.contains("no snapshots"), "list after delete: {:?}", t);
+    let t = sh("desofs unmount", s);
+    check!(n, t.contains("/desofs unmounted"), "final unmount: {:?}", t);
+    let t = sh(&format!("desofs check {}", d), s);
+    check!(n, t.contains("result: 0 errors, 0 warnings"), "check after snapshots: {:?}", t);
 
     println!("dsfstest: {} checks OK (work)", n);
     0

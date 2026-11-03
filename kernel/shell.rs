@@ -297,7 +297,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "stat", usage: "stat <path>", help: "file information", run: cmd_stat },
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
-    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair <disk>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair", run: cmd_desofs },
+    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair|snapshot <disk>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair, snapshot create|list|mount|delete|restore", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1540,6 +1540,11 @@ fn under(path: &str, mount: &str) -> bool {
 fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     let mut parts = args.split_whitespace();
     let sub = parts.next().unwrap_or("");
+    if sub == "snapshot" {
+        let words: alloc::vec::Vec<&str> = parts.collect();
+        cmd_snapshot(&words, out, ctx);
+        return;
+    }
     let disk = parts.next().and_then(|s| s.parse::<usize>().ok());
     match (sub, disk) {
         ("info", Some(disk)) => {
@@ -1568,6 +1573,12 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             let _ = writeln!(out, "  {} nodes, {} snapshots, {} blocks used ({}), maps {} B", r.nodes, r.snapshots, r.used_stored, counted, r.map_bytes);
             for w in &r.warnings {
                 let _ = writeln!(out, "  warning: {}", w);
+            }
+            if r.snapshots > 0 {
+                if let Ok((_, list)) = crate::fs::desofs::snapshot_usage(disk, false) {
+                    let names: alloc::vec::Vec<String> = list.iter().map(|s| alloc::format!("{} (generation {})", s.name, s.created_gen)).collect();
+                    let _ = writeln!(out, "  snapshots: {}", names.join(", "));
+                }
             }
         }
         ("format", Some(disk)) => {
@@ -1693,7 +1704,7 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             }
         }
         _ => {
-            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes]   (disk numbers: 'disk')");
+            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ...   (disk numbers: 'disk')");
         }
     }
 }
@@ -1839,6 +1850,103 @@ pub fn sysinfo(line: &str) -> Option<String> {
     Some(run_to_string(line))
 }
 
+const SNAPSHOT_USAGE: &str = "usage: desofs snapshot create <disk> <name> | list <disk> | mount <disk> <name> | delete <disk> <name> [yes] | restore <disk> <name> [yes]";
+
+/// Runs `f` on the volume of `disk`: the one mounted in the VFS (under its lock), or – when
+/// the disk is not mounted – a volume mounted just for this.
+fn on_volume<T>(disk: usize, f: impl FnOnce(&mut crate::fs::desofs::vol::Volume) -> Result<T, String>) -> Result<T, String> {
+    let mut f = Some(f);
+    let mut res: Option<Result<T, String>> = None;
+    if crate::fs::with_mounted_desofs(disk, &mut |v| {
+        if let Some(f) = f.take() {
+            res = Some(f(v));
+        }
+    }) {
+        return res.unwrap_or_else(|| Err(String::from("internal: no result")));
+    }
+    let mut v = crate::fs::desofs::vol::Volume::mount(disk)?;
+    (f.take().unwrap())(&mut v)
+}
+
+/// `desofs snapshot create | list | mount | delete | restore`.
+fn cmd_snapshot(w: &[&str], out: &mut dyn Write, _ctx: &mut Context) {
+    use crate::fs::desofs::vol::{valid_snapshot_name, Volume};
+    let disk = w.get(1).and_then(|d| d.parse::<usize>().ok());
+    let (Some(disk), Some(&sub)) = (disk, w.first()) else {
+        let _ = writeln!(out, "{}", SNAPSHOT_USAGE);
+        return;
+    };
+    let name = w.get(2).copied().unwrap_or("");
+    let yes = w.get(3) == Some(&"yes");
+    let args_ok = match sub {
+        "list" => w.len() == 2,
+        "create" | "mount" => w.len() == 3,
+        "delete" | "restore" => w.len() == 3 || (w.len() == 4 && yes),
+        _ => false,
+    };
+    if !args_ok {
+        let _ = writeln!(out, "{}", SNAPSHOT_USAGE);
+        return;
+    }
+    let mounted = !crate::fs::mounts_of_disk(disk).is_empty();
+    let r: Result<(), String> = match sub {
+        "list" => on_volume(disk, |_| crate::fs::desofs::snapshot_usage(disk, true)).map(|(gn, list)| {
+            if list.is_empty() {
+                let _ = writeln!(out, "disk {}: no snapshots (generation {}; up to {})", disk, gn, crate::fs::desofs::vol::MAX_SNAPSHOTS);
+                return;
+            }
+            let _ = writeln!(out, "disk {}: {} snapshot(s) of {} at most, generation {} now", disk, list.len(), crate::fs::desofs::vol::MAX_SNAPSHOTS, gn);
+            let _ = writeln!(out, "  {:<24} {:>10}  {}", "NAME", "GENERATION", "ONLY IN IT (back after 'delete' + 2 commits)");
+            for s in &list {
+                let only = s.only.unwrap_or(0);
+                let _ = writeln!(out, "  {:<24} {:>10}  {} blocks ({} KiB)", s.name, s.created_gen, only, only * 4);
+            }
+        }),
+        "create" => valid_snapshot_name(name).and_then(|_| on_volume(disk, |v| v.snapshot_create(name))).map(|_| {
+            let _ = writeln!(out, "disk {}: snapshot {} created", disk, name);
+        }),
+        "mount" => {
+            let at = alloc::format!("/snap/{}", name);
+            if crate::fs::mount_list().iter().any(|(p, _, _)| *p == at) {
+                Err(alloc::format!("{} is already mounted", at))
+            } else {
+                Volume::mount_snapshot(disk, name).and_then(|v| {
+                    let _ = crate::fs::mkdir("/snap");
+                    let _ = crate::fs::mkdir(&at);
+                    crate::fs::mount(&at, alloc::boxed::Box::new(crate::fs::Locked::new(v))).map_err(|e| alloc::format!("{}: {}", at, e))?;
+                    let _ = writeln!(out, "snapshot {} of disk {} mounted at {} (read-only)", name, disk, at);
+                    Ok(())
+                })
+            }
+        }
+        "delete" if !yes => crate::fs::desofs::snapshot_usage(disk, true).and_then(|(_, list)| {
+            let s = list.iter().find(|s| s.name == name).ok_or_else(|| alloc::format!("disk {} has no snapshot named {}", disk, name))?;
+            let only = s.only.unwrap_or(0);
+            let _ = writeln!(out, "This deletes snapshot {} of disk {}; {} blocks ({} KiB) only it holds come back.", name, disk, only, only * 4);
+            let _ = writeln!(out, "To continue type: desofs snapshot delete {} {} yes", disk, name);
+            Ok(())
+        }),
+        "delete" => on_volume(disk, |v| v.snapshot_delete(name)).map(|_| {
+            let _ = writeln!(out, "disk {}: snapshot {} deleted", disk, name);
+        }),
+        "restore" if mounted || crate::fs::desofs::is_mounted(disk) => {
+            Err(String::from("the disk is mounted - 'desofs unmount' first (restore changes every file at once)"))
+        }
+        "restore" if !yes => crate::fs::desofs::snapshot_usage(disk, false).and_then(|(_, list)| {
+            let s = list.iter().find(|s| s.name == name).ok_or_else(|| alloc::format!("disk {} has no snapshot named {}", disk, name))?;
+            let _ = writeln!(out, "This brings every file of disk {} back to snapshot {} (generation {}); changes made since are lost. Snapshots stay.", disk, name, s.created_gen);
+            let _ = writeln!(out, "To continue type: desofs snapshot restore {} {} yes", disk, name);
+            Ok(())
+        }),
+        _ => on_volume(disk, |v| v.snapshot_restore(name)).map(|_| {
+            let _ = writeln!(out, "disk {}: back to snapshot {} - 'desofs mount {}' to use it", disk, name, disk);
+        }),
+    };
+    if let Err(e) = r {
+        let _ = writeln!(out, "desofs snapshot {}: {}", sub, e);
+    }
+}
+
 /// System actions (sysctl syscall – only with the SYSCTL handle, which
 /// the kernel gives to init, and init to the shell).  1 reboot, 2 halt, 3 sync, 4 stress
 /// `arg` seconds (0 = default 10, at most 600); 5–10 `desofs` info / format / mount /
@@ -1855,15 +1963,33 @@ pub const SYSCTL_DESOFS_MOUNT: u64 = 7;
 pub const SYSCTL_DESOFS_UNMOUNT: u64 = 8;
 pub const SYSCTL_DESOFS_CHECK: u64 = 9;
 pub const SYSCTL_DESOFS_REPAIR: u64 = 10;
+/// Snapshots (11–15): create, list, mount, delete, restore; the name (1–24 bytes, checked)
+/// comes as a pointer and a length – every other action must pass none.
+pub const SYSCTL_SNAPSHOT_CREATE: u64 = 11;
+pub const SYSCTL_SNAPSHOT_LIST: u64 = 12;
+pub const SYSCTL_SNAPSHOT_MOUNT: u64 = 13;
+pub const SYSCTL_SNAPSHOT_DELETE: u64 = 14;
+pub const SYSCTL_SNAPSHOT_RESTORE: u64 = 15;
 pub const SYSCTL_YES: u64 = 1 << 32;
+
+/// Whether action `op` takes a snapshot name.
+pub fn sysctl_takes_name(op: u64) -> bool {
+    matches!(op, SYSCTL_SNAPSHOT_CREATE | SYSCTL_SNAPSHOT_MOUNT | SYSCTL_SNAPSHOT_DELETE | SYSCTL_SNAPSHOT_RESTORE)
+}
 /// Most text one sysctl action returns; more is cut with a line that says so.
 pub const SYSCTL_OUT_MAX: usize = 64 * 1024;
 
 /// `cwd`: the caller's current directory – moved to "/" when an unmount takes its mount
 /// away (and only then).
-pub fn sysctl(op: u64, arg: u64, cwd: &mut String) -> Option<String> {
+pub fn sysctl(op: u64, arg: u64, name: Option<&str>, cwd: &mut String) -> Option<String> {
     let disk = arg & 0xFFFF_FFFF;
     let yes = arg & SYSCTL_YES != 0;
+    // A name exactly for the actions that take one, and only a valid one.
+    match name {
+        Some(n) if !sysctl_takes_name(op) || crate::fs::desofs::vol::valid_snapshot_name(n).is_err() => return None,
+        None if sysctl_takes_name(op) => return None,
+        _ => {}
+    }
     let line = match op {
         SYSCTL_REBOOT => String::from("reboot"),
         SYSCTL_HALT => String::from("halt"),
@@ -1885,6 +2011,20 @@ pub fn sysctl(op: u64, arg: u64, cwd: &mut String) -> Option<String> {
                 return None;
             }
             alloc::format!("desofs {} {}{}", sub, disk, if yes { " yes" } else { "" })
+        }
+        SYSCTL_SNAPSHOT_LIST if arg >> 32 == 0 => alloc::format!("desofs snapshot list {}", disk),
+        SYSCTL_SNAPSHOT_CREATE..=SYSCTL_SNAPSHOT_RESTORE if arg & !(0xFFFF_FFFF | SYSCTL_YES) == 0 => {
+            let (sub, may_confirm) = match op {
+                SYSCTL_SNAPSHOT_CREATE => ("create", false),
+                SYSCTL_SNAPSHOT_MOUNT => ("mount", false),
+                SYSCTL_SNAPSHOT_DELETE => ("delete", true),
+                SYSCTL_SNAPSHOT_RESTORE => ("restore", true),
+                _ => return None,
+            };
+            if yes && !may_confirm {
+                return None;
+            }
+            alloc::format!("desofs snapshot {} {} {}{}", sub, disk, name?, if yes { " yes" } else { "" })
         }
         _ => return None,
     };

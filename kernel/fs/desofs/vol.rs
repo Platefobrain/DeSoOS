@@ -17,6 +17,7 @@
 // error of that one read.  Allocation failures are "out of memory", never a panic.
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -75,6 +76,9 @@ pub struct Volume {
     ro: Option<String>,
     cursor: u64,
     pub counters: Counters,
+    /// A read-only view of a snapshot (`desofs snapshot mount`): its root entry index and
+    /// name; the snapshot's tree stands in for the live one.
+    view: Option<(usize, String)>,
 }
 
 fn io(e: crate::block::BlockError) -> FsError {
@@ -88,6 +92,64 @@ fn nomem<T>(_: T) -> FsError {
 impl Drop for Volume {
     fn drop(&mut self) {
         super::mounted_dec(self.disk);
+        if let Some((i, _)) = &self.view {
+            if let Some(c) = VIEWS.get(self.disk).and_then(|d| d.get(*i)) {
+                c.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+// ---------------- snapshots (stage 5) ----------------
+
+/// Snapshot views alive per disk and root entry – `snapshot delete` refuses a snapshot
+/// someone is looking at.  Disks 64 and up have no views (refused).
+static VIEWS: [[core::sync::atomic::AtomicU32; ROOT_ENTRIES]; 64] =
+    [const { [const { core::sync::atomic::AtomicU32::new(0) }; ROOT_ENTRIES] }; 64];
+
+fn viewed(disk: usize, index: usize) -> bool {
+    VIEWS.get(disk).and_then(|d| d.get(index)).map(|c| c.load(core::sync::atomic::Ordering::SeqCst) != 0).unwrap_or(false)
+}
+
+/// Most snapshots per volume (root entries 1–31).
+pub const MAX_SNAPSHOTS: usize = ROOT_ENTRIES - 1;
+
+/// A name `desofs snapshot create` accepts – stricter than the format (which asks only for
+/// non-empty UTF-8 without '/'), because the name becomes a path (`/snap/<name>`) and a
+/// shell word: 1–24 bytes, no '/', space, control character (NUL included) or DEL, not
+/// "." or "..".
+pub fn valid_snapshot_name(name: &str) -> Result<(), String> {
+    let b = name.as_bytes();
+    if b.is_empty() || b.len() > 24 {
+        return Err(format!("snapshot name must have 1-24 bytes ({} given)", b.len()));
+    }
+    if name == "." || name == ".." {
+        return Err(String::from("snapshot name cannot be '.' or '..'"));
+    }
+    if b.iter().any(|&c| c == b'/' || c == b' ' || c < 0x20 || c == 0x7F) {
+        return Err(String::from("snapshot name cannot contain '/', spaces or control characters"));
+    }
+    Ok(())
+}
+
+fn name_bytes(name: &str) -> [u8; 24] {
+    let mut n = [0u8; 24];
+    let b = name.as_bytes();
+    n[..b.len().min(24)].copy_from_slice(&b[..b.len().min(24)]);
+    n
+}
+
+/// One root entry written into a root block (`None` – an empty entry).
+fn put_entry(rb: &mut [u8], index: usize, e: Option<&RootEntry>) {
+    let o = HDR_SIZE + index * ROOT_ENTRY;
+    rb[o..o + ROOT_ENTRY].fill(0);
+    if let Some(e) = e {
+        set_ptr(rb, o, Some(e.nodes));
+        rb[o + 48] = e.depth;
+        rb[o + 49] = e.kind;
+        rb[o + 56..o + 64].copy_from_slice(&e.next_node.to_le_bytes());
+        rb[o + 64..o + 72].copy_from_slice(&e.created_gen.to_le_bytes());
+        rb[o + 72..o + 96].copy_from_slice(&e.name);
     }
 }
 
@@ -143,7 +205,147 @@ impl Volume {
             ro,
             cursor: RESERVED,
             counters: Counters::default(),
+            view: None,
         })
+    }
+
+    /// A read-only view of snapshot `name` of disk `index`: its tree stands in for the live
+    /// one; nothing can be written through it.
+    pub fn mount_snapshot(index: usize, name: &str) -> Result<Volume, String> {
+        valid_snapshot_name(name).map_err(|e| format!("{} - such a snapshot cannot be mounted", e))?;
+        if index >= VIEWS.len() {
+            return Err(String::from("disk number too high for a snapshot view"));
+        }
+        let mut v = Volume::mount(index)?;
+        let nb = name_bytes(name);
+        let Some((i, e)) = v.entries.iter().find(|(_, e)| e.kind == ROOT_SNAPSHOT && e.name == nb).copied() else {
+            return Err(format!("disk {} has no snapshot named {}", index, name));
+        };
+        let live = RootEntry { kind: ROOT_LIVE, created_gen: 0, name: [0; 24], ..e };
+        v.entries.clear();
+        v.entries.push((0, live));
+        v.ro = Some(format!("snapshot {} (read-only)", name));
+        v.pending_free.clear();
+        v.free_nodes.clear();
+        VIEWS[index][i].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        v.view = Some((i, String::from(name)));
+        Ok(v)
+    }
+
+    /// Snapshot entries (index, entry) of the committed root block.
+    #[cfg_attr(not(selftest), allow(dead_code))]
+    pub fn snapshots(&self) -> Vec<(usize, RootEntry)> {
+        self.entries.iter().filter(|(_, e)| e.kind == ROOT_SNAPSHOT).copied().collect()
+    }
+
+    fn snapshot_writable(&self) -> Result<(), String> {
+        if self.view.is_some() {
+            return Err(String::from("a snapshot view is read-only"));
+        }
+        match &self.ro {
+            Some(w) => Err(format!("the volume is read-only ({})", w)),
+            None => Ok(()),
+        }
+    }
+
+    fn find_snapshot(&self, name: &str) -> Result<(usize, RootEntry), String> {
+        let nb = name_bytes(name);
+        self.entries
+            .iter()
+            .find(|(_, e)| e.kind == ROOT_SNAPSHOT && e.name == nb && name.len() <= 24)
+            .copied()
+            .ok_or_else(|| format!("disk {} has no snapshot named {}", self.disk, name))
+    }
+
+    /// New snapshot of the committed state: one commit writing a root block whose new entry
+    /// is a copy of the live one (created_gen = the generation of that state).  Nothing is
+    /// copied; from now on R1 keeps every block born no later than that generation.
+    pub fn snapshot_create(&mut self, name: &str) -> Result<usize, String> {
+        valid_snapshot_name(name)?;
+        self.snapshot_writable()?;
+        let nb = name_bytes(name);
+        if self.entries.iter().any(|(_, e)| e.kind == ROOT_SNAPSHOT && e.name == nb) {
+            return Err(format!("a snapshot named {} already exists", name));
+        }
+        let Some(idx) = (1..ROOT_ENTRIES).find(|i| !self.entries.iter().any(|(j, _)| j == i)) else {
+            return Err(format!("{} snapshots already - delete one first", MAX_SNAPSHOTS));
+        };
+        let live = self.entries.iter().find(|(i, _)| *i == 0).map(|(_, e)| *e).ok_or("no live root")?;
+        let snap = RootEntry { kind: ROOT_SNAPSHOT, created_gen: self.gn, name: nb, ..live };
+        self.write_op(|_| Ok((0, false)), |tx| {
+            tx.root_edits.push((idx, Some(snap)));
+            Ok(())
+        })
+        .map_err(|e| format!("{}", e))?;
+        Ok(idx)
+    }
+
+    /// Deletes snapshot `name`: one commit without its entry, then R3 – the block map is
+    /// computed again by the mount walk over both superblocks, so a block comes back only
+    /// when neither superblock (live root or any snapshot) reaches it.
+    pub fn snapshot_delete(&mut self, name: &str) -> Result<(), String> {
+        self.snapshot_writable()?;
+        let (idx, _) = self.find_snapshot(name)?;
+        if viewed(self.disk, idx) {
+            return Err(format!("snapshot {} is mounted (/snap/{}) - unmount it first", name, name));
+        }
+        // The new superblock's used_blocks: without the blocks only this snapshot held.
+        let only = super::exclusive_blocks(self.disk, idx)?;
+        self.write_op(|_| Ok((0, true)), |tx| {
+            tx.root_edits.push((idx, None));
+            tx.used_delta -= only as i64;
+            Ok(())
+        })
+        .map_err(|e| format!("{}", e))?;
+        self.rescan()
+    }
+
+    /// The whole volume goes back to snapshot `name`: one commit whose live entry is a copy
+    /// of the snapshot's; every snapshot (newer ones too) stays.  Then R3 as for delete –
+    /// the old live state stays reserved while the previous superblock still reaches it.
+    pub fn snapshot_restore(&mut self, name: &str) -> Result<(), String> {
+        self.snapshot_writable()?;
+        let (_, e) = self.find_snapshot(name)?;
+        let live = RootEntry { kind: ROOT_LIVE, created_gen: 0, name: [0; 24], ..e };
+        // used_blocks of the new superblock: without what only the old live state held.
+        let only = super::exclusive_blocks(self.disk, 0)?;
+        self.write_op(|_| Ok((0, true)), |tx| {
+            tx.live = live;
+            tx.used_delta -= only as i64;
+            Ok(())
+        })
+        .map_err(|e| format!("{}", e))?;
+        self.rescan()
+    }
+
+    /// R3: the allocator's map from a fresh mount walk of the disk (both superblocks, every
+    /// root).  On a failure the volume becomes read-only – nothing is allocated from a map
+    /// that is not known to be right.
+    fn rescan(&mut self) -> Result<(), String> {
+        let fail = |v: &mut Volume, why: String| {
+            let w = format!("block map after a snapshot change: {}", why);
+            crate::serial_println!("[DESOFS] disk {}: {} - now read-only", v.disk, w);
+            v.ro = Some(w.clone());
+            Err(w)
+        };
+        match super::scan_volume(self.disk) {
+            Ok((report, sc)) if report.state == State::ReadWrite => {
+                let mut free = 0;
+                for i in 0..self.total {
+                    if sc.map.get(i) == M_FREE {
+                        free += 1;
+                    }
+                }
+                self.map = sc.map;
+                self.free = free;
+                self.pending_free = sc.older_only;
+                self.free_nodes = sc.free_nodes;
+                self.used = report.used_counted.unwrap_or(self.used);
+                Ok(())
+            }
+            Ok((report, _)) => fail(self, format!("{:?}", report.state)),
+            Err(e) => fail(self, e),
+        }
     }
 
     pub fn read_only_reason(&self) -> Option<&str> {
@@ -183,7 +385,7 @@ impl Volume {
     fn tx(&mut self) -> R<Tx<'_>> {
         let gn = self.gn.checked_add(1).ok_or(FsError::NoSpace)?;
         let live = self.entries.iter().find(|(i, _)| *i == 0).map(|(_, e)| *e).ok_or(FsError::Corrupt("no live root"))?;
-        Ok(Tx { v: self, gn, live, dirty: BTreeMap::new(), dropped: Vec::new(), allocated: 0, used_delta: 0, taken_nodes: Vec::new(), freed_nodes: Vec::new() })
+        Ok(Tx { v: self, gn, live, dirty: BTreeMap::new(), dropped: Vec::new(), allocated: 0, used_delta: 0, taken_nodes: Vec::new(), freed_nodes: Vec::new(), root_edits: Vec::new() })
     }
 
     fn check_writable(&self) -> R<()> {
@@ -237,6 +439,8 @@ struct Tx<'a> {
     used_delta: i64,
     taken_nodes: Vec<u64>,
     freed_nodes: Vec<u64>,
+    /// Snapshot entries this commit adds (Some) or removes (None).
+    root_edits: Vec<(usize, Option<RootEntry>)>,
 }
 
 /// Placeholder pointer to a block of this transaction (its checksum is set at commit).
@@ -1342,6 +1546,9 @@ impl<'a> Tx<'a> {
         set_ptr(&mut rb, o, Some(self.live.nodes));
         rb[o + 48] = self.live.depth;
         rb[o + 56..o + 64].copy_from_slice(&self.live.next_node.to_le_bytes());
+        for (i, e) in core::mem::take(&mut self.root_edits) {
+            put_entry(&mut rb, i, e.as_ref());
+        }
         let ra = self.new_block(Kind::Dsrt, 0, rb)?;
         // The old root block is never part of a snapshot.
         self.dropped.push(root.addr);
@@ -1392,11 +1599,24 @@ impl<'a> Tx<'a> {
         v.slot_gen[slot] = Some(self.gn);
         v.gn = self.gn;
         v.root = new_root;
-        // The live entry as sealed (real checksums instead of placeholders).
-        if let Ok(Some(live)) = RootEntry::parse(&self.dirty.get(&ra).unwrap().buf[HDR_SIZE..], 0, self.gn) {
-            if let Some(e) = v.entries.iter_mut().find(|(i, _)| *i == 0) {
-                e.1 = live;
+        // Every entry as sealed (real checksums instead of placeholders; snapshots added,
+        // removed or the live one replaced by this commit), and R1's newest snapshot.
+        let rbuf = &self.dirty.get(&ra).unwrap().buf;
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(ROOT_ENTRIES).is_err() {
+            v.ro = Some(String::from("out of memory after a commit"));
+        } else {
+            let mut newest = 0;
+            for i in 0..ROOT_ENTRIES {
+                if let Ok(Some(e)) = RootEntry::parse(&rbuf[HDR_SIZE + i * ROOT_ENTRY..], i, self.gn) {
+                    if e.kind == ROOT_SNAPSHOT {
+                        newest = newest.max(e.created_gen);
+                    }
+                    entries.push((i, e));
+                }
             }
+            v.entries = entries;
+            v.newest_snap = newest;
         }
         v.used = used;
         v.counters.last_alloc = self.allocated;
@@ -1424,10 +1644,20 @@ impl FileSystem for Volume {
         "desofs"
     }
     fn source(&self) -> String {
-        alloc::format!("disk {}", self.disk)
+        match &self.view {
+            Some((_, name)) => alloc::format!("disk {}, snapshot {}", self.disk, name),
+            None => alloc::format!("disk {}", self.disk),
+        }
     }
     fn disk(&self) -> Option<usize> {
         Some(self.disk)
+    }
+    fn with_desofs(&mut self, f: &mut dyn FnMut(&mut Volume)) -> bool {
+        if self.view.is_some() {
+            return false; // a snapshot view is not the volume
+        }
+        f(self);
+        true
     }
     fn stat(&mut self, path: &str) -> R<Metadata> {
         self.read_op(|tx| {

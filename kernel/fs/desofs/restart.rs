@@ -132,17 +132,32 @@ fn write_set() -> T {
     ensure!(st.size >= 2 * 4096, "300 entries in only {} bytes of directory", st.size);
     // Everything as expected before the power-off, too.
     compare("before the restart")?;
+    // A snapshot of exactly this state, then one more file and one changed file in the
+    // live tree only.
+    let mut made: Result<usize, String> = Err(String::from("/disk not mounted"));
+    fs::with_mounted_desofs(0, &mut |v| made = v.snapshot_create(SNAP));
+    made.map_err(|x| format!("snapshot: {}", x))?;
+    new_file(AFTER_SNAP, &pattern(2000, 66))?;
+    put("/disk/one", 0, &pattern(1, 67))?;
     Ok(format!(
-        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); powering off normally",
+        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); snapshot {} of that state, then a new file and a changed one; powering off normally",
         expected().len(),
-        st.size / 4096
+        st.size / 4096,
+        SNAP
     ))
 }
+
+const SNAP: &str = "before-restart";
+const AFTER_SNAP: &str = "/disk/after-snapshot";
 
 /// Everything under /disk equals the expected set (extra entries allowed only in `allow`).
 fn compare_with(what: &str, allow: &[&str]) -> Result<(), String> {
     let exp = expected();
+    let allowed = |p: &str| allow.iter().any(|a| p.starts_with(a));
     for (path, data) in &exp {
+        if allowed(path) {
+            continue; // changed on purpose; the caller checks it
+        }
         let st = fs::stat(path).map_err(|x| format!("{}: {}", what, e(path, x)))?;
         match data {
             None => ensure!(st.kind == FileType::Directory, "{}: {} is not a directory", what, path),
@@ -162,7 +177,7 @@ fn compare_with(what: &str, allow: &[&str]) -> Result<(), String> {
         }
         for en in fs::read_dir(&dir).map_err(|x| format!("{}: {}", what, e(&dir, x)))? {
             let p = format!("{}/{}", dir, en.name);
-            if allow.iter().any(|a| p.starts_with(a)) {
+            if allowed(&p) {
                 continue;
             }
             ensure!(exp.iter().any(|(q, _)| *q == p), "{}: unexpected {}", what, p);
@@ -172,7 +187,8 @@ fn compare_with(what: &str, allow: &[&str]) -> Result<(), String> {
             }
         }
     }
-    ensure!(seen == exp.len(), "{}: {} entries, {} expected", what, seen, exp.len());
+    let exp_n = exp.iter().filter(|(q, _)| !allowed(q)).count();
+    ensure!(seen == exp_n, "{}: {} entries, {} expected", what, seen, exp_n);
     // The 300-entry directory, read in parts of 32 (byte positions).
     let want = many();
     let mut got: Vec<String> = Vec::new();
@@ -233,7 +249,9 @@ fn auto_mounted() -> T {
 }
 
 fn contents() -> T {
-    compare("after the restart")?;
+    compare_with("after the restart", &[AFTER_SNAP, "/disk/one"])?;
+    ensure!(fs::read_file(AFTER_SNAP).map_err(|x| e(AFTER_SNAP, x))? == pattern(2000, 66), "{} differs", AFTER_SNAP);
+    ensure!(fs::read_file("/disk/one").map_err(|x| e("/disk/one", x))? == pattern(1, 67), "/disk/one is not the version written after the snapshot");
     Ok(format!("every file and directory equal byte for byte ({} + 290 entries; removed ones did not come back); the 300-entry directory read in parts of 32 by byte position", expected().len()))
 }
 
@@ -247,8 +265,32 @@ fn programs() -> T {
     // Writing after the restart.
     new_file("/disk/after-restart", &pattern(5000, 55))?;
     ensure!(fs::read_file("/disk/after-restart").map_err(|x| e("after-restart", x))? == pattern(5000, 55), "file written after the restart differs");
-    compare_with("after a new file", &["/disk/after-restart"])?;
+    compare_with("after a new file", &["/disk/after-restart", AFTER_SNAP, "/disk/one"])?;
     Ok(String::from("/bin/sha256sum reads /disk/mid with the right sum, /bin/ls lists the 290 entries in parts (readdir_part), a new file written and read back"))
+}
+
+/// The snapshot taken before the restart: listed, and its view holds the state before the
+/// last two changes.
+fn snapshot() -> T {
+    let (_, list) = super::snapshot_usage(0, true)?;
+    let s = list.iter().find(|s| s.name == SNAP).ok_or_else(|| format!("snapshot {} not on the list after the restart", SNAP))?;
+    let v = super::vol::Volume::mount_snapshot(0, SNAP)?;
+    let at = format!("/snap/{}", SNAP);
+    let _ = fs::mkdir("/snap");
+    let _ = fs::mkdir(&at);
+    fs::mount(&at, alloc::boxed::Box::new(fs::Locked::new(v))).map_err(|x| e("mount the snapshot", x))?;
+    let r = (|| -> Result<(), String> {
+        let one = fs::read_file(&format!("{}/one", at)).map_err(|x| e("snapshot one", x))?;
+        ensure!(one == pattern(1, 1), "the snapshot's /one is the changed version");
+        ensure!(fs::stat(&format!("{}/after-snapshot", at)).is_err(), "the file written after the snapshot is in the snapshot");
+        let mid = fs::read_file(&format!("{}/mid", at)).map_err(|x| e("snapshot mid", x))?;
+        ensure!(mid == pattern(100 * 1024, 3), "the snapshot's /mid differs");
+        ensure!(fs::create(&format!("{}/x", at)).is_err(), "a file created in a snapshot view");
+        Ok(())
+    })();
+    fs::unmount(&at).map_err(|x| e("unmount the snapshot", x))?;
+    r?;
+    Ok(format!("snapshot {} (generation {}, {} blocks of its own) listed after the restart; its view (read-only) has the old /one and no file written after it", SNAP, s.created_gen, s.only.unwrap_or(0)))
 }
 
 fn bench() -> T {
@@ -321,7 +363,7 @@ fn report(n: usize, total: usize, name: &str, r: T) -> bool {
 pub fn prepare() {
     serial_println!("[RESTART TEST] Part 1: DeSoFS on disk 0 before a restart...");
     crate::selftest::begin();
-    if report(1, 5, "write before the restart", write_set()) {
+    if report(1, 6, "write before the restart", write_set()) {
         crate::selftest::pass();
     }
 }
@@ -330,9 +372,9 @@ pub fn prepare() {
 pub fn verify() {
     serial_println!("[RESTART TEST] Part 2: after the restart...");
     crate::selftest::begin();
-    let steps: [(&str, fn() -> T); 4] = [("automatic mount", auto_mounted), ("contents", contents), ("programs and writing", programs), ("speed and check", bench)];
+    let steps: [(&str, fn() -> T); 5] = [("automatic mount", auto_mounted), ("contents", contents), ("programs and writing", programs), ("snapshot", snapshot), ("speed and check", bench)];
     for (k, (name, f)) in steps.iter().enumerate() {
-        if !report(2 + k, 5, name, f()) {
+        if !report(2 + k, 6, name, f()) {
             return;
         }
     }

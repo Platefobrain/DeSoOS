@@ -143,6 +143,12 @@ pub const SYSCTL_DESOFS_UNMOUNT: u64 = 8;
 pub const SYSCTL_DESOFS_CHECK: u64 = 9;
 pub const SYSCTL_DESOFS_REPAIR: u64 = 10;
 pub const SYSCTL_YES: u64 = 1 << 32;
+/// Snapshots: create / mount / delete / restore take a name (`sysctl_name`), list does not.
+pub const SYSCTL_SNAPSHOT_CREATE: u64 = 11;
+pub const SYSCTL_SNAPSHOT_LIST: u64 = 12;
+pub const SYSCTL_SNAPSHOT_MOUNT: u64 = 13;
+pub const SYSCTL_SNAPSHOT_DELETE: u64 = 14;
+pub const SYSCTL_SNAPSHOT_RESTORE: u64 = 15;
 
 /// mmap: region protection.
 pub const PROT_READ: u64 = 1;
@@ -895,6 +901,11 @@ pub fn sysinfo(topic: &str, buf: &mut [u8]) -> Result<usize, i64> {
 /// System action via the SYSCTL handle (`h`); the result is written as text to `fd`.
 pub fn sysctl(h: u64, op: u64, arg: u64, fd: u64) -> i64 {
     syscall6(SYS_SYSCTL, h, op, arg, fd, 0, 0)
+}
+
+/// System action with a name (snapshots): the kernel copies at most 24 bytes and checks them.
+pub fn sysctl_name(h: u64, op: u64, arg: u64, fd: u64, name: &str) -> i64 {
+    syscall6(SYS_SYSCTL, h, op, arg, fd, name.as_ptr() as u64, name.len() as u64)
 }
 
 /// Description of a wait status.
