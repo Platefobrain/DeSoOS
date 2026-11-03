@@ -342,8 +342,15 @@ impl Process {
     /// old pin is dropped.
     pub fn set_cwd(&mut self, path: String) {
         let pin = crate::fs::MountPin::take(&path);
+        self.set_cwd_pinned(path, pin);
+    }
+
+    /// Current directory with a pin taken earlier (chdir pins before it checks the path).
+    /// Path and pin change together; the old pin is dropped only after both are replaced.
+    pub fn set_cwd_pinned(&mut self, path: String, pin: crate::fs::MountPin) {
+        let old = core::mem::replace(&mut self.cwd_pin, pin);
         self.cwd = path;
-        self.cwd_pin = pin;
+        drop(old);
     }
 
     pub fn new(space: AddressSpace) -> Self {

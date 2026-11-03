@@ -744,7 +744,10 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   (5 info, 6 format, 7 mount, 8 unmount, 9 check, 10 repair; `arg` = disk number in bits 0–31, bit 32 = "yes" for
   format / repair – checked by the kernel, so without it nothing is written even for a program calling sysctl
   directly; any other bit or "yes" elsewhere → `ERROR_INVALID_ARGUMENT`). The text goes to `fd`, at most 64 KiB
-  (`shell::Capped`: more ends with "... output truncated: N bytes more", never a silent cut). The `desofs` actions
+  including the line "... output truncated: N bytes more" (`shell::Capped` keeps room for it; never a silent cut).
+  `fd` is checked before the action (v0.65.1: before, a bad one was found only after a format had run) – the console
+  (not stdin), or a handle with `WRITE` to a pipe's write end or a file opened for writing; otherwise
+  `ERROR_ACCESS_DENIED` (no `WRITE`) / `ERROR_INVALID_HANDLE`. The `desofs` actions
   run the same code as the kernel emergency shell; the result comes at the end (no progress while it runs; the
   syscall holds the BKL, which is released while it waits for the disk). The caller's own current directory does
   not keep a mount busy for it: its pin is dropped for the action and taken again (on "/" if the unmount moved it).
@@ -1483,8 +1486,12 @@ system stays mounted with its file, the whole disk's SHA-256 is unchanged.
 them would let them reach whatever is mounted there next (after `desofs format`: a new, empty volume). Every mount
 has a pin counter (`users`, atomic); `fs::MountPin::take(path)` – under `FS_LOCK` for reading, the mount the VFS
 resolves the path to (longest mount point by whole components, as for every call; "/" is not counted) – is held by
-an open file (`OpenFile.pin`, taken before the open does anything), a directory handle (`DirObj.pin`) and a process's
-current directory (`Process::set_cwd`, the only way to change it; a child's `spawn` copies the parent's pin). Drop
+an open file (`OpenFile.pin`, taken before the open does anything), a directory handle (`DirObj.pin`, also taken
+first) and a process's current directory (`Process::set_cwd` / `set_cwd_pinned`, the only ways to change it: path
+and pin replaced together, the old pin dropped after; `chdir` takes the pin before it checks the directory – v0.65.1,
+before an unmount could slip between the check and the pin; a child's `spawn` copies the parent's pin). Test builds
+have a stop point in `chdir` between the pin and the check (`chdir_pause`): INIT TEST 9 unmounts there and must be
+refused. Drop
 is a plain atomic decrement, without a lock: `close`, a handle leaving with a message, process exit (`exit_current`
 drops the descriptors and the directory pin at once – a zombie holds nothing) never wait for the VFS. `unmount`
 under `FS_LOCK` for writing: pins > 0 → `FsError::InUse(n)` "in use (n open files / directories)" before anything

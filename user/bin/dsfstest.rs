@@ -4,7 +4,8 @@
 //   dsfstest refuse <disk> – nothing may change the disk: raw sysctl without the SYSCTL
 //     handle (a missing number, the console, a pipe, a directory handle) for format + yes,
 //     `/bin/sh` without the handle, a shell started by the shell (children never get it),
-//     format / repair without "yes", bad arguments.  The kernel then compares the
+//     format / repair without "yes", bad arguments, a bad output handle (missing, no WRITE,
+//     not an output) with the right SYSCTL handle.  The kernel then compares the
 //     SHA-256 of the whole disk.
 //   dsfstest work <disk> – format, info, mount (/desofs), files; unmount refused while
 //     something uses the mount and allowed again once it is let go: an open file, an open
@@ -115,6 +116,22 @@ fn refuse(sys: u64, d: u64) -> i32 {
     check!(n, dh >= 0 && sysctl(dh as u64, fmt, yes, 1) == ERROR_INVALID_HANDLE, "format with a directory handle: {}", dh);
     close(dh as u64);
 
+    // The right handle but a bad output handle: refused before anything is done.
+    check!(n, sysctl(sys, fmt, yes, 60) == ERROR_INVALID_HANDLE, "format + yes with a missing output handle");
+    let (pr, pw) = pipe().unwrap_or((0, 0));
+    check!(n, sysctl(sys, fmt, yes, pr) == ERROR_ACCESS_DENIED, "format + yes into a pipe's read end (no WRITE)");
+    close(pr);
+    close(pw);
+    let f = open("/dsfs-ro", O_WRITE | O_CREATE);
+    close(f as u64);
+    let f = open("/dsfs-ro", O_READ);
+    check!(n, f >= 0 && sysctl(sys, fmt, yes, f as u64) == ERROR_ACCESS_DENIED, "format + yes into a file opened read-only: {}", f);
+    close(f as u64);
+    unlink("/dsfs-ro");
+    let dw = dir_open("/", O_READ | O_WRITE);
+    check!(n, dw >= 0 && sysctl(sys, fmt, yes, dw as u64) == ERROR_INVALID_HANDLE, "format + yes into a directory handle (WRITE, but not an output): {}", dw);
+    close(dw as u64);
+
     // Bad arguments with the right handle: refused, nothing done.
     check!(n, sysctl(sys, SYSCTL_DESOFS_INFO, yes, 1) == ERROR_INVALID_ARGUMENT, "info with yes");
     check!(n, sysctl(sys, fmt, d | 1 << 40, 1) == ERROR_INVALID_ARGUMENT, "format with unknown bits");
@@ -151,6 +168,10 @@ fn work(sys: u64, d: u64) -> i32 {
     check!(n, t.contains("DeSoFS, read-write"), "info: {:?}", t);
     let t = sh(&format!("desofs mount {}", d), s);
     check!(n, t.contains("mounted at /desofs (DeSoFS, read-write)"), "mount: {:?}", t);
+    let t = sh(&format!("desofs mount {}", d), s);
+    check!(n, t.contains(&format!("desofs mount: disk {} is already mounted at /desofs", d)), "mount twice: {:?}", t);
+    let t = sh(&format!("desofs info {}", d), s);
+    check!(n, t.contains("blocks used (counted ") && !t.contains("Some("), "info wording: {:?}", t);
     let fd = open("/desofs/a", O_WRITE | O_CREATE);
     check!(n, fd >= 0 && write(fd as u64, b"hello desofs") == 12, "write /desofs/a: {}", fd);
     close(fd as u64);

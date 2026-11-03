@@ -1,4 +1,4 @@
-# DeSoOS v0.65.0
+# DeSoOS v0.65.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary

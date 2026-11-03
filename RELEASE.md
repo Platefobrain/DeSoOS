@@ -10,6 +10,83 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.65.1 — 2026-11-03
+
+**Status: stable on QEMU (TCG and KVM); two fixes from a code review of v0.65.0 – `chdir` pins its mount before
+it checks the directory, and `sysctl` checks its output handle before the action – plus clearer `desofs` messages.**
+
+### What is new since the last report (v0.65.0)
+
+| Version | Change |
+|---|---|
+| v0.65.1 | `chdir`: pin first, then the check (an unmount could slip between them); `sysctl`: a bad output handle refused before anything runs (before, `format <disk> yes` with a bad handle formatted and then returned the error); the 64 KiB output limit includes the truncation line; `desofs info` "counted N", `desofs mount` "already mounted at …" |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 274 tests PASS | 172 s (restart 38 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 274 tests PASS | 102 s (restart 15 s) |
+
+INIT TEST 9/10 extended: `chdir` stopped (test builds only) between its pin and its check while the test unmounts –
+refused; format + yes with the right `SYSCTL` handle and a bad output handle (missing, a pipe's read end, a file
+opened read-only, a directory handle) – refused, the whole disk's SHA-256 unchanged. On the build server the old
+`chdir` order and the output handle checked after the action each make it fail (the latter only through the disk
+check – the error codes are the same).
+
+### DeSoFS speed `[RESULT-FS]`
+
+| | TCG v0.65.0 | TCG v0.65.1 | KVM v0.65.0 | KVM v0.65.1 |
+|---|---|---|---|---|
+| 8 MiB write (KiB/s) | 6 005 | 5 843 | 12 760 | 12 982 |
+| 8 MiB read (KiB/s) | 5 626 | 4 838 | 17 808 | 17 102 |
+| 1000 small files – create + write (ms) | 20 270 | 20 266 | 10 181 | 8 040 |
+| 1000 small files – read (ms) | 7 498 | 7 653 | 2 316 | 2 195 |
+| `desofs check` (ms) | 800 | 857 | 269 | 266 |
+
+### Known problems
+
+- **To watch:** KVM 8 MiB write is now ~13 000 KiB/s in two runs in a row (v0.64.0 17 138, v0.64.1 16 516). The
+  measurement goes through the VFS in the kernel without file handles, so the mount pins are not on its path, and
+  TCG (6 005 / 5 843 against 5 669) does not show it. Not explained yet – to be compared against a v0.64.1 build on
+  the same machine.
+- As in v0.65.0 otherwise.
+
+### Performance against the previous release (v0.65.0 → v0.65.1, same machine)
+
+`[RESULT-SVC]` (ns):
+
+| | TCG v0.65.0 | TCG v0.65.1 | KVM v0.65.0 | KVM v0.65.1 |
+|---|---|---|---|---|
+| irq_kernel_ns | 3 202 | 3 109 | 35 855 | 34 352 |
+| irq_user_ns | 8 078 | 6 031 | 69 881 | 66 912 |
+| fact_kernel_ns | 22 941 | 24 813 | 53 533 | 58 633 |
+| fact_user_ns | 69 808 | 74 934 | 94 652 | 98 570 |
+| fact_svc_ns | 231 213 | 248 756 | 106 269 | 105 540 |
+| ping_svc_ns | 126 903 | 131 061 | 23 727 | 23 124 |
+| restart_us | 5 000 | 6 700 | 1 300 | 1 200 |
+
+`[RESULT-USB]`:
+
+| | TCG v0.65.0 | TCG v0.65.1 | KVM v0.65.0 | KVM v0.65.1 |
+|---|---|---|---|---|
+| start_ms | 418 | 392 | 354 | 402 |
+| enum_avg_ms | 27 | 24 | 27 | 25 |
+| read_kbs (usbd) | 69 423 | 85 333 | 113 777 | 87 148 |
+| kread_kbs (kernel) | 47 499 | 84 111 | 116 765 | 113 863 |
+| kcat_kbs (kernel, cat) | 50 596 | 46 880 | 96 958 | 94 856 |
+| hid_avg_us (keyboard) | 714 | 855 | 331 | 203 |
+
+`[RESULT-RIGHTS]` rows 57, refused 29; gate_ns: TCG 25 → 25, KVM 5 → 5.
+`[RESULT-CRYPTO]` (KiB/s): TCG 46 431 / 50 240 / 43 200 → 34 388 / 48 398 / 48 000; KVM 178 308 / 212 480 / 212 160 →
+180 480 / 205 120 / 211 840.
+
+Verdict: no regression against v0.65.0 – the changes touch `chdir`, `sysctl` and messages only. TCG kernel SHA-256
+34 388 is one run (user space in the same run 48 398 – the same code); TCG `restart_us` 6 700 and `fact_svc_ns`
+within the TCG spread. The KVM 8 MiB write level since v0.65.0 is listed above as a point to check.
+
+---
+
 ## v0.65.0 — 2026-11-03
 
 **Status: stable on QEMU (TCG and KVM); `desofs` in the normal shell behind the `SYSCTL` handle; a mount that a

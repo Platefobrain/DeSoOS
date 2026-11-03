@@ -1265,13 +1265,52 @@ fn is_descendant(pid: u64, ancestor: u64) -> bool {
 
 fn sys_chdir(p: &mut Process, ptr: u64, len: u64) -> SysResult {
     let path = user_path(p, ptr, len)?;
+    // Pinned first, checked after: an unmount between the check and the change would
+    // otherwise leave the process in a directory whose file system is gone.
+    let pin = fs::MountPin::take(&path);
+    #[cfg(selftest)]
+    chdir_pause::point(&path);
     match fs::stat(&path) {
         Ok(m) if m.kind == FileType::Directory => {
-            p.set_cwd(path);
+            // New path and its pin together; the old pin goes after.
+            p.set_cwd_pinned(path, pin);
             Ok(0)
         }
         Ok(_) => Err(ERROR_NOT_DIRECTORY),
         Err(e) => Err(fs_error(e)),
+    }
+}
+
+/// Test builds only: `chdir` to the path set here stops after taking its pin and before
+/// checking the directory, until released – the test unmounts in that window (it must be
+/// refused).  Deterministic instead of hoping to hit the race.
+#[cfg(selftest)]
+pub mod chdir_pause {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static PATH: crate::sched::spin::IrqSpinLock<alloc::string::String> = crate::sched::spin::IrqSpinLock::new("chdir-pause", crate::sched::spin::level::TEST_IRQ, alloc::string::String::new());
+    static REACHED: AtomicBool = AtomicBool::new(false);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    pub fn arm(path: &str) {
+        REACHED.store(false, Ordering::SeqCst);
+        RELEASE.store(false, Ordering::SeqCst);
+        *PATH.lock() = alloc::string::String::from(path);
+    }
+    pub fn reached() -> bool {
+        REACHED.load(Ordering::SeqCst)
+    }
+    pub fn release() {
+        PATH.lock().clear();
+        RELEASE.store(true, Ordering::SeqCst);
+    }
+    pub(super) fn point(path: &str) {
+        if PATH.lock().as_str() != path {
+            return;
+        }
+        REACHED.store(true, Ordering::SeqCst);
+        while !RELEASE.load(Ordering::SeqCst) {
+            crate::time::sleep_ms(1);
+        }
     }
 }
 
@@ -1542,6 +1581,9 @@ fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult 
     if !matches!(p.fd(h)?, Fd::Sysctl) {
         return Err(ERROR_INVALID_HANDLE);
     }
+    // The output handle is checked BEFORE the action: a bad one must not let a format run
+    // and only then report the error.
+    output_handle_ok(p, fd)?;
     // The caller's own current directory does not keep a mount busy for it (`desofs
     // unmount` from a shell standing in /disk): its pin is dropped for the action and taken
     // again afterwards – on the same directory, or on "/" when a successful unmount moved it.
@@ -1551,13 +1593,26 @@ fn sys_sysctl(p: &mut Process, h: u64, op: u64, arg: u64, fd: u64) -> SysResult 
     p.set_cwd(cwd);
     let out = out.ok_or(ERROR_INVALID_ARGUMENT)?;
     if !out.is_empty() {
-        // The output handle is not in the table (only used when there is text).
-        if p.handle(fd)?.rights & rights::WRITE == 0 {
-            return Err(ERROR_ACCESS_DENIED);
-        }
         write_fd(p, fd, out.as_bytes())?;
     }
     Ok(0)
+}
+
+/// Whether `write_fd` would take `fd` (checked before an action, not after): the console
+/// (not stdin), or a handle with the WRITE right to a pipe's write end or a file opened
+/// for writing.  ERROR_ACCESS_DENIED – no WRITE right; ERROR_INVALID_HANDLE – anything else.
+fn output_handle_ok(p: &Process, fd: u64) -> Result<(), i64> {
+    if p.is_console(fd) {
+        return if fd == 0 { Err(ERROR_INVALID_HANDLE) } else { Ok(()) };
+    }
+    if p.handle(fd)?.rights & rights::WRITE == 0 {
+        return Err(ERROR_ACCESS_DENIED);
+    }
+    match p.fd(fd)? {
+        Fd::Pipe(e) if e.write => Ok(()),
+        Fd::File(f) if f.write => Ok(()),
+        _ => Err(ERROR_INVALID_HANDLE),
+    }
 }
 
 // ------------------------------------------------------------

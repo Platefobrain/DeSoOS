@@ -229,7 +229,7 @@ exit 7\n";
     if let Err(e) = desofs_in_user_shell() {
         check!(false, "{}", e);
     }
-    serial_println!("[INIT TEST] 9/10 desofs in the user shell: refused without the SYSCTL handle (raw sysctl with a missing number, the console, a pipe, a directory handle; sh without it; a shell's child shell), 'yes' checked by the kernel, the whole disk's SHA-256 unchanged; format / info / mount / check / repair through sh; unmount and format refused while an open file, an open directory, another process's current directory or a child's inherited file uses the mount, allowed once let go (closed or killed); the caller's own current directory does not block it and ends in /; output limit 64 KiB with a truncation line PASS");
+    serial_println!("[INIT TEST] 9/10 desofs in the user shell: refused without the SYSCTL handle (raw sysctl with a missing number, the console, a pipe, a directory handle; sh without it; a shell's child shell), 'yes' checked by the kernel, the whole disk's SHA-256 unchanged; format / info / mount / check / repair through sh; unmount and format refused while an open file, an open directory, another process's current directory or a child's inherited file uses the mount, allowed once let go (closed or killed); the caller's own current directory does not block it and ends in /; a bad output handle (missing, no WRITE, not an output) refused before the action; an unmount while chdir holds its pin but has not finished refused; 'already mounted', 'counted N'; output at most 64 KiB including the truncation line PASS");
 
     // 10. Cleanup: files and frames.  Heap frames (the heap grows when loading
     // a program and returns pages only from the end) and the PT table from test 2 are not
@@ -267,7 +267,8 @@ fn desofs_in_user_shell() -> Result<(), String> {
     let _ = c.write_str(&"y".repeat(60));
     let _ = c.write_str("z");
     let t = c.finish();
-    if t != alloc::format!("{}{}\n... output truncated: 21 bytes more\n", "x".repeat(60), "y".repeat(40)) {
+    // 121 bytes into 100: the text is cut so that the line about it fits inside the limit too.
+    if t != alloc::format!("{}\n... output truncated: 86 bytes more\n", "x".repeat(35)) || t.len() > 100 {
         return Err(alloc::format!("output limit: {:?}", t));
     }
 
@@ -301,6 +302,22 @@ fn desofs_in_user_shell() -> Result<(), String> {
             return Err(alloc::format!("the disk changed during the refusals ({})", out));
         }
         run("work")?;
+        // chdir against unmount: chdir stops after taking its pin and before checking the
+        // directory (test hook); an unmount in that window must be refused.
+        let t = sysctl(crate::shell::SYSCTL_DESOFS_MOUNT, d as u64, &mut cwd).unwrap_or_default();
+        if !t.contains("mounted at /desofs") {
+            return Err(alloc::format!("mount for the chdir race: {:?}", t));
+        }
+        crate::user::syscalls::chdir_pause::arm("/desofs");
+        let sh = start("/bin/sh", &["sh", "-c", "cd", "/desofs"], b"");
+        let reached = wait_for(10_000, crate::user::syscalls::chdir_pause::reached);
+        let during = crate::fs::unmount("/desofs");
+        crate::user::syscalls::chdir_pause::release();
+        let ended = sh.and_then(|id| finish(id, 10_000));
+        if !reached || !matches!(during, Err(crate::fs::FsError::InUse(1))) || ended.is_none() {
+            return Err(alloc::format!("chdir race: paused {}, unmount during the chdir {:?} (must be in use), sh {:?}", reached, during, ended));
+        }
+        crate::fs::unmount("/desofs").map_err(|e| alloc::format!("unmount after the chdir: {}", e))?;
         if !crate::fs::mounts_of_disk(d).is_empty() || crate::fs::mount_users("/desofs").is_some() {
             return Err(String::from("something still mounted after dsfstest work"));
         }

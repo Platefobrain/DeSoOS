@@ -2,6 +2,29 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.65.1 — 2026-11-03
+
+### Fixed (found in a code review)
+- `chdir` checked the directory first and pinned its mount only afterwards: an unmount between the two left the
+  process in a directory whose file system was gone, without a pin. Now the pin is taken first; path and pin change
+  together, the old pin is dropped after.
+- `sysctl` checked the output handle only after the action – `desofs format <disk> yes` with a bad handle formatted
+  the disk and then returned the error. The handle (existing, `WRITE`, a pipe's write end / a file open for writing /
+  the console) is now checked before anything runs.
+- The 64 KiB output limit is now strict: the truncation line fits inside it.
+
+### Changed
+- `desofs info`: "counted 12" instead of "counted Some(12)"; `desofs mount` of a disk already mounted: "disk 0 is
+  already mounted at /disk" (another disk at the same place: "... already in use by another disk") instead of "mount
+  point busy".
+
+### Tests
+- INIT TEST 9/10: `chdir` stops (test builds only) after taking its pin and before its check while the test unmounts
+  – refused with "in use"; sysctl format + yes with the right `SYSCTL` handle but a missing output handle, a pipe's
+  read end, a file opened read-only, a directory handle – refused, the whole disk's SHA-256 unchanged; mount twice,
+  info wording. Mutations caught: the old `chdir` order, the output handle checked after the action (the error codes
+  stay the same – the disk check catches it). 274 tests.
+
 ## v0.65.0 — 2026-11-03
 
 ### Added – `desofs` in the normal shell

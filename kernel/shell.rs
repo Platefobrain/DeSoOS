@@ -1561,7 +1561,11 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             let _ = writeln!(out, "  label {:?}, uuid {:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-..., {} blocks ({} KiB)", r.label, u[0], u[1], u[2], u[3], u[4], u[5], r.total_blocks, r.total_blocks * 4);
             let slot = |s: u8| if s == 1 { "A" } else { "B" };
             let _ = writeln!(out, "  superblock {} generation {}, next commit to {}", slot(r.slot), r.generation, slot(r.next_slot));
-            let _ = writeln!(out, "  {} nodes, {} snapshots, {} blocks used (counted {:?}), maps {} B", r.nodes, r.snapshots, r.used_stored, r.used_counted, r.map_bytes);
+            let counted = match r.used_counted {
+                Some(n) => alloc::format!("counted {}", n),
+                None => String::from("not counted"),
+            };
+            let _ = writeln!(out, "  {} nodes, {} snapshots, {} blocks used ({}), maps {} B", r.nodes, r.snapshots, r.used_stored, counted, r.map_bytes);
             for w in &r.warnings {
                 let _ = writeln!(out, "  warning: {}", w);
             }
@@ -1598,6 +1602,16 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
         ("mount", Some(disk)) => {
             // Disk 0 is /disk (mounted at every start); other disks /desofs until reboot.
             let at = if disk == 0 { "/disk" } else { "/desofs" };
+            // Already mounted (this disk anywhere, or another one at the same place): say so
+            // plainly instead of "mount point busy".
+            if let Some(p) = crate::fs::mounts_of_disk(disk).first() {
+                let _ = writeln!(out, "desofs mount: disk {} is already mounted at {}", disk, p);
+                return;
+            }
+            if crate::fs::mount_list().iter().any(|(p, _, _)| p == at) {
+                let _ = writeln!(out, "desofs mount: {} is already in use by another disk - 'desofs unmount' first", at);
+                return;
+            }
             match crate::fs::desofs::vol::Volume::mount(disk) {
                 Ok(v) => {
                     let ro = v.read_only_reason().map(String::from);
@@ -1892,8 +1906,18 @@ impl Capped {
         Capped { text: String::new(), max, dropped: 0 }
     }
 
+    /// Room kept for the truncation line ("... output truncated: N bytes more" is at
+    /// most ~55 bytes), so the whole text never exceeds `max`.
+    const TAIL: usize = 64;
+
     pub fn finish(mut self) -> String {
         if self.dropped > 0 {
+            let mut keep = self.max.saturating_sub(Self::TAIL + 1).min(self.text.len());
+            while keep > 0 && !self.text.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            self.dropped += self.text.len() - keep;
+            self.text.truncate(keep);
             if !self.text.ends_with('\n') {
                 self.text.push('\n');
             }
