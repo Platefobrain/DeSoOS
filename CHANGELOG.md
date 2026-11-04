@@ -3344,3 +3344,8 @@ opened by path, without a handle).
 - M1 Frame allocator, M2 Paging, M3 Kernel heap, M4 GDT + IDT + exceptions + on-demand mapping.
 - DSB: SysV ABI on the jump to the kernel, `BootInfo` in allocated memory, `uefi 0.41`
   `exit_boot_services()` with the memory map preserved; kernel zeroes `.bss`; QEMU with a FAT disk from `build/`.
+
+## v0.1 — 2026-09
+- First version: the Rust project and DSB, the DeSoOS boot loader – a UEFI application (`uefi` crate) that loads the
+  kernel, leaves the firmware's boot services and jumps to it; the kernel starts on x86_64 and prints its first
+  messages. Built with `build.sh`, run in QEMU with OVMF.
