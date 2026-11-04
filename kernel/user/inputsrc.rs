@@ -1,5 +1,5 @@
 // INPUT handle – injecting input events from a service (usbd).
-// Design: ARCHITECTURE.md, "USB", "Input – `input_inject`".
+// Design: docs/ARCHITECTURE.md, "USB", "Input – `input_inject`".
 //
 // * Only the kernel creates the handle, for init (slot 5); init gives a copy to each usbd.
 //   INPUT is effectively the system keyboard (it can type into the shell), so only

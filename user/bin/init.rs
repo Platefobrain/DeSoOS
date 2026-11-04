@@ -6,7 +6,7 @@
 // Init does not read the keyboard and cannot be killed from user space (kill -> ERROR_NOT_PERMITTED).
 //
 // Service manager (variant A – inside init; variant B, a separate /bin/svcmgr,
-// is described in ARCHITECTURE.md for later).
+// is described in docs/ARCHITECTURE.md for later).
 //   * Services come from manifests, /etc/services/*.svc (read once, at init's start –
 //     a file changed later has no effect; every boot writes them anew from the image).  A manifest says exactly what
 //     a service gets; nothing else is given:

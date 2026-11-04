@@ -1,4 +1,4 @@
-// ublk – in-kernel USB disk.  Design: ARCHITECTURE.md, section "Disk – `ublk` and the request protocol".
+// ublk – in-kernel USB disk.  Design: docs/ARCHITECTURE.md, section "Disk – `ublk` and the request protocol".
 //
 // usbd (user space) drives the flash drive (Bulk-Only + SCSI) and registers it
 // with syscall 50 `blk_attach(BLK, channel, buffer, info)`.  The kernel sees a regular

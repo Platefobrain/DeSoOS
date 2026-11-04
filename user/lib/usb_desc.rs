@@ -3,7 +3,7 @@
 // Err, never in a read past the buffer, an endless loop or an overflow.
 // Malicious-data tests without hardware: /bin/usbparse (USB TEST 1/3).
 //
-// Limits (ARCHITECTURE.md, "Enumeration"): configuration descriptor ≤ 4 KiB,
+// Limits (docs/ARCHITECTURE.md, "Enumeration"): configuration descriptor ≤ 4 KiB,
 // remembered interfaces (alternate setting 0) ≤ 8, endpoints per
 // interface ≤ 16, all interface descriptors (including alternate
 // settings – cameras have dozens of them) ≤ 64.  Interfaces and endpoints

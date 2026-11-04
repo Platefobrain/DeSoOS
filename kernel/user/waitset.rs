@@ -1,5 +1,5 @@
 // Waiting on many handles at once (`wait_many`).
-// Design: ARCHITECTURE.md, "User-space services".
+// Design: docs/ARCHITECTURE.md, "User-space services".
 //
 // Every object that can be waited on (a channel end queue, a pipe, an
 // interrupt) has `Observers` – a list of WaitQueue channels of the tasks waiting

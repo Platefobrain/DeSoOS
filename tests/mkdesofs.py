@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DeSoFS reference image (format 1, docs/DESOFS-FORMAT.md) – an independent
+# DeSoFS reference image (format 1, docs/desofs/FORMAT.md) – an independent
 # implementation of the on-disk format, written from the specification, used by
 # DESOFS TEST: the kernel must accept exactly this image, and the test then breaks
 # copies of it in every way the specification forbids.
@@ -181,7 +181,7 @@ FMT_LABEL = b"DESOFS-FMT"
 
 
 def format_image(blocks, path):
-    """DESOFS-FORMAT chapter 14: the state right after `desofs format`."""
+    """docs/desofs/FORMAT.md chapter 14: the state right after `desofs format`."""
     global img, TOTAL, next_free, UUID
     TOTAL = blocks
     img = bytearray(TOTAL * BLOCK)

@@ -2,6 +2,20 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.66.1 — 2026-11-04
+
+### Changed – documentation only, no code change
+- The main folder holds only `README.md`, `CHANGELOG.md`, `LICENSE` and the build files. `ARCHITECTURE.md` and
+  `RELEASE.md` moved to `docs/`; the DeSoFS format to `docs/desofs/FORMAT.md` (with `docs/desofs/README.md`);
+  `docs/README.md` lists the documents.
+- `ROADMAP.md` removed: what was done is in this file, the current limitations are now the section "Current
+  limitations" at the top of `docs/RELEASE.md` (brought up to date: snapshots exist, DeSoFS speed figures).
+- The font license (`FONT-LICENSE.txt`) is now the header of `kernel/drivers/font.rs` – the SIL OFL allows its text
+  as a human-readable header of the font file; the rest of DeSoOS stays GPL-3.0-or-later.
+- A `README.md` in the main code folders – what the folder holds and where to start: `kernel/`, `kernel/fs/desofs/`,
+  `user/` (was only a title), `tests/`, `common/desocrypto/` (updated).
+- Paths in comments and documents follow the move (`docs/ARCHITECTURE.md`, `docs/desofs/FORMAT.md`).
+
 ## v0.66.0 — 2026-11-03
 
 ### Added – DeSoFS snapshots (stage 5, format 1 unchanged)

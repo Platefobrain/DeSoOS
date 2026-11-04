@@ -1,6 +1,6 @@
 // Channels – `channel_create()` returns a pair of ends; each end has its own
 // queue of incoming messages (the channel is bidirectional).
-// Design: ARCHITECTURE.md, „IPC”.
+// Design: docs/ARCHITECTURE.md, „IPC”.
 //
 // * Message: up to MSG_MAX bytes of data + up to MSG_HANDLES handles
 //   + the sender (pid) filled in by the kernel.  Queue: up to QUEUE_MAX messages.

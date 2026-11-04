@@ -379,7 +379,7 @@ impl<T> core::ops::DerefMut for MutexGuard<'_, T> {
 //
 // State under IrqSpinLock (short sections, no allocation): an interrupt inside a section
 // under a plain SpinLock takes the BKL – deadlock with a CPU that holds the BKL
-// and waits for the same lock (rule from ARCHITECTURE.md).
+// and waits for the same lock (rule from docs/ARCHITECTURE.md).
 //
 // Separate reader and writer queues (each with its own change
 // counter – the wait condition is a single atomic).  Unlock wakes only those

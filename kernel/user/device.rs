@@ -1,5 +1,5 @@
 // PCI device claimed by a user-space service.
-// Design: ARCHITECTURE.md, "User-space services".
+// Design: docs/ARCHITECTURE.md, "User-space services".
 //
 // * `HW_ROOT` (a handle without DUP / TRANSFER rights) is given only to /bin/init –
 //   `dev_claim` takes individual devices out of it.

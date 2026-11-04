@@ -1,4 +1,4 @@
-// DeSoFS – DeSoOS's own copy-on-write file system (format 1, docs/DESOFS-FORMAT.md).
+// DeSoFS – DeSoOS's own copy-on-write file system (format 1, docs/desofs/FORMAT.md).
 //
 // So far (stage 1): read-only checking of a volume – `probe(disk)` reads both
 // superblocks, walks every tree reachable from them, checks every metadata block

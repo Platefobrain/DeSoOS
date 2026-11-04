@@ -1,4 +1,4 @@
-# DeSoOS v0.66.0
+# DeSoOS v0.66.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -13,11 +13,12 @@ UEFI firmware (OVMF in QEMU) -> DSB (DeSoOS boot loader) -> DeSoOS kernel
 
 More documentation:
 
-- `ARCHITECTURE.md` - architecture: what lives in the kernel, what runs in user space, syscalls
-  and IPC.
-- `CHANGELOG.md` and `ROADMAP.md` - detailed development history and plans.
-- `RELEASE.md` - release report: tests passed, QEMU / KVM configuration, real-hardware results, known
-  problems, performance against the previous release.
+- `CHANGELOG.md` - every change, version by version.
+- `docs/` - the documentation of the whole system (index: `docs/README.md`): `docs/ARCHITECTURE.md` (what lives in
+  the kernel, what runs in user space, syscalls and IPC), `docs/RELEASE.md` (tests, real hardware, performance and
+  current limitations per release), `docs/desofs/` (the DeSoFS file system and its on-disk format).
+- A `README.md` in the main code folders (`kernel/`, `kernel/fs/desofs/`, `user/`, `common/desocrypto/`, `tests/`)
+  – what the folder holds and where to start reading.
 
 ## Features
 
@@ -46,7 +47,7 @@ More documentation:
   HMAC-SHA256, HKDF-SHA256 (no heap, no syscalls); tool `sha256sum`.
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
-  (`docs/DESOFS-FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
+  (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
   operation is tested against power loss at each write.
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
@@ -289,7 +290,7 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
 - `dcp` - permissions (DCP, DeSoOS Capability Permissions): what every process may do (devices,
   system powers, files). `dcp inspect <pid>` - every capability of one process with its rights;
   `dcp audit` - the last refused attempts. DeSoOS has no users or `rwx` bits: a program may do
-  exactly what its capabilities allow (see ARCHITECTURE.md, "Syscalls and handles").
+  exactly what its capabilities allow (see docs/ARCHITECTURE.md, "Syscalls and handles").
 - `netconfig` - network cards: driver, MAC address, link, IPv4 address, gateway and DNS servers (from
   DHCP), lease time, frame counters. `netconfig renew` - renew the DHCP lease now. `netconfig set
   192.168.1.50/24 gw 192.168.1.1 dns 192.168.1.1` - an address by hand (for a cable without a DHCP server;
@@ -375,7 +376,7 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
   process; `run loop` - endless loop (Ctrl+C or `&` + `kill`).
 - Syscalls: `run hello`, `run cat`, `run files` (then `cat /tmp/ring3.txt`), `run ticker &`,
   `run regs` (100k syscalls), `run badptr` (bad pointer -> -14). Syscall list:
-  `kernel/user/syscalls.rs` and `ARCHITECTURE.md`.
+  `kernel/user/syscalls.rs` and `docs/ARCHITECTURE.md`.
 - FPU/SSE: `run sse` (42), `run x87` (3), `run xmm 3` (3 processes checking xmm0-15 2 million
   times; 1 = no corruption), `run fpuclean` (new processes start with clean registers).
 - Kernel tasks: `spawn spin`, `spawn tick`, `kill <id>`.
@@ -389,7 +390,8 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel) and DeSoCrypto
   (`common/desocrypto/`, kernel and programs).
 - `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
-- `docs/` - specifications (`DESOFS-FORMAT.md` – the DeSoFS on-disk format).
+- `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
+  on-disk format).
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
 - `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.
 - `build/` - build output; `logs/` - test and build logs.
@@ -400,7 +402,8 @@ DeSoOS is licensed under the GNU General Public License v3 or later (`GPL-3.0-or
 text in `LICENSE`.
 
 Exception: `kernel/drivers/font.rs` is a modified subset of Terminus Font (Copyright (c) 2020
-Dimitar Toshkov Zhekov), licensed solely under the SIL Open Font License 1.1 (`OFL-1.1`); see
-`FONT-LICENSE.txt`.
+Dimitar Toshkov Zhekov), licensed solely under the SIL Open Font License 1.1 (`OFL-1.1`); the full license text is
+in the header of that file.
 
-When distributing DeSoOS (including `BOOTX64.EFI`), include `LICENSE` and `FONT-LICENSE.txt`.
+When distributing DeSoOS (including `BOOTX64.EFI`), include `LICENSE` and the font license from
+`kernel/drivers/font.rs`.

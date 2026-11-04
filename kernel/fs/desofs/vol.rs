@@ -5,7 +5,7 @@
 // blocks are written bottom-up (a parent stores its children's SHA-256), flushed, and a
 // new superblock goes to the slot with the older generation, flushed again.  Only then
 // is the operation done.  Blocks the new tree no longer uses are still in the tree of
-// the older superblock, so they become free one commit later (DESOFS-FORMAT ch. 10).
+// the older superblock, so they become free one commit later (docs/desofs/FORMAT.md ch. 10).
 //
 // Space: before anything is changed an operation computes the most blocks it can
 // allocate and refuses with "no space" if they are not there – never half-way.  A
@@ -1210,7 +1210,7 @@ impl<'a> Tx<'a> {
     }
 
     /// Part of a directory from byte position `cursor` = logical block × 4096 + offset of
-    /// an entry (DESOFS-FORMAT chapter 13): up to `max` entries and the position of the
+    /// an entry (docs/desofs/FORMAT.md chapter 13): up to `max` entries and the position of the
     /// next active entry (None = end).  The position must be the start of an entry
     /// (FsError::BadCursor otherwise); deleted entries are stepped over by their length.
     fn dir_list_at(&mut self, dir_n: u64, dir: &NodeBuf, cursor: u64, max: usize) -> R<crate::fs::DirPart> {

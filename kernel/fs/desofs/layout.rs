@@ -1,4 +1,4 @@
-// DeSoFS format 1 – on-disk structures and their checks (docs/DESOFS-FORMAT.md).
+// DeSoFS format 1 – on-disk structures and their checks (docs/desofs/FORMAT.md).
 //
 // Everything read from a disk is untrusted: each parser checks every field the
 // specification constrains (ranges, fields that must be zero, counts) and returns
@@ -175,7 +175,7 @@ pub fn min_depth(blocks: u64) -> u8 {
 pub const TYPE_FILE: u8 = 1;
 pub const TYPE_DIR: u8 = 2;
 
-/// An occupied node after the format-1 checks (DESOFS-FORMAT chapter 7).
+/// An occupied node after the format-1 checks (docs/desofs/FORMAT.md chapter 7).
 #[derive(Clone, Copy, Debug)]
 pub struct Node {
     pub number: u64,
@@ -250,7 +250,7 @@ impl Node {
     }
 }
 
-/// One root-block entry (DESOFS-FORMAT chapter 5).
+/// One root-block entry (docs/desofs/FORMAT.md chapter 5).
 #[derive(Clone, Copy, Debug)]
 pub struct RootEntry {
     pub kind: u8,
@@ -317,7 +317,7 @@ impl RootEntry {
     }
 }
 
-/// Checks one directory block (DESOFS-FORMAT chapter 8) and calls `entry(node,
+/// Checks one directory block (docs/desofs/FORMAT.md chapter 8) and calls `entry(node,
 /// type, name)` for every occupied entry; returns how many there were.  Entries
 /// must cover the block exactly; deleted entries and padding must be zeros.
 pub fn check_dir_block(b: &[u8], mut entry: impl FnMut(u64, u8, &[u8]) -> Result<(), Why>) -> Result<usize, Why> {

@@ -55,7 +55,7 @@ pub struct DirObj {
 
 /// Handle rights (bits).  Rights can only be reduced (handle_dup); a missing
 /// right = ERROR_ACCESS_DENIED (the syscall rights table, sysrights.rs).
-/// Design: ARCHITECTURE.md, "Syscalls and handles".
+/// Design: docs/ARCHITECTURE.md, "Syscalls and handles".
 pub mod rights {
     pub const READ: u32 = 1;
     pub const WRITE: u32 = 2;

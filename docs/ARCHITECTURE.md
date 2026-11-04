@@ -1,6 +1,7 @@
 # DeSoOS Architecture
 
-How the system is built and how it works. Change history lives in `CHANGELOG.md`, the plan in `ROADMAP.md`.
+How the system is built and how it works. Change history lives in `CHANGELOG.md`, test results and current limitations
+in `docs/RELEASE.md`.
 
 ## Overview
 
@@ -1357,7 +1358,7 @@ needed):
 
 ## DeSoFS (`kernel/fs/desofs/`)
 
-DeSoOS's own file system, format 1 – the full specification is `docs/DESOFS-FORMAT.md` (closed; changes only as
+DeSoOS's own file system, format 1 – the full specification is `docs/desofs/FORMAT.md` (closed; changes only as
 numbered errata until stage 4). In short: copy-on-write, two superblocks written alternately (the next commit goes to
 the one with the older generation), every pointer carries the SHA-256 of the block it points to (a Merkle tree), fixed
 fan-out trees of 84 pointers, 256-byte nodes with permanent numbers, directories as blocks of entries like ext2. There
@@ -1457,7 +1458,7 @@ it was; an interrupted repair leaves a mountable volume and can be repeated.
 ### Directories in parts
 
 `read_dir_at(path, cursor, max) -> (entries, next)` in `FileSystem`, `ConcurrentFs`, `Locked` and the VFS. DeSoFS:
-the cursor is a byte position (logical directory block × 4096 + entry offset, DESOFS-FORMAT chapter 13) – it must be
+the cursor is a byte position (logical directory block × 4096 + entry offset, `docs/desofs/FORMAT.md` chapter 13) – it must be
 the start of an entry (found by stepping over `rec_len` from the block start; deleted entries keep their length, a
 length under 16 is a damaged block), otherwise `FsError::BadCursor`. An entry present during the whole listing and
 not moved appears exactly once. Default (ramfs, FAT32): an index into the full list. The kernel-shell `ls` reads in

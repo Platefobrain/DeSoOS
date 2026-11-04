@@ -18,7 +18,7 @@
 // Diagnostics (a mini lockdep):
 //   * ordering: every lock has a level (`level`); on one CPU you may only take
 //     locks with a level HIGHER than all those already held – the order is
-//     documented in ARCHITECTURE.md, constants in `level`.  A violation = panic with
+//     documented in docs/ARCHITECTURE.md, constants in `level`.  A violation = panic with
 //     the names of both locks and their code locations,
 //   * recursion: the same CPU takes a lock it already holds -> panic (otherwise
 //     it would spin forever),
@@ -41,7 +41,7 @@ use crate::arch::x86_64::cpu::{self, MAX_CPUS};
 use crate::arch::x86_64::{clock, interrupts};
 
 /// Lock levels (acquisition order: ascending).  List and rationale:
-/// ARCHITECTURE.md, "Lock ordering".
+/// docs/ARCHITECTURE.md, "Lock ordering".
 #[allow(dead_code)]
 pub mod level {
     /// VFS (outer – calls block, heap, the allocator).
@@ -301,7 +301,7 @@ impl RawSpin {
                     panic!("spinlock '{}': CPU {} takes it again at {}:{} (deadlock with itself)", self.name, cpu::id(), f, l)
                 }
                 LockError::Order { held, held_level } => panic!(
-                    "spinlock order: '{}' (level {}) taken at {}:{} while holding '{}' (level {}) - see ARCHITECTURE.md",
+                    "spinlock order: '{}' (level {}) taken at {}:{} while holding '{}' (level {}) - see docs/ARCHITECTURE.md",
                     self.name, self.level, f, l, held, held_level
                 ),
                 LockError::TooMany => panic!("spinlock '{}': more than {} locks held at {}:{}", self.name, MAX_HELD, f, l),

@@ -1,4 +1,4 @@
-// `desofs check` and `desofs repair` (DESOFS-FORMAT chapter 9 "leaving read-only",
+// `desofs check` and `desofs repair` (docs/desofs/FORMAT.md chapter 9 "leaving read-only",
 // chapter 13 "when it is checked", errata E3).
 //
 // check – reads, never writes, refuses a mounted volume:

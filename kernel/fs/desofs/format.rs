@@ -1,4 +1,4 @@
-// `desofs format` – writes the state of DESOFS-FORMAT chapter 14: blocks 0-15 zeroed
+// `desofs format` – writes the state of docs/desofs/FORMAT.md chapter 14: blocks 0-15 zeroed
 // first (both superblock slots too, so an older volume's superblock can never sit next
 // to the new one), then the node block, the node-table pointer block and the root
 // block, then superblock B, then A – each step followed by a flush.  An interrupted

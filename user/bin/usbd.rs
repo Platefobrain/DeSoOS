@@ -1,5 +1,5 @@
 // usbd – xHCI USB controller driver as a user-space service.
-// Design: ARCHITECTURE.md, section "USB".  One instance per
+// Design: docs/ARCHITECTURE.md, section "USB".  One instance per
 // controller; init finds controllers by class (dev_find 0C0330) and starts
 // usb0, usb1, …
 //
@@ -59,7 +59,7 @@
 // "list" – devices (usblist); "noop N" – N No-Op commands, "noop N <ns>";
 // "idle MS" – HID reports every MS ms even without changes (interrupt pipeline test in QEMU).
 //
-// DMA without an IOMMU (ARCHITECTURE.md): usbd itself writes physical addresses into the
+// DMA without an IOMMU (docs/ARCHITECTURE.md): usbd itself writes physical addresses into the
 // controller's structures – the kernel does not check them.  Process isolation protects
 // against crashes and hangs, not against bad DMA; that is why usbd is system code (initrd).
 //

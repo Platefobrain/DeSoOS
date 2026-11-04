@@ -1,7 +1,7 @@
 // DESOFS TEST – DeSoFS format 1, stage 1: the read-only check of a volume.
 //
 // The reference image comes from tests/mkdesofs.py – an independent implementation
-// of the format written from docs/DESOFS-FORMAT.md – so the kernel and the script
+// of the format written from docs/desofs/FORMAT.md – so the kernel and the script
 // must agree on every byte.  Then copies of it are broken in each way the
 // specification forbids; most changes are "resealed" (every checksum above the change
 // recomputed), so the check has to catch the rule itself, not just a bad checksum.

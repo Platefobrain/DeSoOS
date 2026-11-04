@@ -11,7 +11,7 @@
 // single-threaded: a process runs on one CPU at a time, and a CPU that leaves it
 // always loads a different CR3 (another task, a kernel task, idle), which without PCID
 // and without global pages flushes all its entries.  Threads / shared memory
-// – the address space's `active_cpus` mask, see ARCHITECTURE.md.
+// – the address space's `active_cpus` mask, see docs/ARCHITECTURE.md.
 //
 // Mechanism: one request at a time (the `LOCK` lock), range in atomics,
 // `PENDING` = mask of CPUs that have not acknowledged yet.  Receiver: vector

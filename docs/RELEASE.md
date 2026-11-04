@@ -1,12 +1,159 @@
 # DeSoOS Release Report
 
 One section per release, newest on top: what was tested, where, with what result, what is known to be wrong, and
-how performance moved against the previous release. Details of every change: `CHANGELOG.md`; plans and all known
-gaps: `ROADMAP.md`.
+how performance moved against the previous release. Details of every change: `CHANGELOG.md`; what DeSoOS does
+not do yet: "Current limitations" below (kept up to date with every release).
 
 How the numbers are taken: `tests/test.sh` (QEMU TCG) and `ACCEL=kvm tests/test.sh` on the build machine; the
 `[RESULT-…]` lines at the end of each run. Performance differences under ~10% between two runs are noise (TCG
 timings move by ±15% from run to run on the same build).
+
+---
+
+## Current limitations
+
+**Memory**
+- kernel heap: programs are stopped 8 MiB before it is full; the kernel's own allocations (scheduler,
+  drivers, services' kernel side) are not fallible – they rely on that 8 MiB; no test fills the heap from inside the
+  kernel
+- splitting a 2 MiB direct-map page (map_mmio) is one-way – 4 KiB pages are not merged back later
+- the heap shrinks only from the end; large blocks (> 2 KiB) still under a single heap lock (address-ordered list, first-fit)
+- core TSCs are not synchronized (test laptop) – times measured on a single CPU (statistics, profile); no TSC synchronization
+- frame allocator: `alloc_frames(n)` is linear; no "below 4 GiB" zone for 32-bit DMA
+- PML4[256..512) allocated from the start (~1 MiB of empty PDPTs) – the kernel will not add a new entry later
+- DSB page tables and LOADER_DATA/BOOT_SERVICES memory are not returned to the allocator
+- direct map max 512 GiB RAM (the kernel has room for 64 TiB)
+- kernel image without NX (only code is RO) – together with DSB
+
+**Processes and syscalls**
+- `dcp audit` keeps 16 ancestors per entry: a viewer more than 16 levels up does not see the refusal; a process whose
+  parent ended is reparented to init, so its later refusals are no longer seen by the old grandparent
+- `spawn` instead of `fork`/`exec`; no environment variables or signals (kill = process exit)
+- system actions (`sysctl`) behind a single `SYSCTL` handle – no split into reboot / sync / stress / `desofs` (`desofs info` / `check` also need it); raw disk writes only from the kernel's emergency shell
+- `desofs check` runs inside one syscall: no progress until it ends and no Ctrl+C (64 MiB – a fraction of a second; a large disk will need progress and cancelling)
+- snapshots: no automatic ones, no snapshot of a single directory (one live file system per volume in format 1), no creation time (the format stores only the generation); `snapshot delete` / `restore` and `snapshot list` walk the volume (like a mount; one walk per snapshot for the list); a snapshot whose name came from another tool and breaks the stricter rules can be listed but not mounted or deleted through the shell
+- "in use" says how many handles, not which process (`ps`, `dcp` show it); mounting a file system over a directory inside a mount in use is not refused
+- PID = scheduler task number (0 = BSP idle, 1 = kernel startup task, then the idle tasks of the other cores – with 4 CPUs init has PID 5)
+- shell: line max ~70 characters (fits in 80 columns), no scripts, variables or `$?`
+- directory handles hold a path, not the directory: a directory removed and created again under the same name is
+  reached through the old handle; the shell's `cd` and unsandboxed programs still use global paths
+- IPC: no futex and no ring buffers in the library
+- ELF: only static ET_EXEC, envp and auxv empty
+- programs from `/bin` built into the kernel image (initrd); the asm test programs too (only from the kernel's emergency shell: `run <name>`)
+- limits are global, not per user: 1024 processes, kernel memory reserve, 16 MiB of IPC buffers, 24 MiB ramfs; kernel heap 64 MiB
+- `read(0)` reads a whole line; background processes compete with the shell for the keyboard (`readkey`/`read` – first come, first served)
+
+**Scheduler and concurrency**
+- TLB shootdown only for the upper half (kernel); process address spaces rely on processes being single-threaded (threads – later)
+- device interrupts only to the BSP; no priorities or balancing (a task takes the first free CPU)
+- on laptops the firmware stops the machine (SMI) for 30–70 ms while each xHCI controller is handed over at boot,
+  and for ~2 ms now and then later; PIT ticks are caught up from the HPET
+- CPU time on APs is sampled (the LAPIC tick every 10 ms assigns 10 ms to the task that happens to be running)
+- at most 16 CPUs (Ryzen 7 4800H = 16 threads); SMP requires RDTSCP, MADT and I/O APIC
+- no priorities; `kill` of a kernel task is cooperative (the task itself checks `should_exit`)
+- kernel without preemption in the middle of a syscall (only sleeping locks)
+
+**DeSoFS**
+- power loss is tested on RAM disks that model a disk cache (anything since the last flush may or may not land, in
+  any order, by 512-byte sector); a disk that ignores flushes or lies about them is not covered – no file system
+  can be; the random draws use a fixed seed (the same images every run)
+- only disk 0 is mounted at start (`/disk`); other disks by hand (`desofs mount` → `/desofs`); `rename` exists for
+  the kernel (VFS, kernel-shell `mv`), not yet as a syscall – the user-space `mv` still copies
+- slow without a cache: every read verifies the SHA-256 of every block on the way, a name is found by reading the
+  directory block by block (TCG: 8 MiB written at ~6 MiB/s, 1000 small files created in ~19 s; see `[RESULT-FS]`)
+- every operation is its own commit (2 flushes): a `write_file` is truncate + write = two commits, so a power loss
+  between them leaves an empty file – safe replacement is write to a new file + `rename`
+- format 1: volumes up to 64 GiB (the map of the walk needs 18 MiB there); linear directory search; no hard links,
+  no preallocation
+- the walk re-reads metadata shared between roots instead of storing pointers; inside later roots (snapshots, the
+  older superblock) duplicate blocks are found only outside shared subtrees – `desofs check` walks every root fully
+- `desofs check` / `repair` only on an unmounted volume; `repair` only goes back to a whole sound superblock's
+  state – no rescue of single files from a damaged tree; check compares at most 65 536 data blocks shared by two
+  pointer blocks, relations only up to 16 M node numbers – past a limit the check is marked INCOMPLETE (a warning) and
+  repair refuses that superblock
+- directories in parts: ramfs and FAT32 count the position as an index (not stable while the directory changes); DeSoFS
+  uses the byte position (stable)
+
+**Cryptography (DeSoCrypto)**
+- only SHA-256, HMAC-SHA256 and HKDF-SHA256; no random numbers, ciphers, key exchange or signatures yet, no TLS –
+  `netget https://` is refused
+- not hardened against timing side channels beyond the constant-time tag check, not audited – fine for
+  checksums, not yet for protecting secrets; keys are wiped when HMAC / SHA-256 objects are dropped, but temporary
+  copies on the stack (e.g. the message schedule) are not
+
+**Hardware**
+- INTx interrupts on real hardware: a device's IRQ line requires ACPI AML (_PRT) – drivers use MSI/MSI-X
+- block layer: one operation across all disks at a time (global lock) – NVMe queues the commands of one request, different tasks wait in turn
+- virtio-blk: copying through a 64 KiB DMA buffer, only the first virtio disk; NVMe: 128 KiB buffer (copying)
+- NVMe: one I/O queue pair, first active namespace, no metadata; a real SSD is read-only (deliberately)
+- FAT32: an I/O error in the middle of a write can leave lost clusters
+- GPT: read-only; MBR – only via FAT32 (first FAT32 partition); FAT32 only with 512 B sectors (an ESP on a 4Kn disk will not mount)
+- without a serial port, logs only on screen (status bar in the top-right corner: time, keyboard)
+- USB keyboard only via usbd (user space): a dead usbd = no keyboard until init restarts it
+- USB keyboard and mouse only in boot protocol (no multimedia keys); the test laptop's touchpad is unsupported
+- USB stick read-only (deliberately), 512 / 4096 B blocks, ≤ 2 TiB, LUN 0, no UAS
+- hubs: single TT only (no Multi-TT), no port power management (suspend / LPM), TT tested only on
+  real hardware (QEMU has a full-speed hub – no TT)
+- FAT32 reads cluster by cluster (USB stick with 512 B clusters: a few hundred KiB/s in QEMU)
+- IDT: ISA vectors (0x20–0x2F, via I/O APIC), MSI (0x30–0x3F), LAPIC timer / IPI (0x40–0x42), spurious (0xFF); #BP has DPL 3
+- FPU: FXSAVE only, no AVX; QEMU TCG does not raise #XM
+- mouse (PS/2 and USB) only for console scrolling; system autorepeat only for USB (PS/2 – hardware)
+- hard-coded keyboard layout (Polish programmer's)
+
+**Network**
+- no TLS (`https://` refused), no IPv6, no UDP sockets for programs (UDP only inside netd: DHCP, DNS)
+- 8 TCP connections per netd (1 MiB receive ring each), 8 KiB send ring (uploads slow)
+- cards: Intel 8254x / 82574 (QEMU) and Realtek 8168g/8168h; no USB Ethernet, no Wi-Fi
+- DMA without an IOMMU: netd and usbd are trusted system code
+
+**Files**
+- FAT32: no GPT, FAT12/16, sectors ≠ 512 B; files max 4 GiB; `mv` of directories not implemented; times in UTC
+- one lock for the whole VFS
+- OVMF (QEMU firmware) writes NvVars to the first FAT – also to `/disk` or the ESP of the NVMe disk (firmware behavior, not DeSoOS; `build/` is read-only)
+
+**Console**
+- scrollback 1000 lines, shell line max 71 characters, font with 234 glyphs (the rest shown as `?`)
+- M1–M4 logs only on serial; if serial is blocked, serial output is lost
+
+**Tests**
+- recovery procedure in `exceptions.rs` (`RESUME_RIP`, `probe_read`) only for tests
+
+---
+
+## v0.66.1 — 2026-11-04
+
+**Status: stable on QEMU (TCG and KVM); documentation only – no code change.**
+
+### What is new since the last report (v0.66.0)
+
+| Version | Change |
+|---|---|
+| v0.66.1 | documentation reorganised: `ARCHITECTURE.md`, `RELEASE.md` and the DeSoFS format moved to `docs/` (index `docs/README.md`, `docs/desofs/`); `ROADMAP.md` removed – the current limitations are the section at the top of this file; the font license moved into the header of `kernel/drivers/font.rs`; a `README.md` in the main code folders |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 279 tests PASS | 172 s (restart 38 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 279 tests PASS | 103 s (restart 16 s) |
+
+### Performance against the previous release (v0.66.0 → v0.66.1, same machine)
+
+| | TCG v0.66.0 | TCG v0.66.1 | KVM v0.66.0 | KVM v0.66.1 |
+|---|---|---|---|---|
+| irq_user_ns | 12 219 | 12 391 | 66 777 | 65 552 |
+| fact_user_ns | 74 934 | 71 047 | 94 206 | 83 998 |
+| fact_svc_ns | 191 570 | 175 901 | 102 774 | 105 429 |
+| restart_us | 6 200 | 3 700 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 34 133 | 83 591 | 91 022 | 89 043 |
+| rights gate_ns | 75 | 27 | 5 | 6 |
+| crypto sha256 kernel / user (KiB/s) | 47 921 / 51 200 | 49 425 / 49 920 | 178 308 / 217 600 | 180 480 / 211 840 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 099 / 5 688 | 5 657 / 5 614 | 13 721 / 16 384 | 13 721 / 17 925 |
+| DeSoFS 1000 small files create / read (ms) | 19 150 / 6 878 | 19 944 / 7 826 | 9 159 / 2 264 | 9 472 / 2 564 |
+| `desofs check` (ms) | 915 | 950 | 297 | 325 |
+
+Verdict: no regression – the same code (comments only). TCG `gate_ns` back to 27 and usbd read back to 83 591 after
+the one-run lows of v0.66.0; the rest moves within the usual run-to-run spread.
 
 ---
 
@@ -678,7 +825,7 @@ the USB numbers move within their known spread of the emulated stick (TCG read 6
 
 | Version | Change |
 |---|---|
-| v0.60.0 | DeSoFS format 1 closed (`docs/DESOFS-FORMAT.md`, errata E1–E3); `kernel/fs/desofs/` – read-only check of a volume (both superblocks, every metadata block and node, mount decision); `desofs info <disk>` in the kernel shell; `tests/mkdesofs.py` – reference image from an independent implementation; new suite DESOFS TEST |
+| v0.60.0 | DeSoFS format 1 closed (`docs/desofs/FORMAT.md`, errata E1–E3); `kernel/fs/desofs/` – read-only check of a volume (both superblocks, every metadata block and node, mount decision); `desofs info <disk>` in the kernel shell; `tests/mkdesofs.py` – reference image from an independent implementation; new suite DESOFS TEST |
 
 ### Tests
 
@@ -1071,7 +1218,7 @@ New: FS TEST 12/12 (a FAT32 volume patched on disk: a 3.75 GiB file entry → `E
 ### Known problems
 
 - The kernel's own allocations (scheduler, drivers, the kernel side of services) are not fallible; they rely on
-  the 8 MiB heap reserve. Item J of the code review is closed (ROADMAP "Next", 0.J).
+  the 8 MiB heap reserve. Item J of the code review is closed.
 - Otherwise as in v0.57.1.
 
 ### Performance against the previous release (v0.57.1 → v0.57.2, same machine)
@@ -1128,7 +1275,7 @@ The new `oomtest` is ~10 s faster on TCG than in v0.57.0 (98 s → 88 s for the 
 ### Known problems
 
 - Kernel heap: the kernel's own work past the reserve and a fragmented heap after it had been full are not
-  checked by a test yet (ROADMAP "Next", 0.J3).
+  checked by a test yet.
 - Otherwise as in v0.57.0.
 
 ### Performance against the previous release (v0.57.0 → v0.57.1, same machine)
@@ -1189,7 +1336,7 @@ on KVM – the main reason for the longer TCG run.
 - After the kernel heap has been full, its free space is fragmented: no multi-MiB blocks may be allocated at run
   time (the RAM disk of the tests was the one that did – fixed). Pipe writers still hold a 64 KiB copy while
   waiting, and ramfs does not count empty files in its limit – both stopped by the reserve now, to be fixed at the
-  source (ROADMAP "Next", 0.J2).
+  source.
 - Otherwise as in v0.56.1.
 
 ### Performance against the previous release (v0.56.1 → v0.57.0, same machine)
@@ -1247,7 +1394,7 @@ check does not touch – TCG noise.
 
 ### Known problems
 
-- A full kernel heap still panics the kernel on many allocation paths (ROADMAP "Next", 0.J).
+- A full kernel heap still panics the kernel on many allocation paths.
 - Otherwise as in v0.56.0 (the orphan failure is fixed).
 
 ### Performance against the previous release (v0.56.0 → v0.56.1, same machine)
@@ -1369,7 +1516,7 @@ TEST 7/8 (`dcp audit`: 16 generations down seen, 17 not).
 
 - Twice in the build server's runs (not on the build machine): NOBKL TEST 10/10 "199 of 200 orphans reaped" – a
   timing race in the test; next to be fixed (a loop mode for the self-tests first, to reproduce it).
-- A full kernel heap still panics the kernel on many allocation paths (ROADMAP "Next", 0.J).
+- A full kernel heap still panics the kernel on many allocation paths.
 - Otherwise as in v0.55.0.
 
 ### Performance against the previous release (v0.55.0 → v0.55.1, same machine)
@@ -1510,7 +1657,7 @@ Unchanged since the v0.52.1 report (last measured v0.47.0 / v0.35.2 / v0.29.0).
 
 - From the code review, still open: FAT32 on an MBR partition does not keep the partition length (the size is
   checked only against the end of the disk); an I/O error in the middle of a FAT32 write can leave lost clusters;
-  `dcp audit` shows children, not grandchildren. Plan in `ROADMAP.md` ("Next", 0.D–F).
+  `dcp audit` shows children, not grandchildren.
 - Once in the build server's runs: NOBKL TEST 10/10 reported 199 of 200 orphans reaped (a timing race in the test,
   not seen on the build machine); to be looked at.
 - Otherwise as in v0.53.0.
@@ -1574,7 +1721,7 @@ Unchanged since the v0.52.1 report (last measured v0.47.0 / v0.35.2 / v0.29.0).
 ### Known problems
 
 - Directory handles hold a path, not the directory (a directory removed and created again under the same name is
-  reached through the old handle); plan in `ROADMAP.md`.
+  reached through the old handle).
 - Otherwise as in v0.52.1: no TLS / IPv6 / UDP sockets for programs, DMA without an IOMMU, at most 16 CPUs.
 
 ### Performance against the previous release (v0.52.1 → v0.53.0, same machine)
@@ -1659,7 +1806,7 @@ next release that touches the scheduler or drivers.
 - Files: any unsandboxed program may open any path (directory handles – next DCP step); FAT32 only with 512-byte
   sectors; real SSDs are read-only on purpose.
 - At most 16 CPUs; device interrupts only to the boot CPU.
-- Full list: `ROADMAP.md`, "Known gaps".
+- Full list: "Current limitations" at the top.
 
 ### Performance against the previous release (v0.52.0 → v0.52.1, same machine)
 

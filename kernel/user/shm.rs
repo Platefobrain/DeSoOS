@@ -1,5 +1,5 @@
 // Shared memory – an object with frames, mapped into the address spaces of
-// several processes.  Design: ARCHITECTURE.md, "IPC".
+// several processes.  Design: docs/ARCHITECTURE.md, "IPC".
 //
 // * `shm_create(size)` – frames are taken immediately and zeroed, size
 //   rounded up to 4 KiB, at most SHM_MAX.

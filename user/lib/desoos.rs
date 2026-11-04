@@ -9,7 +9,7 @@
 //
 // _start (the kernel jumps here with RSP pointing at argc, argv[], NULL, envp
 // NULL, auxv AT_NULL – the SysV layout) -> main(args) -> exit(code).
-// Syscalls: numbers from kernel/user/syscalls.rs (table in ARCHITECTURE.md).
+// Syscalls: numbers from kernel/user/syscalls.rs (table in docs/ARCHITECTURE.md).
 //
 // Processes (spawn/wait/kill), directories, keys for the line editor
 // and a heap: a program that wants Vec/String writes at its crate root

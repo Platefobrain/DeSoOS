@@ -1,5 +1,5 @@
 // netd – network card service (one per card), started by init as `net0`, `net1`…
-// Design: ARCHITECTURE.md, "Network".  The driver (reset, MAC, rx/tx rings, MSI)
+// Design: docs/ARCHITECTURE.md, "Network".  The driver (reset, MAC, rx/tx rings, MSI)
 // and the protocols: ARP (cache, answers for our address), IPv4 (header checks,
 // no fragments), ICMP echo (answers pings, `ping` for clients), UDP, and a DHCP
 // client for the address, gateway and DNS servers (user/lib/dhcp.rs – a pure state
