@@ -7,6 +7,8 @@
 #   DURATION=8h tests/soak.sh          for the night (s / m / h: 90s, 30m, 8h)
 #   SEED=12345 tests/soak.sh           the same run again (the seed is always printed)
 #   ACCEL=tcg tests/soak.sh            without KVM (slower)
+#   SOAK_DISK=ram tests/soak.sh        DeSoFS on a RAM disk made by the soak (`desofs ramdisk`)
+#                                      instead of the virtio disk – the way it runs on hardware
 #   tests/soak.sh --no-build           without ./build.sh --selftest first
 #
 # Exit codes: 0 = PASS, 1 = FAIL (the soak reported an error), 2 = HANG (no heartbeat for
@@ -38,6 +40,12 @@ case "$DURATION" in
 esac
 [ "$SECS" -ge 60 ] 2>/dev/null || { echo "DURATION: at least 60 s (got: $DURATION)"; exit 4; }
 SEED="${SEED:-$(date +%s)}"
+SOAK_DISK="${SOAK_DISK:-virtio}"
+case "$SOAK_DISK" in
+  virtio) PHASE_DISK="" ;;
+  ram) PHASE_DISK=" ram" ;;
+  *) echo "SOAK_DISK: virtio or ram (got: $SOAK_DISK)"; exit 4 ;;
+esac
 case "$SEED" in *[!0-9]*|"") echo "SEED: a number (got: $SEED)"; exit 4 ;; esac
 SMP="${SMP:-4}"
 ACCEL="${ACCEL:-kvm}"
@@ -67,11 +75,11 @@ OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.fd"
 [ -f "$OVMF_CODE" ] || { echo "OVMF not found (sudo apt install ovmf)"; exit 4; }
 
 # Own disk images (sparse) – tests/test.sh's and your disk.img stay untouched.
-SOAK_DISK="$ROOT/build-soak-disk.img"
+SOAK_IMG="$ROOT/build-soak-disk.img"
 SOAK_NVME="$ROOT/build-soak-nvme.img"
 SOAK_USB="$ROOT/build-soak-usb.img"
-rm -f "$SOAK_DISK" "$SOAK_NVME" "$SOAK_USB"
-truncate -s 512M "$SOAK_DISK"
+rm -f "$SOAK_IMG" "$SOAK_NVME" "$SOAK_USB"
+truncate -s 512M "$SOAK_IMG"
 truncate -s 64M "$SOAK_NVME"
 python3 "$T/mkfat32.py" "$SOAK_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "ERROR: mkfat32.py"; exit 4; }
 rm -f "$ROOT/build/NvVars"
@@ -97,17 +105,17 @@ QEMU=(qemu-system-x86_64
   -blockdev driver=raw,file=usbtestf,node-name=usbtest,read-only=on
   -device usb-storage,bus=xhci.0,port=3.2,drive=usbtest,id=hubdisk
   -monitor unix:"$MON",server=on,wait=off
-  -drive file="$SOAK_DISK",format=raw,if=none,id=vd0
+  -drive file="$SOAK_IMG",format=raw,if=none,id=vd0
   -device virtio-blk-pci,drive=vd0
   -drive file="$SOAK_NVME",format=raw,if=none,id=nv0
   -device nvme,serial=desoos-test,drive=nv0
   -device edu,addr=06
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
   -fw_cfg name=opt/desoos/autotest,string=1
-  -fw_cfg name=opt/desoos/phase,string="soak $SECS $SEED"
+  -fw_cfg name=opt/desoos/phase,string="soak $SECS $SEED$PHASE_DISK"
   -serial stdio -display none -no-reboot)
 
-echo "Soak in QEMU: ${SECS} s, SEED=$SEED ($ACCEL, $SMP CPU) - log: $LOG"
+echo "Soak in QEMU: ${SECS} s, SEED=$SEED ($ACCEL, $SMP CPU, $SOAK_DISK disk) - log: $LOG"
 START=$(date +%s)
 # Network servers on the host (as in tests/test.sh): DNS and HTTP (/big, 1 MiB).
 python3 "$T/dns-stub.py" 53530 &
@@ -180,7 +188,7 @@ else
 fi
 kill "$DNS_PID" "$HTTP_PID" 2>/dev/null
 wait "$DNS_PID" "$HTTP_PID" 2>/dev/null
-rm -f "$SOAK_DISK" "$SOAK_NVME" "$SOAK_USB" "$MON"
+rm -f "$SOAK_IMG" "$SOAK_NVME" "$SOAK_USB" "$MON"
 TIME=$(( $(date +%s) - START ))
 
 echo "--- last 50 lines of $LOG ---"

@@ -237,10 +237,10 @@ pub extern "sysv64" fn kernel_main(
     // tests/soak.sh: the long test instead of the self-tests (it needs every core, the
     // keyboard repeat task and the usb-disks task like a normal start).
     #[cfg(selftest)]
-    if let Some((secs, seed)) = selftest::soak() {
+    if let Some((secs, seed, ram)) = selftest::soak() {
         input::start_repeat_task();
         user::ublk::start_monitor();
-        let ok = user::soak_run(secs, seed);
+        let ok = user::soak_run(secs, seed, ram);
         let ok = selftest::finish() && ok;
         selftest::exit_if_autotest(ok);
     }
@@ -322,6 +322,10 @@ pub extern "sysv64" fn kernel_main(
     // Automatic stress test after boot (build with DESOOS_AUTOSTRESS=s,
     // e.g. on a laptop without a working keyboard) – result on screen.
     user::stress::start_auto_from_build();
+
+    // Automatic soak test (build with DESOOS_AUTOSOAK=s, real hardware): it runs before
+    // init on a RAM disk, the result stays on screen, then the system starts as usual.
+    user::soak::run_auto_from_build();
 
     // The kernel starts only /bin/init (user space manages the rest)
     // and watches it; without /bin/init or when init keeps crashing – kernel shell.

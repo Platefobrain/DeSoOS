@@ -750,7 +750,7 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   the heap: a cache of at most 1000 lines that fills up and stays – not a leak), `tasks`, `tasks_dead`, `processes`,
   `zombies`, `ipc_bytes`, `ramfs_bytes`, and `mem_<pid>_<name>` (heap + other areas of every process).
 - **`sysctl(handle, action, arg, fd)`** (47) – `reboot`, `halt`, `sync`, `stress [s]` (actions 1–4) and `desofs`
-  (5 info, 6 format, 7 mount, 8 unmount, 9 check, 10 repair; `arg` = disk number in bits 0–31, bit 32 = "yes" for
+  (5 info, 6 format, 7 mount, 8 unmount, 9 check, 10 repair, 16 ramdisk – `arg` = size in MiB; `arg` = disk number in bits 0–31, bit 32 = "yes" for
   format / repair – checked by the kernel, so without it nothing is written even for a program calling sysctl
   directly; any other bit or "yes" elsewhere → `ERROR_INVALID_ARGUMENT`). The text goes to `fd`, at most 64 KiB
   including the line "... output truncated: N bytes more" (`shell::Capped` keeps room for it; never a silent cut).
@@ -1648,6 +1648,19 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test
   (without waiting for `on_cpu` the test must fail).
+- **RAM disk** (v0.68.0, `block::FrameDisk`): `desofs ramdisk <MiB>` (sysctl 16) – a writable disk of 4 KiB physical
+  frames (taken from the frame allocator one by one, zeroed; the list of their addresses is the only heap it uses –
+  8 bytes per 4 KiB), named `ramN`, registered like any disk. 1–1024 MiB, at most 4, refused when less than a
+  quarter of the free memory (and at least 64 MiB) would stay free. Not removable – its frames come back at the next
+  start. Meant for real hardware, where every disk is read-only: DeSoFS and the soak test run there.
+- **Soak on real hardware** (v0.68.0, `kernel/user/soak.rs`): a build with `DESOOS_AUTOSOAK=S` runs the soak before
+  init with `<S>:<seed>:hw` – a RAM disk (256 MiB with ≥ 1.5 GiB free, else 96 MiB), the services killed are those
+  init runs (network cards, USB controllers, `echo`; not `edu`), the network check is a ping of netd's gateway (a
+  download only when QEMU's test server answers), a service may take 60 s to come back (real DHCP), the USB check
+  is the boot stick's `EFI/BOOT/BOOTX64.EFI` against the SHA-256 of its first reading (first 256 KiB, the whole file
+  at checkpoints). Then boot goes on to the normal init; the verdict stays on the screen. `tests/soak.sh` with
+  `SOAK_DISK=ram` uses a RAM disk in QEMU (`:ram`, still with the test server and stick), which is how the short
+  soak in `tests/test.sh` runs.
 - **Soak test** (v0.67.0): `tests/soak.sh` (default 1 hour with KVM, `DURATION=8h`, `SEED=`) starts QEMU with the
   fw_cfg phase `soak <seconds> <seed>`; the boot tests are skipped and the kernel runs `init test /bin/soak
   <seconds>:<seed>` with the handles the real init gets (`kernel/user/test_soak.rs`), so everything goes through the
@@ -1662,7 +1675,9 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   - **svcnet** – kills `net0`, `usb0` or `echo` every 30–90 s. Back = init lists a new pid and a higher restart
     count, and the service works (ping + a 1 MiB download from the host's `http-stub.py` with the right SHA-256 /
     `DATA.BIN` of the test stick read and checked on whichever `/usbN` it came back as / an echo answer) within 30
-    s; the times go into min / average / max, and an average three times the first period's fails. Between kills:
+    s; the times go into min / average / max, and per service an average three times (+ 2 s) that service's first
+    period average fails (each service against itself – v0.68.0; a network card on a real DHCP server takes 16–32 s,
+    a USB controller 0.2 s); every checkpoint prints min / avg / max per service. Between kills:
     downloads, ping, echo, USB reads.
   - **procs** – spawn / wait (exit codes), kill, pipes, channels, shared memory, mmap / munmap.
   - **Checkpoints** – a baseline after the warm-up (a quarter of the run, at most 5 minutes), then every 30

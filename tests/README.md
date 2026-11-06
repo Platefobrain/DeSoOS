@@ -8,11 +8,12 @@ tests/test.sh              build --selftest and run all suites in QEMU (TCG); re
 ACCEL=kvm tests/test.sh    the same with KVM
 tests/test.sh --no-build   run only
 LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights crypto desofs)
-tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg)
+tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg,
+                           SOAK_DISK=ram – on a RAM disk as on real hardware)
 ```
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
-restart), then a short soak runs (2 minutes, `soak.sh`). The end of the output has the summary and the `[RESULT-…]`
+restart), then a short soak runs (2 minutes, `soak.sh` on a RAM disk). The end of the output has the summary and the `[RESULT-…]`
 lines (services, USB, rights, crypto, DeSoFS, soak) copied into `docs/RELEASE.md`. Logs: `logs/test.log`,
 `logs/test-restart.log`, `logs/test-soak.log`. Exit code: 0 PASS, 1 FAIL, 2 timeout, 3 QEMU stopped otherwise.
 

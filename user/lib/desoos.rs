@@ -149,6 +149,8 @@ pub const SYSCTL_SNAPSHOT_LIST: u64 = 12;
 pub const SYSCTL_SNAPSHOT_MOUNT: u64 = 13;
 pub const SYSCTL_SNAPSHOT_DELETE: u64 = 14;
 pub const SYSCTL_SNAPSHOT_RESTORE: u64 = 15;
+/// A RAM disk of `arg` MiB (1–1024) – `desofs ramdisk`; the answer names its disk number.
+pub const SYSCTL_RAMDISK: u64 = 16;
 
 /// mmap: region protection.
 pub const PROT_READ: u64 = 1;

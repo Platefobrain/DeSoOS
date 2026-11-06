@@ -10,6 +10,10 @@ cd "$ROOT"
 #                               (60 s) and prints the result, `cpus` and `mem` on
 #                               the screen - e.g. a laptop without a working keyboard.
 #                               Same thing: DESOOS_AUTOSTRESS=60 ./make-usb.sh ...
+# ./build.sh --autosoak=3600  -> before init runs the soak test (3600 s) on a RAM disk
+#                               (real hardware; the computer's disks are not touched),
+#                               the result on the screen, then the system starts as usual.
+#                               Same thing: DESOOS_AUTOSOAK=3600 ./make-usb.sh ...
 SELFTEST_CFG=()
 MODE="normal"
 for arg in "$@"; do
@@ -17,14 +21,25 @@ for arg in "$@"; do
     --selftest) SELFTEST_CFG=(--cfg selftest); MODE="selftest" ;;
     --autostress) DESOOS_AUTOSTRESS=60 ;;
     --autostress=*) DESOOS_AUTOSTRESS="${arg#--autostress=}" ;;
-    -h|--help) sed -n '7,12p' "$0"; exit 0 ;;
-    *) echo "Unknown option: $arg (use --selftest or --autostress=S)"; exit 1 ;;
+    --autosoak=*) DESOOS_AUTOSOAK="${arg#--autosoak=}" ;;
+    -h|--help) sed -n '7,16p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg (use --selftest, --autostress=S or --autosoak=S)"; exit 1 ;;
   esac
 done
 export DESOOS_AUTOSTRESS="${DESOOS_AUTOSTRESS:-0}"
 case "$DESOOS_AUTOSTRESS" in
   ''|*[!0-9]*) echo "--autostress: give a number of seconds (got: $DESOOS_AUTOSTRESS)"; exit 1 ;;
 esac
+export DESOOS_AUTOSOAK="${DESOOS_AUTOSOAK:-0}"
+case "$DESOOS_AUTOSOAK" in
+  ''|*[!0-9]*) echo "--autosoak: give a number of seconds (got: $DESOOS_AUTOSOAK)"; exit 1 ;;
+esac
+if [ "$DESOOS_AUTOSOAK" != 0 ] && [ "$DESOOS_AUTOSOAK" -lt 60 ]; then
+  echo "--autosoak: at least 60 seconds (got: $DESOOS_AUTOSOAK)"; exit 1
+fi
+if [ "$DESOOS_AUTOSOAK" != 0 ] && [ "$DESOOS_AUTOSTRESS" != 0 ]; then
+  echo "--autosoak and --autostress together: choose one"; exit 1
+fi
 # DESOOS_STRESS_POOL=P – stress with P processes per CPU (full load);
 # unset / 0 = comparison mode (3 per CPU, at most 48 – the default).
 export DESOOS_STRESS_POOL="${DESOOS_STRESS_POOL:-0}"
@@ -37,6 +52,8 @@ if [ "$DESOOS_AUTOSTRESS" != 0 ]; then
   else
     echo "Build: $MODE + automatic stress test ${DESOOS_AUTOSTRESS} s after boot (comparison mode)"
   fi
+elif [ "$DESOOS_AUTOSOAK" != 0 ]; then
+  echo "Build: $MODE + soak test ${DESOOS_AUTOSOAK} s on a RAM disk before init"
 else
   echo "Build: $MODE"
 fi

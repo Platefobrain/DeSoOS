@@ -11,7 +11,7 @@
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
 # by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Not in loop mode.
-# Then a short soak (2 min, tests/soak.sh – all workers at once, checkpoints): the soak
+# Then a short soak (2 min, tests/soak.sh on a RAM disk – all workers at once, checkpoints): the soak
 # itself keeps working ([RESULT-SOAK], log logs/test-soak.log).  Not in loop mode.
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
@@ -187,7 +187,7 @@ SOAK_OK=""
 if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
   echo "Short soak (2 min, tests/soak.sh)..."
   START3=$(date +%s)
-  DURATION=2m ACCEL="$ACCEL" SMP="$SMP" SOAK_LOG="$LOG3" "$T/soak.sh" --no-build > "$ROOT/logs/test-soak.out" 2>&1
+  DURATION=2m SOAK_DISK=ram ACCEL="$ACCEL" SMP="$SMP" SOAK_LOG="$LOG3" "$T/soak.sh" --no-build > "$ROOT/logs/test-soak.out" 2>&1
   CODE3=$?
   TIME3=$(( $(date +%s) - START3 ))
   [ "$CODE3" = 0 ] && SOAK_OK="; short soak: PASS"

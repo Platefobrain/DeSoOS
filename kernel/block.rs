@@ -328,6 +328,107 @@ pub fn partition_kind(index: usize) -> Option<&'static str> {
 // ------------------------------------------------------------
 // In-memory disk (file system tests without touching a real disk)
 // ------------------------------------------------------------
+// RAM disk in physical frames (`desofs ramdisk <MiB>`): a writable disk on a computer
+// whose own disks stay read-only (DeSoFS and the soak test on real hardware).  Its frames
+// stay taken until the next start – there is no way to remove it (its contents are lost
+// at power-off anyway).
+// ------------------------------------------------------------
+
+pub const RAM_DISK_MAX_MIB: u64 = 1024;
+const RAM_DISKS_MAX: usize = 4;
+static RAM_DISKS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub struct FrameDisk {
+    name: String,
+    /// Physical address of every 4 KiB page of the disk, in order.
+    frames: Vec<u64>,
+}
+
+impl FrameDisk {
+    /// Copies between `buf` and the disk at byte `off`, page by page.
+    fn each(&mut self, off: usize, len: usize, mut f: impl FnMut(&mut [u8], core::ops::Range<usize>)) {
+        let mut done = 0;
+        while done < len {
+            let (k, o) = ((off + done) / 4096, (off + done) % 4096);
+            let n = (4096 - o).min(len - done);
+            let page = unsafe { core::slice::from_raw_parts_mut(crate::memory::phys_to_virt(self.frames[k]) as *mut u8, 4096) };
+            f(&mut page[o..o + n], done..done + n);
+            done += n;
+        }
+    }
+}
+
+impl BlockDevice for FrameDisk {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> String {
+        alloc::format!("RAM disk, {} MiB (gone at power-off)", self.frames.len() as u64 * 4096 / (1024 * 1024))
+    }
+    fn sector_count(&self) -> u64 {
+        self.frames.len() as u64 * (4096 / SECTOR_SIZE as u64)
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        check_range(self.sector_count(), lba, buf.len())?;
+        self.each(lba as usize * SECTOR_SIZE, buf.len(), |disk, r| buf[r].copy_from_slice(disk));
+        Ok(())
+    }
+    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        check_range(self.sector_count(), lba, buf.len())?;
+        self.each(lba as usize * SECTOR_SIZE, buf.len(), |disk, r| disk.copy_from_slice(&buf[r]));
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        Ok(())
+    }
+}
+
+/// A new zeroed RAM disk of `mib` MiB; Ok(disk number).  Refused: a size outside
+/// 1..=RAM_DISK_MAX_MIB, more than RAM_DISKS_MAX of them, or less than a quarter of the free
+/// memory (and at least 64 MiB) left afterwards for everything else.
+pub fn create_ram_disk(mib: u64) -> Result<usize, String> {
+    use core::sync::atomic::Ordering;
+    if !(1..=RAM_DISK_MAX_MIB).contains(&mib) {
+        return Err(alloc::format!("size must be 1-{} MiB", RAM_DISK_MAX_MIB));
+    }
+    let pages = mib * 256;
+    let free = crate::memory::free_frame_count();
+    let keep = (free / 4).max(64 * 256);
+    if free < pages + keep {
+        return Err(alloc::format!("not enough memory: {} MiB free, {} MiB must stay free", free / 256, keep / 256));
+    }
+    let n = RAM_DISKS.fetch_add(1, Ordering::SeqCst);
+    if n >= RAM_DISKS_MAX {
+        RAM_DISKS.fetch_sub(1, Ordering::SeqCst);
+        return Err(alloc::format!("at most {} RAM disks", RAM_DISKS_MAX));
+    }
+    let mut frames: Vec<u64> = Vec::new();
+    if frames.try_reserve_exact(pages as usize).is_err() {
+        RAM_DISKS.fetch_sub(1, Ordering::SeqCst);
+        return Err(String::from("not enough kernel heap"));
+    }
+    for _ in 0..pages {
+        match crate::memory::alloc_frame() {
+            Some(f) => {
+                unsafe { core::ptr::write_bytes(crate::memory::phys_to_virt(f) as *mut u8, 0, 4096) };
+                frames.push(f);
+            }
+            None => {
+                for f in frames {
+                    crate::memory::free_frame(f);
+                }
+                RAM_DISKS.fetch_sub(1, Ordering::SeqCst);
+                return Err(String::from("not enough memory"));
+            }
+        }
+    }
+    Ok(register(Box::new(FrameDisk { name: alloc::format!("ram{}", n), frames })))
+}
+
+// ------------------------------------------------------------
 
 /// Contents in 64 KiB pieces, not one block: a 16 MiB test disk is then 256 small heap
 /// blocks instead of one 16 MiB block, which a fragmented heap (e.g. right after the heap

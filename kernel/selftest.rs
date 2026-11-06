@@ -12,8 +12,8 @@
 // * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
 //   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
 //   (DeSoFS written in the first start must be there, mounted at /disk by itself).
-// * Soak phase (tests/soak.sh): `opt/desoos/phase` = "soak <seconds> <seed>"; the boot
-//   tests are skipped and `init test /bin/soak <seconds>:<seed>` runs instead – all workers
+// * Soak phase (tests/soak.sh): `opt/desoos/phase` = "soak <seconds> <seed> [ram]"; the boot
+//   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
 // * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/desoos/loop`
 //   holds "suite:rounds".  The suites up to SMP start run once (the system needs
@@ -33,6 +33,7 @@ static RESTART: AtomicBool = AtomicBool::new(false);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
 static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
+static SOAK_RAM: AtomicBool = AtomicBool::new(false);
 
 pub fn begin() {
     STARTED.fetch_add(1, Ordering::SeqCst);
@@ -268,15 +269,21 @@ fn detect_phase() {
     if w.next() == Some("soak") {
         let secs = w.next().and_then(|s| s.parse::<u64>().ok()).filter(|&s| (60..=7 * 24 * 3600).contains(&s));
         let seed = w.next().and_then(|s| s.parse::<u64>().ok());
-        match (secs, seed, w.next()) {
-            (Some(secs), Some(seed), None) => {
+        let ram = match w.next() {
+            None => Some(false),
+            Some("ram") => Some(true),
+            Some(_) => None,
+        };
+        match (secs, seed, ram, w.next()) {
+            (Some(secs), Some(seed), Some(ram), None) => {
                 SOAK_SECS.store(secs, Ordering::SeqCst);
                 SOAK_SEED.store(seed, Ordering::SeqCst);
-                serial_println!("[TEST] Soak phase: {} s, seed {} (the boot tests are skipped)", secs, seed);
+                SOAK_RAM.store(ram, Ordering::SeqCst);
+                serial_println!("[TEST] Soak phase: {} s, seed {}{} (the boot tests are skipped)", secs, seed, if ram { ", on a RAM disk" } else { "" });
             }
             // A bad phase must not quietly run the normal tests instead: it fails.
             _ => {
-                serial_println!("[TEST] bad soak phase {:?} - expected \"soak <60..604800 seconds> <seed>\"", text);
+                serial_println!("[TEST] bad soak phase {:?} - expected \"soak <60..604800 seconds> <seed> [ram]\"", text);
                 STARTED.fetch_add(1, Ordering::SeqCst);
                 SOAK_SECS.store(u64::MAX, Ordering::SeqCst);
             }
@@ -289,11 +296,12 @@ pub fn restart() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
-/// The soak start: Some((seconds, seed)); u64::MAX seconds = a bad phase (fails at once).
-pub fn soak() -> Option<(u64, u64)> {
+/// The soak start: Some((seconds, seed, on a RAM disk)); u64::MAX seconds = a bad phase
+/// (fails at once).
+pub fn soak() -> Option<(u64, u64, bool)> {
     match SOAK_SECS.load(Ordering::SeqCst) {
         0 => None,
-        s => Some((s, SOAK_SEED.load(Ordering::SeqCst))),
+        s => Some((s, SOAK_SEED.load(Ordering::SeqCst), SOAK_RAM.load(Ordering::SeqCst))),
     }
 }
 

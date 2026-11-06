@@ -7,6 +7,7 @@ volume. Format 1 is closed – `FORMAT.md` describes it byte by byte.
 What it can do (details and design in `../ARCHITECTURE.md`, section "DeSoFS"):
 
 - `desofs format` / `mount` / `unmount` – disk 0 is mounted at `/disk` at start, other disks at `/desofs`;
+- `desofs ramdisk <MiB>` – a disk in memory to format (real hardware: the computer's disks stay read-only);
 - `desofs check` – every block's checksum, directories and relations; `desofs repair` – back to the other
   superblock's whole state when one tree is damaged;
 - `desofs snapshot create / list / mount / delete / restore` – up to 31 snapshots, nothing copied when one is made;

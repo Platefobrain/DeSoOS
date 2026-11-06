@@ -82,6 +82,8 @@ mod test_net;
 mod test_soak;
 // SMP stress test (self-test and the `stress` command).
 pub mod stress;
+// The soak test's start: tests/soak.sh and DESOOS_AUTOSOAK builds.
+pub mod soak;
 
 pub use process::Process;
 pub use space::AddressSpace;

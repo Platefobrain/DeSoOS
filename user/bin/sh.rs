@@ -547,6 +547,7 @@ fn desofs_action(words: &[String]) -> Option<(u64, u64, Option<String>)> {
     }
     Some(match w.as_slice() {
         ["unmount"] => (desoos::SYSCTL_DESOFS_UNMOUNT, 0),
+        ["ramdisk", m] => (desoos::SYSCTL_RAMDISK, m.parse::<u64>().ok().filter(|m| (1..=1024).contains(m))?),
         ["info", d] => (desoos::SYSCTL_DESOFS_INFO, disk(d)?),
         ["mount", d] => (desoos::SYSCTL_DESOFS_MOUNT, disk(d)?),
         ["check", d] => (desoos::SYSCTL_DESOFS_CHECK, disk(d)?),
@@ -971,7 +972,7 @@ impl Shell {
                     return;
                 }
                 None => {
-                    eprintln!("usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ...   (disk numbers: 'disk')");
+                    eprintln!("usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ... | ramdisk <MiB>   (disk numbers: 'disk')");
                     return;
                 }
             },

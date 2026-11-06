@@ -1,4 +1,4 @@
-# DeSoOS v0.67.0
+# DeSoOS v0.68.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -76,6 +76,7 @@ Ethernet.
 ./build.sh                  # regular kernel (no self-tests)
 ./build.sh --selftest       # kernel with self-tests (results on the serial console)
 ./build.sh --autostress=60  # runs a 60 s stress test by itself 5 s after boot
+./build.sh --autosoak=3600  # runs a 1-hour soak test on a RAM disk before init (real hardware)
 ```
 
 Do not run `build.sh` with sudo.
@@ -85,6 +86,7 @@ Build-time environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `DESOOS_AUTOSTRESS=S` | `0` (off) | Same as `--autostress=S`: stress test for S seconds 5 s after boot. |
+| `DESOOS_AUTOSOAK=S` | `0` (off) | Same as `--autosoak=S`: the soak test for S seconds (at least 60) on a RAM disk before init. Not together with `DESOOS_AUTOSTRESS`. |
 | `DESOOS_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
 | `DESOOS_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
 | `DESOOS_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |
@@ -281,6 +283,17 @@ keyboard latency (interrupt to character, in us; press a few keys meanwhile), pr
 from `/usb0` (a `usb:` line with MiB, KiB/s, per-pass checksums and errors), and finally prints
 `[AUTOSTRESS] PASS/FAIL`, `cpus` and `mem`. Use `DESOOS_STRESS_POOL=P` for full load.
 
+### Soak test on real hardware
+
+Build with `DESOOS_AUTOSOAK=S` (`DESOOS_AUTOSOAK=3600 ./make-usb.sh /media/$USER/<LABEL>`). Before `init` the
+kernel runs the same soak test as `tests/soak.sh`, but on a RAM disk it makes itself (`desofs ramdisk`, 256 MiB
+when there is enough memory) – nothing is written to the computer's own disks. The services it kills are whatever
+runs (network cards, USB controllers, `echo`); the network check is a ping of the router (and 60 s for a service to
+come back – a real DHCP server takes ~16 s); the USB check reads `EFI/BOOT/BOOTX64.EFI` of the boot stick and
+compares it with its first reading. Heartbeat lines every minute, a checkpoint every 30 minutes; at the end
+`[RESULT-SOAK] …` and a green `[AUTOSOAK] PASS` or red `FAIL`, then the system starts as usual (Shift+PgUp scrolls
+back to the result). The USB keyboard and stick drop out for a moment whenever their controller is killed.
+
 `cpus` also lists long gaps between clock (PIT) interrupts as `clock gap N: from X ms, Y us, ...`.
 A few during boot are expected on laptops: when `usbd` takes each xHCI controller over from the
 firmware (`usblist -v` shows `BIOS: handed over (from X ms, Y ms; ...)`), the firmware stops the
@@ -373,6 +386,9 @@ Line editing and console:
   shows each with the blocks only it holds (what deleting it gives back); `desofs snapshot mount <disk> <name>` shows
   it read-only at `/snap/<name>`; `desofs snapshot restore <disk> <name> [yes]` brings every file back to it (disk
   unmounted first; all snapshots stay); `desofs snapshot delete <disk> <name> [yes]` frees its space.
+- A RAM disk: `desofs ramdisk <MiB>` (1-1024; at least a quarter of the free memory stays free) adds a writable disk
+  in memory – on a computer whose own disks are read-only this is where DeSoFS can be tried: `desofs format N yes`,
+  `desofs mount N` (at `/desofs`). It stays until power-off (up to 4 of them, not removable).
 - The disk is Linux-compatible; with QEMU stopped you can use mtools on the host:
   `mdir -i disk.img ::`, `mcopy -i disk.img file.txt ::/`.
 - Low level: `lspci`, `disk`, `disk read 0 <sector>`, `disk write 0 <sector> <text>`.

@@ -6,6 +6,8 @@
 #   ./make-usb.sh --format /dev/sdX      (optional) format the flash drive as FAT32 – ERASES it
 #   DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/...   the kernel, 5 s after boot,
 #                                        runs a 60 s stress test by itself and shows the result
+#   DESOOS_AUTOSOAK=3600 ./make-usb.sh /media/...   the kernel runs a 1-hour soak test on a
+#                                        RAM disk before init and shows the result
 #
 # What installing does: builds the regular kernel (./build.sh, without self-tests)
 # and copies ONE file: build/EFI/BOOT/BOOTX64.EFI -> <flash drive>/EFI/BOOT/.
@@ -107,6 +109,8 @@ install_to() {
 
   if [ "${DESOOS_AUTOSTRESS:-0}" != 0 ]; then
     echo "Building the regular kernel + automatic stress test ${DESOOS_AUTOSTRESS} s after boot..."
+  elif [ "${DESOOS_AUTOSOAK:-0}" != 0 ]; then
+    echo "Building the regular kernel + soak test ${DESOOS_AUTOSOAK} s on a RAM disk before init..."
   else
     echo "Building the regular kernel (no self-tests)..."
   fi

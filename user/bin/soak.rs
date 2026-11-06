@@ -42,8 +42,24 @@ use desoos::*;
 
 entry!(main);
 
-/// The disk the soak formats (QEMU's virtio test disk).
-const DISK: u64 = 0;
+/// The disk the soak formats: QEMU's virtio disk 0 (mounted at /disk), or a RAM disk it
+/// makes itself (another number, mounted at /desofs).  Set once at the start of every process.
+static VOL_DISK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn disk() -> u64 {
+    VOL_DISK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Real hardware (DESOOS_AUTOSOAK): the network and USB checks take what is there.
+static HW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn hw() -> bool {
+    HW.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn root() -> &'static str {
+    if disk() == 0 { "/disk" } else { "/desofs" }
+}
 /// The control channel in a worker.
 const CTL: u64 = 7;
 /// Below this length the soak is "short" (tests/test.sh): everything happens more often.
@@ -303,6 +319,8 @@ trait Work {
 fn worker(args: Args, name: &'static str) -> i32 {
     let seed = args.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
     let secs = args.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(3600);
+    VOL_DISK.store(args.get(4).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
+    HW.store(args.get(5) == Some("hw"), core::sync::atomic::Ordering::Relaxed);
     if handle_info(CTL).map(|(k, _)| k) != Ok(KIND_CHANNEL) {
         eprintln!("soak {}: no control channel - only the soak controller starts workers", name);
         return 1;
@@ -427,11 +445,11 @@ impl Files {
             deleted: 0,
         };
         log.op(format_args!("setup directories"));
-        let mut dirs = vec![String::from("/disk/soak")];
+        let mut dirs = vec![format!("{}/soak", root())];
         for t in 0..8 {
-            dirs.push(format!("/disk/soak/d{}", t));
+            dirs.push(format!("{}/soak/d{}", root(), t));
             for e in 0..4 {
-                dirs.push(format!("/disk/soak/d{}/e{}", t, e));
+                dirs.push(format!("{}/soak/d{}/e{}", root(), t, e));
             }
         }
         for d in &dirs {
@@ -629,7 +647,7 @@ impl Files {
         self.snap_no += 1;
         let name = format!("soak{}", self.snap_no);
         log.op(format_args!("op=snapshot_create name={}", name));
-        match sysctl_text(self.sys, SYSCTL_SNAPSHOT_CREATE, DISK, Some(&name)) {
+        match sysctl_text(self.sys, SYSCTL_SNAPSHOT_CREATE, disk(), Some(&name)) {
             Ok(t) if t.contains("created") => {}
             r => fail!(log, "op=snapshot_create name={} result={:?}", name, r),
         }
@@ -638,7 +656,7 @@ impl Files {
         if self.snaps.len() > KEEP_SNAPSHOTS {
             let old = self.snaps.remove(0);
             log.op(format_args!("op=snapshot_delete name={}", old.name));
-            match sysctl_text(self.sys, SYSCTL_SNAPSHOT_DELETE, DISK | SYSCTL_YES, Some(&old.name)) {
+            match sysctl_text(self.sys, SYSCTL_SNAPSHOT_DELETE, disk() | SYSCTL_YES, Some(&old.name)) {
                 Ok(t) if t.contains("deleted") => {}
                 r => fail!(log, "op=snapshot_delete name={} result={:?}", old.name, r),
             }
@@ -646,7 +664,7 @@ impl Files {
         }
         // The list holds exactly the snapshots the model has.
         log.op(format_args!("op=snapshot_list"));
-        let t = match sysctl_text(self.sys, SYSCTL_SNAPSHOT_LIST, DISK, None) {
+        let t = match sysctl_text(self.sys, SYSCTL_SNAPSHOT_LIST, disk(), None) {
             Ok(t) => t,
             Err(r) => fail!(log, "op=snapshot_list error={}", error_name(r)),
         };
@@ -676,7 +694,7 @@ impl Work for Files {
             // create
             0..=19 => {
                 let Some(s) = self.pick(false) else { return };
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 let e = Ent { live: true, size: self.new_size() as u32, seed: self.rng.next() };
                 log.op(format_args!("op=create path={} size={} seed={:x}", p, e.size, e.seed));
                 let fd = Self::open_or_fail(log, &p, O_WRITE | O_CREATE | O_TRUNC);
@@ -689,7 +707,7 @@ impl Work for Files {
             20..=34 => {
                 let Some(s) = self.pick(true) else { return };
                 let mut e = self.m.e[s];
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 let add = self.rng.range(1, 32 * 1024).min(MAX_FILE - (e.size as u64).min(MAX_FILE));
                 if add == 0 {
                     return;
@@ -706,7 +724,7 @@ impl Work for Files {
             35..=44 => {
                 let Some(s) = self.pick(true) else { return };
                 let mut e = self.m.e[s];
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 e.seed = self.rng.next();
                 log.op(format_args!("op=overwrite path={} size={} seed={:x}", p, e.size, e.seed));
                 let fd = Self::open_or_fail(log, &p, O_WRITE);
@@ -726,7 +744,7 @@ impl Work for Files {
                 if e.size == 0 {
                     return;
                 }
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 let off = self.rng.below(e.size as u64);
                 let len = self.rng.range(1, 64 * 1024).min(e.size as u64 - off);
                 log.op(format_args!("op=patch path={} off={} len={}", p, off, len));
@@ -740,7 +758,7 @@ impl Work for Files {
             55..=62 => {
                 let Some(s) = self.pick(true) else { return };
                 let mut e = self.m.e[s];
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 let new = self.rng.below(e.size as u64 + 1);
                 log.op(format_args!("op=truncate path={} size={} new={}", p, e.size, new));
                 let fd = Self::open_or_fail(log, &p, O_WRITE | O_TRUNC);
@@ -754,7 +772,7 @@ impl Work for Files {
             63..=69 => {
                 let (Some(from), Some(to)) = (self.pick(true), self.pick(false)) else { return };
                 let e = self.m.e[from];
-                let (pf, pt) = (file_path("/disk", from), file_path("/disk", to));
+                let (pf, pt) = (file_path(root(), from), file_path(root(), to));
                 log.op(format_args!("op=move from={} to={} size={}", pf, pt, e.size));
                 let src = Self::open_or_fail(log, &pf, O_READ);
                 let dst = Self::open_or_fail(log, &pt, O_WRITE | O_CREATE | O_TRUNC);
@@ -786,7 +804,7 @@ impl Work for Files {
             // delete
             70..=79 => {
                 let Some(s) = self.pick(true) else { return };
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 log.op(format_args!("op=delete path={}", p));
                 let r = unlink(&p);
                 if r != 0 {
@@ -798,7 +816,7 @@ impl Work for Files {
             // read
             80..=94 => {
                 let Some(s) = self.pick(true) else { return };
-                let p = file_path("/disk", s);
+                let p = file_path(root(), s);
                 let e = self.m.e[s];
                 log.op(format_args!("op=read path={} size={}", p, e.size));
                 self.verify(log, &p, e);
@@ -806,7 +824,7 @@ impl Work for Files {
             // an empty directory: create or delete
             _ => {
                 let k = self.rng.below(NDIRS as u64) as usize;
-                let p = dir_path("/disk", k);
+                let p = dir_path(root(), k);
                 let bit = 1u32 << k;
                 if self.m.dirs & bit == 0 {
                     log.op(format_args!("op=mkdir path={}", p));
@@ -848,11 +866,11 @@ impl Work for Files {
     fn audit(&mut self, log: &mut Log) -> String {
         log.op(format_args!("op=audit files"));
         let m = self.m.clone();
-        self.verify_all(log, "/disk", &m);
+        self.verify_all(log, root(), &m);
         let names: Vec<String> = self.snaps.iter().map(|s| s.name.clone()).collect();
         for (i, name) in names.iter().enumerate() {
             log.op(format_args!("op=snapshot_mount name={}", name));
-            match sysctl_text(self.sys, SYSCTL_SNAPSHOT_MOUNT, DISK, Some(name)) {
+            match sysctl_text(self.sys, SYSCTL_SNAPSHOT_MOUNT, disk(), Some(name)) {
                 Ok(t) if t.contains("mounted at") => {}
                 r => fail!(log, "op=snapshot_mount name={} result={:?}", name, r),
             }
@@ -884,15 +902,34 @@ const USB_FILE: &str = "DATA.BIN";
 const USB_SIZE: u64 = 4 * 1024 * 1024;
 const RECOVER_MS: u64 = 30_000;
 
+/// The file the USB checks read: the test stick's pattern file (QEMU), or a file of the
+/// boot stick (real hardware) compared with its first reading (SHA-256 of the first 256 KiB
+/// and of the whole file).
+enum UsbFile {
+    Pattern,
+    Known { rel: &'static str, size: u64, head: [u8; 32], whole: [u8; 32] },
+}
+
 struct SvcNet {
     rng: Rng,
     big_sha: [u8; 32],
+    /// The services killed: network cards, USB controllers, echo – whatever runs here.
+    targets: Vec<String>,
+    /// The first network card (pings and downloads go through it), its gateway, and
+    /// whether the host's test HTTP server is there (QEMU: gateway 10.0.2.2).
+    net: Option<String>,
+    gw: String,
+    downloads: bool,
+    usb: Option<UsbFile>,
     next_kill: u64,
     gap: (u64, u64),
     kills: u64,
     rec: Vec<u64>,
-    rec_cp: Vec<u64>,
-    first_avg: u64,
+    /// Per service: (name, recovery times of all kills, of this checkpoint period, the
+    /// average of the first period that had a kill of it).  Each service is compared only
+    /// with itself – a network card waiting for a real DHCP server (16–32 s) must not make
+    /// the USB controllers (0.2 s) look slower.
+    per: Vec<(String, Vec<u64>, Vec<u64>, Option<u64>)>,
     net_bytes: u64,
     pings: u64,
     echoes: u64,
@@ -920,12 +957,16 @@ impl SvcNet {
         let mut s = SvcNet {
             rng: Rng(mix(seed ^ 0x7376_636e)),
             big_sha: h.finish().unwrap_or([0; 32]),
+            targets: Vec::new(),
+            net: None,
+            gw: String::new(),
+            downloads: false,
+            usb: None,
             next_kill: 0,
             gap,
             kills: 0,
             rec: Vec::new(),
-            rec_cp: Vec::new(),
-            first_avg: 0,
+            per: Vec::new(),
             net_bytes: 0,
             pings: 0,
             echoes: 0,
@@ -934,29 +975,129 @@ impl SvcNet {
             buf: vec![0; MSG_MAX],
         };
         s.next_kill = uptime_ms() + s.rng.range(gap.0, gap.1);
+        // What runs here: init's list (edu is a QEMU test device – not killed).
+        let mut list = [0u8; 2048];
+        let n = svc_list(&mut list).unwrap_or(0);
+        for line in core::str::from_utf8(&list[..n]).unwrap_or("").lines() {
+            let mut w = line.split_whitespace();
+            if let (Some(name), Some("running")) = (w.next(), w.next()) {
+                if name.starts_with("net") || name.starts_with("usb") || name == "echo" {
+                    s.targets.push(String::from(name));
+                }
+            }
+        }
+        s.net = s.targets.iter().find(|t| t.starts_with("net")).cloned();
         // Everything must work before the first kill (netd may still be getting its address).
-        log.op(format_args!("op=wait_ready"));
+        log.op(format_args!("op=wait_ready services={:?}", s.targets));
         let t0 = uptime_ms();
         loop {
-            let ok = s.check("net0", false).is_ok() && s.check("usb0", false).is_ok() && s.check("echo", false).is_ok();
-            if ok {
-                break;
+            if s.net.is_some() && (s.gw.is_empty() || s.gw == "0.0.0.0") {
+                s.gw = s.gateway();
+                // QEMU's test server; on real hardware only if it answers (it does not
+                // when a DESOOS_AUTOSOAK build runs in plain QEMU without tests/soak.sh).
+                s.downloads = s.gw == HOST && (!hw() || s.download().is_ok());
             }
-            if uptime_ms() - t0 > 60_000 {
-                for n in ["net0", "usb0", "echo"] {
-                    if let Err(e) = s.check(n, false) {
-                        fail!(log, "op=wait_ready service={} error={:?}", n, e);
-                    }
+            if s.usb.is_none() {
+                s.usb = s.find_usb_file();
+            }
+            let targets = s.targets.clone();
+            let mut bad = None;
+            for t in &targets {
+                if let Err(e) = s.check(t, false) {
+                    bad = Some((t.clone(), e));
+                    break;
                 }
+            }
+            // tests/soak.sh: the test stick and the test server must be there.
+            if bad.is_none() && !hw() && (!matches!(s.usb, Some(UsbFile::Pattern)) || (s.net.is_some() && !s.downloads)) {
+                bad = Some((String::from("setup"), String::from("no test stick (DATA.BIN) or no test server at 10.0.2.2")));
+            }
+            // A stick needs a moment after usbd starts: looked for during the first 20 s.
+            if bad.is_none() && s.usb.is_none() && uptime_ms() - t0 < 20_000 {
+                bad = Some((String::from("usb"), String::from("no USB stick yet")));
+            }
+            let Some((t, e)) = bad else { break };
+            if uptime_ms() - t0 > 60_000 {
+                fail!(log, "op=wait_ready service={} error={:?}", t, e);
             }
             sleep_ms(500);
         }
+        println!(
+            "[SOAK] svcnet: killing {:?}; network: {}; USB check: {}",
+            s.targets,
+            match (&s.net, s.downloads) {
+                (None, _) => String::from("none"),
+                (Some(n), true) => format!("{} - ping {} + 1 MiB downloads from the test server", n, s.gw),
+                (Some(n), false) => format!("{} - ping of the gateway {} (no test server here)", n, s.gw),
+            },
+            match &s.usb {
+                None => String::from("none (no stick found)"),
+                Some(UsbFile::Pattern) => format!("/usbN/{} pattern", USB_FILE),
+                Some(UsbFile::Known { rel, size, .. }) => format!("/usbN/{} ({} B, SHA-256 of its first reading)", rel, size),
+            }
+        );
         s
+    }
+
+    /// The gateway netd got ("gw=" in its status line); "0.0.0.0" while it has none.
+    fn gateway(&mut self) -> String {
+        let Some(net) = self.net.clone() else { return String::new() };
+        let Ok(c) = svc_connect(&net) else { return String::new() };
+        let mut out = String::new();
+        if chan_send(c, b"status", 0) == 0 {
+            let mut info = RecvInfo::default();
+            let r = chan_recv(c, &mut self.buf, 0, &mut info);
+            if r > 0 {
+                out = String::from_utf8_lossy(&self.buf[..r as usize]).into_owned();
+            }
+        }
+        close(c);
+        String::from(out.split_whitespace().find_map(|w| w.strip_prefix("gw=")).unwrap_or(""))
+    }
+
+    /// Which USB file to check: the test stick's pattern file, else a boot stick's loader.
+    fn find_usb_file(&mut self) -> Option<UsbFile> {
+        if (0..8).any(|n| stat(&format!("/usb{}/{}", n, USB_FILE)).map(|s| s.size) == Ok(USB_SIZE)) {
+            return Some(UsbFile::Pattern);
+        }
+        let rel = "EFI/BOOT/BOOTX64.EFI";
+        let path = (0..8).map(|n| format!("/usb{}/{}", n, rel)).find(|p| stat(p).is_ok())?;
+        let size = stat(&path).ok()?.size;
+        let head = self.file_sha(&path, 256 * 1024).ok()?;
+        let whole = self.file_sha(&path, size).ok()?;
+        Some(UsbFile::Known { rel, size, head, whole })
+    }
+
+    /// SHA-256 of the first `len` bytes of a file.
+    fn file_sha(&mut self, path: &str, len: u64) -> Result<[u8; 32], String> {
+        let fd = open(path, O_READ);
+        if fd < 0 {
+            return Err(format!("open {}: {}", path, error_name(fd)));
+        }
+        let mut h = Sha256::new();
+        let mut off = 0u64;
+        let mut chunk = vec![0u8; 64 * 1024];
+        while off < len {
+            let want = (len - off).min(chunk.len() as u64) as usize;
+            let n = read(fd as u64, &mut chunk[..want]);
+            if n < 0 {
+                close(fd as u64);
+                return Err(format!("read {} at {}: {}", path, off, error_name(n)));
+            }
+            if n == 0 {
+                break;
+            }
+            h.update(&chunk[..n as usize]);
+            off += n as u64;
+        }
+        close(fd as u64);
+        h.finish().map_err(|_| String::from("sha"))
     }
 
     /// One download of /big through netd: size and SHA-256.
     fn download(&mut self) -> Result<(), String> {
-        let c = svc_connect("net0").map_err(|e| format!("connect net0: {}", error_name(e)))?;
+        let net = self.net.clone().unwrap_or_default();
+        let c = svc_connect(&net).map_err(|e| format!("connect {}: {}", net, error_name(e)))?;
         let r = self.download_on(c);
         close(c);
         r
@@ -1017,8 +1158,9 @@ impl SvcNet {
     }
 
     fn ping(&mut self) -> Result<(), String> {
-        let c = svc_connect("net0").map_err(|e| format!("connect net0: {}", error_name(e)))?;
-        let req = format!("ping {} 1", HOST);
+        let net = self.net.clone().unwrap_or_default();
+        let c = svc_connect(&net).map_err(|e| format!("connect {}: {}", net, error_name(e)))?;
+        let req = format!("ping {} 1", self.gw);
         if chan_send(c, req.as_bytes(), 0) != 0 {
             close(c);
             return Err(String::from("netd not running"));
@@ -1063,10 +1205,26 @@ impl SvcNet {
         Ok(())
     }
 
-    /// DATA.BIN of the test USB stick (on /usbN – the number can change after usb0 restarts):
-    /// the first `len` bytes against its pattern (32-bit word k = k * 2654435761).
-    fn usb_read(&mut self, len: u64) -> Result<(), String> {
-        let path = (0..8).map(|n| format!("/usb{}/{}", n, USB_FILE)).find(|p| stat(p).map(|s| s.size) == Ok(USB_SIZE)).ok_or_else(|| String::from("no USB stick with DATA.BIN mounted"))?;
+    /// The USB file (on /usbN – the number can change after a USB controller restarts):
+    /// DATA.BIN of the test stick against its pattern (32-bit word k = k * 2654435761), or
+    /// the boot stick's file against the SHA-256 of its first reading.  `full`: the whole file.
+    fn usb_read(&mut self, full: bool) -> Result<(), String> {
+        let (rel, size) = match &self.usb {
+            None => return Ok(()),
+            Some(UsbFile::Pattern) => (USB_FILE, USB_SIZE),
+            Some(UsbFile::Known { rel, size, .. }) => (*rel, *size),
+        };
+        let path = (0..8).map(|n| format!("/usb{}/{}", n, rel)).find(|p| stat(p).map(|s| s.size) == Ok(size)).ok_or_else(|| format!("no USB stick with {} mounted", rel))?;
+        let len = if full { size } else { size.min(256 * 1024) };
+        if let Some(UsbFile::Known { head, whole, .. }) = &self.usb {
+            let want = if full { *whole } else { *head };
+            let got = self.file_sha(&path, len)?;
+            if got != want {
+                return Err(format!("{}: SHA-256 of {} bytes {} - first reading {}", path, len, sha_text(&got), sha_text(&want)));
+            }
+            self.usb_reads += 1;
+            return Ok(());
+        }
         let fd = open(&path, O_READ);
         if fd < 0 {
             return Err(format!("open {}: {}", path, error_name(fd)));
@@ -1097,15 +1255,29 @@ impl SvcNet {
 
     /// Whether service `name` really works.  `full`: the long version (audit).
     fn check(&mut self, name: &str, full: bool) -> Result<(), String> {
-        match name {
-            "net0" => self.ping().and_then(|_| self.download()),
-            "usb0" => self.usb_read(if full { USB_SIZE } else { 256 * 1024 }),
-            _ => self.echo(),
+        if name.starts_with("net") {
+            if self.gw.is_empty() || self.gw == "0.0.0.0" {
+                return Err(String::from("no address / gateway yet"));
+            }
+            self.ping()?;
+            if self.downloads {
+                self.download()?;
+            }
+            Ok(())
+        } else if name.starts_with("usb") {
+            self.usb_read(full)
+        } else {
+            self.echo()
         }
     }
 
     fn kill_one(&mut self, log: &mut Log) {
-        let name = ["net0", "usb0", "echo"][self.rng.below(3) as usize];
+        if self.targets.is_empty() {
+            self.next_kill = u64::MAX;
+            return;
+        }
+        let name = self.targets[self.rng.below(self.targets.len() as u64) as usize].clone();
+        let name = name.as_str();
         let Some((state, pid0, r0)) = svc_status(name) else { fail!(log, "op=kill service={} not in the service list", name) };
         if state != "running" {
             fail!(log, "op=kill service={} state={} before the kill (expected running)", name, state);
@@ -1131,8 +1303,10 @@ impl SvcNet {
                     last = format!("state {} pid {} restarts {}", st, pid, r);
                 }
             }
-            if uptime_ms() - t0 > RECOVER_MS {
-                fail!(log, "op=recover service={} not working {} ms after the kill: {}", name, RECOVER_MS, last);
+            // Real hardware: a real DHCP server can take ~16 s – 60 s allowed there.
+            let limit = if hw() { 2 * RECOVER_MS } else { RECOVER_MS };
+            if uptime_ms() - t0 > limit {
+                fail!(log, "op=recover service={} not working {} ms after the kill: {}", name, limit, last);
             }
             sleep_ms(100);
         }
@@ -1142,7 +1316,13 @@ impl SvcNet {
         println!("[SOAK] svcnet: {} killed and working again in {} ms (kernel heap {} KiB + console {} KiB, free frames {})", name, ms, counter(&c, "heap_used").saturating_sub(counter(&c, "heap_console")) / 1024, counter(&c, "heap_console") / 1024, counter(&c, "frames_free"));
         self.kills += 1;
         self.rec.push(ms);
-        self.rec_cp.push(ms);
+        match self.per.iter_mut().find(|p| p.0 == name) {
+            Some(p) => {
+                p.1.push(ms);
+                p.2.push(ms);
+            }
+            None => self.per.push((String::from(name), vec![ms], vec![ms], None)),
+        }
         self.next_kill = uptime_ms() + self.rng.range(self.gap.0, self.gap.1);
     }
 }
@@ -1155,10 +1335,10 @@ impl Work for SvcNet {
         }
         self.ops += 1;
         let (what, r) = match self.rng.below(100) {
-            0..=29 => ("download", self.download()),
-            30..=39 => ("ping", self.ping()),
-            40..=79 => ("echo", self.echo()),
-            _ => ("usb_read", self.usb_read(256 * 1024)),
+            0..=29 if self.downloads => ("download", self.download()),
+            0..=39 if self.net.is_some() => ("ping", self.ping()),
+            80..=99 if self.usb.is_some() => ("usb_read", self.usb_read(false)),
+            _ => ("echo", self.echo()),
         };
         log.op(format_args!("op={}", what));
         if let Err(e) = r {
@@ -1184,22 +1364,32 @@ impl Work for SvcNet {
     }
 
     /// Paused: every service answers (long USB read), and the average recovery time of
-    /// this period is not far above the first period's.
+    /// this period is not far above the first period's – per service.
     fn audit(&mut self, log: &mut Log) -> String {
-        for n in ["net0", "usb0", "echo"] {
+        for n in self.targets.clone() {
             log.op(format_args!("op=audit service={}", n));
-            if let Err(e) = self.check(n, true) {
+            if let Err(e) = self.check(&n, true) {
                 fail!(log, "op=audit service={} {}", n, e);
             }
         }
-        let avg = if self.rec_cp.is_empty() { 0 } else { self.rec_cp.iter().sum::<u64>() / self.rec_cp.len() as u64 };
-        if self.first_avg == 0 {
-            self.first_avg = avg;
-        } else if avg > 3 * self.first_avg + 2000 {
-            fail!(log, "op=audit recovery average {} ms this period, {} ms in the first one - it keeps growing", avg, self.first_avg);
+        let avg = |v: &[u64]| if v.is_empty() { 0 } else { v.iter().sum::<u64>() / v.len() as u64 };
+        let mut text = Vec::new();
+        for (name, all, cp, first) in self.per.iter_mut() {
+            if !cp.is_empty() {
+                let now = avg(cp);
+                match *first {
+                    None => *first = Some(now),
+                    Some(f) if now > 3 * f + 2000 => {
+                        fail!(log, "op=audit {} recovery average {} ms this period, {} ms in its first one - it keeps growing", name, now, f);
+                    }
+                    Some(_) => {}
+                }
+                cp.clear();
+            }
+            text.push(format!("{}:{}/{}/{}", name, all.iter().min().copied().unwrap_or(0), avg(all), all.iter().max().copied().unwrap_or(0)));
         }
-        self.rec_cp.clear();
-        format!("services_ok=3 recover_avg_ms={}", avg)
+        println!("[SOAK] svcnet: recovery per service, min/avg/max ms: {}", if text.is_empty() { String::from("no kills yet") } else { text.join(", ") });
+        format!("services_ok={}", self.targets.len())
     }
 }
 
@@ -1624,10 +1814,10 @@ impl Ctl {
             sleep_ms(100);
             c = counters();
         }
-        let svc_handles = ["net0", "usb0", "echo", "edu"]
-            .iter()
-            .filter_map(|n| svc_status(n).map(|(_, pid, _)| (String::from(*n), handles_of(pid))))
-            .collect();
+        let mut list = [0u8; 2048];
+        let n = svc_list(&mut list).unwrap_or(0);
+        let names: Vec<String> = core::str::from_utf8(&list[..n]).unwrap_or("").lines().filter_map(|l| l.split_whitespace().next()).map(String::from).collect();
+        let svc_handles = names.iter().filter_map(|n| svc_status(n).filter(|(st, _, _)| st == "running").map(|(_, pid, _)| (n.clone(), handles_of(pid)))).collect();
         Point { c, own_handles: handle_count(), svc_handles }
     }
 
@@ -1645,7 +1835,7 @@ impl Ctl {
         }
         // DeSoFS: unmount (also the snapshot views), check, mount again.
         let t = sysctl_text(self.sys, SYSCTL_DESOFS_UNMOUNT, 0, None).unwrap_or_default();
-        if !t.contains("/disk unmounted") || t.contains("nothing changed") {
+        if !t.contains(&format!("{} unmounted", root())) || t.contains("nothing changed") {
             self.fail(format_args!("desofs unmount at the checkpoint: {:?}", t.trim()));
         }
         // The empty mount points of the views (/snap/<name>) go too, and /snap when empty.
@@ -1659,13 +1849,13 @@ impl Ctl {
         }
         // And /snap itself (ramfs), made by the first view – it would count as ramfs growth.
         unlink("/snap");
-        let check = sysctl_text(self.sys, SYSCTL_DESOFS_CHECK, DISK, None).unwrap_or_default();
+        let check = sysctl_text(self.sys, SYSCTL_DESOFS_CHECK, disk(), None).unwrap_or_default();
         if !check.lines().any(|l| l.trim() == "result: 0 errors, 0 warnings") {
             println!("[SOAK] desofs check:\n{}", check);
             self.fail(format_args!("desofs check at the checkpoint is not clean"));
         }
-        let m = sysctl_text(self.sys, SYSCTL_DESOFS_MOUNT, DISK, None).unwrap_or_default();
-        if !m.contains("mounted at /disk (DeSoFS, read-write)") {
+        let m = sysctl_text(self.sys, SYSCTL_DESOFS_MOUNT, disk(), None).unwrap_or_default();
+        if !m.contains(&format!("mounted at {} (DeSoFS, read-write)", root())) {
             self.fail(format_args!("desofs mount at the checkpoint: {:?}", m.trim()));
         }
         // After the remount: the counters again (the volume is back in memory).
@@ -1800,27 +1990,71 @@ impl Ctl {
 }
 
 fn controller(spec: &str) -> i32 {
-    let (s, d) = spec.split_once(':').unwrap_or(("", ""));
-    let (Ok(secs), Ok(seed)) = (s.parse::<u64>(), d.parse::<u64>()) else {
-        eprintln!("soak: expected <seconds>:<seed>, got {:?}", spec);
+    // <seconds>:<seed>, or <seconds>:<seed>:ram – on a RAM disk instead of the virtio disk 0,
+    // or <seconds>:<seed>:hw – a RAM disk on real hardware (DESOOS_AUTOSOAK): no test server
+    // and no test stick expected (downloads only if the host's test server answers).
+    let mut parts = spec.split(':');
+    let (secs, seed) = (parts.next().and_then(|s| s.parse::<u64>().ok()), parts.next().and_then(|s| s.parse::<u64>().ok()));
+    let ram = match parts.next() {
+        None => false,
+        Some("ram") => true,
+        Some("hw") => {
+            HW.store(true, core::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        Some(_) => {
+            eprintln!("soak: expected <seconds>:<seed>[:ram], got {:?}", spec);
+            return 1;
+        }
+    };
+    let (Some(secs), Some(seed)) = (secs, seed) else {
+        eprintln!("soak: expected <seconds>:<seed>[:ram], got {:?}", spec);
         return 1;
     };
     // Only where the kernel started it for this: init's channels and the SYSCTL handle.
     let sys = 4;
     if handle_info(sys).map(|(k, _)| k) != Ok(KIND_SYSCTL) || handle_info(SVC).map(|(k, _)| k) != Ok(KIND_CHANNEL) {
-        eprintln!("soak: needs the SYSCTL handle and the service channel (tests/soak.sh starts it)");
-        return 1;
-    }
-    let disks = info_text("disk");
-    let d0 = disks.lines().find(|l| l.starts_with("0: ")).unwrap_or("");
-    if !d0.contains("virtio") || d0.contains("read-only") {
-        eprintln!("soak: disk 0 is not a writable virtio disk ({:?}) - the soak runs only in QEMU", d0);
+        eprintln!("soak: needs the SYSCTL handle and the service channel (tests/soak.sh or a DESOOS_AUTOSOAK build starts it)");
         return 1;
     }
     println!("[SOAK] {}", info_text("ver").trim());
-    println!("[SOAK] start: {} s, SEED={} (workers: files {}, svcnet {}, procs {}), disk {}", secs, seed, mix(seed ^ 1), mix(seed ^ 2), mix(seed ^ 3), d0);
-    match sysctl_text(sys, SYSCTL_DESOFS_FORMAT, DISK | SYSCTL_YES, None) {
-        Ok(t) if t.contains("mounted at /disk") => {}
+    // The volume: a RAM disk the soak makes (real hardware: nothing on the computer's own
+    // disks is touched), or QEMU's virtio disk 0 – only that one, never another disk 0.
+    let vol = if ram {
+        let free = counter(&counters(), "frames_free") / 256;
+        let mib = if free >= 1536 { 256 } else { 96 };
+        let t = match sysctl_text(sys, SYSCTL_RAMDISK, mib, None) {
+            Ok(t) => t,
+            Err(e) => {
+                println!("[SOAK] ERROR worker=controller desofs ramdisk {}: {}", mib, error_name(e));
+                return 1;
+            }
+        };
+        let Some(n) = t.strip_prefix("disk ").and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse::<u64>().ok()) else {
+            println!("[SOAK] ERROR worker=controller desofs ramdisk {}: {:?}", mib, t.trim());
+            return 1;
+        };
+        VOL_DISK.store(n, core::sync::atomic::Ordering::Relaxed);
+        format!("disk {} - RAM disk, {} MiB", n, mib)
+    } else {
+        let disks = info_text("disk");
+        let d0 = String::from(disks.lines().find(|l| l.starts_with("0: ")).unwrap_or(""));
+        if !d0.contains("virtio") || d0.contains("read-only") {
+            eprintln!("soak: disk 0 is not a writable virtio disk ({:?}) - without :ram the soak runs only in QEMU", d0);
+            return 1;
+        }
+        format!("disk {}", d0)
+    };
+    println!("[SOAK] start: {} s, SEED={} (workers: files {}, svcnet {}, procs {}), {}", secs, seed, mix(seed ^ 1), mix(seed ^ 2), mix(seed ^ 3), vol);
+    match sysctl_text(sys, SYSCTL_DESOFS_FORMAT, disk() | SYSCTL_YES, None) {
+        Ok(t) if disk() == 0 && t.contains("mounted at /disk") => {}
+        Ok(t) if disk() != 0 && t.contains("DeSoFS,") => match sysctl_text(sys, SYSCTL_DESOFS_MOUNT, disk(), None) {
+            Ok(m) if m.contains("mounted at /desofs (DeSoFS, read-write)") => {}
+            r => {
+                println!("[SOAK] ERROR worker=controller desofs mount {}: {:?}", disk(), r);
+                return 1;
+            }
+        },
         r => {
             println!("[SOAK] ERROR worker=controller desofs format: {:?}", r);
             return 1;
@@ -1828,6 +2062,8 @@ fn controller(spec: &str) -> i32 {
     }
     let mut ctl = Ctl { sys, secs, seed, t0: uptime_ms(), workers: Vec::new(), base: None, heap_series: Vec::new(), frames_series: Vec::new(), checks: 0 };
     let secs_s = format!("{}", secs);
+    let disk_s = format!("{}", disk());
+    let mode_s = if hw() { "hw" } else { "test" };
     for (i, name) in ["files", "svcnet", "procs"].iter().enumerate() {
         let wseed = format!("{}", mix(seed ^ (i as u64 + 1)));
         let Ok((mine, theirs)) = channel_create() else {
@@ -1838,7 +2074,7 @@ fn controller(spec: &str) -> i32 {
             "svcnet" => &[(1, 1), (2, 2), (SVC, 3), (theirs, CTL)],
             _ => &[(1, 1), (2, 2), (theirs, CTL)],
         };
-        let pid = spawn_ex("/bin/soak", &["soak", name, &wseed, &secs_s], map, 0);
+        let pid = spawn_ex("/bin/soak", &["soak", name, &wseed, &secs_s, &disk_s, mode_s], map, 0);
         close(theirs);
         if pid <= 0 {
             ctl.fail(format_args!("cannot start worker {}: {}", name, error_name(pid)));

@@ -117,11 +117,77 @@ timings move by ±15% from run to run on the same build).
 
 **Tests**
 - recovery procedure in `exceptions.rs` (`RESUME_RIP`, `probe_read`) only for tests
-- the soak test runs only in QEMU (it formats a virtio disk 0); on the test laptop it needs a RAM disk with DeSoFS
-  and a command to make one; no random allocation failures (fault injection) and no `sysfuzz` worker yet
+- the soak test on real hardware (`DESOOS_AUTOSOAK`) runs before init and only on a RAM disk; its network check
+  there is a ping of the router (no download server); no random allocation failures (fault injection) and no
+  `sysfuzz` worker yet
+- RAM disks (`desofs ramdisk`) cannot be removed – their memory comes back at the next start
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.68.0 — 2026-11-06
+
+**Status: stable on QEMU (TCG and KVM) and on the test laptop – the soak test ran on real hardware for the first
+time (RAM disk, real network and USB): PASS, 0 leaks, 0 errors.**
+
+### What is new since the last report (v0.67.0)
+
+| Version | Change |
+|---|---|
+| v0.68.0 | `desofs ramdisk <MiB>` – a RAM disk of physical frames to format as DeSoFS; `DESOOS_AUTOSOAK=S` – the soak before init on a RAM disk (real hardware), then the normal system; the soak takes the services, network and USB stick the machine has; `tests/soak.sh SOAK_DISK=ram`; the short soak in `tests/test.sh` on a RAM disk; recovery times compared per service |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1 + short soak (RAM disk), 280 tests PASS | 299 s (restart 36 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1 + short soak (RAM disk), 280 tests PASS | 230 s (restart 16 s, soak 126 s) |
+| Soak 15 min, test laptop | `DESOOS_AUTOSOAK=900`, SEED=1793998094 | **PASS**, 2 checkpoints, leaks 0, errors 0 | 903 s |
+
+### Real hardware (test laptop: Ryzen 7 4800H, 16 threads, NVMe, 3 × xHCI, Realtek RTL8168h) – soak v0.68.0
+
+The soak chose by itself: a 256 MiB RAM disk (disk 3; the NVMe untouched, read-only), killing `echo`, `net0`, `usb0`,
+`usb1`, `usb2` (`edu`: no device), pings to the router 192.168.1.1 (no test server), the boot stick's
+`EFI/BOOT/BOOTX64.EFI` (3 783 680 B) against the SHA-256 of its first reading.
+
+| What | 15 minutes |
+|---|---|
+| File operations on DeSoFS (all checked against the model) | 232 561 (3 785 MiB written, ~400–490 files, ~16 MiB live) |
+| Snapshots (checked through their views) | 2 |
+| Processes started | 375 571 |
+| Services killed | 15 – back in (min / avg / max ms): `usb0` 205 / 208 / 213, `usb1` (the stick's controller) 512 / 515 / 518, `usb2` (keyboard, mouse, hubs) 207 / 212 / 215, `echo` 105 / 169 / 202, `net0` 15 970 / 23 997 / 32 024 |
+| Final checkpoint | 3.3 s; kernel heap without the scrollback 3 921 056 B, tasks 30, processes 10, IPC buffers 0, every handle count as at the baseline, `desofs check` clean |
+| After the soak | init, services and the shell started as usual |
+
+`net0` takes 16 or 32 s: after a restart the Realtek card reports "link down", and the router's DHCP answers after
+15.7 s, sometimes only after a second round (31.7 s) – within the 60 s the soak allows on real hardware.
+
+The first run (1 hour) failed after 30 minutes on the soak's own rule, not on the system: it compared the average
+recovery of all services together, and the first period had only USB / `echo` kills (~0.3 s) while the next one had
+`net0` (16–32 s). Until then 460 451 file operations, 753 156 processes and 28 kills had passed with a steady kernel
+heap and free frames. Fixed before this report – each service is now compared with itself.
+
+### Performance against the previous release (v0.67.0 → v0.68.0, same machine)
+
+| | TCG v0.67.0 | TCG v0.68.0 | KVM v0.67.0 | KVM v0.68.0 |
+|---|---|---|---|---|
+| irq_user_ns | 11 214 | 10 949 | 66 072 | 66 006 |
+| fact_user_ns | 79 020 | 74 962 | 96 852 | 90 375 |
+| fact_svc_ns | 206 185 | 240 096 | 103 092 | 103 412 |
+| restart_us | 4 100 | 3 900 | 1 200 | 1 300 |
+| USB read_kbs (usbd) | 89 043 | 40 960 | 89 043 | 95 255 |
+| rights gate_ns | 25 | 26 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 49 182 / 41 600 | 49 920 / 52 160 | 180 480 / 216 960 | 175 360 / 210 560 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 316 / 5 809 | 6 527 / 5 673 | 17 102 / 18 004 | 16 684 / 21 557 |
+| DeSoFS 1000 small files create / read (ms) | 19 318 / 7 527 | 18 462 / 7 089 | 10 241 / 2 220 | 9 726 / 2 322 |
+| `desofs check` (ms) | 942 | 1 121 | 288 | 314 |
+| short soak: file operations in 2 min | 2 040 (virtio) | 6 490 (RAM disk) | 5 584 (virtio) | 27 744 (RAM disk) |
+
+Verdict: no regression – nothing on these paths changed. TCG `fact_svc` +16 % and TCG usbd read −54 % are single
+runs (TCG usbd read has been 34 133 before, v0.66.0; KVM 95 255 is the best so far); the short soak does 3–5 times
+more file operations because it now runs on a RAM disk.
 
 ---
 

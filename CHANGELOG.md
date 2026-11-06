@@ -2,6 +2,34 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.68.0 — 2026-11-06
+
+### Added – the soak test on real hardware
+- `desofs ramdisk <MiB>` (both shells; sysctl action 16, `arg` = size): a writable disk in memory (`ramN`, 1–1024
+  MiB, up to 4), made of physical frames – the kernel heap holds only their addresses. Refused when less than a
+  quarter of the free memory (at least 64 MiB) would stay free. Not removable (gone at power-off). On a computer whose
+  disks are read-only this is where DeSoFS can be used: `desofs format N yes`, `desofs mount N` (at `/desofs`).
+- `DESOOS_AUTOSOAK=<seconds>` (`./build.sh --autosoak=S`, `DESOOS_AUTOSOAK=3600 ./make-usb.sh …`): before init the
+  kernel runs the soak on a RAM disk (256 MiB with enough memory), then shows a green PASS / red FAIL and starts the
+  system as usual. Nothing is written to the computer's own disks.
+- `/bin/soak` takes what the machine has: it kills the services init runs (network cards, USB controllers, `echo`;
+  `edu` never), pings netd's gateway (downloads only when QEMU's test server is there), allows 60 s for a service to
+  come back on real hardware (a real DHCP server takes ~16 s), and checks the boot stick's `EFI/BOOT/BOOTX64.EFI`
+  against the SHA-256 of its first reading when the test stick is not there. Its first lines say what it chose.
+  Volume, disk number and mount point follow the RAM disk (`/desofs`).
+- `tests/soak.sh`: `SOAK_DISK=ram` – the soak on a RAM disk in QEMU (fw_cfg phase `soak <s> <seed> ram`).
+
+### Fixed (found by the first soak on the test laptop, before this release was tested)
+- The "recovery keeps growing" rule compared the average of all services together: the first period had only USB
+  and `echo` kills (~0.3 s), the next ones `net0` waiting for a real DHCP server (16–32 s), and the soak failed at
+  its first checkpoint although nothing got slower. Now every service is compared only with its own first period;
+  each checkpoint prints min / avg / max recovery per service.
+
+### Tests
+- The short soak in `tests/test.sh` runs on a RAM disk (the long `tests/soak.sh` keeps the virtio disk), so both
+  paths are covered; a `DESOOS_AUTOSOAK=120` kernel was run in plain QEMU (no test server, no test stick): PASS,
+  then the normal shell. 33 suites, a restart phase and a short soak, 280 tests.
+
 ## v0.67.0 — 2026-11-05
 
 ### Added – the soak test (long "everything at once" run)

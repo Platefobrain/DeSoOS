@@ -298,7 +298,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "stat", usage: "stat <path>", help: "file information", run: cmd_stat },
     Command { name: "mount", usage: "mount", help: "list mounted file systems", run: cmd_mount },
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
-    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair|snapshot <disk>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair, snapshot create|list|mount|delete|restore", run: cmd_desofs },
+    Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair|snapshot <disk> | ramdisk <MiB>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair, snapshot create|list|mount|delete|restore, ramdisk (a RAM disk to format)", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
     Command { name: "date", usage: "date", help: "date and time from the RTC (UTC)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
@@ -1577,6 +1577,15 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
     }
     let disk = parts.next().and_then(|s| s.parse::<usize>().ok());
     match (sub, disk) {
+        ("ramdisk", Some(mib)) => match crate::block::create_ram_disk(mib as u64) {
+            Ok(disk) => {
+                let name = crate::block::with_device(disk, |d| String::from(d.name())).unwrap_or_default();
+                let _ = writeln!(out, "disk {} ({}): RAM disk, {} MiB - 'desofs format {} yes', then 'desofs mount {}' (at /desofs); gone at power-off", disk, name, mib, disk, disk);
+            }
+            Err(e) => {
+                let _ = writeln!(out, "desofs ramdisk: {}", e);
+            }
+        },
         ("info", Some(disk)) => {
             let r = crate::fs::desofs::probe(disk);
             use crate::fs::desofs::State;
@@ -1734,7 +1743,7 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             }
         }
         _ => {
-            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ...   (disk numbers: 'disk')");
+            let _ = writeln!(out, "usage: desofs info <disk> | format <disk> [yes] | mount <disk> | unmount | check <disk> | repair <disk> [yes] | snapshot ... | ramdisk <MiB>   (disk numbers: 'disk')");
         }
     }
 }
@@ -2000,6 +2009,8 @@ pub const SYSCTL_SNAPSHOT_LIST: u64 = 12;
 pub const SYSCTL_SNAPSHOT_MOUNT: u64 = 13;
 pub const SYSCTL_SNAPSHOT_DELETE: u64 = 14;
 pub const SYSCTL_SNAPSHOT_RESTORE: u64 = 15;
+/// A RAM disk (`desofs ramdisk <MiB>`): `arg` = size in MiB.
+pub const SYSCTL_RAMDISK: u64 = 16;
 pub const SYSCTL_YES: u64 = 1 << 32;
 
 /// Whether action `op` takes a snapshot name.
@@ -2042,6 +2053,7 @@ pub fn sysctl(op: u64, arg: u64, name: Option<&str>, cwd: &mut String) -> Option
             }
             alloc::format!("desofs {} {}{}", sub, disk, if yes { " yes" } else { "" })
         }
+        SYSCTL_RAMDISK if (1..=crate::block::RAM_DISK_MAX_MIB).contains(&arg) => alloc::format!("desofs ramdisk {}", arg),
         SYSCTL_SNAPSHOT_LIST if arg >> 32 == 0 => alloc::format!("desofs snapshot list {}", disk),
         SYSCTL_SNAPSHOT_CREATE..=SYSCTL_SNAPSHOT_RESTORE if arg & !(0xFFFF_FFFF | SYSCTL_YES) == 0 => {
             let (sub, may_confirm) = match op {
