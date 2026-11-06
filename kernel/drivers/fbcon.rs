@@ -410,6 +410,14 @@ impl FbConsole {
         self.history.len()
     }
 
+    /// Kernel heap the history takes (it grows up to SCROLLBACK_LINES lines, then stays):
+    /// a cache, not a leak – `counters` reports it on its own.
+    pub fn history_bytes(&self) -> usize {
+        use crate::memory::heap_block_bytes as b;
+        let lines: usize = self.history.iter().map(|l| b(l.capacity() * core::mem::size_of::<Cell>(), core::mem::align_of::<Cell>())).sum();
+        lines + b(self.history.capacity() * core::mem::size_of::<Vec<Cell>>(), core::mem::align_of::<Vec<Cell>>())
+    }
+
     /// How many lines the view is shifted back (0 = live).
     #[allow(dead_code)]
     pub fn view_offset(&self) -> usize {

@@ -98,7 +98,8 @@ impl AddressSpace {
     }
 
     /// Removes a page mapping; returns its frame (TLB flush and freeing the
-    /// frame – the caller's job).  Empty intermediate tables stay (until the process ends).
+    /// frame – the caller's job).  Intermediate tables that become empty stay until
+    /// `prune` (munmap / brk call it) or the end of the process.
     pub fn unmap(&mut self, va: u64) -> Option<u64> {
         if va >= USER_SPACE_END {
             return None;
@@ -113,6 +114,66 @@ impl AddressSpace {
         let frame = *e & ADDRESS_MASK;
         *e = 0;
         Some(frame)
+    }
+
+    /// Frees the intermediate tables (page table, directory, PDPT) that hold no entry any
+    /// more in the 2 MiB stretches touching [start, end) – after an unmap.  Without it a
+    /// process that keeps mapping new areas (mmap moves on to fresh addresses) collected
+    /// empty tables for as long as it ran (found by the soak test).  Returns the number of
+    /// freed tables; the caller then flushes the TLB with its cached table entries (a CR3
+    /// reload – `flush_if_active`).
+    pub fn prune(&mut self, start: u64, end: u64) -> u64 {
+        const R2M: u64 = 1 << 21;
+        let end = end.min(USER_SPACE_END);
+        let mut freed = 0;
+        let mut va = start & !(R2M - 1);
+        while va < end {
+            let (i4, i3, i2) = (index(va, 4), index(va, 3), index(va, 2));
+            let up = |bits: u32| (va | ((1u64 << bits) - 1)).saturating_add(1);
+            let Some(pdpt) = Self::next(self.pml4, i4, false) else {
+                va = up(39);
+                continue;
+            };
+            let Some(pd) = Self::next(pdpt, i3, false) else {
+                va = up(30);
+                continue;
+            };
+            let next = up(21);
+            let Some(pt) = Self::next(pd, i2, false) else {
+                va = next;
+                continue;
+            };
+            if table(pt).iter().any(|&e| e != 0) {
+                va = next;
+                continue;
+            }
+            table(pd)[i2] = 0;
+            free_frame(pt);
+            freed += 1;
+            if table(pd).iter().all(|&e| e == 0) {
+                table(pdpt)[i3] = 0;
+                free_frame(pd);
+                freed += 1;
+                if table(pdpt).iter().all(|&e| e == 0) {
+                    table(self.pml4)[i4] = 0;
+                    free_frame(pdpt);
+                    freed += 1;
+                }
+            }
+            va = next;
+        }
+        freed
+    }
+
+    /// After `prune` freed tables: a CR3 reload drops this CPU's cached translations
+    /// and table entries when this space is the active one (other CPUs load another CR3
+    /// whenever they leave the process – see tlb.rs).
+    pub fn flush_if_active(&self) {
+        let cr3: u64;
+        unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags)) };
+        if cr3 & ADDRESS_MASK == self.pml4 {
+            unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
+        }
     }
 
     /// End of the unmapped stretch around `va` when a whole table above the page

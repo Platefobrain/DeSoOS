@@ -77,6 +77,9 @@ mod test_svc;
 mod test_usb;
 #[cfg(selftest)]
 mod test_net;
+// The long test (tests/soak.sh): init + /bin/soak instead of the self-tests.
+#[cfg(selftest)]
+mod test_soak;
 // SMP stress test (self-test and the `stress` command).
 pub mod stress;
 
@@ -761,6 +764,8 @@ pub use test_svc::self_test as svc_self_test;
 pub use test_usb::self_test as usb_self_test;
 #[cfg(selftest)]
 pub use test_net::self_test as net_self_test;
+#[cfg(selftest)]
+pub use test_soak::run as soak_run;
 #[cfg(selftest)]
 pub use test_smp::self_test as smp_self_test;
 #[cfg(selftest)]

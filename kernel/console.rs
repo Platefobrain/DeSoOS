@@ -513,6 +513,11 @@ impl SerialDecoder {
 
 static mut SERIAL_DECODER: SerialDecoder = SerialDecoder::new();
 
+/// Kernel heap held by the screen's scrollback (0 without a framebuffer) – `counters`.
+pub fn scrollback_bytes() -> usize {
+    with_fb(|fb| fb.history_bytes()).unwrap_or(0)
+}
+
 /// Scrolls the console screen (scrollback) by `lines` lines back
 /// (negative = forward).  Returns the new offset (0 = live).
 pub fn scroll_view(lines: isize) -> usize {

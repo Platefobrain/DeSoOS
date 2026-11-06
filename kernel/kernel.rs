@@ -84,28 +84,28 @@ pub extern "sysv64" fn kernel_main(
     // GDT/IDT as early as possible – after that every fault gets a readable report.
     arch::x86_64::init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         arch::x86_64::self_test();
     }
 
     // Physical memory (frame allocator).
     memory::init(boot);
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         memory::self_test();
     }
 
     // Paging.
     memory::paging_init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         memory::paging_self_test();
     }
 
     // Kernel heap.
     memory::heap_init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         memory::heap_self_test();
     }
     // Per-CPU block lists – after the self-test (it checks exact counters).
@@ -118,7 +118,7 @@ pub extern "sysv64" fn kernel_main(
     // On-demand mapping (needs #PF + frame allocator + paging)
     // – always active, the test runs only in the selftest build.
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         memory::demand_self_test();
     }
 
@@ -139,7 +139,7 @@ pub extern "sysv64" fn kernel_main(
     arch::x86_64::interrupts::enable();
     serial_println!("[ARCH] Interrupts enabled");
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         time::self_test();
     }
 
@@ -147,31 +147,31 @@ pub extern "sysv64" fn kernel_main(
     // the idle task; the PIT tick preempts tasks.
     sched::init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         sched::self_test();
     }
 
     // Ring 3 (FPU/SSE, SMEP, SMAP, SYSCALL); process, FPU and syscall tests.
     user::init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         user::self_test();
     }
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         user::fpu_self_test();
     }
 
     // PS/2 controller + keyboard (IRQ1) -> input (event queue).
     let keyboard = drivers::keyboard::init();
     #[cfg(selftest)]
-    if keyboard && !selftest::restart() {
+    if keyboard && !selftest::skip_boot() {
         drivers::keyboard::self_test();
     }
     // PS/2 mouse (the wheel scrolls the console).
     let mouse = keyboard && drivers::mouse::init();
     #[cfg(selftest)]
-    if mouse && !selftest::restart() {
+    if mouse && !selftest::skip_boot() {
         drivers::mouse::self_test();
     }
     let _ = mouse;
@@ -181,7 +181,7 @@ pub extern "sysv64" fn kernel_main(
         serial_println!("[CON] WARNING: serial input not available");
     }
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         shell::self_test();
     }
 
@@ -190,7 +190,7 @@ pub extern "sysv64" fn kernel_main(
     drivers::pci::init();
     drivers::virtio_blk::init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         drivers::virtio_blk::self_test();
     }
     drivers::nvme::init();
@@ -198,27 +198,27 @@ pub extern "sysv64" fn kernel_main(
     // VFS – ramfs at "/", disk 0 at "/disk" (DeSoFS or FAT32).
     fs::init();
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         fs::self_test();
     }
     // ACPI, ECAM, MSI-X, NVMe, GPT (needs the VFS – the /esp partition).
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         drivers::nvme::self_test();
     }
 
     // Syscalls (they need the VFS – file test); ELF programs from /bin.
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         user::syscall_self_test();
     }
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         user::elf_self_test();
     }
     // spawn/wait/parent, user-space shell, init.
     #[cfg(selftest)]
-    if !selftest::restart() {
+    if !selftest::skip_boot() {
         user::init_self_test();
     }
 
@@ -234,6 +234,16 @@ pub extern "sysv64" fn kernel_main(
         selftest::exit_if_autotest(ok);
     }
     arch::x86_64::smp::init();
+    // tests/soak.sh: the long test instead of the self-tests (it needs every core, the
+    // keyboard repeat task and the usb-disks task like a normal start).
+    #[cfg(selftest)]
+    if let Some((secs, seed)) = selftest::soak() {
+        input::start_repeat_task();
+        user::ublk::start_monitor();
+        let ok = user::soak_run(secs, seed);
+        let ok = selftest::finish() && ok;
+        selftest::exit_if_autotest(ok);
+    }
     #[cfg(selftest)]
     selftest::suite("smp", user::smp_self_test);
     // Spinlocks and the SMP stress test.

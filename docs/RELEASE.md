@@ -117,6 +117,83 @@ timings move by ±15% from run to run on the same build).
 
 **Tests**
 - recovery procedure in `exceptions.rs` (`RESUME_RIP`, `probe_read`) only for tests
+- the soak test runs only in QEMU (it formats a virtio disk 0); on the test laptop it needs a RAM disk with DeSoFS
+  and a command to make one; no random allocation failures (fault injection) and no `sysfuzz` worker yet
+- soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
+  kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
+  below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.67.0 — 2026-11-06
+
+**Status: stable on QEMU (TCG and KVM); the soak test – 1 hour and 8 hours with KVM PASS, 0 leaks, 0 errors; one kernel leak
+found by it and fixed (empty page tables after `munmap`).**
+
+### What is new since the last report (v0.66.1)
+
+| Version | Change |
+|---|---|
+| v0.67.0 | `tests/soak.sh` + `/bin/soak`: files and snapshots on DeSoFS, services killed and checked to work again, network downloads, processes and IPC – all at once, with checkpoints (kernel counters and handles against a baseline, `desofs check`); `sysinfo counters`; `munmap` / `brk` free page tables left empty; a 2-minute soak at the end of `tests/test.sh` |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1 + short soak, 280 tests PASS | 299 s (restart 37 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1 + short soak, 280 tests PASS | 228 s (restart 16 s, soak 125 s) |
+| Soak 1 h | KVM, 4 CPUs, 512 MiB, 512 MiB virtio disk, SEED=1793942415 | **PASS**, 3 checkpoints, leaks 0, errors 0 | 3 631 s |
+| Soak 8 h | KVM, 4 CPUs, 512 MiB, 512 MiB virtio disk, SEED=1793952020 | **PASS**, 17 checkpoints, leaks 0, errors 0 | 28 828 s |
+
+The test time now includes the short soak; the self-tests themselves take as long as before (~169 s TCG, ~103 s KVM).
+
+### Soak `[RESULT-SOAK]`
+
+| | short, TCG | short, KVM | 1 hour, KVM | 8 hours, KVM |
+|---|---|---|---|---|
+| seconds | 127 | 122 | 3 626 |
+| file operations (all checked against the model) | 2 040 | 5 584 | 109 447 (1 787 MiB written; ~430–495 files, ~16 MiB live) | 832 122 (13 641 MiB written) |
+| snapshots made (each checked through its view at every checkpoint) | 7 | 7 | 11 (5 deleted, 6 kept) | 95 (89 deleted, 6 kept) |
+| services killed / back in (min / avg / max ms) | 8 / 111 / 553 / 935 | 7 / 202 / 654 / 974 | 62 / 104 / 681 / 1 427 | 462 / 103 / 628 / 2 154 |
+| downloaded (SHA-256 checked) | 757 MiB | 830 MiB | 25 360 MiB | 198 958 MiB |
+| processes started | 17 228 | 46 956 | 1 399 607 | 11 087 468 |
+| checkpoints / leaks / errors | 3 / 0 / 0 | 3 / 0 / 0 | 3 / 0 / 0 | 17 / 0 / 0 |
+
+At the end of the hour (paused workers, volume remounted): kernel heap without the console scrollback 3 344 912 B,
+the scrollback 1.8 MiB (its 1000-line limit), tasks, processes, IPC buffers (0), ramfs and every handle count the same
+as at the baseline; `desofs check` 0 errors, 0 warnings; the final checkpoint took 26 s (all files plus six snapshots
+read and compared). After 8 hours: the kernel heap without the scrollback 3 344 880 B (32 B less than at the end of
+the 1-hour run), the scrollback at its limit (2 032 KiB), every count the same as at the baseline, `desofs check`
+clean at all 17 checkpoints; with 17 checkpoints the "three in a row" trend rule was active and never triggered; the
+recovery average did not grow (628 ms over 8 hours vs 681 ms in the first hour). Real hardware: not run (the soak formats a virtio disk – on the laptop it needs a RAM disk, see
+Current limitations).
+
+### Known problems
+
+- Found and fixed in this release: page tables left empty by `munmap` stayed until the process ended – ~4 frames a
+  second in the soak's process worker (CHANGELOG v0.67.0).
+- The kernel heap "grew" ~100 KiB a minute in the first soak runs – the console scrollback filling up (bounded at
+  1000 lines, ~1.8 MiB on this screen); now reported apart (`heap_console`) and not counted as a leak.
+
+### Performance against the previous release (v0.66.1 → v0.67.0, same machine)
+
+| | TCG v0.66.1 | TCG v0.67.0 | KVM v0.66.1 | KVM v0.67.0 |
+|---|---|---|---|---|
+| irq_user_ns | 12 391 | 11 214 | 65 552 | 66 072 |
+| fact_user_ns | 71 047 | 79 020 | 83 998 | 96 852 |
+| fact_svc_ns | 175 901 | 206 185 | 105 429 | 103 092 |
+| restart_us | 3 700 | 4 100 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 83 591 | 89 043 | 89 043 | 89 043 |
+| rights gate_ns | 27 | 25 | 6 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 49 425 / 49 920 | 49 182 / 41 600 | 180 480 / 211 840 | 180 480 / 216 960 |
+| DeSoFS 8 MiB write / read (KiB/s) | 5 657 / 5 614 | 6 316 / 5 809 | 13 721 / 17 925 | 17 102 / 18 004 |
+| DeSoFS 1000 small files create / read (ms) | 19 944 / 7 826 | 19 318 / 7 527 | 9 472 / 2 564 | 10 241 / 2 220 |
+| `desofs check` (ms) | 950 | 942 | 325 | 288 |
+
+Verdict: no regression. TCG `fact_svc` (+17 %) and `fact_user` (+11 %) and TCG user-space SHA-256 (−17 %) are single
+runs within the known TCG spread (v0.62.0 had `fact_svc` 201 005, TCG SHA-256 moves 19–41 MiB/s); KVM `fact_user`
+96 852 is the known two-state `edu` measurement. The `munmap` change touches only unmapping, which none of these
+measure.
 
 ---
 
@@ -136,6 +213,30 @@ timings move by ±15% from run to run on the same build).
 |---|---|---|---|
 | TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1, 279 tests PASS | 172 s (restart 38 s) |
 | KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1, 279 tests PASS | 103 s (restart 16 s) |
+
+### Real hardware (test laptop: Ryzen 7 4800H, 16 threads, NVMe, 3 × xHCI, Realtek RTL8168h) – v0.66.1
+
+First real-hardware run since v0.58.0 (DeSoFS, `/disk`, the `SYSCTL` handle for `desofs`, mount pins and
+snapshots came in between). Built with `DESOOS_AUTOSTRESS=60`.
+
+| What | v0.55.0 | v0.66.1 |
+|---|---|---|
+| Boot | – | 16 CPUs, `echo`, `net0`, `usb0`–`usb2` running (`edu`: no device, QEMU only); 7 USB devices (keyboard, G502 mouse behind a hub, USB 3 stick, camera, Bluetooth, 2 hubs) |
+| Stress 60 s (compare mode) | PASS, 587 878 shell scripts | **PASS**, 565 322 shell scripts, 282 660 primes, 8 062 IPC jobs, 0 deadlock reports |
+| USB stick read before the stress (256 KiB / 4 KiB reads) | 125 051 KiB/s | 120 457 / 124 181 KiB/s, identical data |
+| USB stick read during the stress | 78 604 KiB/s | 74 535 KiB/s, 1 296 full passes, 0 errors |
+| USB keyboard, interrupt → character | 110 µs (41 presses) | **25 µs** avg, max 116 µs (18 presses) |
+| `ipcbench` ping-pong | 4.5 µs | 4.5 µs (4.6 during the stress) |
+| `ping 192.168.1.1` | < 1 ms | < 1 ms, 0 % loss |
+| `netget` 10 MiB (thinkbroadband) | 6 692 first, then ~9 500 KiB/s | 7 441 first, then 9 481 / 9 463 KiB/s (the 100 Mb/s link) |
+| DHCP address after boot | 15.7 s | 15.7 s |
+| `cryptotest` | – | 92 checks OK; SHA-256 / HMAC 247 680 KiB/s in user space |
+| `sha256sum /usb0/EFI/BOOT/BOOTX64.EFI` | – | `947a7b92…a81e1eed` – the same as `sha256sum` of the file on the build machine (USB read path and DeSoCrypto agree byte for byte) |
+| `desofs info 0` / `snapshot list 0` (NVMe, read-only) | – | "not a DeSoFS volume" – refused, nothing written; `/disk` not available (read-only disk without DeSoFS / FAT32) |
+
+The stress run did ~4 % fewer shell scripts than on v0.55.0 (each script starts processes; since v0.65.0 a process
+start also takes a mount pin for its current directory). One run only (v0.35.2: 600 637, v0.55.0: 587 878 and
+587 935), so not called a regression yet; to be compared in the next hardware run.
 
 ### Performance against the previous release (v0.66.0 → v0.66.1, same machine)
 

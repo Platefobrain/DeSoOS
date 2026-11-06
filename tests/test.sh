@@ -11,6 +11,8 @@
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
 # by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Not in loop mode.
+# Then a short soak (2 min, tests/soak.sh – all workers at once, checkpoints): the soak
+# itself keeps working ([RESULT-SOAK], log logs/test-soak.log).  Not in loop mode.
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
 #             3 = QEMU exited otherwise (e.g. triple fault / reboot).
@@ -175,13 +177,28 @@ if [ "$CODE" = 33 ] && [ -z "$LOOP" ]; then
   TIME2=$(( $(date +%s) - START2 ))
 fi
 rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
+
+# Short soak (only after two passing starts, not in loop mode).
+LOG3="$ROOT/logs/test-soak.log"
+: > "$LOG3"
+CODE3=0
+TIME3=0
+SOAK_OK=""
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
+  echo "Short soak (2 min, tests/soak.sh)..."
+  START3=$(date +%s)
+  DURATION=2m ACCEL="$ACCEL" SMP="$SMP" SOAK_LOG="$LOG3" "$T/soak.sh" --no-build > "$ROOT/logs/test-soak.out" 2>&1
+  CODE3=$?
+  TIME3=$(( $(date +%s) - START3 ))
+  [ "$CODE3" = 0 ] && SOAK_OK="; short soak: PASS"
+fi
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) ))
+PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
 # The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
-echo "Log: logs/test.log + logs/test-restart.log (${TIME} s, restart ${TIME2} s, ${PASSED} tests PASS)"
+echo "Log: logs/test.log + logs/test-restart.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, soak ${TIME3} s, ${PASSED} tests PASS)"
 # Service benchmark (kernel vs user space) – the [RESULT-SVC] line from the SVC self-test.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
@@ -192,6 +209,8 @@ grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
 grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
+# The short soak – the [RESULT-SOAK] line (tests/soak.sh adds the QEMU configuration).
+grep -a "^\[RESULT-SOAK\]" "$ROOT/logs/test-soak.out" 2>/dev/null | tail -n1 || true
 # Loop mode – rounds passed and round times.
 grep -a "^\[RESULT-LOOP\]" "$LOG" | tail -n1 || true
 grep -a "^\[LOOP\] .*FAILED" "$LOG" | tail -n1 || true
@@ -210,10 +229,16 @@ if [ "$CODE" = 33 ] && [ "$CODE2" != 33 ]; then
   esac
 fi
 
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE3" != 0 ]; then
+  echo "FAIL - short soak: tests/soak.sh ended with code $CODE3 (1 FAIL, 2 HANG, 3 QEMU, 4 timeout). Its summary:"
+  tail -n 25 "$ROOT/logs/test-soak.out"
+  exit 1
+fi
+
 case "$CODE" in
   33)
     if [ -n "$SUMMARY2" ]; then
-      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}"
+      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}${SOAK_OK}"
     else
       echo "PASS - ${SUMMARY}"
     fi

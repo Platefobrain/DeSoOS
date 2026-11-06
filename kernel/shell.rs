@@ -268,6 +268,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "ver", usage: "ver", help: "system version", run: cmd_ver },
     Command { name: "uptime", usage: "uptime", help: "time since the timer started", run: cmd_uptime },
     Command { name: "mem", usage: "mem", help: "physical memory, kernel heap and image", run: cmd_mem },
+    Command { name: "counters", usage: "counters", help: "kernel counters as numbers (leak checks)", run: cmd_counters },
     Command { name: "irq", usage: "irq", help: "interrupt counters per IRQ line", run: cmd_irq },
     Command { name: "sleep", usage: "sleep <ms>", help: "wait (the shell task sleeps)", run: cmd_sleep },
     Command { name: "ps", usage: "ps", help: "list tasks (id, state, CPU, CPU time)", run: cmd_ps },
@@ -340,6 +341,35 @@ fn cmd_uptime(_: &str, out: &mut dyn Write, _: &mut Context) {
 
 fn cmd_mem(_: &str, out: &mut dyn Write, _: &mut Context) {
     mem_report(out);
+}
+
+/// `counters` (also `sysinfo counters`): one "name value" pair per line, for programs that
+/// look for leaks (/bin/soak).  Free frames are counted after the task stack cache is
+/// emptied, so stacks kept for reuse do not look like a leak.
+fn cmd_counters(_: &str, out: &mut dyn Write, _: &mut Context) {
+    let tasks = crate::sched::tasks();
+    let dead = tasks.iter().filter(|t| t.state == crate::sched::State::Dead).count();
+    let _ = writeln!(out, "frames_free {}", crate::sched::stack::free_frames_flushed());
+    let _ = writeln!(out, "heap_used {}", crate::memory::heap_used_bytes());
+    let _ = writeln!(out, "heap_mapped {}", crate::memory::heap_mapped_bytes());
+    // Caches inside heap_used – they fill up to a limit and stay (not a leak).
+    let _ = writeln!(out, "heap_console {}", crate::console::scrollback_bytes());
+    let _ = writeln!(out, "tasks {}", tasks.len());
+    let _ = writeln!(out, "tasks_dead {}", dead);
+    let _ = writeln!(out, "processes {}", crate::user::process::LIVE_PROCS.load(core::sync::atomic::Ordering::Relaxed));
+    let _ = writeln!(out, "zombies {}", crate::user::procs::zombies().len());
+    let _ = writeln!(out, "ipc_bytes {}", crate::user::kbuf::stats().0);
+    let _ = writeln!(out, "ramfs_bytes {}", crate::fs::ramfs::bytes_used());
+    // Memory of every process: heap (brk) + other areas, "mem_<pid>_<name> <bytes>".
+    let mut procs: Vec<(u64, u64)> = Vec::new();
+    crate::sched::for_each_process(|pid, p| {
+        let (b, m) = p.mem.footprint();
+        procs.push((pid, b + m));
+    });
+    for (pid, bytes) in procs {
+        let name = tasks.iter().find(|t| t.id == pid).map(|t| t.name.as_str()).unwrap_or("?");
+        let _ = writeln!(out, "mem_{}_{} {}", pid, name, bytes);
+    }
 }
 
 /// `mem` (also the automatic stress test after boot).
@@ -1830,7 +1860,7 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 /// Read-only commands for user space (sysinfo syscall) –
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
 /// (sector read / write, run – only in the kernel fallback shell).
-pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
     let line = line.trim();

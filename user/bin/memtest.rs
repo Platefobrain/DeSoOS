@@ -6,7 +6,8 @@
 //   memtest protnone – reads a PROT_NONE page (should die from #PF)
 // Also: the area limit (MAX_VMAS – 4 KiB areas until ERROR_OUT_OF_MEMORY, the kernel keeps
 // running, everything comes back after munmap), freed address ranges are reused (60 000 ×
-// 2 GiB mmap + munmap = 117 TiB, more than the whole mmap range), PROT_NONE.
+// 2 GiB mmap + munmap = 117 TiB, more than the whole mmap range), page tables left empty
+// by munmap are freed (512 x 4 MiB areas), PROT_NONE.
 #![no_std]
 #![no_main]
 
@@ -39,6 +40,13 @@ fn deep(level: u64) -> u64 {
     pad[(level % 4000) as usize] = level as u8;
     let r = if level == 0 { 0 } else { deep(level - 1) };
     r + core::hint::black_box(&pad)[(level % 4000) as usize] as u64
+}
+
+/// Free frames from `sysinfo counters` (0 if missing).
+fn free_frames() -> u64 {
+    let mut buf = [0u8; 4096];
+    let n = sysinfo("counters", &mut buf).unwrap_or(0);
+    core::str::from_utf8(&buf[..n]).unwrap_or("").lines().find_map(|l| l.strip_prefix("frames_free ")).and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
 fn main(args: Args) -> i32 {
@@ -192,6 +200,21 @@ fn main(args: Args) -> i32 {
     }
     check!(n, prev >= MMAP_BASE && prev < MMAP_END && wrapped >= 1, "last address {:#x} inside the mmap range, {} returns to its start", prev, wrapped);
 
+    // 7b. Page tables left empty by munmap are freed: 512 areas of 4 MiB at fresh
+    // addresses, one page touched in each (a new page table every time) – the free frames
+    // stay put while the process keeps running (a long-lived process used to collect them).
+    let f0 = free_frames();
+    for i in 0..512u64 {
+        let Ok(a) = mmap(4 << 20, PROT_READ | PROT_WRITE) else {
+            check!(n, false, "mmap 4 MiB number {} failed", i);
+            return 1;
+        };
+        unsafe { core::ptr::write_volatile(a as *mut u64, i) };
+        munmap(a, 4 << 20);
+    }
+    let f1 = free_frames();
+    check!(n, f0 > 0 && f0.saturating_sub(f1) < 64, "512 x mmap + touch + munmap: {} free frames before, {} after - empty page tables kept", f0, f1);
+
     // 8. PROT_NONE: the range exists, no access – a read into it from the kernel fails;
     // PROT_WRITE without PROT_READ is invalid.
     let none = mmap(8192, 0);
@@ -211,6 +234,6 @@ fn main(args: Args) -> i32 {
         check!(n, matches!(st, Ok((_, s)) if s == STATUS_SIGNALED | want), "memtest {}: {:?}", mode, st);
     }
 
-    println!("memtest: {} checks OK (area limit at {} areas, 60 000 x 2 GiB mmap reusing freed ranges, PROT_NONE)", n, count);
+    println!("memtest: {} checks OK (area limit at {} areas, 60 000 x 2 GiB mmap reusing freed ranges, empty page tables freed, PROT_NONE)", n, count);
     0
 }

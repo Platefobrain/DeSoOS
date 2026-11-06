@@ -67,6 +67,7 @@ pub use heap::{
     init as heap_init,
     used_bytes as heap_used_bytes,
     mapped_bytes as heap_mapped_bytes,
+    block_bytes as heap_block_bytes,
 };
 
 #[allow(unused_imports)]

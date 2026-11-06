@@ -1,4 +1,4 @@
-# DeSoOS v0.66.1
+# DeSoOS v0.67.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -53,8 +53,9 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (33 suites and a restart phase, 279 tests) and stress tests, runnable automatically in QEMU or on real
-  hardware.
+- Built-in self-tests (33 suites, a restart phase and a short soak, 280 tests), stress tests and a long soak test
+  (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
+  QEMU or on real hardware.
 
 It has been tested in QEMU and on a real 16-thread AMD laptop with xHCI USB, an NVMe SSD and Realtek
 Ethernet.
@@ -156,8 +157,11 @@ named suite runs round after round (USB, network, stress and the other suites ar
 becomes 3600 s. Suites: `smp`, `lock`, `tlb`, `alloc`, `nobkl`, `files`, `ipc`, `rights`. The summary shows
 `[RESULT-LOOP] suite=… rounds=… passed=… min_ms=… avg_ms=… max_ms=…` and the failed round, if any.
 
+After the tests QEMU starts a second time on the same test disk (the restart phase – DeSoFS written by the first
+start must be there), then a short soak runs for 2 minutes (see below).
+
 Result and exit code: `PASS` (0), `FAIL` (1, with a list of failures), `TIMEOUT` (2, hang) or a
-QEMU/build error (3). Full log: `logs/test.log`. Tests use separate, temporary disk images, so
+QEMU/build error (3). Full logs: `logs/test.log`, `logs/test-restart.log`, `logs/test-soak.log`. Tests use separate, temporary disk images, so
 `disk.img` is left untouched. Do not run `test.sh` at the same time as `run-qemu.sh` or another `test.sh` (they
 share `build/` and a host port) – `test.sh` checks this and stops with "another test or QEMU is already running".
 
@@ -166,6 +170,21 @@ device; after the tests (or on a panic / critical exception) the kernel powers Q
 result code. A `--selftest` build started with plain `./run-qemu.sh` runs the tests and then
 starts the shell as usual. Test code is marked `#[cfg(selftest)]` and is not compiled into a
 regular build at all. When adding new test-only functions, mark them `#[cfg(selftest)]` as well.
+
+Soak test – everything at once for a long time (files on DeSoFS with snapshots, services killed and checked to come
+back, network downloads, processes and IPC), with a checkpoint every 30 minutes (leaks against a baseline,
+`desofs check`):
+
+```bash
+tests/soak.sh                     # 1 hour with KVM
+DURATION=8h tests/soak.sh         # for the night (90s, 30m, 8h ...)
+SEED=1234 tests/soak.sh           # the same run again (the seed is printed at the start)
+ACCEL=tcg tests/soak.sh           # without KVM
+```
+
+Exit codes: 0 PASS, 1 FAIL (the first error with the last 64 operations of that worker), 2 HANG (no line for 5
+minutes), 3 QEMU ended by itself, 4 took too long. Log: `logs/soak.log`; the summary is the `[RESULT-SOAK]` line.
+It uses its own disk images and needs the same host ports as `test.sh`, so not both at once.
 
 Stress test in QEMU (the same autostress as on real hardware, before writing a USB stick):
 
@@ -389,7 +408,7 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
 - `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel) and DeSoCrypto
   (`common/desocrypto/`, kernel and programs).
-- `tests/` - `test.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
+- `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.

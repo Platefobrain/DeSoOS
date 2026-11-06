@@ -141,6 +141,11 @@ fn page_up_user(x: u64) -> Option<u64> {
 }
 
 impl ProcMem {
+    /// Bytes of the heap (brk) and of the other areas (mmap, shared memory) – `counters`.
+    pub fn footprint(&self) -> (u64, u64) {
+        (self.brk - self.brk_start, self.mapped)
+    }
+
     /// `image_end` – the first address past the program image (the heap starts
     /// one page further – guard page).
     pub fn new(image_end: u64) -> Self {
@@ -291,6 +296,9 @@ impl ProcMem {
         }
         if new_end < old_end {
             unmap_range(space, new_end, old_end);
+            if space.prune(new_end, old_end) > 0 {
+                space.flush_if_active();
+            }
         }
         self.brk = addr;
         addr
@@ -438,6 +446,10 @@ impl ProcMem {
             self.mapped -= b - a;
         }
         self.vmas = out;
+        // Tables left without any entry go too (a later access maps them again).
+        if space.prune(addr, end) > 0 {
+            space.flush_if_active();
+        }
         Ok(())
     }
 

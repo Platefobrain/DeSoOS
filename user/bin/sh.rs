@@ -64,7 +64,7 @@ const BUILTINS: &[(&str, &str)] = &[
 const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress", "desofs"];
 
 /// Information from the kernel (sysinfo syscall, read-only).
-const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "dcp"];
+const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "dcp"];
 
 /// Commands that remain only in the kernel's emergency shell.
 const KERNEL_ONLY: &[&str] = &["run", "hexdump", "write", "spawn", "colors", "keys", "k"];

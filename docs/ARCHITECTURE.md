@@ -152,6 +152,11 @@ zeroing and no TLB shootdown).
 - **Protection:** `PROT_READ`, `PROT_READ | PROT_WRITE`, or `0` (`PROT_NONE` – a reserved range, never mapped: every
   access is a #PF, a kernel copy is `ERROR_INVALID_ADDRESS`). Pages are never executable.
 - `munmap` skips stretches without a page table (2 MiB / 1 GiB / 512 GiB) instead of walking every page.
+- `munmap` (and a shrinking `brk`) frees the page tables, directories and PDPTs that are left without any entry
+  in the unmapped range (`AddressSpace::prune`), then reloads CR3 on this CPU so no cached entry points at a freed
+  table (other CPUs load another CR3 whenever they leave the process). Before v0.67.0 they stayed until the process
+  ended – with next-fit addresses a long-running process that keeps mapping collected one table per new 2 MiB (found
+  by the soak test).
 - A process is single-threaded, so only the process itself changes its regions and page tables – no locks.
 - A ring-3 #PF runs on the task stack (no IST); a kernel stack overflow → #DF (on an IST stack).
 - **Shared regions** – pages of a shared memory object, mapped eagerly, always NX; the frames belong to the
@@ -738,9 +743,12 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
 
 ### `sysinfo` and `sysctl`
 
-- **`sysinfo(topic, buffer)`** (46) – read-only text: `ver`, `uptime`, `date`, `mem`, `irq`, `cpus`, `lspci`
-  (`-v`), `acpi`, `disk` (list only), `mount`, `df`. Any program may ask. The shell runs these by name (`mem`,
-  `lspci -v > file`).
+- **`sysinfo(topic, buffer)`** (46) – read-only text: `ver`, `uptime`, `date`, `mem`, `counters`, `irq`, `cpus`,
+  `lspci` (`-v`), `acpi`, `disk` (list only), `mount`, `df`. Any program may ask. The shell runs these by name
+  (`mem`, `lspci -v > file`). `counters` is for programs (the soak test): one `name value` per line – `frames_free`
+  (after the task stack cache is emptied), `heap_used`, `heap_mapped`, `heap_console` (the screen scrollback inside
+  the heap: a cache of at most 1000 lines that fills up and stays – not a leak), `tasks`, `tasks_dead`, `processes`,
+  `zombies`, `ipc_bytes`, `ramfs_bytes`, and `mem_<pid>_<name>` (heap + other areas of every process).
 - **`sysctl(handle, action, arg, fd)`** (47) – `reboot`, `halt`, `sync`, `stress [s]` (actions 1–4) and `desofs`
   (5 info, 6 format, 7 mount, 8 unmount, 9 check, 10 repair; `arg` = disk number in bits 0–31, bit 32 = "yes" for
   format / repair – checked by the kernel, so without it nothing is written even for a program calling sysctl
@@ -1631,7 +1639,8 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 32 self-test suites (256 tests) in QEMU (TCG or `ACCEL=kvm`, 1–4 CPUs);
+- **Self-tests:** `tests/test.sh` – 33 self-test suites, a restart phase and a short soak (280 tests) in QEMU (TCG
+  or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, cryptography, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
@@ -1639,6 +1648,38 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test
   (without waiting for `on_cpu` the test must fail).
+- **Soak test** (v0.67.0): `tests/soak.sh` (default 1 hour with KVM, `DURATION=8h`, `SEED=`) starts QEMU with the
+  fw_cfg phase `soak <seconds> <seed>`; the boot tests are skipped and the kernel runs `init test /bin/soak
+  <seconds>:<seed>` with the handles the real init gets (`kernel/user/test_soak.rs`), so everything goes through the
+  real paths – syscalls, init restarting services, `desofs` through `sysctl`, the network through netd. `/bin/soak`
+  is a controller with three worker processes (the same program; a control channel each, all randomness from the
+  seed):
+  - **files** – DeSoFS on `/disk` (the disk formatted first; only a writable virtio disk 0 is accepted): create,
+    append, overwrite, patch, truncate, move (copy + delete – `rename` is not a syscall), delete, read, empty
+    directories; at most 500 files of up to 256 KiB in 3 levels, 16 MiB in all. The model keeps (size, seed) per
+    file – the content is computed from the seed, so the model stays ~12 KiB for hours; every changed file is read
+    back and compared. A snapshot every 5 minutes (6 kept), each with its own frozen copy of the model.
+  - **svcnet** – kills `net0`, `usb0` or `echo` every 30–90 s. Back = init lists a new pid and a higher restart
+    count, and the service works (ping + a 1 MiB download from the host's `http-stub.py` with the right SHA-256 /
+    `DATA.BIN` of the test stick read and checked on whichever `/usbN` it came back as / an echo answer) within 30
+    s; the times go into min / average / max, and an average three times the first period's fails. Between kills:
+    downloads, ping, echo, USB reads.
+  - **procs** – spawn / wait (exit codes), kill, pipes, channels, shared memory, mmap / munmap.
+  - **Checkpoints** – a baseline after the warm-up (a quarter of the run, at most 5 minutes), then every 30
+    minutes and at the end: "pause" to every worker; each finishes its operation, checks all it owns (every file
+    and directory listing against the model, every snapshot through its read-only view, every service, one round
+    of each process test), answers "paused" with its handle count and heap end, and waits. Then: zombies and dead
+    tasks 0; `sysinfo counters` and handles against the baseline – tasks, processes, IPC buffers, ramfs equal; free
+    frames within 1 MiB and the kernel heap within 512 KiB (both without the console scrollback), neither worse at
+    three checkpoints in a row; handles of the controller, every worker and every service equal; a worker's heap
+    end not more than 1 MiB higher; `desofs unmount` (the views go too) → `desofs check` = "0 errors, 0 warnings"
+    (complete) → `desofs mount`. A pin that still holds the volume makes the unmount fail – reported, not raced.
+  - **Output** – a heartbeat once a minute and a line per service kill (the kernel's "nothing printed" watchdog waits
+    150 s in a soak start); a failure prints `[SOAK] ERROR worker=… seq=… …` with the last 64 operations of that
+    worker (a ring in memory, not millions of log lines); the end is `[RESULT-SOAK] seconds seed ops_files
+    snapshots kills recover_ms net_mib procs checks leaks errors`. `soak.sh` exit codes: 0 PASS, 1 FAIL, 2 HANG (no
+    new line for 5 minutes – QEMU stopped, CPU state from the QEMU monitor in the log), 3 QEMU ended by itself, 4
+    too long. `tests/test.sh` ends with a 2-minute soak (snapshots every 15 s, kills every 10–20 s, 1 MiB of files).
 - **Syscall fuzzer:** `/bin/sysfuzz [children] [calls]` – children (8 in parallel) call random syscalls with random
   and extreme arguments (0, -1, 2^64−1, kernel addresses, near-overflows, a real buffer with a wrong length, random
   handle numbers, nonexistent numbers → `ERROR_NOT_IMPLEMENTED`). Children start with no handles (`spawn_ex` with an empty map), so

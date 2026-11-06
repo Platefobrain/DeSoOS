@@ -143,6 +143,8 @@ pub fn watchdog_tick(rip: u64) {
 #[cfg(selftest)]
 const STALL_MS: u64 = 30_000;
 #[cfg(selftest)]
+const SOAK_STALL_MS: u64 = 150_000;
+#[cfg(selftest)]
 static STALL_LINES: AtomicU64 = AtomicU64::new(u64::MAX);
 #[cfg(selftest)]
 static STALL_STAMP: AtomicU64 = AtomicU64::new(0);
@@ -162,13 +164,16 @@ fn stall_poll() {
         }
         return;
     }
-    if clock::elapsed_us(STALL_STAMP.load(Ordering::Relaxed)) < STALL_MS * 1000 {
+    // The soak prints a heartbeat once a minute (tests/soak.sh calls 5 quiet minutes a
+    // hang) – its report comes after 150 s, still before soak.sh stops QEMU.
+    let limit = if crate::selftest::soak().is_some() { SOAK_STALL_MS } else { STALL_MS };
+    if clock::elapsed_us(STALL_STAMP.load(Ordering::Relaxed)) < limit * 1000 {
         return;
     }
     if STALL_REPORTED.swap(true, Ordering::AcqRel) {
         return;
     }
-    lockup_dump(format_args!("self-test printed nothing for {} s (seen by CPU {}) - a task is stuck", STALL_MS / 1000, cpu::id()));
+    lockup_dump(format_args!("self-test printed nothing for {} s (seen by CPU {}) - a task is stuck", limit / 1000, cpu::id()));
 }
 
 /// Checks whether the clock has stopped (called from wait loops; cheap).

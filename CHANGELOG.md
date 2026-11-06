@@ -2,6 +2,52 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.67.0 — 2026-11-05
+
+### Added – the soak test (long "everything at once" run)
+- `tests/soak.sh`: QEMU with the same devices as `tests/test.sh` (own 512 MiB disk), the boot self-tests skipped
+  (fw_cfg phase `soak <seconds> <seed>`), the kernel starts `init test /bin/soak <seconds>:<seed>`. Default 1 hour
+  with KVM; `DURATION=8h`, `SEED=` (always printed – the same seed repeats the run), `ACCEL=tcg`. Exit codes: 0 PASS,
+  1 FAIL, 2 HANG (no line for 5 minutes – QEMU stopped, monitor dump in the log), 3 QEMU ended by itself, 4 too long.
+  Log `logs/soak.log`, the last 50 lines and the `[RESULT-SOAK]` line on screen.
+- `/bin/soak`: three workers at once, all from one seed –
+  - files: create, append, overwrite, patch, truncate, move (copy + delete), delete, read, empty directories on
+    DeSoFS (`/disk`), at most 500 files of up to 256 KiB in 3 directory levels; the model keeps only size and seed
+    per file (content computed from the seed), every changed file read back and compared (SHA-256); a snapshot every
+    5 minutes (at most 6 kept, the oldest deleted), each with its own frozen copy of the model;
+  - svcnet: kills `net0`, `usb0` or `echo` every 30–90 s; a service counts as back only when init shows a new pid
+    and restart count AND it works (ping + a 1 MiB download with the right SHA-256 / `DATA.BIN` of the test stick
+    read and checked / an echo answer) – within 30 s, the time is recorded (min / average / max); between kills:
+    downloads, ping, echo, USB reads;
+  - procs: spawn / wait with exit codes, kill, pipes there and back, channels, shared memory, mmap / munmap.
+- Checkpoints (a baseline after the warm-up, every 30 minutes, at the end): every worker finishes its operation,
+  checks everything it owns (all files against the model, every snapshot through its read-only view, every service,
+  one round of each process test) and confirms; then zombies 0, kernel counters and handles against the baseline
+  (tasks, processes, IPC buffers, ramfs equal; free frames within 1 MiB, kernel heap within 512 KiB and not up three
+  checkpoints in a row; handles of the soak and of every service equal; the workers' own heap not growing),
+  `desofs unmount` → `desofs check` (0 errors, 0 warnings, complete) → `desofs mount`.
+- A heartbeat line every minute, a line per service kill; an error prints `[SOAK] ERROR worker=… seq=… …` and the
+  last 64 operations of that worker.
+- `sysinfo counters` (also the shell command `counters`): kernel numbers for programs – free frames (after emptying
+  the task stack cache), kernel heap used / mapped, the console scrollback inside the heap (`heap_console`, a cache
+  of at most 1000 lines – the soak does not count it as a leak), tasks, dead tasks, processes, zombies, IPC buffers,
+  ramfs, and the memory (heap + areas) of every process.
+
+### Fixed (found by the soak test)
+- Page tables left empty by `munmap` (and by a shrinking `brk`) were kept until the process ended. `mmap` moves on to
+  fresh addresses, so a long-running process that keeps mapping and unmapping collected one table per new 2 MiB –
+  about 4 frames a second in the soak. Now the empty page tables, directories and PDPTs of the unmapped range are
+  freed (then a CR3 reload drops the cached entries on this CPU; other CPUs reload CR3 whenever they leave the
+  process).
+
+### Tests
+- `tests/test.sh` ends with a short soak (2 minutes, `logs/test-soak.log`) after the restart phase – the soak itself
+  keeps working; `[RESULT-SOAK]` in the summary.
+- FILE TEST 4/9 (`memtest`): 512 areas of 4 MiB at fresh addresses, one page touched in each – the free frames stay
+  put while the process runs (the old code lost 516 frames there – mutation caught).
+- The kernel's "nothing printed" watchdog waits 150 s in a soak start (heartbeat once a minute) instead of 30 s.
+- 33 suites, a restart phase and a short soak, 280 tests.
+
 ## v0.66.1 — 2026-11-04
 
 ### Changed – documentation only, no code change

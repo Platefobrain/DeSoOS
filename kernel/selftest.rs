@@ -12,13 +12,16 @@
 // * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
 //   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
 //   (DeSoFS written in the first start must be there, mounted at /disk by itself).
+// * Soak phase (tests/soak.sh): `opt/desoos/phase` = "soak <seconds> <seed>"; the boot
+//   tests are skipped and `init test /bin/soak <seconds>:<seed>` runs instead – all workers
+//   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
 // * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/desoos/loop`
 //   holds "suite:rounds".  The suites up to SMP start run once (the system needs
 //   them), then only the named suite runs, round after round, until a round fails;
 //   the others are skipped.  Result: "[RESULT-LOOP] suite=… rounds=… passed=… …".
 //   For rare failures that show up once in hundreds of runs.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::port::{inb, outb, outw};
 use crate::serial_println;
@@ -27,6 +30,9 @@ static STARTED: AtomicU32 = AtomicU32::new(0);
 static PASSED: AtomicU32 = AtomicU32::new(0);
 static AUTOTEST: AtomicBool = AtomicBool::new(false);
 static RESTART: AtomicBool = AtomicBool::new(false);
+/// Soak phase: its length in seconds (0 = not a soak start) and the seed.
+static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
+static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
 
 pub fn begin() {
     STARTED.fetch_add(1, Ordering::SeqCst);
@@ -244,22 +250,56 @@ pub fn detect_autotest() {
     }
 }
 
-/// Reads `opt/desoos/phase` – "restart" = the second start (tests/test.sh).
+/// Reads `opt/desoos/phase` – "restart" = the second start (tests/test.sh), "soak <seconds>
+/// <seed>" = the long test (tests/soak.sh).
 fn detect_phase() {
     let Some((size, select)) = fw_cfg_find(PHASE_FILE) else { return };
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 48];
     let n = (size as usize).min(buf.len());
     unsafe { outw(FW_CFG_SELECTOR, select) };
     fw_cfg_bytes(&mut buf[..n]);
-    if core::str::from_utf8(&buf[..n]).unwrap_or("").trim_matches(|c: char| c == '\0' || c.is_whitespace()) == "restart" {
+    let text = core::str::from_utf8(&buf[..n]).unwrap_or("").trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    if text == "restart" {
         RESTART.store(true, Ordering::SeqCst);
         serial_println!("[TEST] Restart phase: only RESTART TEST part 2 (the disk from the first start)");
+        return;
+    }
+    let mut w = text.split_whitespace();
+    if w.next() == Some("soak") {
+        let secs = w.next().and_then(|s| s.parse::<u64>().ok()).filter(|&s| (60..=7 * 24 * 3600).contains(&s));
+        let seed = w.next().and_then(|s| s.parse::<u64>().ok());
+        match (secs, seed, w.next()) {
+            (Some(secs), Some(seed), None) => {
+                SOAK_SECS.store(secs, Ordering::SeqCst);
+                SOAK_SEED.store(seed, Ordering::SeqCst);
+                serial_println!("[TEST] Soak phase: {} s, seed {} (the boot tests are skipped)", secs, seed);
+            }
+            // A bad phase must not quietly run the normal tests instead: it fails.
+            _ => {
+                serial_println!("[TEST] bad soak phase {:?} - expected \"soak <60..604800 seconds> <seed>\"", text);
+                STARTED.fetch_add(1, Ordering::SeqCst);
+                SOAK_SECS.store(u64::MAX, Ordering::SeqCst);
+            }
+        }
     }
 }
 
 /// The second start of tests/test.sh: the other self-tests are skipped.
 pub fn restart() -> bool {
     RESTART.load(Ordering::SeqCst)
+}
+
+/// The soak start: Some((seconds, seed)); u64::MAX seconds = a bad phase (fails at once).
+pub fn soak() -> Option<(u64, u64)> {
+    match SOAK_SECS.load(Ordering::SeqCst) {
+        0 => None,
+        s => Some((s, SOAK_SEED.load(Ordering::SeqCst))),
+    }
+}
+
+/// Restart or soak start: the boot self-tests are skipped.
+pub fn skip_boot() -> bool {
+    restart() || soak().is_some()
 }
 
 pub fn autotest() -> bool {

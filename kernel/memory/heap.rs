@@ -545,6 +545,15 @@ pub fn used_bytes() -> usize {
     HEAP_LOCK.lock().used.saturating_sub(cached_bytes())
 }
 
+/// Heap bytes a block of `size` / `align` really takes (the class rounding) – for
+/// counting what a cache holds (`counters`).
+pub fn block_bytes(size: usize, align: usize) -> usize {
+    match Layout::from_size_align(size, align) {
+        Ok(l) if size > 0 => block_size(l),
+        _ => 0,
+    }
+}
+
 #[allow(dead_code)]
 pub fn mapped_bytes() -> usize {
     HEAP_LOCK.lock().mapped_end - HEAP_START
