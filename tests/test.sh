@@ -209,6 +209,8 @@ grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
 grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
+# Where the DeSoFS time goes per benchmark phase (I/O, SHA-256, writes, both flushes, commits).
+grep -a "^\[RESULT-FS-PROF\]" "$LOG2" | tr -d '\r' || true
 # The short soak – the [RESULT-SOAK] line (tests/soak.sh adds the QEMU configuration).
 grep -a "^\[RESULT-SOAK\]" "$ROOT/logs/test-soak.out" 2>/dev/null | tail -n1 || true
 # Loop mode – rounds passed and round times.

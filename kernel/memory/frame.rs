@@ -546,6 +546,12 @@ pub fn free_frames_approx() -> u64 {
     FREE_MIRROR.load(Relaxed) + FCACHED.iter().map(|c| c.load(Relaxed)).sum::<u64>()
 }
 
+/// Frames the allocator covers (the physical memory map, holes included) – for limits that
+/// are a share of memory (the DeSoFS block cache).
+pub fn total_frames() -> u64 {
+    NFRAMES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Reserve of frames that processes will not get: 1/16 of memory, 16..256 MiB.
 /// The kernel lives off it (heap, task stacks, tables) – a process eating memory
 /// gets an error or dies, while the kernel keeps running.

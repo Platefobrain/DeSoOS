@@ -1,4 +1,4 @@
-# DeSoOS v0.68.0
+# DeSoOS v0.69.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -49,11 +49,12 @@ More documentation:
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
-  operation is tested against power loss at each write.
+  operation is tested against power loss at each write. A block cache keeps verified blocks between operations
+  (every hit checked by its SHA-256 again; at most 1/16 of memory, 64 MiB).
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (33 suites, a restart phase and a short soak, 280 tests), stress tests and a long soak test
+- Built-in self-tests (33 suites, a restart phase and a short soak, 284 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 

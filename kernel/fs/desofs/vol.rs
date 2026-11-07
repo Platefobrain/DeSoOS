@@ -43,6 +43,8 @@ struct Dirty {
     kind: Kind,
     level: u8,
     buf: Vec<u8>,
+    /// Its checksum once sealed (the one its parent's pointer gets) – for the block cache.
+    sha: Option<[u8; 32]>,
 }
 
 /// Counters for tests: blocks the last operation allocated and its own upper bound.
@@ -52,6 +54,49 @@ pub struct Counters {
     pub last_bound: u64,
     pub max_over: u64,
     pub commits: u64,
+}
+
+/// Where the time of the operations goes (measurement only – it changes nothing in what is
+/// read, written, checked or flushed, nor their order).  CPU timestamp counter cycles
+/// (`rdtscp`, a few tens of cycles each; a delta that went backwards – another CPU – counts
+/// as 0); `probes` = timestamps taken, for the cost of the counting itself.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Prof {
+    /// Whole operations: read-only (stat, read, readdir) and writing (incl. the commit).
+    pub read_ops: u64,
+    pub read_op_cyc: u64,
+    pub write_ops: u64,
+    pub write_op_cyc: u64,
+    /// Blocks read from the disk: the disk read, the SHA-256, the header check.
+    pub blk_reads: u64,
+    pub io_read_cyc: u64,
+    pub sha_read_cyc: u64,
+    pub hdr_cyc: u64,
+    /// SHA-256 of the blocks a commit seals (new checksums for the parents).
+    pub seal_shas: u64,
+    pub sha_seal_cyc: u64,
+    /// Commit: new blocks written, flush 1, superblock written, flush 2, the whole commit.
+    pub blk_writes: u64,
+    pub io_write_cyc: u64,
+    pub flush1_cyc: u64,
+    pub sb_write_cyc: u64,
+    pub flush2_cyc: u64,
+    pub commits: u64,
+    pub commit_cyc: u64,
+    pub probes: u64,
+}
+
+impl Prof {
+    #[inline]
+    pub fn now(&mut self) -> u64 {
+        self.probes += 1;
+        crate::arch::x86_64::clock::tsc_cpu().0
+    }
+    #[inline]
+    pub fn since(&mut self, t0: u64) -> u64 {
+        let d = self.now().wrapping_sub(t0);
+        if d > 1 << 62 { 0 } else { d }
+    }
 }
 
 pub struct Volume {
@@ -76,6 +121,9 @@ pub struct Volume {
     ro: Option<String>,
     cursor: u64,
     pub counters: Counters,
+    pub prof: Prof,
+    /// Verified blocks kept between operations (cache.rs).
+    pub cache: super::cache::BlockCache,
     /// A read-only view of a snapshot (`desofs snapshot mount`): its root entry index and
     /// name; the snapshot's tree stands in for the live one.
     view: Option<(usize, String)>,
@@ -205,6 +253,8 @@ impl Volume {
             ro,
             cursor: RESERVED,
             counters: Counters::default(),
+            prof: Prof::default(),
+            cache: super::cache::BlockCache::new(),
             view: None,
         })
     }
@@ -395,6 +445,15 @@ impl Volume {
     /// Runs a writing operation as one transaction.
     fn write_op<T>(&mut self, bound: impl FnOnce(&mut Tx) -> R<(u64, bool)>, op: impl FnOnce(&mut Tx) -> R<T>) -> R<T> {
         self.check_writable()?;
+        let t0 = self.prof.now();
+        let r = self.write_op_inner(bound, op);
+        let d = self.prof.since(t0);
+        self.prof.write_ops += 1;
+        self.prof.write_op_cyc += d;
+        r
+    }
+
+    fn write_op_inner<T>(&mut self, bound: impl FnOnce(&mut Tx) -> R<(u64, bool)>, op: impl FnOnce(&mut Tx) -> R<T>) -> R<T> {
         let mut tx = self.tx()?;
         let r = (|| {
             let (need, frees) = bound(&mut tx)?;
@@ -421,9 +480,16 @@ impl Volume {
 
     /// Runs a reading operation (no commit).
     fn read_op<T>(&mut self, op: impl FnOnce(&mut Tx) -> R<T>) -> R<T> {
-        let mut tx = self.tx()?;
-        let r = op(&mut tx);
-        tx.abort();
+        let t0 = self.prof.now();
+        let r = (|| {
+            let mut tx = self.tx()?;
+            let r = op(&mut tx);
+            tx.abort();
+            r
+        })();
+        let d = self.prof.since(t0);
+        self.prof.read_ops += 1;
+        self.prof.read_op_cyc += d;
         r
     }
 }
@@ -578,7 +644,74 @@ impl<'a> Tx<'a> {
         let mut b = Vec::new();
         b.try_reserve_exact(BLOCK).map_err(nomem)?;
         b.resize(BLOCK, 0);
+        // The cache first: a copy is used only if its SHA-256 (computed again here) and its
+        // header pass the same checks as a block from the disk; one that fails is dropped
+        // and the block read from the disk instead.
+        let mut cached = self.v.cache.get(p.addr, &p.sha, &mut b);
+        let mut good = false;
+        if cached {
+            let t1 = self.v.prof.now();
+            good = sha256(&b) == p.sha;
+            let d = self.v.prof.since(t1);
+            self.v.prof.sha_read_cyc += d;
+            if !good {
+                self.v.cache.reject(p.addr);
+                cached = false;
+            }
+        }
+        if !cached {
+            let t0 = self.v.prof.now();
+            crate::block::read(self.v.disk, p.addr * SECT, &mut b).map_err(io)?;
+            let t1 = self.v.prof.now();
+            good = sha256(&b) == p.sha;
+            let t2 = self.v.prof.now();
+            let pr = &mut self.v.prof;
+            pr.blk_reads += 1;
+            pr.io_read_cyc += if t1.wrapping_sub(t0) > 1 << 62 { 0 } else { t1.wrapping_sub(t0) };
+            pr.sha_read_cyc += if t2.wrapping_sub(t1) > 1 << 62 { 0 } else { t2.wrapping_sub(t1) };
+        }
+        let t2 = self.v.prof.now();
+        if !good {
+            if kind == Kind::Data {
+                return Err(FsError::Corrupt("data block checksum does not match"));
+            }
+            return Err(self.corrupt("metadata block checksum does not match"));
+        }
+        let want: Option<&[u8; 4]> = match kind {
+            Kind::Data => None,
+            Kind::Dspt => Some(KIND_DSPT),
+            Kind::Dsnd => Some(KIND_DSND),
+            Kind::Dsrt => Some(KIND_DSRT),
+        };
+        if let Some(k) = want {
+            let uuid = self.v.uuid;
+            let checked = check_header(&b, k, level, p.birth, p.addr, &uuid);
+            let d = self.v.prof.since(t2);
+            self.v.prof.hdr_cyc += d;
+            if let Err(w) = checked {
+                if cached {
+                    // A cached copy with a good checksum but a header that does not fit this
+                    // pointer: dropped, and the disk decides (as without the cache).
+                    self.v.cache.reject(p.addr);
+                    return self.read_disk_only(p, kind, level);
+                }
+                return Err(self.corrupt(w));
+            }
+        }
+        if !cached {
+            self.v.cache.insert(p.addr, &p.sha, &b, kind != Kind::Data, false);
+        }
+        Ok(b)
+    }
+
+    /// A block straight from the disk with every check (no cache) – after a cached copy
+    /// was refused by its header check.
+    fn read_disk_only(&mut self, p: &Ptr, kind: Kind, level: u8) -> R<Vec<u8>> {
+        let mut b = Vec::new();
+        b.try_reserve_exact(BLOCK).map_err(nomem)?;
+        b.resize(BLOCK, 0);
         crate::block::read(self.v.disk, p.addr * SECT, &mut b).map_err(io)?;
+        self.v.prof.blk_reads += 1;
         if sha256(&b) != p.sha {
             if kind == Kind::Data {
                 return Err(FsError::Corrupt("data block checksum does not match"));
@@ -597,6 +730,7 @@ impl<'a> Tx<'a> {
                 return Err(self.corrupt(w));
             }
         }
+        self.v.cache.insert(p.addr, &p.sha, &b, kind != Kind::Data, false);
         Ok(b)
     }
 
@@ -628,7 +762,7 @@ impl<'a> Tx<'a> {
 
     fn new_block(&mut self, kind: Kind, level: u8, buf: Vec<u8>) -> R<u64> {
         let a = self.alloc(kind, level)?;
-        self.dirty.insert(a, Dirty { kind, level, buf });
+        self.dirty.insert(a, Dirty { kind, level, buf, sha: None });
         Ok(a)
     }
 
@@ -1516,7 +1650,14 @@ impl<'a> Tx<'a> {
             let child = u64_at(&d.buf, o);
             if self.dirty.contains_key(&child) {
                 self.seal(child)?;
+                let t0 = self.v.prof.now();
                 let h = sha256(&self.dirty.get(&child).unwrap().buf);
+                if let Some(c) = self.dirty.get_mut(&child) {
+                    c.sha = Some(h);
+                }
+                let spent = self.v.prof.since(t0);
+                self.v.prof.seal_shas += 1;
+                self.v.prof.sha_seal_cyc += spent;
                 d.buf[o + 8..o + 16].copy_from_slice(&self.gn.to_le_bytes());
                 d.buf[o + 16..o + 48].copy_from_slice(&h);
             }
@@ -1539,6 +1680,15 @@ impl<'a> Tx<'a> {
     }
 
     fn commit(mut self) -> R<()> {
+        let tc = self.v.prof.now();
+        let r = self.commit_inner();
+        let d = self.v.prof.since(tc);
+        self.v.prof.commits += 1;
+        self.v.prof.commit_cyc += d;
+        r
+    }
+
+    fn commit_inner(&mut self) -> R<()> {
         // New root block: the committed one with the live entry replaced.
         let root = self.v.root;
         let mut rb = self.read(&root, Kind::Dsrt, 0)?;
@@ -1554,22 +1704,38 @@ impl<'a> Tx<'a> {
         self.dropped.push(root.addr);
         self.used_delta -= 1;
         self.seal(ra)?;
+        let t0 = self.v.prof.now();
         let rsha = sha256(&self.dirty.get(&ra).unwrap().buf);
+        if let Some(r) = self.dirty.get_mut(&ra) {
+            r.sha = Some(rsha);
+        }
+        let d = self.v.prof.since(t0);
+        self.v.prof.seal_shas += 1;
+        self.v.prof.sha_seal_cyc += d;
         let new_root = Ptr { addr: ra, birth: self.gn, sha: rsha };
         // 1. New blocks.
         let disk = self.v.disk;
         let mut err = None;
+        let t0 = self.v.prof.now();
+        let mut written = 0;
         for (a, d) in self.dirty.iter() {
             if let Err(e) = crate::block::write(disk, a * SECT, &d.buf) {
                 err = Some(e);
                 break;
             }
+            written += 1;
         }
+        let t1 = self.v.prof.now();
+        self.v.prof.blk_writes += written;
+        self.v.prof.io_write_cyc += if t1.wrapping_sub(t0) > 1 << 62 { 0 } else { t1.wrapping_sub(t0) };
         if err.is_some() {
             return Err(self.fail("write error during a commit"));
         }
         // 2. Flush.
-        if crate::block::flush(disk).is_err() {
+        let flushed = crate::block::flush(disk);
+        let d = self.v.prof.since(t1);
+        self.v.prof.flush1_cyc += d;
+        if flushed.is_err() {
             return Err(self.fail("flush error during a commit"));
         }
         // 3. Superblock to the slot with the older generation (bad slot = oldest, tie -> B).
@@ -1581,12 +1747,26 @@ impl<'a> Tx<'a> {
         let used = (self.v.used as i64 + self.used_delta).max(0) as u64;
         let rp = ptr_bytes(Some(new_root));
         let sb = superblock(&self.v.uuid, self.gn, self.v.total, used, now(), &rp, &self.v.label);
-        if crate::block::write(disk, (1 + slot as u64) * SECT, &sb).is_err() {
+        let t2 = self.v.prof.now();
+        let wrote = crate::block::write(disk, (1 + slot as u64) * SECT, &sb);
+        let t3 = self.v.prof.now();
+        self.v.prof.sb_write_cyc += if t3.wrapping_sub(t2) > 1 << 62 { 0 } else { t3.wrapping_sub(t2) };
+        if wrote.is_err() {
             return Err(self.fail("superblock write error"));
         }
         // 4. Flush – only now is the operation done.
-        if crate::block::flush(disk).is_err() {
+        let flushed = crate::block::flush(disk);
+        let d = self.v.prof.since(t3);
+        self.v.prof.flush2_cyc += d;
+        if flushed.is_err() {
             return Err(self.fail("flush error after the superblock"));
+        }
+        // The operation is on the disk: its blocks may serve later reads (never before).
+        let v = &mut *self.v;
+        for (a, d) in self.dirty.iter() {
+            if let Some(sha) = d.sha {
+                v.cache.insert(*a, &sha, &d.buf, d.kind != Kind::Data, true);
+            }
         }
         // 5. Adopt the new state; blocks dropped by the previous commit are now free.
         let v = &mut *self.v;

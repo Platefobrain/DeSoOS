@@ -293,14 +293,82 @@ fn snapshot() -> T {
     Ok(format!("snapshot {} (generation {}, {} blocks of its own) listed after the restart; its view (read-only) has the old /one and no file written after it", SNAP, s.created_gen, s.only.unwrap_or(0)))
 }
 
+/// The mounted /disk volume's time counters (vol::Prof).
+fn prof_now() -> (super::vol::Prof, super::cache::Stats) {
+    let mut p = (super::vol::Prof::default(), super::cache::Stats::default());
+    fs::with_mounted_desofs(0, &mut |v| p = (v.prof, v.cache.stats));
+    p
+}
+
+/// One `[RESULT-FS-PROF]` line: where the time of a benchmark phase went (µs), and what
+/// the counting itself cost (timestamps taken × the measured cost of one).
+fn prof_line(phase: &str, a: &(super::vol::Prof, super::cache::Stats), b: &(super::vol::Prof, super::cache::Stats), probe_cyc: u64, per_ms: u64) {
+    let (ca, cb) = (&a.1, &b.1);
+    let (a, b) = (&a.0, &b.0);
+    let per_ms = per_ms.max(1);
+    let us = |c: u64| c * 1000 / per_ms;
+    let d = |x: u64, y: u64| y.saturating_sub(x);
+    serial_println!(
+        "[RESULT-FS-PROF] phase={} read_ops={} write_ops={} op_us={} blk_reads={} io_read_us={} sha_read_us={} hdr_us={} seal_shas={} sha_seal_us={} blk_writes={} io_write_us={} flush1_us={} sb_write_us={} flush2_us={} commits={} commit_us={} cache_hits={} cache_misses={} cache_stale={} cache_bad={} cache_inserts={} cache_evictions={} probes={} probe_overhead_us={}",
+        phase,
+        d(a.read_ops, b.read_ops),
+        d(a.write_ops, b.write_ops),
+        us(d(a.read_op_cyc, b.read_op_cyc) + d(a.write_op_cyc, b.write_op_cyc)),
+        d(a.blk_reads, b.blk_reads),
+        us(d(a.io_read_cyc, b.io_read_cyc)),
+        us(d(a.sha_read_cyc, b.sha_read_cyc)),
+        us(d(a.hdr_cyc, b.hdr_cyc)),
+        d(a.seal_shas, b.seal_shas),
+        us(d(a.sha_seal_cyc, b.sha_seal_cyc)),
+        d(a.blk_writes, b.blk_writes),
+        us(d(a.io_write_cyc, b.io_write_cyc)),
+        us(d(a.flush1_cyc, b.flush1_cyc)),
+        us(d(a.sb_write_cyc, b.sb_write_cyc)),
+        us(d(a.flush2_cyc, b.flush2_cyc)),
+        d(a.commits, b.commits),
+        us(d(a.commit_cyc, b.commit_cyc)),
+        d(ca.hits, cb.hits),
+        d(ca.misses, cb.misses),
+        d(ca.stale, cb.stale),
+        d(ca.bad, cb.bad),
+        d(ca.inserts, cb.inserts),
+        d(ca.evictions, cb.evictions),
+        d(a.probes, b.probes),
+        us(d(a.probes, b.probes) * probe_cyc)
+    );
+}
+
+/// Cycles one timestamp of vol::Prof costs (the median of 5 runs of 10 000).
+fn probe_cost() -> u64 {
+    let mut runs = [0u64; 5];
+    for r in runs.iter_mut() {
+        let mut p = super::vol::Prof::default();
+        let t0 = crate::arch::x86_64::clock::tsc_cpu().0;
+        let mut x = 0u64;
+        for _ in 0..10_000 {
+            x = x.wrapping_add(p.now());
+        }
+        core::hint::black_box(x);
+        *r = crate::arch::x86_64::clock::tsc_cpu().0.wrapping_sub(t0) / 10_000;
+    }
+    runs.sort();
+    runs[2]
+}
+
 fn bench() -> T {
     let ms = crate::time::uptime_ms;
+    let probe_cyc = probe_cost();
+    // Cycles per ms measured over the whole benchmark (the restart start skips the LAPIC
+    // calibration, and this also holds where the TSC rate is not the nominal one).
+    let (tsc0, ms0) = (crate::arch::x86_64::clock::tsc_cpu().0, ms());
     fs::mkdir("/disk/bench").map_err(|x| e("mkdir bench", x))?;
     // A large file: 8 MiB in 64 KiB pieces (each one commit), then read back.
     let big = pattern(8 << 20, 77);
+    let p0 = prof_now();
     let t0 = ms();
     new_file("/disk/bench/big", &big)?;
     let t_w = ms() - t0;
+    let p1 = prof_now();
     let t0 = ms();
     let mut back = vec![0u8; 64 * 1024];
     let mut same = true;
@@ -309,6 +377,7 @@ fn bench() -> T {
         same &= n == back.len() && back[..] == big[k * back.len()..(k + 1) * back.len()];
     }
     let t_r = ms() - t0;
+    let p2 = prof_now();
     ensure!(same, "the 8 MiB file read back differs");
     // 1000 small files of 100 bytes: create + write, then read all.
     let t0 = ms();
@@ -316,12 +385,14 @@ fn bench() -> T {
         new_file(&format!("/disk/bench/s{:04}", i), &pattern(100, i))?;
     }
     let t_sc = ms() - t0;
+    let p3 = prof_now();
     let t0 = ms();
     for i in 0..1000 {
         let p = format!("/disk/bench/s{:04}", i);
         ensure!(fs::read_file(&p).map_err(|x| e(&p, x))? == pattern(100, i), "{} differs", p);
     }
     let t_sr = ms() - t0;
+    let p4 = prof_now();
     // The whole volume checked (unmounted first – check refuses a mounted volume).
     fs::unmount("/disk").map_err(|x| e("unmount /disk", x))?;
     let t0 = ms();
@@ -332,6 +403,11 @@ fn bench() -> T {
     ensure!(m == DiskMount::DeSoFs(None), "mount again: {:?}", m);
     let kbs = |bytes: usize, t: u64| bytes as u64 * 1000 / 1024 / t.max(1);
     let vol_mib = super::probe(0).total_blocks * 4 / 1024;
+    let tsc_khz = crate::arch::x86_64::clock::tsc_cpu().0.wrapping_sub(tsc0) / (ms() - ms0).max(1);
+    for (phase, a, b) in [("big_write", &p0, &p1), ("big_read", &p1, &p2), ("small_create", &p2, &p3), ("small_read", &p3, &p4)] {
+        prof_line(phase, a, b, probe_cyc, tsc_khz);
+    }
+    serial_println!("[RESULT-FS-PROF] tsc_khz={} probe_cycles={} cache_limit_kib={} cache_used_kib={}", tsc_khz, probe_cyc, super::cache::limit() / 1024, super::cache::used() / 1024);
     serial_println!(
         "[RESULT-FS] ver={} disk=virtio vol_mib={} big_mib=8 chunk_kib=64 big_write_kbs={} big_read_kbs={} small_n=1000 small_b=100 small_create_ms={} small_read_ms={} check_ms={} check_blocks={}",
         crate::shell::VERSION,

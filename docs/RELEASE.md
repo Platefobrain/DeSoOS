@@ -59,8 +59,11 @@ timings move by ±15% from run to run on the same build).
   can be; the random draws use a fixed seed (the same images every run)
 - only disk 0 is mounted at start (`/disk`); other disks by hand (`desofs mount` → `/desofs`); `rename` exists for
   the kernel (VFS, kernel-shell `mv`), not yet as a syscall – the user-space `mv` still copies
-- slow without a cache: every read verifies the SHA-256 of every block on the way, a name is found by reading the
-  directory block by block (TCG: 8 MiB written at ~6 MiB/s, 1000 small files created in ~19 s; see `[RESULT-FS]`)
+- every operation still walks the path from the root and finds a name by reading the directory block by block (35
+  block reads to read a small file, 58 to create one); the block cache (v0.69.0) saves the disk reads but not the
+  SHA-256 of each block (checked on every hit too) – a cache of looked-up names and nodes would save both (not
+  done: it needs invalidation on every change); the cache cannot see a disk block that goes bad after it was
+  cached until the copy leaves the cache – `desofs check` reads the disk itself
 - every operation is its own commit (2 flushes): a `write_file` is truncate + write = two commits, so a power loss
   between them leaves an empty file – safe replacement is write to a new file + `rename`
 - format 1: volumes up to 64 GiB (the map of the walk needs 18 MiB there); linear directory search; no hard links,
@@ -124,6 +127,65 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.69.0 — 2026-11-07
+
+**Status: stable on QEMU (TCG and KVM). DeSoFS keeps verified blocks in memory: reading 1000 small files is 2.9 times
+faster under KVM, and reading the 8 MiB file 2.5 times faster. The format, the flush order and the SHA-256 checks are
+unchanged.**
+
+### What is new since the last report (v0.68.0)
+
+| Version | Change |
+|---|---|
+| v0.69.0 | DeSoFS block cache (`cache.rs`): one cache per mounted volume or snapshot view, keyed by address + SHA-256, so nothing is ever invalidated; SHA-256 and header check on every hit; a commit's blocks enter only after its second flush; one global limit for all caches together, min(1/16 of memory, 64 MiB), counting frames and index; Clock replacement with metadata kept first; `desofs check` / `repair` always read the disk; `fs_cache_bytes` in `sysinfo counters`, cache counters in `[RESULT-FS-PROF]`; DESOFS TEST 29–32 |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1 + short soak (RAM disk), 284 tests PASS | 288 s (restart 24 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1 + short soak (RAM disk), 284 tests PASS | 222 s (restart 12 s, soak 125 s) |
+
+Each of four deliberate faults made one of the new tests fail: a key without the checksum (test 30), inserting
+before the second flush (test 32), no limit (test 31), a hit without the SHA-256 check (test 32).
+
+### Where the time goes now (KVM, `[RESULT-FS-PROF]`)
+
+| Phase | v0.68.0 | v0.69.0 | Disk reads (v0.69.0) | What remains |
+|---|---|---|---|---|
+| Reading 1000 small files | 2.44 s (disk I/O 68 %, SHA 30 %) | 0.81 s | 580 (34 220 hits) | SHA-256 of the hits 0.70 s (87 %), disk I/O 0.06 s |
+| Creating 1000 small files | 9.45 s (read I/O 3.51 s, SHA 1.27 s, commit 4.71 s) | 7.36 s | 0 (57 820 hits) | commit 5.13 s (flush 1: 2.27 s, flush 2: 1.05 s, writes 1.06 s), SHA of the hits 2.10 s |
+| Reading 8 MiB | 0.45 s | 0.15 s | 0 (7 168 hits) | SHA-256 only |
+
+The 580 misses are blocks of files created early on, evicted while the create phase filled the 32 MiB limit
+(512 MiB of RAM / 16; 4 492 evictions). Reads now cost almost only their SHA-256, as planned. To go further, the
+volume has to read fewer blocks (a lookup without scanning the path from the root each time), which is a separate
+plan because it needs invalidation. The commit (both flushes) stays as it is.
+
+### Performance against the previous release (v0.68.0 → v0.69.0, same machine)
+
+| | TCG v0.68.0 | TCG v0.69.0 | KVM v0.68.0 | KVM v0.69.0 |
+|---|---|---|---|---|
+| irq_user_ns | 10 949 | 6 703 | 66 006 | 63 734 |
+| fact_user_ns | 74 962 | 77 220 | 90 375 | 92 678 |
+| fact_svc_ns | 240 096 | 208 986 | 103 412 | 106 894 |
+| restart_us | 3 900 | 4 700 | 1 300 | 1 200 |
+| USB read_kbs (usbd) | 40 960 | 59 362 | 95 255 | 99 902 |
+| rights gate_ns | 26 | 25 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 49 920 / 52 160 | 48 158 / 49 920 | 175 360 / 210 560 | 181 760 / 216 640 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 527 / 5 673 | 6 942 / **12 430** | 16 684 / 21 557 | 16 516 / **54 979** |
+| DeSoFS 1000 small files create / read (ms) | 18 462 / 7 089 | **13 485 / 3 592** | 9 726 / 2 322 | **7 371 / 809** |
+| `desofs check` (ms) | 1 121 | 937 | 314 | 265 |
+| short soak: file operations in 2 min | 6 490 | 6 296 | 27 744 | 28 051 |
+
+Verdict: no regression. DeSoFS reads are 2–2.9 times faster and creating small files 24–27 % faster; writing the
+8 MiB file is unchanged, as it should be (its time is the commit). `desofs check` reads the disk directly, without
+the cache; its time is within the usual spread. The short soak runs on a RAM disk, where a read is already a memory
+copy, so it gains nothing. The other rows are the usual single-run noise (TCG `restart_us` +20 %, TCG usbd read
++45 %).
 
 ---
 

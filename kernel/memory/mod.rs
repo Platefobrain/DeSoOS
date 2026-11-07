@@ -20,6 +20,8 @@ pub use frame::{
     alloc_frame,
     alloc_frame_user,
     free_frames_approx,
+    user_reserve_frames,
+    total_frames,
     user_reserve_stats,
     alloc_frames,
     alloc_frames_below,

@@ -24,6 +24,7 @@ pub mod layout;
 pub mod format;
 pub mod vol;
 pub mod check;
+pub mod cache;
 #[cfg(selftest)]
 pub mod test;
 #[cfg(selftest)]
@@ -34,6 +35,8 @@ pub mod test_crash;
 pub mod test_check;
 #[cfg(selftest)]
 pub mod test_snap;
+#[cfg(selftest)]
+pub mod test_cache;
 #[cfg(selftest)]
 pub mod restart;
 

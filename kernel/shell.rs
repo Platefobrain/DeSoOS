@@ -354,6 +354,8 @@ fn cmd_counters(_: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = writeln!(out, "heap_mapped {}", crate::memory::heap_mapped_bytes());
     // Caches inside heap_used – they fill up to a limit and stay (not a leak).
     let _ = writeln!(out, "heap_console {}", crate::console::scrollback_bytes());
+    // DeSoFS block caches (frames + index, all volumes; emptied at unmount).
+    let _ = writeln!(out, "fs_cache_bytes {}", crate::fs::desofs::cache::used());
     let _ = writeln!(out, "tasks {}", tasks.len());
     let _ = writeln!(out, "tasks_dead {}", dead);
     let _ = writeln!(out, "processes {}", crate::user::process::LIVE_PROCS.load(core::sync::atomic::Ordering::Relaxed));

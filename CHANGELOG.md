@@ -2,6 +2,35 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.69.0 — 2026-11-07
+
+### Added – DeSoFS block cache
+- Verified blocks are kept between operations, one cache per mounted volume or snapshot view. Key = (address,
+  SHA-256 from the parent's pointer): nothing is ever invalidated – an address used again carries another checksum.
+- **Every hit is checked like a disk read**: SHA-256 computed again, the header (kind, level, generation, address,
+  volume uuid) checked; a copy that fails is dropped and the block read from the disk. `desofs check` / `repair`
+  and the mount walk always read the disk.
+- What enters: blocks read from the disk after their checks; a commit's blocks only after its second flush –
+  nothing uncommitted, nothing from a failed commit. The order of writes and flushes is unchanged, and so is the
+  format.
+- Memory: contents in physical frames, the index on the heap; one global budget for all volumes – min(1/16 of
+  memory, 64 MiB), frames plus the heap blocks of the index – reserved atomically before allocating; no growth while
+  free memory is below 1/8 or the kernel reserve; unmount gives everything back. Replacement: Clock, metadata
+  enters referenced, data not (a large file read once leaves first).
+- Time measurement (`vol::Prof`): TSC timestamps around disk reads, SHA-256, header checks, sealing, the commit's
+  writes, both flushes and whole operations; `[RESULT-FS-PROF]` per benchmark phase in `tests/test.sh` (also cache
+  hits, misses, stale, failed checks, evictions). Cost 0.04–0.1 %.
+- `sysinfo counters`: `fs_cache_bytes`.
+
+### Tests
+- DESOFS TEST 29 hits (a second read reads nothing from the disk; a commit's blocks serve the next read), 30 an
+  address used again (the key on its own; delete / write rounds on a 128-block volume – every read right, no stale
+  copy reaches the checksum check), 31 the global limit (1 MiB through 300 KiB: never more held, frames + index,
+  every byte back at unmount), 32 a failing first / second flush caches nothing of that commit; every cached copy
+  of a file damaged in memory – each hit caught by the SHA-256, read again from the disk, contents right.
+- Mutations caught: the key without the checksum (30), inserting before the second flush (32), no limit (31), a
+  hit without the SHA-256 (32). 33 suites, a restart phase and a short soak, 284 tests.
+
 ## v0.68.0 — 2026-11-06
 
 ### Added – the soak test on real hardware

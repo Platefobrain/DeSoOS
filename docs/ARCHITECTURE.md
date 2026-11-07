@@ -1511,6 +1511,36 @@ change only their own table, so scanning other tables would race). The message h
 and `dcp` show who. The kernel shell moves its directory to "/" only after a successful unmount. `unmount_lost`
 (a USB stick pulled out) ignores pins: the disk is gone anyway. INIT TEST 9 (`/bin/dsfstest`).
 
+### Block cache (`cache.rs`, v0.69.0) and the time measurement
+
+- **Measured first** (`vol::Prof`, `[RESULT-FS-PROF]` per benchmark phase of the restart test): TSC timestamps
+  (`rdtscp`) around the disk reads, their SHA-256, the header checks, the SHA-256 of sealed blocks, the commit's
+  writes, flush 1, the superblock write, flush 2, whole commits and whole operations – the order of writes, flushes
+  and checks is untouched; ~50–90 cycles per timestamp, 0.04–0.1 % of a phase. KVM before the cache: reading 1000
+  small files 2.44 s = disk reads 68 %, SHA-256 30 % (35 block reads per file: every operation walks the path from
+  the root, a directory is searched block by block); creating them 9.45 s = reads 37 %, SHA 13 %, commits 50 % (the
+  two flushes 36 %).
+- **The cache**: one per mounted volume or snapshot view (`Volume.cache`), between `Tx::read` and the disk. Key =
+  (address, the SHA-256 in the parent's pointer): copy-on-write never overwrites a live block and an address used
+  again carries another checksum, so nothing is ever invalidated – an entry with another checksum is stale and
+  dropped. **A hit is checked like a disk read**: SHA-256 computed again, the header (kind, level, generation,
+  address, volume uuid) checked; a copy that fails is dropped (`bad`) and the block read from the disk (a header
+  that fails on a good checksum: the disk decides, as without the cache). What the cache cannot see: the disk copy
+  going bad after the block was cached – until the copy leaves the cache; `desofs check` / `repair` (and the mount
+  walk) read the disk itself, never the cache.
+- **What enters**: a block read from the disk after its checks passed; the blocks of a commit only after its second
+  flush (each sealed block keeps its checksum for this) – nothing from a commit that failed, nothing uncommitted
+  (those blocks are read from the transaction's own dirty map, as before).
+- **Memory**: contents in 4 KiB physical frames, the index (slots + an open-addressing hash table on the address)
+  on the heap. One global budget for all caches – min(1/16 of memory, 64 MiB) – counts the frames and the heap
+  blocks the index really takes (the heap's size classes included); it is reserved by compare-exchange before
+  anything is allocated, so volumes working at once cannot pass it. No new frame while free memory is below 1/8 of
+  it or below the kernel's reserve – then the cache reuses its own frames. Unmount (dropping the volume) frees every
+  frame and returns every byte (`sysinfo counters`: `fs_cache_bytes`).
+- **Replacement: Clock.** A hit sets the slot's reference bit; the hand skips and clears referenced slots.
+  Metadata (root, pointer, node and directory blocks) enters referenced, data blocks not – a large file read once
+  leaves first instead of pushing out the node tables and directories.
+
 ### Snapshots (v0.66.0, stage 5 – format 1 unchanged)
 
 - **Create** (`Volume::snapshot_create`): one commit whose root block gets a new entry (the first free of 1–31) –
@@ -1639,7 +1669,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 33 self-test suites, a restart phase and a short soak (280 tests) in QEMU (TCG
+- **Self-tests:** `tests/test.sh` – 33 self-test suites, a restart phase and a short soak (284 tests) in QEMU (TCG
   or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
