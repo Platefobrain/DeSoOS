@@ -2,6 +2,24 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.70.1 — 2026-11-07
+
+### Fixed – entropy counting (DeSoCrypto 0.2.1), after a review of v0.70.0
+- The firmware's RNG counted 256 bits whatever algorithm it used – also the default one, which on OVMF and many PCs
+  is a DRBG fed by RDRAND, so on a machine without RDSEED RDRAND got in through the back door. DSB now asks for the
+  RAW algorithm first and tells the kernel which one it got (`BootInfo.rng_seed_kind`, magic `DSBOOT13`): only RAW
+  counts (½ bit per bit, plausible bytes); the default algorithm is mixed and counts 0. `[RNG] ready` and
+  `[RESULT-RNG]` say which.
+- `KeyErasureRng::fill` promised any length, but the ChaCha20 block counter is 32 bits: a request over 1 GiB is now
+  cut into pieces, each a call with its own key – no counter can wrap.
+- The simpler check on interrupt times (than on jitter) is described in the code and in ARCHITECTURE, with why an
+  interrupt counts only 1/64 of a bit.
+
+### Tests
+- RNG TEST 1: RAW bytes count 256, the default algorithm 0, implausible RAW bytes and no bytes 0. DeSoCrypto: a long
+  request cut into pieces equals separate calls (125 checks). Mutation caught: the firmware's bytes counted without
+  looking at the algorithm (RNG 1). 34 suites, 287 tests.
+
 ## v0.70.0 — 2026-11-07
 
 ### Added – the kernel's random number generator (DeSoCrypto 0.2.0)

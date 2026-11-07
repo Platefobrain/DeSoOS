@@ -1662,7 +1662,7 @@ a second process.
 
 | Source | Mixed | Counted |
 |---|---|---|
-| UEFI `EFI_RNG_PROTOCOL` – 64 bytes read by DSB before `ExitBootServices`, passed in `BootInfo` (magic `DSBOOT12`), copied and wiped there at the very start of `kernel_main` | yes | ½ bit per bit (256), if the bytes are plausible |
+| UEFI `EFI_RNG_PROTOCOL` – 64 bytes read by DSB before `ExitBootServices` (the RAW algorithm first, otherwise the firmware's default), passed in `BootInfo` with which one it was (magic `DSBOOT13`), copied and wiped there at the very start of `kernel_main` | yes | RAW: ½ bit per bit (256), if the bytes are plausible; the default algorithm (usually a DRBG fed by RDRAND – its source cannot be told): 0 |
 | RDSEED – 64-bit words | yes | ½ bit per bit (32 per word), after the start-up check |
 | RDRAND | yes | 0 |
 | TSC jitter at boot – 64-sample windows of a short memory-touching loop | yes | 1 bit per window that passes the timing check |
@@ -1672,6 +1672,14 @@ a second process.
 **Not counting the same entropy twice.** The firmware's RNG may be the CPU's RDRAND/RDSEED (OVMF does exactly
 that), so UEFI and RDSEED form one hardware class counted as max(UEFI, RDSEED). Jitter and interrupt times both
 come from the TSC and may be correlated: one timing class, max(jitter, interrupts). Counted = hardware + timing.
+The firmware's default algorithm counts nothing at all: OVMF and many PCs implement it as a DRBG fed by RDRAND, and
+counting it would let RDRAND in through the back door on a machine without RDSEED.
+
+The interrupt check is deliberately simpler than the jitter one (a difference counts when it is not 0 and not the
+previous one): the 64-difference window check would cost thousands of comparisons inside every interrupt handler.
+That is why an interrupt counts only 1/64 of a bit. Without RDSEED and a RAW firmware RNG, and with a clock the
+jitter check refuses (KVM), the start waits for interrupt times: 16 384 good ones – about 16 s with the 1000 Hz
+timer.
 
 **Health checks** (our own simple checks – not the NIST SP 800-90B tests; they catch obvious failures and prove
 nothing about quality): 16 healthy words before a hardware source counts anything; the carry flag of every
@@ -1686,7 +1694,9 @@ entropy: N/256 bits …` every second – and never pretends. So `getrandom` nev
 RNG this is immediate; the time without them depends on the machine.
 
 **The generator.** The whole state is a 32-byte key. Every call: ChaCha20 with that key, nonce 0, counter from 0;
-the first 32 bytes become the new key at once, the rest is the output; the block is wiped. Every key is used for
+the first 32 bytes become the new key at once, the rest is the output; the block is wiped. The block counter is
+32 bits, so a request over 1 GiB is cut into 1 GiB pieces, each a call with its own key – the counter never
+wraps. Every key is used for
 one call only, so no (key, counter) pair and no output byte repeats. One `SpinLock` (`RANDOM`); interrupts never
 take it. A stolen state gives away the output until the next reseed with new entropy, and nothing produced before.
 

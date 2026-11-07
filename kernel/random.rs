@@ -5,11 +5,18 @@
 // towards readiness and reseeding.  The declared values are a TRUST POLICY, not
 // something the health tests prove:
 //
-//   UEFI EFI_RNG_PROTOCOL  64 B from the loader     1/2 bit per bit   (hardware class)
+//   UEFI EFI_RNG_PROTOCOL  64 B from the loader, RAW algorithm: 1/2 bit per bit (hardware
+//                          class); the firmware's default algorithm (a DRBG, usually
+//                          fed by RDRAND): 0 – mixed only
 //   RDSEED                 64-bit words             1/2 bit per bit   (hardware class)
 //   RDRAND                 64-bit words             0 – mixed only
 //   TSC jitter (boot)      time of a short loop     1 bit per 64 samples (timing class)
 //   interrupt times        TSC at each interrupt    1 bit per 64 events  (timing class)
+//
+// The interrupt check is simpler than the jitter one (a time difference counts when it
+// is not 0 and not equal to the previous one; the 64-difference window check would cost
+// thousands of comparisons inside every interrupt handler) – that is why an interrupt
+// counts 1/64 of a bit and why jitter and interrupts are one class (max).
 //   RTC, HPET, CPUID, disk serial numbers           0 – they only tell machines apart
 //
 // Sources that may share a generator are not added up: the firmware's RNG often IS
@@ -495,12 +502,16 @@ static STATE: SpinLock<Option<State>> = SpinLock::new("random", level::RANDOM, N
 static READY: AtomicBool = AtomicBool::new(false);
 /// 64 bytes from the firmware's RNG (copied from BootInfo at the very start).
 static mut BOOT_SEED: [u8; 64] = [0; 64];
-static BOOT_SEED_OK: AtomicBool = AtomicBool::new(false);
+/// What the firmware gave (BootInfo `rng_seed_kind`): 0 none, 1 RAW, 2 its default algorithm.
+static BOOT_SEED_KIND: AtomicU64 = AtomicU64::new(0);
+pub const SEED_NONE: u64 = 0;
+pub const SEED_RAW: u64 = 1;
+pub const SEED_DEFAULT: u64 = 2;
 
 /// At the very start of `kernel_main`: the firmware's bytes from BootInfo are copied
 /// and wiped there (BootInfo memory is reused later).
 pub fn take_boot_seed(boot: &crate::bootinfo::BootInfo) {
-    let ok = boot.rng_seed_ok != 0;
+    let kind = boot.rng_seed_kind;
     // BootInfo is the loader's writable memory, handed over by address; the field is
     // read and wiped through a raw pointer (volatile) and never read again.
     let p = core::ptr::addr_of!(boot.rng_seed) as *mut [u8; 64];
@@ -510,12 +521,31 @@ pub fn take_boot_seed(boot: &crate::bootinfo::BootInfo) {
         BOOT_SEED = s;
         core::ptr::write_volatile(p, [0; 64]);
     }
-    BOOT_SEED_OK.store(ok, Ordering::SeqCst);
+    BOOT_SEED_KIND.store(if kind <= SEED_DEFAULT { kind } else { SEED_NONE }, Ordering::SeqCst);
 }
 
 /// Our own check of the firmware's bytes: not one repeated byte, the halves differ.
 pub fn boot_seed_plausible(s: &[u8; 64]) -> bool {
     !s.iter().all(|&b| b == s[0]) && s[..32] != s[32..]
+}
+
+/// Bits the firmware's bytes count (a trust policy, like RDSEED's): only the RAW
+/// algorithm – entropy straight from the source – counts, ½ bit per bit (256 for 64
+/// bytes), and only when the bytes look plausible.  The default algorithm is usually a
+/// DRBG fed by RDRAND (OVMF, many PCs); its source cannot be told from here, so it is
+/// mixed and counts 0 – exactly like RDRAND.
+pub fn uefi_credit(kind: u64, seed: &[u8; 64]) -> u32 {
+    if kind == SEED_RAW && boot_seed_plausible(seed) { 256 } else { 0 }
+}
+
+/// What the firmware's RNG gave at boot: "raw", "default" (a DRBG – not counted) or "no".
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn boot_seed_kind() -> &'static str {
+    match BOOT_SEED_KIND.load(Ordering::SeqCst) {
+        SEED_RAW => "raw",
+        SEED_DEFAULT => "default",
+        _ => "no",
+    }
 }
 
 pub fn is_ready() -> bool {
@@ -544,15 +574,16 @@ pub fn init() {
     // The firmware's RNG.
     // SAFETY: written once by take_boot_seed before this; single CPU at boot.
     let mut seed = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BOOT_SEED)) };
-    let uefi = if BOOT_SEED_OK.load(Ordering::SeqCst) && boot_seed_plausible(&seed) {
+    let kind = BOOT_SEED_KIND.load(Ordering::SeqCst);
+    if kind != SEED_NONE {
         st.pool.mix(&seed);
-        st.pool.credit.uefi = 256;
-        "yes"
-    } else if BOOT_SEED_OK.load(Ordering::SeqCst) {
-        st.pool.mix(&seed);
-        "implausible (not counted)"
-    } else {
-        "no"
+    }
+    st.pool.credit.uefi = uefi_credit(kind, &seed);
+    let uefi = match (kind, st.pool.credit.uefi) {
+        (SEED_RAW, 0) => "RAW, implausible (not counted)",
+        (SEED_RAW, _) => "RAW",
+        (SEED_DEFAULT, _) => "default algorithm (a DRBG – mixed, not counted)",
+        _ => "no",
     };
     crate::desocrypto::wipe(&mut seed);
     // SAFETY: as above.
@@ -650,9 +681,4 @@ pub fn summary() -> (Stats, [(&'static str, &'static str); 2]) {
     }
 }
 
-/// Whether the firmware's RNG gave bytes at boot.
-#[allow(dead_code)]
-pub fn had_boot_seed() -> bool {
-    BOOT_SEED_OK.load(Ordering::SeqCst)
-}
 

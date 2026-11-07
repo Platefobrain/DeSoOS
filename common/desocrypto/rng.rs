@@ -21,6 +21,8 @@ use super::chacha20::{self, BLOCK_LEN, KEY_LEN, NONCE_LEN};
 use super::sha256::Sha256;
 
 const NONCE: [u8; NONCE_LEN] = [0; NONCE_LEN];
+/// Largest output of one key: 1 GiB (2^24 blocks – far below the counter's 2^32).
+pub const MAX_PIECE: usize = 1 << 30;
 
 pub struct KeyErasureRng {
     key: [u8; KEY_LEN],
@@ -32,8 +34,32 @@ impl KeyErasureRng {
         KeyErasureRng { key: *seed }
     }
 
-    /// Fills `out` with random bytes (any length; blocks: ceil((32 + len) / 64)).
+    /// Fills `out` with random bytes (any length).  The ChaCha20 block counter is 32
+    /// bits, so one key covers at most 2^32 blocks; a longer request is cut into pieces
+    /// of MAX_PIECE bytes, each one a separate call with its own key – no counter ever
+    /// wraps.
     pub fn fill(&mut self, out: &mut [u8]) {
+        self.fill_pieces(out, MAX_PIECE);
+    }
+
+    fn fill_pieces(&mut self, out: &mut [u8], piece: usize) {
+        if out.is_empty() {
+            self.fill_one(out);
+            return;
+        }
+        for chunk in out.chunks_mut(piece) {
+            self.fill_one(chunk);
+        }
+    }
+
+    /// Test only: `fill` with a small piece size (to check the cutting without GiBs).
+    #[cfg(any(selftest, desocrypto_test))]
+    pub fn fill_with_piece(&mut self, out: &mut [u8], piece: usize) {
+        self.fill_pieces(out, piece.max(1));
+    }
+
+    /// One call: blocks ceil((32 + len) / 64) <= 2^32 (len <= MAX_PIECE).
+    fn fill_one(&mut self, out: &mut [u8]) {
         // The key of this call, on the stack only for its duration.
         let mut k = self.key;
         let mut blk = [0u8; BLOCK_LEN];

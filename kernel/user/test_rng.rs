@@ -112,7 +112,7 @@ fn sources() -> bool {
         c.rdseed,
         c.jitter,
         c.irq,
-        if random::had_boot_seed() { "gave bytes" } else { "absent" },
+        random::boot_seed_kind(),
         src[0].0,
         src[0].1,
         src[1].0,
@@ -188,7 +188,12 @@ fn sources() -> bool {
     let mut halves = seed;
     halves.copy_within(..32, 32);
     ck!(random::boot_seed_plausible(&seed) && !random::boot_seed_plausible(&[0; 64]) && !random::boot_seed_plausible(&[0xAB; 64]) && !random::boot_seed_plausible(&halves), "the firmware bytes check");
-    serial_println!("[RNG TEST] 1/3 sources: 16 start-up words count nothing; health checks switch off a constant, zero, all-ones, repeating and never-succeeding source; RDSEED 32 bits/word, RDRAND 0; UEFI+RDSEED counted once (max), jitter+interrupts once (max); no start below 256 bits; equal clock steps count 0 PASS");
+    // Only the RAW algorithm counts; the firmware's default (a DRBG, usually fed by
+    // RDRAND) is mixed and counts 0, like RDRAND itself.
+    ck!(random::uefi_credit(random::SEED_RAW, &seed) == 256, "plausible RAW bytes: {} bits", random::uefi_credit(random::SEED_RAW, &seed));
+    ck!(random::uefi_credit(random::SEED_DEFAULT, &seed) == 0, "the firmware's default algorithm counted {} bits", random::uefi_credit(random::SEED_DEFAULT, &seed));
+    ck!(random::uefi_credit(random::SEED_RAW, &halves) == 0 && random::uefi_credit(random::SEED_NONE, &seed) == 0, "implausible RAW bytes / no bytes counted");
+    serial_println!("[RNG TEST] 1/3 sources: the firmware's RNG counts only with the RAW algorithm (default DRBG 0); 16 start-up words count nothing; health checks switch off a constant, zero, all-ones, repeating and never-succeeding source; RDSEED 32 bits/word, RDRAND 0; UEFI+RDSEED counted once (max), jitter+interrupts once (max); no start below 256 bits; equal clock steps count 0 PASS");
     true
 }
 
@@ -337,7 +342,7 @@ pub fn self_test() {
         "[RESULT-RNG] ver={} lib={} uefi={} rdseed={} rdrand={} credited={} hw_bits={} timing_bits={} ready_ms={} reseeds={} getrandom_kbs={} chacha20_kbs={}",
         crate::shell::VERSION,
         crate::desocrypto::VERSION,
-        if random::had_boot_seed() { "yes" } else { "no" },
+        random::boot_seed_kind(),
         src[0].1,
         src[1].1,
         c.total(),

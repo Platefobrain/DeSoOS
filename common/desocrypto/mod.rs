@@ -28,7 +28,7 @@ pub mod hmac;
 pub mod rng;
 pub mod sha256;
 
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.2.1";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {

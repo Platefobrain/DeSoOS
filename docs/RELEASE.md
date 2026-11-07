@@ -85,8 +85,10 @@ timings move by ±15% from run to run on the same build).
 - random numbers: the entropy each source counts (RDSEED and the firmware's RNG ½ bit per bit, RDRAND 0, timing 1 bit
   per 64 samples) is a trust policy, not something the health checks prove; the health checks are our own simple
   ones, not NIST SP 800-90B; one generator for all CPUs under one lock (a 4 KiB request ~tens of µs); reseeding is
-  checked only when someone asks for random bytes; the firmware's RNG is not checked for being the CPU's own (counted
-  as one hardware source with RDSEED instead)
+  checked only when someone asks for random bytes; the firmware's RNG counts only with the RAW algorithm (whether its
+  RAW source is the CPU's own cannot be told – it forms one hardware class with RDSEED); the default algorithm counts 0
+- a machine without RDSEED and without a RAW firmware RNG, whose clock fails the jitter check, waits about 16 s at
+  boot for interrupt times
 - the timing check is strict: under KVM none of the 64 jitter windows passed (in TCG 43 of 64), so a machine
   without RDSEED and without the firmware's RNG waits at boot for interrupt times – that path is tested only with
   substituted sources; QEMU's OVMF here gives no `EFI_RNG_PROTOCOL` (QEMU and the test laptop start from RDSEED)
@@ -134,6 +136,53 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.70.1 — 2026-11-07
+
+**Status: stable on QEMU (TCG and KVM); fix only – the firmware's RNG counts entropy only with the RAW algorithm (its
+default algorithm, usually a DRBG fed by RDRAND, counts 0 like RDRAND); `KeyErasureRng` cuts requests over 1 GiB so the
+ChaCha20 counter cannot wrap.**
+
+### What is new since the last report (v0.70.0)
+
+| Version | Change |
+|---|---|
+| v0.70.1 | DSB asks for the RAW algorithm first and tells the kernel which one it got (`BootInfo.rng_seed_kind`, `DSBOOT13`); only RAW counts; `fill` in 1 GiB pieces with a new key each; the simpler interrupt-time check described; DeSoCrypto 0.2.1 (125 checks) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 298 s (restart 24 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 224 s (restart 12 s, soak 126 s) |
+
+A deliberate fault – the firmware's bytes counted without looking at the algorithm – made RNG TEST 1 fail ("the
+firmware's default algorithm counted 256 bits").
+
+`[RESULT-RNG]`: QEMU's OVMF gives no `EFI_RNG_PROTOCOL` (`uefi=no`), so nothing changes here: TCG 256 (RDSEED) + 47
+(jitter) = 303 bits, ready after 5 ms; KVM 256 + 0, 1 ms. `getrandom` 104 580 / 389 000 KiB/s, the generator in the
+kernel 134 080 / 485 460 KiB/s (TCG / KVM).
+
+### Performance against the previous release (v0.70.0 → v0.70.1, same machine)
+
+| | TCG v0.70.0 | TCG v0.70.1 | KVM v0.70.0 | KVM v0.70.1 |
+|---|---|---|---|---|
+| irq_user_ns | 7 721 | 8 310 | 67 294 | 66 733 |
+| fact_user_ns | 76 423 | 67 773 | 91 659 | 90 826 |
+| fact_svc_ns | 296 296 | 208 116 | 110 132 | 104 931 |
+| restart_us | 5 700 | 4 200 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 63 015 | 52 512 | 93 090 | 97 523 |
+| rights gate_ns | 26 | 25 | 7 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 41 645 / 49 920 | 48 158 / 48 398 | 175 360 / 205 760 | 180 480 / 218 560 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 491 / 10 625 | 7 641 / 12 740 | 17 504 / 47 080 | 14 948 / 53 894 |
+| DeSoFS 1000 small files create / read (ms) | 14 081 / 3 575 | 12 869 / 3 695 | 7 598 / 863 | 7 760 / 865 |
+| `desofs check` (ms) | 1 026 | 916 | 306 | 298 |
+| short soak: file operations in 2 min | 5 898 | 6 421 | 27 744 | 28 212 |
+
+Verdict: no regression – no measured path changed; the differences are the usual single-run spread (TCG `fact_svc`
+back at its v0.69.0 level, KVM 8 MiB write −15 % / read +14 %).
 
 ---
 

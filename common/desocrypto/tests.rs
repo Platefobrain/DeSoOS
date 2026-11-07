@@ -486,6 +486,16 @@ fn rng_checks(c: &mut Checks) -> Result<(), Failure> {
     a.fill(&mut x);
     b.fill(&mut y);
     c.check(x != y)?;
+    // A long request is cut into pieces, each a call of its own (new key) – checked with
+    // 64-byte pieces against separate calls.
+    let mut c1 = KeyErasureRng::new(&seed);
+    let mut c2 = KeyErasureRng::new(&seed);
+    let (mut long, mut parts) = ([0u8; 200], [0u8; 200]);
+    c1.fill_with_piece(&mut long, 64);
+    for ch in parts.chunks_mut(64) {
+        c2.fill(ch);
+    }
+    c.check(long == parts && c1.key_for_test() == c2.key_for_test())?;
     // Two calls never give the same bytes.
     let (mut p, mut q) = ([0u8; 64], [0u8; 64]);
     b.fill(&mut p);

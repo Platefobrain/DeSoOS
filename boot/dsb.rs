@@ -25,7 +25,7 @@ use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
 use uefi::println;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
-use uefi::proto::rng::Rng;
+use uefi::proto::rng::{Rng, RngAlgorithmType};
 
 /// Must be identical to kernel/bootinfo.rs.
 #[repr(C)]
@@ -49,10 +49,10 @@ struct BootInfo {
     stack_size: u64,
     acpi_rsdp: u64,
     rng_seed: [u8; 64],
-    rng_seed_ok: u64,
+    rng_seed_kind: u64,
 }
 
-const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT12");
+const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT13");
 
 const PAGE: u64 = 4096;
 const HUGE_PAGE: u64 = 2 * 1024 * 1024;
@@ -361,12 +361,25 @@ fn dsb() -> Status {
 
     // 64 bytes from the firmware's RNG (EFI_RNG_PROTOCOL), if it has one – one of the
     // kernel's entropy sources (kernel/random.rs).  Read before ExitBootServices.
+    // First the RAW algorithm (entropy straight from the source, no DRBG); otherwise the
+    // firmware's default algorithm – usually a DRBG fed by RDRAND, which the kernel
+    // mixes in but does not count.  `rng_seed_kind`: 0 none, 1 RAW, 2 default.
     let mut rng_seed = [0u8; 64];
-    let rng_seed_ok = boot::get_handle_for_protocol::<Rng>()
+    let rng_seed_kind: u64 = match boot::get_handle_for_protocol::<Rng>()
         .ok()
         .and_then(|h| boot::open_protocol_exclusive::<Rng>(h).ok())
-        .map(|mut rng| rng.get_rng(None, &mut rng_seed).is_ok())
-        .unwrap_or(false);
+    {
+        Some(mut rng) => {
+            if rng.get_rng(Some(RngAlgorithmType::ALGORITHM_RAW), &mut rng_seed).is_ok() {
+                1
+            } else if rng.get_rng(None, &mut rng_seed).is_ok() {
+                2
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
 
     let ranges = match direct_map_ranges(framebuffer_addr, framebuffer_size) {
         Ok(r) => r,
@@ -406,7 +419,7 @@ fn dsb() -> Status {
         stack_size: STACK_SIZE,
         acpi_rsdp,
         rng_seed,
-        rng_seed_ok: rng_seed_ok as u64,
+        rng_seed_kind,
     };
     unsafe { core::ptr::write(bootinfo_phys as *mut BootInfo, info) };
     // Our copy of the firmware's random bytes goes (the kernel wipes BootInfo's).

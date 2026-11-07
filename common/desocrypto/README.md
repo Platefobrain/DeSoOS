@@ -1,4 +1,4 @@
-# DeSoCrypto v0.2.0
+# DeSoCrypto v0.2.1
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
