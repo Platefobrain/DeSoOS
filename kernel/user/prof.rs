@@ -19,29 +19,29 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use crate::arch::x86_64::percpu::PerCpu;
 
 /// Categories 0..SYSCALLS are syscall numbers.
-pub const SYSCALLS: usize = 58; // syscall numbers 0..58
-pub const PF_USER: usize = 58;
-pub const IRQ_PIT: usize = 59;
-pub const IRQ_TIMER: usize = 60;
-pub const IRQ_RESCHED: usize = 61;
-pub const REAP: usize = 62;
-pub const EXIT: usize = 63;
-pub const LOAD_ELF: usize = 64;
-pub const CTX_SWITCH: usize = 65;
-pub const DRV_EXEC: usize = 66;
+pub const SYSCALLS: usize = 59; // syscall numbers 0..59
+pub const PF_USER: usize = 59;
+pub const IRQ_PIT: usize = 60;
+pub const IRQ_TIMER: usize = 61;
+pub const IRQ_RESCHED: usize = 62;
+pub const REAP: usize = 63;
+pub const EXIT: usize = 64;
+pub const LOAD_ELF: usize = 65;
+pub const CTX_SWITCH: usize = 66;
+pub const DRV_EXEC: usize = 67;
 /// Measurements whose end precedes their start (should not happen – a sanity check).
-const TSC_SKEW: usize = 67;
-pub const SP_READ: usize = 68;
-pub const SP_ELF: usize = 69;
-pub const SP_TASK: usize = 70;
-const N: usize = 71;
+const TSC_SKEW: usize = 68;
+pub const SP_READ: usize = 69;
+pub const SP_ELF: usize = 70;
+pub const SP_TASK: usize = 71;
+const N: usize = 72;
 
 const NAMES: [&str; N] = [
     "exit(sys)", "write", "read", "open", "close", "getpid", "sleep", "yield", "uptime", "spawn", "wait",
     "getppid", "kill", "chdir", "getcwd", "readdir", "stat", "mkdir", "unlink", "readkey", "tasks", "(21)",
     "dup", "dup2", "seek", "pipe", "brk", "mmap", "munmap", "handle_dup", "handle_info", "chan_create",
     "chan_send", "chan_recv", "shm_create", "shm_map", "spawn_ex", "shm_size", "wait_many", "dev_claim",
-    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "dev_find", "input_inject", "blk_attach", "dir_open", "openat", "readdirat", "statat", "mkdirat", "unlinkat", "readdir_part", "#PF user", "IRQ PIT", "LAPIC timer",
+    "dev_info", "dev_map", "irq_bind", "irq_read", "dma_alloc", "dma_phys", "sysinfo", "sysctl", "dev_find", "input_inject", "blk_attach", "dir_open", "openat", "readdirat", "statat", "mkdirat", "unlinkat", "readdir_part", "getrandom", "#PF user", "IRQ PIT", "LAPIC timer",
     "resched IPI", "reap", "exit proc", " spawn:load", "ctx switch", "drv exec", "TSC skew", " sp:readfile", " sp:elf+pt", " sp:task",
 ];
 
@@ -72,6 +72,7 @@ const _: () = assert!(
         && same(NAMES[41], "dev_map")
         && same(NAMES[48], "dev_find")
         && same(NAMES[57], "readdir_part")
+        && same(NAMES[58], "getrandom")
         && same(NAMES[PF_USER], "#PF user")
         && same(NAMES[REAP], "reap")
         && same(NAMES[EXIT], "exit proc")

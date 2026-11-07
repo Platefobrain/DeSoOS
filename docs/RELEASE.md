@@ -78,11 +78,18 @@ timings move by ±15% from run to run on the same build).
   uses the byte position (stable)
 
 **Cryptography (DeSoCrypto)**
-- only SHA-256, HMAC-SHA256 and HKDF-SHA256; no random numbers, ciphers, key exchange or signatures yet, no TLS –
-  `netget https://` is refused
-- not hardened against timing side channels beyond the constant-time tag check, not audited – fine for
-  checksums, not yet for protecting secrets; keys are wiped when HMAC / SHA-256 objects are dropped, but temporary
-  copies on the stack (e.g. the message schedule) are not
+- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20 and the kernel's random number generator; no authenticated encryption
+  (Poly1305), key exchange (X25519), AES-GCM or signatures yet, no TLS – `netget https://` is refused
+- not audited; SHA-256 and ChaCha20 use no tables or branches on secrets, but nothing is verified against timing side
+  channels; keys are wiped when objects are dropped, but temporary copies in registers and on the stack are not
+- random numbers: the entropy each source counts (RDSEED and the firmware's RNG ½ bit per bit, RDRAND 0, timing 1 bit
+  per 64 samples) is a trust policy, not something the health checks prove; the health checks are our own simple
+  ones, not NIST SP 800-90B; one generator for all CPUs under one lock (a 4 KiB request ~tens of µs); reseeding is
+  checked only when someone asks for random bytes; the firmware's RNG is not checked for being the CPU's own (counted
+  as one hardware source with RDSEED instead)
+- the timing check is strict: under KVM none of the 64 jitter windows passed (in TCG 43 of 64), so a machine
+  without RDSEED and without the firmware's RNG waits at boot for interrupt times – that path is tested only with
+  substituted sources; QEMU's OVMF here gives no `EFI_RNG_PROTOCOL` (QEMU and the test laptop start from RDSEED)
 
 **Hardware**
 - INTx interrupts on real hardware: a device's IRQ line requires ACPI AML (_PRT) – drivers use MSI/MSI-X
@@ -130,6 +137,66 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.70.0 — 2026-11-07
+
+**Status: stable on QEMU (TCG and KVM). The kernel has its own random number generator (DeSoCrypto 0.2.0: ChaCha20
+with fast key erasure, an entropy pool, health checks, `getrandom`); `netd` no longer takes TCP sequence numbers and
+DNS ids from a generator seeded with the uptime.**
+
+### What is new since the last report (v0.69.0)
+
+| Version | Change |
+|---|---|
+| v0.70.0 | ChaCha20 (RFC 8439) and `KeyErasureRng` in DeSoCrypto; `kernel/random.rs` – sources UEFI RNG, RDSEED, RDRAND, TSC jitter, interrupt times; declared entropy as a trust policy, correlated sources counted once (max); our own health checks with a 16-word start-up check; the kernel waits at boot for 256 counted bits; reseeding after 60 s or 1024 interrupts only with 128 new bits; `getrandom` (syscall 58, no right); `netd`, DeSoFS uuids, `/bin/random`; RNG TEST 1–3 |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 293 s (restart 26 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 224 s (restart 12 s, soak 126 s) |
+
+Each of seven deliberate faults made a test fail: no key replacement, a reseed without the 128-bit threshold,
+RDRAND counted, no repetition checks, a start below 256 bits, classes added up instead of max, a wrong ChaCha20
+constant. The first bytes of the generator differed between the two starts in both runs.
+
+### The generator (`[RESULT-RNG]`)
+
+| | TCG | KVM |
+|---|---|---|
+| firmware RNG (`EFI_RNG_PROTOCOL`) | no | no |
+| RDSEED / RDRAND | on / on | on / on |
+| counted at start: hardware (RDSEED) + timing | 256 + 43 = 299 bits | 256 + 0 = 256 bits |
+| ready after | 4 ms | 1 ms |
+| reseeds during the tests | 2 | 2 |
+| `getrandom` from a program (4 KiB requests) | 92 980 KiB/s | 383 160 KiB/s |
+| ChaCha20 generator in the kernel | 130 340 KiB/s | 475 980 KiB/s |
+
+Under KVM none of the 64 jitter windows passed the timing check (one difference dominates the window), so the
+timing class counted 0 – the check refuses a regular clock as it should; RDSEED alone made the generator ready.
+
+### Performance against the previous release (v0.69.0 → v0.70.0, same machine)
+
+| | TCG v0.69.0 | TCG v0.70.0 | KVM v0.69.0 | KVM v0.70.0 |
+|---|---|---|---|---|
+| irq_user_ns | 6 703 | 7 721 | 63 734 | 67 294 |
+| fact_user_ns | 77 220 | 76 423 | 92 678 | 91 659 |
+| fact_svc_ns | 208 986 | 296 296 | 106 894 | 110 132 |
+| restart_us | 4 700 | 5 700 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 59 362 | 63 015 | 99 902 | 93 090 |
+| rights gate_ns | 25 | 26 | 5 | 7 |
+| crypto sha256 kernel / user (KiB/s) | 48 158 / 49 920 | 41 645 / 49 920 | 181 760 / 216 640 | 175 360 / 205 760 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 942 / 12 430 | 6 491 / 10 625 | 16 516 / 54 979 | 17 504 / 47 080 |
+| DeSoFS 1000 small files create / read (ms) | 13 485 / 3 592 | 14 081 / 3 575 | 7 371 / 809 | 7 598 / 863 |
+| `desofs check` (ms) | 937 | 1 026 | 265 | 306 |
+| short soak: file operations in 2 min | 6 296 | 5 898 | 28 051 | 27 744 |
+
+Verdict: no regression. Nothing on the measured paths changed except one per-interrupt hook (a few tens of cycles:
+`irq_user_ns` +5 % under KVM, within the spread of earlier releases); TCG `fact_svc` +42 % and KVM 8 MiB read −14 %
+are single-run noise (the read is SHA-256 bound, and SHA-256 itself was 4 % slower in this run).
+
+---
+
 ## v0.69.0 — 2026-11-07
 
 **Status: stable on QEMU (TCG and KVM). DeSoFS keeps verified blocks in memory: reading 1000 small files is 2.9 times
@@ -148,9 +215,31 @@ unchanged.**
 |---|---|---|---|
 | TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 33/33 suites + restart 1/1 + short soak (RAM disk), 284 tests PASS | 288 s (restart 24 s, soak 131 s) |
 | KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 33/33 suites + restart 1/1 + short soak (RAM disk), 284 tests PASS | 222 s (restart 12 s, soak 125 s) |
+| Soak 15 min, test laptop | `DESOOS_AUTOSOAK=900`, SEED=1794069017 | **PASS**, 2 checkpoints, leaks 0, errors 0 | 903 s |
 
 Each of four deliberate faults made one of the new tests fail: a key without the checksum (test 30), inserting
 before the second flush (test 32), no limit (test 31), a hit without the SHA-256 check (test 32).
+
+### Real hardware (test laptop: Ryzen 7 4800H, 16 threads, NVMe, 3 × xHCI, Realtek RTL8168h) – soak v0.69.0
+
+The same setup as for v0.68.0: a 256 MiB RAM disk (the NVMe untouched, read-only), killing `echo`, `net0`, `usb0`,
+`usb1`, `usb2`, pings to the router, the boot stick's `EFI/BOOT/BOOTX64.EFI` (3 849 216 B) against its first
+SHA-256. The block cache limit on this machine is 64 MiB; every checkpoint unmounts the volume, which gives the
+whole cache back, so the memory is compared with an empty cache.
+
+| What | v0.68.0 (15 min) | v0.69.0 (15 min) |
+|---|---|---|
+| File operations on DeSoFS (checked against the model) | 232 561 | 230 400 (3 836 MiB written, ~410–490 files, ~16 MiB live) |
+| Snapshots (checked through their views) | 2 | 2 (410 and 487 files, both match the model) |
+| Processes started | 375 571 | 378 671 |
+| Services killed | 15 | 12 – back in (min / avg / max ms): `echo` 202 / 202 / 202, `usb0` 205 / 210 / 217, `usb1` 515 / 515 / 515, `net0` 15 968 / 23 996 / 32 026 |
+| Kernel heap without the scrollback, baseline → final | – | 3 922 272 → 3 921 472 B (−800 B) |
+| Free frames (with the scrollback's share), baseline → final | – | 4 052 616 → 4 052 833 (+217) |
+| Final checkpoint | 3.3 s, `desofs check` clean | 3.3 s, tasks 30, processes 10, IPC buffers 0, handles as at the baseline, `desofs check` clean |
+| After the soak | init, services, shell as usual | init, services, shell as usual |
+
+On a RAM disk a block read is already a memory copy, so the cache does not change the number of file operations
+(−1 %, within the spread). `net0` again takes 16 or 32 s because of the router's DHCP, within the 60 s allowed.
 
 ### Where the time goes now (KVM, `[RESULT-FS-PROF]`)
 

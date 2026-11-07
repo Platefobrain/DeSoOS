@@ -2,6 +2,47 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.70.0 — 2026-11-07
+
+### Added – the kernel's random number generator (DeSoCrypto 0.2.0)
+- **ChaCha20** (RFC 8439) in DeSoCrypto: the block function and the stream XOR (a wrapping counter is refused);
+  **`rng::KeyErasureRng`**: ChaCha20 with fast key erasure – the whole state is a 32-byte key, replaced by the first
+  32 bytes of every call's stream before any output; `reseed` = SHA-256(key ‖ input); `wipe` in `mod.rs`.
+- **`kernel/random.rs`**: an entropy pool (SHA-256) and a generator from it. Sources: the firmware's
+  `EFI_RNG_PROTOCOL` (64 bytes read by DSB before ExitBootServices, `BootInfo` magic `DSBOOT12`, copied and wiped at
+  the start of `kernel_main`), RDSEED, RDRAND, TSC jitter at boot, interrupt times (per-CPU, IRQ and MSI), and RTC /
+  HPET / CPUID / NVMe serial numbers. Declared entropy (a trust policy, not proven by the checks): UEFI and RDSEED ½
+  bit per bit, RDRAND 0, jitter and interrupts 1 bit per 64 samples, identity data 0. Sources that may share a
+  generator count once: max(UEFI, RDSEED) + max(jitter, interrupts).
+- Health checks (our own, not NIST SP 800-90B): 16 start-up words before a hardware source counts, the carry flag
+  and bounded retries, words 0 / all ones, the same word twice, a word repeated within 64; a failure or 3 failed
+  reads switch the source off until reboot. Timing windows with a dominant or repeating difference count nothing.
+- **The kernel waits at boot** (before the scheduler and any process) until 256 bits are counted, saying so every
+  second if it must; it never pretends. Reseeding: checked in every request after 60 s or 1024 interrupts
+  (whichever first), only with at least 128 newly counted bits.
+- **`getrandom(buf, len, flags)`** – syscall 58: up to 4096 bytes, `flags` 0, no right needed, never blocks;
+  `desoos::getrandom` (any length). Spinlock level `RANDOM` (227).
+- `netd`: TCP sequence numbers and ports, DNS ids and ports, ping ids from its own `KeyErasureRng` keyed from
+  `getrandom` (reseeded every minute) – instead of xorshift seeded from the uptime, the pid and the MAC, which
+  anyone knowing the start time could predict; DHCP transaction ids seeded from `getrandom`.
+- DeSoFS volume uuids from the generator. `/bin/random [n]` – n random bytes in hex. `sysinfo counters`:
+  `rng_reseeds`, `rng_bytes_out`, `rng_sources_disabled`.
+
+### Tests
+- DeSoCrypto: ChaCha20 RFC 8439 2.3.2, 2.4.2, A.1 (1–5), A.2 (2); lengths around the block, the last counter value,
+  a wrapping counter refused; the generator against the same construction in Python (124 checks).
+- RNG TEST 1 sources: substituted sources (constant, zeros, all ones, a repeating sequence, never succeeding) are
+  switched off and count nothing; the start-up words count nothing; RDRAND counts 0; the classes are max, not sum;
+  no start below 256 bits; a clock with equal steps counts 0; the firmware bytes check. 2 the generator: the key
+  replaced on every call, a stolen key predicts until a reseed and gives nothing earlier, no reseed below 128 new
+  bits, due after 60 s or 1024 interrupts, 1 MiB without a repeated 16-byte block. 3 `getrandom` from user space
+  (`/bin/rngtest`: lengths 0 / 4096 / 4097, a wrong flag, null / kernel / code addresses; four processes at once –
+  all samples different), `/bin/random`. `tests/test.sh` compares the first bytes of the two starts;
+  `[RESULT-RNG]`.
+- Mutations caught: no key replacement (RNG 2), a reseed without the 128-bit threshold (RNG 2), RDRAND counted
+  (RNG 1), no repetition checks (RNG 1), a start without 256 bits (RNG 1), classes added up instead of max (RNG 1),
+  a wrong ChaCha20 constant (CRYPTO). 34 suites, a restart phase and a short soak, 287 tests.
+
 ## v0.69.0 — 2026-11-07
 
 ### Added – DeSoFS block cache

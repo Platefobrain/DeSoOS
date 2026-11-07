@@ -74,6 +74,10 @@ pub mod level {
     /// Process exit log – written from interrupts (killing a
     /// ring-3 process) and from syscalls without the BKL; a leaf, no allocation.
     pub const EXIT_LOG: u8 = 225;
+    /// The random number generator (random.rs) – a leaf without allocation; taken by
+    /// `getrandom`, the kernel (DeSoFS format under VFS / BLOCK) – never in an interrupt
+    /// (interrupts write per-CPU counters instead).
+    pub const RANDOM: u8 = 227;
     /// Kernel heap.  Allocation is allowed from anywhere – including from an
     /// interrupt handler that jumped into a section under any SpinLock
     /// (IF = 1) – so the heap and the frame allocator are nearly innermost

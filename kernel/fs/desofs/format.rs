@@ -155,17 +155,9 @@ pub fn format(index: usize, p: &Params) -> Result<u64, String> {
     Ok(total)
 }
 
-/// A random uuid for a new volume: SHA-256 of the time stamp counter, the tick count
-/// and the clock (good enough to tell volumes apart; not a secret).
+/// A random uuid for a new volume, from the kernel's generator (random.rs).
 pub fn random_uuid() -> [u8; 16] {
-    let mut seed = [0u8; 32];
-    // SAFETY: RDTSC has no side effects.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    seed[0..8].copy_from_slice(&tsc.to_le_bytes());
-    seed[8..16].copy_from_slice(&crate::time::ticks().to_le_bytes());
-    seed[16..24].copy_from_slice(&crate::drivers::rtc::now().to_unix().to_le_bytes());
-    let h = sha256(&seed);
     let mut u = [0u8; 16];
-    u.copy_from_slice(&h[..16]);
+    crate::random::fill(&mut u);
     u
 }

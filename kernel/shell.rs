@@ -356,6 +356,11 @@ fn cmd_counters(_: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = writeln!(out, "heap_console {}", crate::console::scrollback_bytes());
     // DeSoFS block caches (frames + index, all volumes; emptied at unmount).
     let _ = writeln!(out, "fs_cache_bytes {}", crate::fs::desofs::cache::used());
+    // The random number generator: reseeds, output, switched-off hardware sources.
+    let (rs, src) = crate::random::summary();
+    let _ = writeln!(out, "rng_reseeds {}", rs.reseeds);
+    let _ = writeln!(out, "rng_bytes_out {}", rs.bytes_out);
+    let _ = writeln!(out, "rng_sources_disabled {}", src.iter().filter(|(_, st)| *st == "disabled").count());
     let _ = writeln!(out, "tasks {}", tasks.len());
     let _ = writeln!(out, "tasks_dead {}", dead);
     let _ = writeln!(out, "processes {}", crate::user::process::LIVE_PROCS.load(core::sync::atomic::Ordering::Relaxed));

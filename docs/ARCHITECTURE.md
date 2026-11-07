@@ -227,6 +227,7 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 50 | `blk_attach` |
 | 51–56 | `dir_open`, `openat`, `readdirat`, `statat`, `mkdirat`, `unlinkat` (directory handles) |
 | 57 | `readdir_part` (a directory in parts through a directory handle, see DeSoFS) |
+| 58 | `getrandom(buf, len, flags)` – up to 4096 random bytes from the kernel's generator; no right needed, never blocks (see "Random numbers") |
 
 The syscall profiler (`prof.rs`) tracks all 58 numbers. Error numbers are the Linux ones, with DeSoOS names (below).
 
@@ -507,6 +508,7 @@ a violation – the interrupted code does not wait for the handler); recursion i
 | 55 `PAGING` | page tables, task stack pages |
 | 100 `OUTPUT` | process output (captured stdout, shell line) |
 | 225 `EXIT_LOG` | process exit log (leaf, no allocation) |
+| 227 `RANDOM` | the random number generator (`random.rs`; leaf, no allocation, never in an interrupt – interrupts write per-CPU counters) |
 | 230 / 240 `HEAP` / `FRAMES` | heap / frame allocator (allocation allowed from anywhere, including interrupts) |
 | 250 / 255 `TLB` / `CONSOLE` | TLB shootdown / console (logging is always allowed) |
 
@@ -1617,7 +1619,9 @@ syscall per operation, and a mistake in it can only hurt the program that uses i
 | `sha256` | `Sha256::new / update / finish`, `sha256(data)` | FIPS 180-4 |
 | `hmac` | `HmacSha256::new / update / finish / verify`, `hmac_sha256(key, data)` | RFC 2104, vectors RFC 4231 |
 | `hkdf` | `extract`, `expand`, `hkdf` | RFC 5869 |
-| `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `VERSION` | – |
+| `chacha20` | `block`, `xor_stream` (refuses a wrapping counter) | RFC 8439 |
+| `rng` | `KeyErasureRng::new / fill / reseed` – ChaCha20 with fast key erasure | – |
+| `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `wipe`, `VERSION` | – |
 
 Rules of the code:
 - **Only `core`:** no heap, no syscalls, no `std`. Results go into memory the caller owns (an array returned by
@@ -1629,21 +1633,84 @@ Rules of the code:
 - **Arithmetic** is explicitly wrapping (`wrapping_add`, `rotate_right`) – correct with or without overflow checks.
 - **Keys** are wiped (volatile writes): `Sha256` and `HmacSha256` clear their whole state when dropped (also
   without `finish`, e.g. on an error path) – the inner SHA-256 state of HMAC is a hash of the key and as good as the
-  key; HKDF wipes its PRK and blocks. Temporary copies on the stack (the message schedule in `compress`) are not
-  wiped – no full guarantee yet. Tags are compared in constant time. Nothing else is hardened against timing side
-  channels yet.
+  key; HKDF wipes its PRK and blocks; ChaCha20 wipes its state and key stream, the generator its key. Temporary
+  copies in registers or on the stack (the message schedule in `compress`) are not wiped – no full guarantee.
+  Tags are compared in constant time; SHA-256 and ChaCha20 use no tables and no branches on secret data.
 - **Test-only code stays out:** `assume_length` (a pretended length counter for the limit tests) exists only with
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
-Tests: `common/desocrypto/tests.rs` (92 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869 vectors; block-edge lengths;
+Tests: `common/desocrypto/tests.rs` (124 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439 vectors; the
+generator against the same construction in Python; block-edge lengths;
 every split of a message; length limits with a pretended counter; wrong tags and parameters). `mod.rs` does not
 include it, so it is not in the kernel or ordinary programs: only `/bin/cryptotest` and CRYPTO TEST (selftest build)
 include it. CRYPTO TEST runs it in the kernel and in user space, checks `sha256sum` against the kernel's own result
 and measures the speed (`[RESULT-CRYPTO]`).
 
-Next (DeSoCrypto v0.2.0, after DeSoFS): `getrandom` from a kernel generator fed by several sources,
-ChaCha20-Poly1305, X25519, AES-128-GCM; then DeSoTLS (TLS 1.3) on top of it.
+Next: Poly1305, ChaCha20-Poly1305 and X25519 (DeSoCrypto 0.3.0), AES-128-GCM with AES-NI and a constant-time
+fallback (0.4.0); then DeSoTLS (TLS 1.3) – signatures, X.509 and the protocol itself are a separate step.
+
+## Random numbers (`kernel/random.rs`, v0.70.0)
+
+The kernel's generator: a pool of entropy, a ChaCha20 generator with fast key erasure (`desocrypto::rng`) and the
+`getrandom` syscall (58). Programs that need many random numbers (`netd`) key their own `KeyErasureRng` from
+`getrandom` and reseed it from it every minute; DeSoOS has no `fork`, so a generator's state is never copied into
+a second process.
+
+**Sources.** Everything is mixed into the pool (SHA-256); only declared entropy counts. The declared values are a
+**trust policy, not a result** – the health checks cannot prove them:
+
+| Source | Mixed | Counted |
+|---|---|---|
+| UEFI `EFI_RNG_PROTOCOL` – 64 bytes read by DSB before `ExitBootServices`, passed in `BootInfo` (magic `DSBOOT12`), copied and wiped there at the very start of `kernel_main` | yes | ½ bit per bit (256), if the bytes are plausible |
+| RDSEED – 64-bit words | yes | ½ bit per bit (32 per word), after the start-up check |
+| RDRAND | yes | 0 |
+| TSC jitter at boot – 64-sample windows of a short memory-touching loop | yes | 1 bit per window that passes the timing check |
+| interrupt times – the TSC at every IRQ / MSI, per-CPU mixing words | yes | 1 bit per 64 events whose time difference is not 0 and not the previous one |
+| RTC, HPET, CPUID, NVMe serial numbers | yes | 0 |
+
+**Not counting the same entropy twice.** The firmware's RNG may be the CPU's RDRAND/RDSEED (OVMF does exactly
+that), so UEFI and RDSEED form one hardware class counted as max(UEFI, RDSEED). Jitter and interrupt times both
+come from the TSC and may be correlated: one timing class, max(jitter, interrupts). Counted = hardware + timing.
+
+**Health checks** (our own simple checks – not the NIST SP 800-90B tests; they catch obvious failures and prove
+nothing about quality): 16 healthy words before a hardware source counts anything; the carry flag of every
+RDSEED/RDRAND, up to 100 / 10 retries; words 0 and all ones; the same word twice in a row; a word repeated within
+the last 64 (which also catches a repeated sequence of up to 32 words). A failed check, or 3 failed reads in a row,
+switch the source off until the next boot (`[RNG] RDSEED disabled until reboot: …`); the others carry on. Timing
+windows are not counted when one value makes up more than half of the 64 differences or repeats 8 times in a row.
+
+**Readiness.** `random::init` runs right after interrupts are enabled, before the scheduler and before any process
+exists. It waits until 256 bits are counted – collecting jitter and interrupt times and printing `[RNG] waiting for
+entropy: N/256 bits …` every second – and never pretends. So `getrandom` never blocks. With RDSEED or the firmware's
+RNG this is immediate; the time without them depends on the machine.
+
+**The generator.** The whole state is a 32-byte key. Every call: ChaCha20 with that key, nonce 0, counter from 0;
+the first 32 bytes become the new key at once, the rest is the output; the block is wiped. Every key is used for
+one call only, so no (key, counter) pair and no output byte repeats. One `SpinLock` (`RANDOM`); interrupts never
+take it. A stolen state gives away the output until the next reseed with new entropy, and nothing produced before.
+
+**Reseeding** is checked inside `fill`: every 60 s or after 1024 interrupts, whichever comes first. The interrupt
+times and 4 fresh RDSEED/RDRAND words go into the pool; a new key = SHA-256(key ‖ pool) only when the pool holds at
+least 128 newly counted bits – smaller reseeds would let someone who stole the state guess each addition ("catastrophic
+reseeding", Fortuna). Otherwise the pool keeps collecting.
+
+**Users:** `getrandom` (`desoos::getrandom` in programs: any length, 4096-byte syscalls), DeSoFS volume uuids,
+`netd` (TCP sequence numbers and ports, DNS ids and ports, ping ids; DHCP transaction ids are seeded from it – they
+travel in broadcast frames anyway), `/bin/random`. `sysinfo counters`: `rng_reseeds`, `rng_bytes_out`,
+`rng_sources_disabled`.
+
+| | Linux | Windows | RedoxOS | Fuchsia | DeSoOS |
+|---|---|---|---|---|---|
+| where | kernel | kernel + a generator in every process | `randd` (user space) | kernel | kernel; programs may key their own from it |
+| generator | ChaCha20, fast key erasure | AES-CTR-DRBG | ChaCha | ChaCha20 | ChaCha20, fast key erasure |
+| trust in RDRAND | not alone | not alone | yes | not alone | counted 0 |
+| API | `getrandom()` | `ProcessPrng` | `/scheme/rand` | `zx_cprng_draw` (no rights) | `getrandom` (no right) |
+| blocks | only before initialization | no | no | no | never (the kernel waits at boot) |
+
+Tests: RNG TEST (substituted sources that fail on purpose, the counting classes, the start-up check; fast key
+erasure, a stolen key, the reseed rules; 1 MiB without a repeated block; `getrandom` edge cases and four processes
+at once through `/bin/rngtest`), the first bytes of the two starts in `tests/test.sh` compared, `[RESULT-RNG]`.
 
 ## Resource limits
 
@@ -1669,11 +1736,11 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 33 self-test suites, a restart phase and a short soak (284 tests) in QEMU (TCG
+- **Self-tests:** `tests/test.sh` – 34 self-test suites, a restart phase and a short soak (287 tests) in QEMU (TCG
   or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
-  files, IPC, the rights table, cryptography, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
+  files, IPC, the rights table, cryptography, the random number generator, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed
   task = FAIL); a storm of sleeps and wake-ups across CPUs with a safety deadline (wake-up after the deadline = lost
   = FAIL); exit + reap in a loop with an assertion that reap never frees a task with `on_cpu`; and a mutation test

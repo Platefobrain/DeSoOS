@@ -79,6 +79,9 @@ pub const SYS_STATAT: u64 = 54;
 pub const SYS_MKDIRAT: u64 = 55;
 pub const SYS_UNLINKAT: u64 = 56;
 pub const SYS_READDIR_PART: u64 = 57;
+pub const SYS_GETRANDOM: u64 = 58;
+/// Largest single `getrandom` syscall.
+pub const GETRANDOM_MAX: usize = 4096;
 /// readdir_part: the cursor after the last part.
 pub const DIR_END: u64 = u64::MAX;
 
@@ -305,6 +308,18 @@ pub fn openat(dir: u64, path: &str, flags: u64) -> i64 {
 /// done).  `dir` is a directory handle (READ), `path` relative to it ("" = itself).
 pub fn readdir_part(dir: u64, path: &str, buf: &mut [u8], cursor: &mut u64) -> i64 {
     syscall6(SYS_READDIR_PART, dir, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, cursor as *mut u64 as u64)
+}
+
+/// Fills `buf` with random bytes from the kernel's generator (any length – 4096-byte
+/// syscalls).  Never blocks; no right needed.
+pub fn getrandom(buf: &mut [u8]) -> Result<(), i64> {
+    for chunk in buf.chunks_mut(GETRANDOM_MAX) {
+        let r = syscall3(SYS_GETRANDOM, chunk.as_mut_ptr() as u64, chunk.len() as u64, 0);
+        if r < 0 {
+            return Err(r);
+        }
+    }
+    Ok(())
 }
 
 /// A handle for reading directory `path` in parts: (handle, path relative to it, whether

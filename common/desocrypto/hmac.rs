@@ -101,8 +101,5 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; OUT_LEN] {
 
 /// Zeroes key material in a way the compiler does not remove.
 pub(super) fn wipe(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        // SAFETY: `b` is a valid, aligned &mut u8.
-        unsafe { core::ptr::write_volatile(b, 0) };
-    }
+    super::wipe(buf);
 }

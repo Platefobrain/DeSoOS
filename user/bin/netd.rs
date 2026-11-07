@@ -61,6 +61,8 @@ mod dhcp;
 mod dns;
 #[path = "../lib/tcp.rs"]
 mod tcp;
+#[path = "../../common/desocrypto/mod.rs"]
+mod desocrypto;
 
 use core::fmt::Write;
 use desoos::*;
@@ -348,8 +350,10 @@ struct Nic {
     dns_answers: u64,
     dns_bad: u64,
     /// Random numbers (DNS ids and ports, ping ids, TCP ports and sequence
-    /// numbers) and the next local port.
-    rng: u64,
+    /// numbers): ChaCha20 with fast key erasure, keyed from `getrandom` and reseeded
+    /// from it every minute; and the next local port.
+    rng: desocrypto::rng::KeyErasureRng,
+    rng_reseed_ms: u64,
     next_port: u16,
     /// TCP: addresses and owner of each block in TCBS, counters.
     tcp: [TcpMeta; TCP_MAX],
@@ -1004,12 +1008,18 @@ impl Nic {
     }
 
     fn rand16(&mut self) -> u16 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        (x >> 24) as u16
+        let now = uptime_ms();
+        if now.wrapping_sub(self.rng_reseed_ms) >= 60_000 {
+            let mut fresh = [0u8; 32];
+            if getrandom(&mut fresh).is_ok() {
+                self.rng.reseed(&fresh);
+                self.rng_reseed_ms = now;
+            }
+            desocrypto::wipe(&mut fresh);
+        }
+        let mut b = [0u8; 2];
+        self.rng.fill(&mut b);
+        u16::from_le_bytes(b)
     }
 
     /// A local port for a DNS query: random in 49152–65535, never the last one.
@@ -2677,6 +2687,12 @@ fn main(args: Args) -> i32 {
         println!("{}: cannot map the DMA buffer", name);
         return 2;
     };
+    // The key of our generator, from the kernel's (never from the clock).
+    let mut seed = [0u8; 32];
+    if let Err(e) = getrandom(&mut seed) {
+        println!("{}: getrandom failed ({})", name, e);
+        return 2;
+    }
     let mut nic = Nic {
         name,
         chip,
@@ -2732,7 +2748,8 @@ fn main(args: Args) -> i32 {
         dns_queries: 0,
         dns_answers: 0,
         dns_bad: 0,
-        rng: 0,
+        rng: desocrypto::rng::KeyErasureRng::new(&seed),
+        rng_reseed_ms: uptime_ms(),
         next_port: 0,
         tcp: [TCP_FREE; TCP_MAX],
         tcp_made: 0,
@@ -2756,6 +2773,7 @@ fn main(args: Args) -> i32 {
         by_hand: false,
         conflicts: 0,
     };
+    desocrypto::wipe(&mut seed);
     if let Err(e) = nic.start() {
         println!("{}: {}", name, e);
         return 2;
@@ -2767,8 +2785,11 @@ fn main(args: Args) -> i32 {
     write(1, first);
     write(1, b"\n");
     // Ask for an address (DISCOVER now; the rest happens in the loop).
-    nic.dhcp = Client::new(nic.mac, uptime_ms() ^ (getpid() << 32));
-    nic.rng = (uptime_ms() << 20) ^ getpid() ^ u64::from_be_bytes([0, 0, nic.mac[0], nic.mac[1], nic.mac[2], nic.mac[3], nic.mac[4], nic.mac[5]]) | 1;
+    // DHCP transaction ids: seeded from the kernel's generator (they travel in broadcast
+    // frames anyway – not secret, only different between runs).
+    let mut x = [0u8; 8];
+    let _ = getrandom(&mut x);
+    nic.dhcp = Client::new(nic.mac, u64::from_le_bytes(x));
     nic.next_port = 49152 + nic.rand16() % 16384;
     nic.dhcp_t0 = uptime_ms();
     nic.dhcp_tick();

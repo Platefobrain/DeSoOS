@@ -7,7 +7,7 @@ helper scripts.
 tests/test.sh              build --selftest and run all suites in QEMU (TCG); result PASS / FAIL
 ACCEL=kvm tests/test.sh    the same with KVM
 tests/test.sh --no-build   run only
-LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights crypto desofs)
+LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights crypto rng desofs)
 tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg,
                            SOAK_DISK=ram – on a RAM disk as on real hardware)
 ```

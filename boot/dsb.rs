@@ -25,6 +25,7 @@ use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
 use uefi::println;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
+use uefi::proto::rng::Rng;
 
 /// Must be identical to kernel/bootinfo.rs.
 #[repr(C)]
@@ -47,9 +48,11 @@ struct BootInfo {
     stack_top: u64,
     stack_size: u64,
     acpi_rsdp: u64,
+    rng_seed: [u8; 64],
+    rng_seed_ok: u64,
 }
 
-const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT11");
+const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT12");
 
 const PAGE: u64 = 4096;
 const HUGE_PAGE: u64 = 2 * 1024 * 1024;
@@ -356,6 +359,15 @@ fn dsb() -> Status {
         find(ConfigTableEntry::ACPI2_GUID).or_else(|| find(ConfigTableEntry::ACPI_GUID)).unwrap_or(0)
     });
 
+    // 64 bytes from the firmware's RNG (EFI_RNG_PROTOCOL), if it has one – one of the
+    // kernel's entropy sources (kernel/random.rs).  Read before ExitBootServices.
+    let mut rng_seed = [0u8; 64];
+    let rng_seed_ok = boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|h| boot::open_protocol_exclusive::<Rng>(h).ok())
+        .map(|mut rng| rng.get_rng(None, &mut rng_seed).is_ok())
+        .unwrap_or(false);
+
     let ranges = match direct_map_ranges(framebuffer_addr, framebuffer_size) {
         Ok(r) => r,
         Err(e) => return fail(e, Status::LOAD_ERROR),
@@ -375,7 +387,7 @@ fn dsb() -> Status {
     let map_meta = memory_map.meta();
     let map_buffer = memory_map.buffer();
 
-    let info = BootInfo {
+    let mut info = BootInfo {
         magic: BOOTINFO_MAGIC,
         framebuffer_addr,
         framebuffer_size,
@@ -393,8 +405,14 @@ fn dsb() -> Status {
         stack_top: STACK_TOP,
         stack_size: STACK_SIZE,
         acpi_rsdp,
+        rng_seed,
+        rng_seed_ok: rng_seed_ok as u64,
     };
     unsafe { core::ptr::write(bootinfo_phys as *mut BootInfo, info) };
+    // Our copy of the firmware's random bytes goes (the kernel wipes BootInfo's).
+    for b in rng_seed.iter_mut().chain(info.rng_seed.iter_mut()) {
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
 
     // The memory map buffer must live forever – the kernel reads it through the direct map.
     core::mem::forget(memory_map);

@@ -13,6 +13,8 @@
 //   SHA-256  FIPS 180-4 / NIST examples ("abc", 448- and 896-bit messages, a million 'a')
 //   HMAC     RFC 4231 test cases 1-7
 //   HKDF     RFC 5869 test cases 1-3 (SHA-256)
+//   ChaCha20 RFC 8439 sections 2.3.2, 2.4.2, appendix A.1 (1-5) and A.2 (2)
+//   rng      the fast-key-erasure generator against the same construction in Python
 // The other expected values (block-edge lengths, empty key, 8160-byte output) were
 // computed with an independent implementation (Python hashlib / hmac).
 
@@ -20,6 +22,8 @@
 
 use super::desocrypto::hkdf::{self, MAX_OUTPUT};
 use super::desocrypto::hmac::{HmacSha256, MIN_TAG_LEN, hmac_sha256};
+use super::desocrypto::chacha20;
+use super::desocrypto::rng::KeyErasureRng;
 use super::desocrypto::sha256::{MAX_BYTES, Sha256, sha256};
 use super::desocrypto::{Error, equal_ct, hex};
 
@@ -113,6 +117,9 @@ pub fn run() -> Result<usize, Failure> {
     hmac_edges(&mut c)?;
     hkdf_vectors(&mut c)?;
     hkdf_edges(&mut c)?;
+    chacha_vectors(&mut c)?;
+    chacha_edges(&mut c)?;
+    rng_checks(&mut c)?;
     misc(&mut c)?;
     Ok(c.passed)
 }
@@ -353,6 +360,137 @@ fn hkdf_edges(c: &mut Checks) -> Result<(), Failure> {
     // Other info -> other key.
     let mut other = [0u8; 42];
     c.check(hkdf::hkdf(b"salt", b"ikm", b"inf0", &mut other).is_ok() && other != short)?;
+    Ok(())
+}
+
+const RFC_2_4_2_TEXT: &[u8] = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+const RFC_A_2_2_TEXT: &[u8] = b"Any submission to the IETF intended by the Contributor for publication as all or part of an IETF Internet-Draft or RFC and any statement made within the context of an IETF activity is considered an \"IETF Contribution\". Such statements include oral statements in IETF sessions, as well as written and electronic communications made at any time or place, which are addressed to";
+
+fn key_from(hex_key: &str) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    unhex(hex_key, &mut k);
+    k
+}
+
+fn nonce_from(hex_nonce: &str) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    unhex(hex_nonce, &mut n);
+    n
+}
+
+/// RFC 8439: the block function (2.3.2, A.1) and encryption (2.4.2, A.2).
+fn chacha_vectors(c: &mut Checks) -> Result<(), Failure> {
+    c.group("chacha20 vectors");
+    let mut k = [0u8; 32];
+    range(0, &mut k);
+    let mut blk = [0u8; 64];
+    chacha20::block(&k, 1, &nonce_from("000000090000004a00000000"), &mut blk);
+    c.check(same(&blk, "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"))?;
+    // 2.4.2: 114 bytes of text, counter 1.
+    let mut buf = [0u8; 400];
+    let t = &mut buf[..RFC_2_4_2_TEXT.len()];
+    t.copy_from_slice(RFC_2_4_2_TEXT);
+    c.check(chacha20::xor_stream(&k, 1, &nonce_from("000000000000004a00000000"), t).is_ok())?;
+    c.check(same(t, "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"))?;
+    // Decryption = the same operation.
+    c.check(chacha20::xor_stream(&k, 1, &nonce_from("000000000000004a00000000"), t).is_ok() && t == RFC_2_4_2_TEXT)?;
+    // A.1: test vectors 1-5 for the block function.
+    let a1: [(&str, u32, &str, &str); 5] = [
+        ("0000000000000000000000000000000000000000000000000000000000000000", 0, "000000000000000000000000", "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586"),
+        ("0000000000000000000000000000000000000000000000000000000000000000", 1, "000000000000000000000000", "9f07e7be5551387a98ba977c732d080dcb0f29a048e3656912c6533e32ee7aed29b721769ce64e43d57133b074d839d531ed1f28510afb45ace10a1f4b794d6f"),
+        ("0000000000000000000000000000000000000000000000000000000000000001", 1, "000000000000000000000000", "3aeb5224ecf849929b9d828db1ced4dd832025e8018b8160b82284f3c949aa5a8eca00bbb4a73bdad192b5c42f73f2fd4e273644c8b36125a64addeb006c13a0"),
+        ("00ff000000000000000000000000000000000000000000000000000000000000", 2, "000000000000000000000000", "72d54dfbf12ec44b362692df94137f328fea8da73990265ec1bbbea1ae9af0ca13b25aa26cb4a648cb9b9d1be65b2c0924a66c54d545ec1b7374f4872e99f096"),
+        ("0000000000000000000000000000000000000000000000000000000000000000", 0, "000000000000000000000002", "c2c64d378cd536374ae204b9ef933fcd1a8b2288b3dfa49672ab765b54ee27c78a970e0e955c14f3a88e741b97c286f75f8fc299e8148362fa198a39531bed6d"),
+    ];
+    for (key, ctr, nonce, want) in a1.iter() {
+        chacha20::block(&key_from(key), *ctr, &nonce_from(nonce), &mut blk);
+        c.check(same(&blk, want))?;
+    }
+    // A.2 test vector 2: 375 bytes (checked through the SHA-256 of the ciphertext).
+    let t = &mut buf[..RFC_A_2_2_TEXT.len()];
+    t.copy_from_slice(RFC_A_2_2_TEXT);
+    c.check(chacha20::xor_stream(&key_from("0000000000000000000000000000000000000000000000000000000000000001"), 1, &nonce_from("000000000000000000000002"), t).is_ok())?;
+    c.check(same(&t[..16], "a3fbf07df3fa2fde4f376ca23e827370"))?;
+    c.check(same(&sha256(t), A_2_2_SHA))?;
+    Ok(())
+}
+
+/// SHA-256 of the A.2 test vector 2 ciphertext (RFC 8439, also computed with Python).
+const A_2_2_SHA: &str = "8eac94947838712fa057586d21640ecda364b38f811a40af7272d1e9556e6386";
+
+/// SHA-256 of the pattern (byte i = i*7 + 3) XOR the stream (key 00..1f, nonce 01..0c,
+/// counter 5) – computed with Python's `cryptography`.
+const CHACHA_LENS: [(usize, &str); 9] = [
+    (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (1, "333e0a1e27815d0ceee55c473fe3dc93d56c63e3bee2b3b4aee8eed6d70191a3"),
+    (63, "726214b5ddb99b657918ec4af5d987f1c5ed2c9a0aa204550b2cfbd0dcad1089"),
+    (64, "8644e08681a7151e5bda7049df3612399685dc06c3f4f3b6be648d5a1f97bd6e"),
+    (65, "ac63298322349a196d28f236b506f4fd1a6d0881e68d6af9982a2d5201bc415b"),
+    (127, "ab87496ee8316ce6adf843a42c70c1eb6d9e3562db5d094d1b1c27963c6c3665"),
+    (128, "954c40c3ce0ded13b8e0cc46bf514ececc6b77b70d50b58d8f2fb8dab115355f"),
+    (129, "2cecb2164a4f313911f9879d68e8f79606f6646b62d501ffd9619ef4accaa7c6"),
+    (1000, "c0a8d534a9bf94018a7165868bc3e81376b9ed3cfb914d03a6e99d6d65f712a0"),
+];
+
+/// Lengths around the block size, the last counter value, refusing a wrapping counter.
+fn chacha_edges(c: &mut Checks) -> Result<(), Failure> {
+    c.group("chacha20 edges");
+    let mut k = [0u8; 32];
+    range(0, &mut k);
+    let n = nonce_from("0102030405060708090a0b0c");
+    let lens = CHACHA_LENS;
+    let mut buf = [0u8; 1000];
+    for (len, want) in lens.iter() {
+        let d = &mut buf[..*len];
+        pattern(d);
+        c.check(chacha20::xor_stream(&k, 5, &n, d).is_ok() && same(&sha256(d), want))?;
+    }
+    // Pieces: the stream from block 5 in two calls (5..6 and 7..) equals one call.
+    let mut whole = [0u8; 256];
+    pattern(&mut whole);
+    let mut parts = whole;
+    c.check(chacha20::xor_stream(&k, 5, &n, &mut whole).is_ok())?;
+    c.check(chacha20::xor_stream(&k, 5, &n, &mut parts[..128]).is_ok() && chacha20::xor_stream(&k, 7, &n, &mut parts[128..]).is_ok() && parts == whole)?;
+    // The last counter value: one block is fine, two would wrap.
+    let mut blk = [0u8; 64];
+    c.check(chacha20::xor_stream(&k, u32::MAX, &[0; 12], &mut blk).is_ok())?;
+    c.check(same(&blk, "1ce0deb8925fccea2d5587e850054559edcbbeb1a6c8e1c02c1e89abba08b01cad6048fe5ab5242ed6befbef6b4040fcb666a5f3858d942a912c4e8800301a42"))?;
+    let mut two = [7u8; 65];
+    c.check(chacha20::xor_stream(&k, u32::MAX, &[0; 12], &mut two) == Err(Error::LengthOverflow) && two == [7u8; 65])?;
+    c.check(chacha20::xor_stream(&k, u32::MAX, &[0; 12], &mut []).is_ok())?;
+    Ok(())
+}
+
+/// The fast-key-erasure generator: exact output for a known seed, the key replaced on
+/// every call, reseeding.
+fn rng_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("rng");
+    let mut seed = [0u8; 32];
+    range(0, &mut seed);
+    let mut r = KeyErasureRng::new(&seed);
+    let mut out = [0u8; 100];
+    r.fill(&mut out);
+    c.check(same(&out, "2b23cce7a26023ab3f0eef693ac87f64258235eab1f7a32dc22762a0485b410c18b84231ade6a6d113615c61af434e27f8b1f3f5e1ad5b5cecf8fc122a35755c7208086dd1ee3c5d9d815824640e003c9ba0f65ede5d59ce0d2a4a7f31955acd42f22ddc"))?;
+    let mut five = [0u8; 5];
+    r.fill(&mut five);
+    c.check(same(&five, "2d41a59c90"))?;
+    r.reseed(b"fresh");
+    let mut o = [0u8; 32];
+    r.fill(&mut o);
+    c.check(same(&o, "37a0a805278c330f2236bb5465bfbf9f11fb62c59aa530c97f6a43f47fe6640a"))?;
+    // An empty request still replaces the key (and gives nothing).
+    let mut a = KeyErasureRng::new(&seed);
+    let mut b = KeyErasureRng::new(&seed);
+    a.fill(&mut []);
+    let (mut x, mut y) = ([0u8; 16], [0u8; 16]);
+    a.fill(&mut x);
+    b.fill(&mut y);
+    c.check(x != y)?;
+    // Two calls never give the same bytes.
+    let (mut p, mut q) = ([0u8; 64], [0u8; 64]);
+    b.fill(&mut p);
+    b.fill(&mut q);
+    c.check(p != q)?;
     Ok(())
 }
 

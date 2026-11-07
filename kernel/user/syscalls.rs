@@ -303,6 +303,13 @@ pub const SYS_STATAT: u64 = 54;
 pub const SYS_MKDIRAT: u64 = 55;
 pub const SYS_UNLINKAT: u64 = 56;
 pub const SYS_READDIR_PART: u64 = 57;
+/// getrandom(buf, len, flags): `len` random bytes (at most 4096) from the kernel's
+/// generator (random.rs) into `buf`; `flags` must be 0.  No right needed – randomness
+/// is not a resource to guard (like Linux `getrandom`, Fuchsia `zx_cprng_draw`).
+/// Never blocks: the kernel starts processes only after the generator is ready.
+/// Returns `len`; ERROR_INVALID_ARGUMENT (len > 4096, flags != 0),
+/// ERROR_INVALID_ADDRESS (the buffer is not writable user memory).
+pub const SYS_GETRANDOM: u64 = 58;
 /// readdir_part: the cursor value after the last part.
 pub const DIR_END: u64 = u64::MAX;
 /// Maximum number of entries in the spawn_ex map.
@@ -1347,6 +1354,25 @@ fn readdir_path(p: &mut Process, path: &str, buf: u64, cap: u64) -> SysResult {
 }
 
 /// readdir_part(dir, path, len, buf, buflen, cursor): entries from *cursor that fit in buf.
+fn sys_getrandom(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
+    if flags != 0 || len > crate::random::MAX_REQUEST as u64 {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    // The whole buffer first: nothing is generated for a request that cannot land.
+    if !user_range_ok(p, ptr, len, true) {
+        return Err(ERROR_INVALID_ADDRESS);
+    }
+    let mut buf = [0u8; crate::random::MAX_REQUEST];
+    let out = &mut buf[..len as usize];
+    crate::random::fill(out);
+    let r = copy_to_user(p, ptr, out);
+    crate::desocrypto::wipe(&mut buf);
+    r.map(|_| len)
+}
+
 fn sys_readdir_part(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use core::fmt::Write;
     let path = dir_path(p, f.rdi, f.rsi, f.rdx, true)?;
@@ -1853,6 +1879,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_OPENAT => sys_openat(p, frame),
         SYS_READDIRAT => dir_path(p, a0, a1, a2, true).and_then(|path| readdir_path(p, &path, frame.r10, frame.r8)),
         SYS_READDIR_PART => sys_readdir_part(p, frame),
+        SYS_GETRANDOM => sys_getrandom(p, a0, a1, a2),
         SYS_STATAT => dir_path(p, a0, a1, a2, true).and_then(|path| stat_path(p, &path, frame.r10)),
         SYS_MKDIRAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
         SYS_UNLINKAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),

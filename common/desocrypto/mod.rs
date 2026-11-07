@@ -8,22 +8,45 @@
 //   sha256  SHA-256 (FIPS 180-4) – streaming (new / update / finish) and one-shot
 //   hmac    HMAC-SHA256 (RFC 2104, vectors RFC 4231) – tags and their checking
 //   hkdf    HKDF-SHA256 (RFC 5869) – keys derived from a secret
+//   chacha20  ChaCha20 (RFC 8439) – the stream cipher (no tables: constant time)
+//   rng     a generator with fast key erasure (ChaCha20) – the kernel's CSPRNG and
+//           programs' own generators seeded from `getrandom`
 //
 // Not included on purpose: tests.rs (official vectors, edge cases) – only
 // /bin/cryptotest and the kernel CRYPTO TEST include it, next to this module.
 //
-// Limits: the code is not hardened against timing side channels beyond the
-// constant-time tag comparison; it is not audited.  Key material is wiped when the
-// HMAC / SHA-256 objects are dropped, but Rust may leave temporary copies on the
-// stack (e.g. the message schedule in `compress`) – no full guarantee.  Fine for
-// checksums and for learning, not yet for protecting secrets.
+// Limits: not audited.  SHA-256, HMAC and ChaCha20 use no tables and no branches on
+// secret data; the tag comparison is constant-time.  Key material is wiped when the
+// HMAC / SHA-256 / generator objects are dropped (volatile writes), but Rust may leave
+// temporary copies in registers or on the stack (e.g. the message schedule in
+// `compress`) – no full guarantee.
 #![allow(dead_code)]
 
+pub mod chacha20;
 pub mod hkdf;
 pub mod hmac;
+pub mod rng;
 pub mod sha256;
 
-pub const VERSION: &str = "0.1.1";
+pub const VERSION: &str = "0.2.0";
+
+/// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
+pub fn wipe(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid, aligned &mut u8.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// The same for 32-bit words (cipher states).
+pub fn wipe_words(buf: &mut [u32]) {
+    for w in buf.iter_mut() {
+        // SAFETY: `w` is a valid, aligned &mut u32.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
 
 /// What can go wrong.  Every function returns one of these instead of panicking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

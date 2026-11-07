@@ -5,8 +5,8 @@
 // (`memory::phys_to_virt`); DSB already passes the BootInfo pointer itself as
 // a direct-map address.
 
-/// "DSBOOT11" – changes together with the structure layout (last change: + acpi_rsdp).
-pub const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT11");
+/// "DSBOOT12" – changes together with the structure layout (last change: + rng_seed).
+pub const BOOTINFO_MAGIC: u64 = u64::from_le_bytes(*b"DSBOOT12");
 
 #[repr(C)]
 pub struct BootInfo {
@@ -33,4 +33,8 @@ pub struct BootInfo {
     /// Physical address of the RSDP (UEFI configuration table: ACPI 2.0,
     /// or ACPI 1.0 if that is missing); 0 = no ACPI.
     pub acpi_rsdp: u64,
+    /// 64 bytes from the firmware's EFI_RNG_PROTOCOL (`rng_seed_ok` = 1 when it gave
+    /// them); the kernel copies them at once and wipes this field (kernel/random.rs).
+    pub rng_seed: [u8; 64],
+    pub rng_seed_ok: u64,
 }

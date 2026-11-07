@@ -128,6 +128,7 @@ impl BlockCache {
     }
 
     /// Bytes this cache holds of the global budget.
+    #[cfg_attr(not(selftest), allow(dead_code))]
     pub fn held(&self) -> u64 {
         self.held
     }
@@ -353,6 +354,7 @@ impl BlockCache {
     }
 
     /// Blocks held now.
+    #[cfg_attr(not(selftest), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.slots.iter().filter(|s| s.frame != 0).count()
     }

@@ -16,6 +16,7 @@ the parts up in order and starts `/bin/init`.
 | `fs/` | the VFS (`mod.rs`), `ramfs.rs` (`/`), `fat32.rs`, `desofs/` (own README) |
 | `drivers/` | framebuffer console, font (own license – see its header), PS/2 keyboard and mouse, PCI, NVMe, virtio-blk, serial, RTC |
 | `block.rs`, `gpt.rs` | the block layer (disks, partitions, read-only disks, RAM disks) and GPT |
+| `random.rs` | the random number generator: entropy pool, sources and their health checks, ChaCha20 with fast key erasure, `getrandom` (see docs/ARCHITECTURE.md, "Random numbers") |
 | `shell.rs` | the kernel shell (emergency shell, and the code behind `sysinfo` / `sysctl`, including `desofs`) |
 | `initrd.rs` | the programs from `user/bin/` built into the kernel image |
 | `selftest.rs` | self-test support (`--cfg selftest`, run by `tests/test.sh`) |

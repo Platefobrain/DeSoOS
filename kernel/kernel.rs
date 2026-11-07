@@ -17,7 +17,10 @@ mod drivers;
 mod fs;
 mod gpt;
 mod input;
+#[path = "../common/desocrypto/mod.rs"]
+pub mod desocrypto;
 mod memory;
+mod random;
 mod sched;
 #[cfg(selftest)]
 mod selftest;
@@ -62,6 +65,8 @@ pub extern "sysv64" fn kernel_main(
 
     // Kernel and stack addresses from BootInfo (needed e.g. for the TSS).
     memory::layout::init(boot);
+    // The firmware's random bytes: copied and wiped in BootInfo before anything reuses it.
+    random::take_boot_seed(boot);
 
     drivers::serial::init();
 
@@ -138,6 +143,9 @@ pub extern "sysv64" fn kernel_main(
     crate::drivers::rtc::init();
     arch::x86_64::interrupts::enable();
     serial_println!("[ARCH] Interrupts enabled");
+    // The random number generator: waits here until 256 bits of entropy are counted –
+    // before any process and any key exists.
+    random::init();
     #[cfg(selftest)]
     if !selftest::skip_boot() {
         time::self_test();
@@ -267,9 +275,12 @@ pub extern "sysv64" fn kernel_main(
     // The syscall rights table – every right taken away in turn.
     #[cfg(selftest)]
     selftest::suite("rights", user::rights_self_test);
-    // DeSoCrypto – SHA-256, HMAC, HKDF in the kernel and in user space.
+    // DeSoCrypto – SHA-256, HMAC, HKDF, ChaCha20 in the kernel and in user space.
     #[cfg(selftest)]
     selftest::suite("crypto", user::crypto_self_test);
+    // The random number generator (random.rs) and getrandom.
+    #[cfg(selftest)]
+    selftest::suite("rng", user::rng_self_test);
     // DeSoFS – read-only check of a volume (format 1, stage 1).
     #[cfg(selftest)]
     selftest::suite("desofs", fs::desofs::test::self_test);

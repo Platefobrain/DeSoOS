@@ -474,6 +474,8 @@ impl Nvme {
         let text = |b: &[u8]| String::from(core::str::from_utf8(b).unwrap_or("?").trim());
         let id = me.identify(1, 0).map_err(|_| "Identify Controller failed")?;
         me.serial = text(&id[4..24]);
+        // Tells this machine apart in the random pool (0 bits counted).
+        crate::random::mix_identity(&id[4..24]);
         me.model = text(&id[24..64]);
         me.firmware = text(&id[64..72]);
         let mdts = id[77];

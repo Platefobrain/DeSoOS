@@ -40,8 +40,7 @@ pub mod test_cache;
 #[cfg(selftest)]
 pub mod restart;
 
-#[path = "../../../common/desocrypto/mod.rs"]
-mod desocrypto;
+use crate::desocrypto;
 
 use alloc::format;
 use alloc::string::String;

@@ -57,6 +57,7 @@ pub fn count(vector: u8) -> u64 {
 pub fn dispatch(frame: &mut ExceptionFrame) {
     let i = frame.vector as usize - MSI_BASE;
     COUNTS[i].fetch_add(1, Ordering::Relaxed);
+    crate::random::irq_event(frame.vector as u8);
     let h = HANDLERS[i].load(Ordering::Acquire);
     if h != 0 {
         let h: MsiHandler = unsafe { core::mem::transmute(h) };

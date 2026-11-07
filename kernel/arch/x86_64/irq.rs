@@ -98,6 +98,7 @@ pub fn dispatch(frame: &mut ExceptionFrame) {
     }
 
     COUNTS[irq as usize].fetch_add(1, Ordering::Relaxed);
+    crate::random::irq_event(frame.vector as u8);
     let t0 = crate::user::prof::start();
 
     let handler = HANDLERS[irq as usize].load(Ordering::Acquire);

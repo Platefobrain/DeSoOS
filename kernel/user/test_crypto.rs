@@ -69,7 +69,7 @@ pub fn self_test() {
     let r = desocrypto_tests::run();
     check!(r.is_ok(), "in the kernel: {:?}", r.err());
     let n = r.unwrap_or(0);
-    serial_println!("[CRYPTO TEST] 1/4 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, limits) in {} ms PASS", n, ticks() - t0);
+    serial_println!("[CRYPTO TEST] 1/4 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 RFC 8439, the key-erasure generator, limits) in {} ms PASS", n, ticks() - t0);
 
     // 2. The same in user space.
     let r = run("/bin/cryptotest", &["cryptotest"], &[], 60_000);
