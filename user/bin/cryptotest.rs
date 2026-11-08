@@ -1,10 +1,11 @@
 // cryptotest – DeSoCrypto in user space: every test vector and edge case
 // (common/desocrypto/tests.rs – AES-GCM with every AES-NI / PCLMULQDQ combination this CPU
 // allows), then the speeds.
-// Output, two lines short enough for the screen (240 columns):
+// Output, three lines short enough for the screen (240 columns):
 //   "cryptotest: N checks OK (DeSoCrypto x.y.z); sha256 K KiB/s, hmac K KiB/s, aead K KiB/s,
 //    x25519 N ops/s"
 //   "cryptotest: aesni yes|no, pclmul yes|no, aesgcm K KiB/s, aesgcm_soft K KiB/s"
+//   "cryptotest: sha512 K KiB/s, verify rsa2048 N/s, p256 N/s, p384 N/s"
 // on a failure "cryptotest: FAIL <group> case <n>" and exit code 1.
 //
 // `cryptotest xmm <n> [seconds]`: the XMM test (0.4 s unless seconds are given – e.g. 20 to
@@ -29,6 +30,7 @@ use desocrypto::aes::Features;
 use desocrypto::aes_gcm::AesGcm;
 use desocrypto::hmac::HmacSha256;
 use desocrypto::sha256::Sha256;
+use desocrypto::sha512::Sha512;
 
 entry!(main);
 
@@ -205,5 +207,26 @@ fn main(args: desoos::Args) -> i32 {
         gcm_kbs,
         soft_kbs
     );
+    let mut sha5 = Sha512::new();
+    let sha512_kbs = speed(|b| sha5.update(b));
+    let _ = sha5.finish();
+    // Signature checks per second (one stored signature each, at least 200 ms).
+    let mut per_s = [0u64; 3];
+    for (kind, out) in per_s.iter_mut().enumerate() {
+        let start = desoos::uptime_ms();
+        let mut ops = 0u64;
+        *out = loop {
+            if !desocrypto_tests::sig_bench(kind as u8, 4) {
+                println!("cryptotest: FAIL signature speed run {}", kind);
+                return 1;
+            }
+            ops += 4;
+            let ms = desoos::uptime_ms() - start;
+            if ms >= 200 {
+                break ops * 1000 / ms;
+            }
+        };
+    }
+    println!("cryptotest: sha512 {} KiB/s, verify rsa2048 {}/s, p256 {}/s, p384 {}/s", sha512_kbs, per_s[0], per_s[1], per_s[2]);
     0
 }

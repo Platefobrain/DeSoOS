@@ -78,9 +78,14 @@ timings move by ±15% from run to run on the same build).
   uses the byte position (stable)
 
 **Cryptography (DeSoCrypto)**
-- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519, AES-128-GCM and the kernel's
-  random number generator; no signatures, X.509 or TLS yet – `netget https://` is refused; nothing in the system uses
-  the AEADs or X25519 yet
+- SHA-256/384/512, HMAC and HKDF over them, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519, AES-128-GCM, RSA and
+  ECDSA signature verification and the kernel's random number generator; no X.509 or TLS yet – `netget https://` is
+  refused; nothing in the system uses the AEADs, X25519 or the signature checks yet
+- signatures: verification only (no signing, no RSA decryption); RSA 2048–4096 bits with 3 ≤ e < 2^32, PKCS#1 v1.5
+  (DigestInfo with NULL only) and PSS; ECDSA only P-256 / SHA-256 and P-384 / SHA-384; no Ed25519, no SHA-1. The
+  big-number and curve arithmetic is not constant time – fine for public keys and public data, the only use; it must
+  not be used for secrets. Wycheproof RSA 3072 / 4096 sets were checked on the host only (not shipped – 330 KB); the
+  shipped vectors make `/bin/cryptotest` about 390 KB larger (570 KB)
 - AES-GCM: only AES-128, 12-byte nonces and 16-byte tags; AES-NI / PCLMULQDQ only in programs (the kernel has the
   software path only – it does not save XMM for its own code); the software path is slow (bit-by-bit GHASH)
 - not audited and not for production use: the code avoids branches and table look-ups that depend on secrets, but it
@@ -143,6 +148,71 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.73.0 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM). DeSoCrypto 0.5.0 – signature verification: SHA-384/512, HMAC and HKDF over
+any hash, RSA (PKCS#1 v1.5, PSS) and ECDSA (P-256, P-384), tested with Wycheproof. The first step of DeSoTLS (plan D:
+v0.73 signatures → v0.74 certificates → v0.75 TLS 1.3). Nothing in the system uses the signature checks yet.**
+
+### What is new since the last report (v0.72.1)
+
+| Version | Change |
+|---|---|
+| v0.73.0 | `sha512.rs`, `hash.rs` (one interface for the hashes; `Hmac<D>`, `hkdf::*_with::<D>`), `bignum.rs` (public data only), `rsa.rs` (verification: PKCS#1 v1.5 with the whole block compared, PSS with explicit parameters; n 2048–4096 bits), `ecdsa.rs` (verification: P-256 / SHA-256, P-384 / SHA-384; key on the curve, strict DER, 1 ≤ r, s < n); Wycheproof vectors in `vectors/wycheproof.bin`; `cryptotest` third line; 4181 checks (were 2429) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 299 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 227 s (restart 12 s, soak 126 s) |
+
+CRYPTO TEST: 4181 checks in the kernel (software paths, overflow checks on) and the same 4181 in `/bin/cryptotest` –
+among them 1375 Wycheproof cases (ECDSA P-256 / P-384, RSA PKCS#1 2048 / SHA-256, PSS 2048 / SHA-256, PSS "misc"):
+every "valid" verifies, every "invalid" and "acceptable" (MissingNull) is refused. Before the release, on the host:
+the Wycheproof RSA 3072 / 4096 sets too (2178 checks together, all passed) and 36 mutations of the new code (33
+caught, 3 equivalent).
+
+### The new primitives (`[RESULT-CRYPTO]`, user space)
+
+| | TCG | KVM |
+|---|---|---|
+| SHA-512 (KiB/s) | 102 400 | 356 800 |
+| RSA-2048 PKCS#1 verifications / s | 2 200 | 12 980 |
+| ECDSA P-256 verifications / s | 470 | 3 820 |
+| ECDSA P-384 verifications / s | 162 | 1 360 |
+
+SHA-512 is 1.7 times faster than SHA-256 under KVM (356 800 vs 212 800 KiB/s: 64-bit words, 128-byte blocks). The
+signature checks are far below what TLS needs to be slow: one handshake checks a chain of 2–3 certificates and one
+CertificateVerify – a few milliseconds even with P-384 under KVM (0.7 ms each).
+
+### Performance against the previous release (v0.72.1 → v0.73.0, same machine)
+
+| | TCG v0.72.1 | TCG v0.73.0 | KVM v0.72.1 | KVM v0.73.0 |
+|---|---|---|---|---|
+| irq_user_ns | 9 168 | 9 218 | 65 659 | 65 854 |
+| fact_user_ns | 76 277 | 73 800 | 94 339 | 97 608 |
+| fact_svc_ns | 171 526 | 199 401 | 103 950 | 100 100 |
+| restart_us | 3 500 | 4 200 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 51 848 | 73 142 | 85 333 | 99 902 |
+| rights gate_ns | 43 | 27 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 21 126 / 49 600 | 48 640 / 32 640 | 181 760 / 216 000 | 177 920 / 212 800 |
+| AES-GCM hardware / software (KiB/s) | 52 480 / 8 871 | 51 200 / 9 458 | 533 120 / 26 746 | 522 240 / 26 240 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 267 / 7 663 | 7 454 / 11 473 | 18 244 / 53 542 | 18 004 / 53 194 |
+| DeSoFS 1000 small files create / read (ms) | 16 128 / 5 520 | 13 886 / 3 774 | 6 932 / 808 | 7 210 / 818 |
+| `desofs check` (ms) | 1 185 | 1 021 | 292 | 305 |
+| short soak: file operations in 2 min | 6 546 | 5 998 | 28 554 | 27 600 |
+
+Verdict: no regression. KVM is within the usual spread (±4 %); nothing outside DeSoCrypto changed. In TCG the
+user-space SHA-256 / HMAC fell to 32 640 KiB/s while the kernel's SHA-256 is back at 48 640 – the reverse of
+v0.72.1's run, the same code: the TCG numbers move with the host's load. The kernel image of the test build is
+0.5 MB larger (the Wycheproof vectors are in CRYPTO TEST and in `cryptotest`); the normal build only by `cryptotest`.
+
+Not yet done: `cryptotest` on the test laptop (optional – the new code has no hardware-specific path; the speeds on
+the real CPU would go here).
 
 ---
 

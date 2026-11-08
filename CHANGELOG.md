@@ -2,6 +2,37 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.73.0 — 2026-11-08
+
+### Added – DeSoCrypto 0.5.0: signature verification (the first step towards TLS)
+- `sha512.rs`: SHA-512 and SHA-384 (FIPS 180-4) – one core with 64-bit words, the state wiped when dropped.
+- `hash.rs`: the hashes behind one interface – `Digest` for generic code, `HashAlg` / `Hasher` for a hash chosen at
+  run time. `hmac.rs` / `hkdf.rs` work over any of them (`Hmac<Sha384>`, `hkdf::expand_with::<Sha512>`); the SHA-256
+  API (`HmacSha256`, `hmac_sha256`, `extract` / `expand` / `hkdf`) is unchanged.
+- `bignum.rs`: big numbers up to 4096 bits with Montgomery multiplication – for public data only, not constant time.
+- `rsa.rs`: RSA signature verification – PKCS#1 v1.5 (the whole expected block built and compared; DigestInfo with
+  NULL only) and PSS with explicit parameters (`PssParams::tls(h)` = TLS 1.3's rule); n 2048–4096 bits, odd e with
+  3 ≤ e < 2^32, the signature exactly as long as n and below it.
+- `ecdsa.rs`: ECDSA signature verification on P-256 (SHA-256) and P-384 (SHA-384) – one hash per curve; the public
+  key checked (uncompressed, coordinates < p, on the curve), strict DER, 1 ≤ r, s < n, the result not at infinity.
+- `Error::InvalidKey`, `Error::InvalidSignature`. Only verification: nothing signs, nothing decrypts with RSA.
+- `/bin/cryptotest`: a third line – `sha512 K KiB/s, verify rsa2048 N/s, p256 N/s, p384 N/s`; `[RESULT-CRYPTO]`:
+  `sha512_user_kbs`, `rsa2048_verify_ops`, `p256_verify_ops`, `p384_verify_ops`.
+
+### Tests
+- 4181 checks (were 2429), in the kernel and in `/bin/cryptotest`: SHA-384/512 FIPS 180-4 examples and padding edges;
+  RFC 4231 for HMAC-SHA384/512; HKDF-SHA384/512 against Python `cryptography`; modular powers of 64–4096-bit numbers
+  against Python integers; RSA (keys and signatures from `cryptography`, several PSS parameter sets, a 2049-bit key,
+  crafted almost-right blocks, s = 0 / n, wrong lengths, keys outside the rules); ECDSA (the key with private value 1,
+  digests e > n / e = n / e = 0, high s, DER variants, keys off the curve or with x + p).
+- Wycheproof: `common/desocrypto/vectors/wycheproof.bin` (237 KB), built by `vectors/gen-wycheproof.py` from a pinned
+  Wycheproof commit (every JSON file checked by SHA-256) – ECDSA P-256 and P-384, RSA PKCS#1 2048/SHA-256, PSS
+  2048/SHA-256 and the PSS "misc" sets with SHA-256/384/512: every "valid" case verifies, every "invalid" and
+  "acceptable" (MissingNull) case is refused. The RSA 3072 / 4096 sets (2178 checks with the shipped ones) were run on
+  the host only.
+- 36 mutations of the new code on the host: 33 caught, 3 equivalent (the long-form DER length, an infinite result and
+  the HKDF empty salt length are each also caught by a later check or give the same result).
+
 ## v0.72.1 — 2026-11-08
 
 ### Fixed – the test program and the documentation, after a review of v0.72.0 and a first run on the test laptop

@@ -1617,8 +1617,10 @@ syscall per operation, and a mistake in it can only hurt the program that uses i
 | Module | What | Standard |
 |---|---|---|
 | `sha256` | `Sha256::new / update / finish`, `sha256(data)` | FIPS 180-4 |
-| `hmac` | `HmacSha256::new / update / finish / verify`, `hmac_sha256(key, data)` | RFC 2104, vectors RFC 4231 |
-| `hkdf` | `extract`, `expand`, `hkdf` | RFC 5869 |
+| `sha512` | `Sha512`, `Sha384` (one core, two starting values), `sha512(data)`, `sha384(data)` | FIPS 180-4 |
+| `hash` | `Digest` (trait for generic code), `HashAlg` (chosen at run time: digest, length), `Hasher` (streaming) – SHA-1 / SHA-224 deliberately absent | – |
+| `hmac` | `Hmac<D>` over any `Digest`; `HmacSha256::new / update / finish / verify`, `hmac_sha256(key, data)` as before | RFC 2104, vectors RFC 4231 |
+| `hkdf` | `extract`, `expand`, `hkdf` (SHA-256); `extract_with / expand_with / hkdf_with::<D>` | RFC 5869 |
 | `chacha20` | `block`, `xor_stream` (refuses a wrapping counter) | RFC 8439 |
 | `rng` | `KeyErasureRng::new / fill / reseed` – ChaCha20 with fast key erasure | – |
 | `poly1305` | `Poly1305::new / update / finish / verify`, `poly1305(key, msg)` – one-time authenticator, limbs 44/44/42 bits | RFC 8439 §2.5 |
@@ -1627,6 +1629,9 @@ syscall per operation, and a mistake in it can only hurt the program that uses i
 | `aes` | `Aes128::new(key, features)`, `encrypt_blocks` – AES-NI or bitsliced (4 blocks in 8 planes, Boyar–Peralta S-box circuit); `Features::detect / limit` | FIPS-197 |
 | `ghash` | `Ghash::new(h, features)`, `update / pad / finish` – PCLMULQDQ or bit by bit with masks | SP 800-38D §6.4 |
 | `aes_gcm` | `AesGcm::new / with_features`, `seal / open` in place; 12-byte nonce, 16-byte tag | SP 800-38D |
+| `bignum` | `Modulus<N>` (odd, Montgomery CIOS): `pow`, `mul / add / sub / to_mont / from_mont / pow_mont`; up to 4096 bits – **public data only, not constant time** | – |
+| `rsa` | `PublicKey::new(n, e)`, `verify_pkcs1(hash, msg, sig)`, `verify_pss(&PssParams, msg, sig)`; `PssParams::tls(h)` | RFC 8017 |
+| `ecdsa` | `verify(Curve::P256 / P384, public_key, msg, der_sig)` – each curve with its one hash | FIPS 186-5, SEC 1 |
 | `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `wipe`, `VERSION` | – |
 
 Rules of the code:
@@ -1651,6 +1656,19 @@ Rules of the code:
   `equal_ct`.
 - **Arithmetic ranges:** every product and sum of Poly1305 and X25519 has its upper bound written next to it, and in
   test builds (`--cfg selftest` / `desocrypto_test`) the bounds are asserted (`bound!`) – far below 2^128.
+- **Signatures – verification only, public data only:** `rsa` and `ecdsa` check signatures made by others
+  (certificates, TLS CertificateVerify); nothing signs and nothing decrypts with RSA. Their arithmetic (`bignum`,
+  Jacobian points, Shamir's trick) is not constant time on purpose – every input is public (the key, the signature,
+  the signed data), so there is no secret to leak; it must not be used for anything secret. Every input is bounded:
+  RSA n 2048–4096 bits (odd, no leading zero byte), e odd with 3 ≤ e < 2^32, the signature exactly as long as n and
+  below it; ECDSA keys must be uncompressed points on the curve with coordinates below p, signatures strict DER
+  (short lengths, minimal integers, nothing after them) with 1 ≤ r, s < n. So one check costs at most a 4096-bit
+  power with a 32-bit exponent or ~384 point doublings and additions. PKCS#1 v1.5 builds the whole expected block and
+  compares it (no parsing of the decrypted block – the Bleichenbacher 2006 forgery needs a lenient parser); the
+  DigestInfo without NULL parameters is refused. PSS takes its parameters explicitly (hash, MGF1 hash, salt length):
+  `PssParams::tls(h)` is TLS 1.3's rule (same hash, salt = hash length), a certificate's parameters are read by the
+  X.509 code and passed as they are – never guessed. ECDSA has exactly one hash per curve (P-256 / SHA-256, P-384 /
+  SHA-384) – the pairs TLS 1.3 names and DeSoTLS will announce; no low-s rule (ECDSA has none).
 - **AEAD nonces:** reusing a (key, nonce) pair is a serious security failure (the XOR of the plaintexts leaks, the
   Poly1305 key repeats and tags can be forged). DeSoCrypto does not choose nonces – there is no generator or counter
   for them until there is key management to keep them safe. `open` checks the tag before decrypting: with a wrong
@@ -1659,7 +1677,17 @@ Rules of the code:
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
-Tests: `common/desocrypto/tests.rs` (2429 checks; AES-GCM: FIPS-197 C.1 / A.1, the circuit S-box for all 256 inputs,
+Tests: `common/desocrypto/tests.rs` (4181 checks; signatures: SHA-384/512 FIPS 180-4 examples and padding edges,
+RFC 4231 for HMAC-SHA384/512, HKDF-SHA384/512 against Python `cryptography`; modular powers of 64–4096-bit numbers
+against Python integers; RSA keys and signatures from `cryptography` – PKCS#1 v1.5 and PSS with several parameter
+sets, a 2049-bit key (the PSS block one byte shorter than the signature), crafted almost-right blocks (padding 0xfe,
+block type 2, no separator, a bit above emBits), s = 0 / n, wrong lengths, keys outside the rules; ECDSA P-256 /
+P-384 including the key with private value 1, digests e > n / e = n / e = 0, high s, DER variants and public keys off
+the curve or with x + p; Wycheproof (`vectors/wycheproof.bin`, built by `vectors/gen-wycheproof.py` from a pinned
+commit – ECDSA P-256 and P-384, RSA PKCS#1 2048/SHA-256, PSS 2048/SHA-256 and the PSS "misc" sets: every "valid" case
+verifies, every "invalid" and "acceptable" case is refused; the RSA 3072 / 4096 sets were checked on the host, not
+shipped); 36 hand-made mutations of the new code were run on the host – 33 caught, 3 equivalent (a check that a later
+check repeats); AES-GCM: FIPS-197 C.1 / A.1, the circuit S-box for all 256 inputs,
 1–5 blocks, GF(2^128) products and GHASH against SP 800-38D written on Python integers, NIST Test Cases 1–4, every
 length 0–95 and 1000 inside guard bytes, aad of 1 / 15 / 16 / 17 bytes, a wrong tag leaving the buffer untouched –
 each with every AES-NI / PCLMULQDQ combination the CPU allows; before that: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439, RFC 7748 vectors;
@@ -1685,12 +1713,12 @@ last group of 1–3 blocks and a tail under 16 bytes go through a local array �
 and bit-by-bit GHASH; both avoid tables and branches on secrets. GCM nonce reuse: it reveals the XOR of the plaintexts
 and, under certain conditions, can make it possible to recover H and forge tags – the caller must keep nonces unique.
 
-Passing the RFC vectors shows agreement with chosen cases of the standards; it does not prove the implementation
-secure. DeSoCrypto is not for production use without an audit. Nothing in the system uses the AEAD or X25519 yet –
-they are the base for DeSoTLS.
+Passing the RFC and Wycheproof vectors shows agreement with chosen cases of the standards; it does not prove the
+implementation secure. DeSoCrypto is not for production use without an audit. Nothing in the system uses the AEAD,
+X25519 or the signature checks yet – they are the base for DeSoTLS.
 
-Next: DeSoTLS (TLS 1.3) – signatures (RSA-PSS, ECDSA P-256), X.509, the handshake and the record layer are a
-separate step.
+Next: DeSoTLS (TLS 1.3, client only) – X.509 certificates, the trusted CA store and a wall-clock syscall (v0.74), then
+the handshake and the record layer with `netget https://` (v0.75).
 
 ## Random numbers (`kernel/random.rs`, v0.70.0)
 

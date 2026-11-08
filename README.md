@@ -1,4 +1,4 @@
-# DeSoOS v0.72.1
+# DeSoOS v0.73.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -43,9 +43,10 @@ More documentation:
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
-- Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
-  HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519, AES-128-GCM (AES-NI and PCLMULQDQ
-  in programs, a bitsliced fallback without tables) (no heap, no syscalls; not audited – not for production use);
+- Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256/384/512,
+  HMAC and HKDF over them, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519, AES-128-GCM (AES-NI and PCLMULQDQ
+  in programs, a bitsliced fallback without tables), RSA (PKCS#1 v1.5, PSS) and ECDSA (P-256, P-384) signature
+  verification, tested with Wycheproof (no heap, no syscalls; not audited – not for production use);
   tools `sha256sum`, `random`.
 - Random numbers: the kernel's generator (ChaCha20 with fast key erasure) fed by the firmware's RNG, RDSEED,
   RDRAND, TSC jitter and interrupt times, with health checks and careful entropy counting; the kernel waits at boot

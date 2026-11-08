@@ -69,7 +69,7 @@ pub fn self_test() {
     let r = desocrypto_tests::run();
     check!(r.is_ok(), "in the kernel: {:?}", r.err());
     let n = r.unwrap_or(0);
-    serial_println!("[CRYPTO TEST] 1/5 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 / Poly1305 / AEAD RFC 8439, X25519 RFC 7748, AES FIPS-197, GHASH / AES-GCM SP 800-38D (software path in the kernel), the key-erasure generator, arithmetic ranges, limits) in {} ms PASS", n, ticks() - t0);
+    serial_println!("[CRYPTO TEST] 1/5 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 / Poly1305 / AEAD RFC 8439, X25519 RFC 7748, AES FIPS-197, GHASH / AES-GCM SP 800-38D (software path in the kernel), SHA-384/512, RSA PKCS#1 / PSS and ECDSA P-256 / P-384 with Wycheproof, the key-erasure generator, arithmetic ranges, limits) in {} ms PASS", n, ticks() - t0);
 
     // 2. The same in user space.
     let r = run("/bin/cryptotest", &["cryptotest"], &[], 60_000);
@@ -83,6 +83,10 @@ pub fn self_test() {
     let x25519_ops = number_after(out, "x25519 ");
     let gcm_kbs = number_after(out, "aesgcm ");
     let gcm_soft_kbs = number_after(out, "aesgcm_soft ");
+    let sha512_kbs = number_after(out, "sha512 ");
+    let rsa_ops = number_after(out, "rsa2048 ");
+    let p256_ops = number_after(out, "p256 ");
+    let p384_ops = number_after(out, "p384 ");
     let aesni = if out.contains("aesni yes") { "yes" } else { "no" };
     let pclmul = if out.contains("pclmul yes") { "yes" } else { "no" };
     serial_println!("[CRYPTO TEST] 2/5 user space: {} PASS", out.replace('\n', "; "));
@@ -154,7 +158,7 @@ pub fn self_test() {
     }
     serial_println!("[CRYPTO TEST] 5/5 XMM: 4 processes at once, {} rounds of xmm0-15 patterns checked after every yield and AES-GCM (AES-NI {}, PCLMULQDQ {}) = software PASS", rounds, aesni, pclmul);
     serial_println!(
-        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={} aead_user_kbs={} x25519_user_ops={} aesni={} pclmul={} aesgcm_user_kbs={} aesgcm_soft_kbs={}",
+        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={} aead_user_kbs={} x25519_user_ops={} aesni={} pclmul={} aesgcm_user_kbs={} aesgcm_soft_kbs={} sha512_user_kbs={} rsa2048_verify_ops={} p256_verify_ops={} p384_verify_ops={}",
         crate::shell::VERSION,
         desocrypto::VERSION,
         n,
@@ -166,7 +170,11 @@ pub fn self_test() {
         aesni,
         pclmul,
         gcm_kbs,
-        gcm_soft_kbs
+        gcm_soft_kbs,
+        sha512_kbs,
+        rsa_ops,
+        p256_ops,
+        p384_ops
     );
     serial_println!("[CRYPTO TEST] All crypto tests passed!");
     crate::selftest::pass();

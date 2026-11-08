@@ -11,6 +11,13 @@
 //   chacha20  ChaCha20 (RFC 8439) – the stream cipher (no tables: constant time)
 //   rng     a generator with fast key erasure (ChaCha20) – the kernel's CSPRNG and
 //           programs' own generators seeded from `getrandom`
+//   sha512  SHA-512 and SHA-384 (FIPS 180-4)
+//   hash    the hashes behind one interface (Digest, HashAlg, Hasher) – HMAC and HKDF take
+//           any of them (`Hmac<Sha384>`, `hkdf::expand_with::<Sha512>`)
+//   bignum  big numbers for signature checks – public data only, not constant time
+//   rsa     RSA signature verification: PKCS#1 v1.5 and PSS (explicit parameters)
+//   ecdsa   ECDSA signature verification on P-256 (SHA-256) and P-384 (SHA-384)
+//   (plus poly1305, aead, x25519, aes, ghash, aes_gcm – see their headers)
 //
 // Not included on purpose: tests.rs (official vectors, edge cases) – only
 // /bin/cryptotest and the kernel CRYPTO TEST include it, next to this module.
@@ -25,16 +32,21 @@
 pub mod aead;
 pub mod aes;
 pub mod aes_gcm;
+pub mod bignum;
 pub mod chacha20;
+pub mod ecdsa;
 pub mod ghash;
+pub mod hash;
 pub mod hkdf;
 pub mod hmac;
 pub mod poly1305;
 pub mod rng;
+pub mod rsa;
 pub mod sha256;
+pub mod sha512;
 pub mod x25519;
 
-pub const VERSION: &str = "0.4.0";
+pub const VERSION: &str = "0.5.0";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {
@@ -76,8 +88,12 @@ pub enum Error {
     InvalidLength,
     /// The output buffer is too small.
     BufferTooSmall,
-    /// A tag did not match.
+    /// A tag did not match; a well-formed signature that does not verify.
     Mismatch,
+    /// A public key outside the accepted rules (RSA size or exponent, EC point).
+    InvalidKey,
+    /// A signature with the wrong length or encoding, or numbers out of range.
+    InvalidSignature,
 }
 
 impl Error {
@@ -89,6 +105,8 @@ impl Error {
             Error::InvalidLength => "invalid length",
             Error::BufferTooSmall => "buffer too small",
             Error::Mismatch => "mismatch",
+            Error::InvalidKey => "invalid key",
+            Error::InvalidSignature => "invalid signature",
         }
     }
 }

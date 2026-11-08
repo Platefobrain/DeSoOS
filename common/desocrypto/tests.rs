@@ -31,6 +31,18 @@
 //            larger array with guard bytes), aad of 1 / 15 / 16 / 17 bytes; a wrong tag
 //            leaves the buffer untouched.  Every check runs with each combination of
 //            AES-NI / PCLMULQDQ the CPU allows (in the kernel: software only) – all equal.
+//   SHA-384/512  FIPS 180-4 / NIST examples ("abc", "", 896-bit, a million 'a'); lengths at
+//            the padding edges against Python hashlib
+//   HMAC/HKDF SHA-384/512  RFC 4231 cases 1-7; HKDF against Python `cryptography`
+//   bignum   modular powers of 64- to 4096-bit numbers against Python integers
+//   RSA      keys and signatures (PKCS#1 v1.5, PSS with several parameter sets, a 2049-bit
+//            key) from Python `cryptography`; tampered messages and signatures, s = 0 / n,
+//            wrong lengths, keys outside the rules, a DigestInfo without NULL
+//   ECDSA    P-256 / P-384 from Python `cryptography` (also the key with private value 1,
+//            digests e > n, e = n, e = 0); DER variants (non-minimal, long form, negative,
+//            trailing bytes), r / s = 0 or n, high s, public keys off the curve
+//   Wycheproof  vectors/wycheproof.bin (gen-wycheproof.py, pinned commit): ECDSA P-256 and
+//            P-384, RSA PKCS#1 2048/SHA-256, PSS 2048/SHA-256 and the PSS "misc" sets
 // The other expected values (block-edge lengths, empty key, 8160-byte output) were
 // computed with an independent implementation (Python hashlib / hmac).
 
@@ -47,6 +59,12 @@ use super::desocrypto::poly1305::{self, Poly1305};
 use super::desocrypto::rng::KeyErasureRng;
 use super::desocrypto::sha256::{MAX_BYTES, Sha256, sha256};
 use super::desocrypto::x25519;
+use super::desocrypto::bignum::{self, MAX_LIMBS, Modulus};
+use super::desocrypto::ecdsa::{self, Curve};
+use super::desocrypto::hash::HashAlg;
+use super::desocrypto::hmac::Hmac;
+use super::desocrypto::rsa::{self, PssParams};
+use super::desocrypto::sha512::{Sha384, Sha512, sha384, sha512};
 use super::desocrypto::{Error, equal_ct, hex};
 
 /// The first failed check: group and case number (1-based).
@@ -155,6 +173,12 @@ pub fn run() -> Result<usize, Failure> {
     gcm_vectors(&mut c)?;
     gcm_tamper(&mut c)?;
     misc(&mut c)?;
+    sha512_all(&mut c)?;
+    hmac_hkdf_generic(&mut c)?;
+    bignum_checks(&mut c)?;
+    rsa_checks(&mut c)?;
+    ecdsa_checks(&mut c)?;
+    wycheproof_sets(&mut c, WYCHEPROOF)?;
     Ok(c.passed)
 }
 
@@ -1513,3 +1537,693 @@ fn misc(c: &mut Checks) -> Result<(), Failure> {
     c.check(equal_ct(b"abc", b"abc") && !equal_ct(b"abc", b"abd") && !equal_ct(b"abc", b"ab") && equal_ct(b"", b""))?;
     Ok(())
 }
+
+// ---- SHA-384/512, generic HMAC/HKDF, bignum, RSA, ECDSA (DeSoCrypto 0.5.0) ----
+
+/// Hex into `buf`, the bytes as a slice.
+fn bytes<'a>(h: &str, buf: &'a mut [u8]) -> &'a [u8] {
+    let n = unhex(h, buf);
+    &buf[..n]
+}
+
+fn sha512_all(c: &mut Checks) -> Result<(), Failure> {
+    c.group("sha384/512 vectors");
+    c.check(same(&sha384(b"abc"), "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"))?;
+    c.check(same(&sha512(b"abc"), "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"))?;
+    c.check(same(&sha384(b""), "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"))?;
+    c.check(same(&sha512(b""), "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"))?;
+    let m896: &[u8] = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    c.check(same(&sha384(m896), "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039"))?;
+    c.check(same(&sha512(m896), "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"))?;
+    let a = [b'a'; 1000];
+    let (mut h3, mut h5) = (Sha384::new(), Sha512::new());
+    for _ in 0..1000 {
+        h3.update(&a);
+        h5.update(&a);
+        h5.update(&[]);
+    }
+    c.check(h3.finish().is_ok_and(|d| same(&d, "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985")))?;
+    c.check(h5.finish().is_ok_and(|d| same(&d, "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b")))?;
+
+    c.group("sha384/512 edges");
+    let mut buf = [0u8; 1000];
+    pattern(&mut buf);
+    for &(n, w384, w512) in SHA512_EDGES {
+        let msg = &buf[..n];
+        c.check(same(&sha384(msg), w384) && same(&sha512(msg), w512))?;
+        let (mut a, mut b) = (Sha384::new(), Sha512::new());
+        for byte in msg {
+            a.update(core::slice::from_ref(byte));
+            b.update(core::slice::from_ref(byte));
+        }
+        c.check(a.finish().is_ok_and(|d| same(&d, w384)) && b.finish().is_ok_and(|d| same(&d, w512)))?;
+        // The run-time choice gives the same.
+        c.check(same(HashAlg::Sha384.digest(msg).as_bytes(), w384) && same(HashAlg::Sha512.digest(msg).as_bytes(), w512))?;
+    }
+    let msg = &buf[..300];
+    let whole = sha512(msg);
+    let mut ok = true;
+    for i in 0..=msg.len() {
+        let mut h = Sha512::new();
+        h.update(&msg[..i]);
+        h.update(&msg[i..]);
+        ok &= h.finish() == Ok(whole);
+    }
+    c.check(ok)?;
+    c.check(same(HashAlg::Sha256.digest(b"abc").as_bytes(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"))?;
+    c.check(HashAlg::Sha256.out_len() == 32 && HashAlg::Sha384.out_len() == 48 && HashAlg::Sha512.out_len() == 64)?;
+
+    c.group("sha512 length limit");
+    let mut h = Sha512::new();
+    h.assume_length(u64::MAX - 3);
+    h.update(b"abc");
+    c.check(h.finish().is_ok())?;
+    let mut h = Sha512::new();
+    h.assume_length(u64::MAX - 3);
+    h.update(b"abcd");
+    c.check(h.finish() == Err(Error::LengthOverflow))?;
+    let mut h = Sha384::new();
+    h.assume_length(u64::MAX);
+    h.update(b"x");
+    h.update(b"");
+    c.check(h.finish() == Err(Error::LengthOverflow))?;
+    Ok(())
+}
+
+fn hmac_hkdf_generic(c: &mut Checks) -> Result<(), Failure> {
+    c.group("hmac sha384/512 rfc4231");
+    let k6 = [0xaau8; 131];
+    let mut k4 = [0u8; 25];
+    range(1, &mut k4);
+    let msgs: [(&[u8], &[u8]); 7] = [
+        (&[0x0b; 20], b"Hi There"),
+        (b"Jefe", b"what do ya want for nothing?"),
+        (&[0xaa; 20], &[0xdd; 50]),
+        (&k4, &[0xcd; 50]),
+        (&[0x0c; 20], b"Test With Truncation"),
+        (&k6, b"Test Using Larger Than Block-Size Key - Hash Key First"),
+        (&k6, b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."),
+    ];
+    for (i, (k, m)) in msgs.iter().enumerate() {
+        let (w384, w512) = HMAC_4231[i];
+        let t384 = Hmac::<Sha384>::new(k).chain(m).finish();
+        let t512 = Hmac::<Sha512>::new(k).chain(m).finish();
+        let n = if i == 4 { 16 } else { 64 };
+        c.check(t384.is_ok_and(|t| same(&t.as_bytes()[..n.min(48)], w384)))?;
+        c.check(t512.is_ok_and(|t| same(&t.as_bytes()[..n], w512)))?;
+    }
+    // Streamed in uneven pieces.
+    let mut m = Hmac::<Sha512>::new(&k6);
+    for piece in msgs[6].1.chunks(17) {
+        m.update(piece);
+    }
+    c.check(m.finish().is_ok_and(|t| same(t.as_bytes(), HMAC_4231[6].1)))?;
+
+    c.group("hmac generic");
+    let mut k = [0u8; 129];
+    pattern(&mut k);
+    for &(n, w384, w512) in HMAC_512_EDGES.iter() {
+        c.check(Hmac::<Sha384>::new(&k[..n]).chain(b"x").finish().is_ok_and(|t| same(t.as_bytes(), w384)))?;
+        c.check(Hmac::<Sha512>::new(&k[..n]).chain(b"x").finish().is_ok_and(|t| same(t.as_bytes(), w512)))?;
+    }
+    // A key over the 128-byte block = its hash.
+    let hk = sha512(&k);
+    c.check(Hmac::<Sha512>::new(&k).chain(b"m").finish().is_ok_and(|a| Hmac::<Sha512>::new(&hk).chain(b"m").finish().is_ok_and(|b| a.as_bytes() == b.as_bytes())))?;
+    // The generic SHA-256 is the old HmacSha256.
+    c.check(Hmac::<Sha256>::new(b"Jefe").chain(b"what do ya want for nothing?").finish().is_ok_and(|t| t.as_bytes() == hmac_sha256(b"Jefe", b"what do ya want for nothing?")))?;
+    // verify: full, truncated, too short, too long, wrong byte.
+    let tag = Hmac::<Sha384>::new(b"k").chain(b"m").finish().unwrap_or_else(|_| HashAlg::Sha384.digest(b""));
+    let v = || Hmac::<Sha384>::new(b"k").chain(b"m");
+    c.check(v().verify(tag.as_bytes()).is_ok() && v().verify(&tag.as_bytes()[..16]).is_ok())?;
+    c.check(v().verify(&tag.as_bytes()[..15]) == Err(Error::InvalidLength))?;
+    let mut long = [0u8; 49];
+    long[..48].copy_from_slice(tag.as_bytes());
+    c.check(v().verify(&long) == Err(Error::InvalidLength))?;
+    let mut bad = [0u8; 48];
+    bad.copy_from_slice(tag.as_bytes());
+    bad[47] ^= 1;
+    c.check(v().verify(&bad) == Err(Error::Mismatch))?;
+    // The length limit passes through the generic HMAC.
+    let mut h = Sha512::new();
+    h.assume_length(u64::MAX);
+    h.update(b"x");
+    c.check(h.finish() == Err(Error::LengthOverflow))?;
+
+    c.group("hkdf sha384/512");
+    let mut salt = [0u8; 13];
+    range(0, &mut salt);
+    let mut info = [0u8; 10];
+    range(0xf0, &mut info);
+    let mut okm = [0u8; 42];
+    for (i, &(_, wprk, wokm)) in HKDF_512.iter().enumerate() {
+        if i == 0 {
+            let prk = hkdf::extract_with::<Sha384>(&salt, &[0x0b; 22]);
+            c.check(same(prk.as_bytes(), wprk))?;
+            c.check(hkdf::expand_with::<Sha384>(prk.as_bytes(), &info, &mut okm).is_ok() && same(&okm, wokm))?;
+        } else {
+            let prk = hkdf::extract_with::<Sha512>(&salt, &[0x0b; 22]);
+            c.check(same(prk.as_bytes(), wprk))?;
+            c.check(hkdf::hkdf_with::<Sha512>(&salt, &[0x0b; 22], &info, &mut okm).is_ok() && same(&okm, wokm))?;
+        }
+    }
+    let mut big = [0u8; 255 * 48 + 1];
+    c.check(hkdf::hkdf_with::<Sha384>(b"salt", b"ikm", b"info", &mut big[..255 * 48]).is_ok())?;
+    c.check(same(&sha256(&big[..255 * 48]), HKDF_384_MAX_SHA256))?;
+    c.check(hkdf::hkdf_with::<Sha384>(b"salt", b"ikm", b"info", &mut big) == Err(Error::OutputTooLong))?;
+    let prk = hkdf::extract_with::<Sha384>(b"salt", b"ikm");
+    c.check(hkdf::expand_with::<Sha384>(&prk.as_bytes()[..47], b"info", &mut okm) == Err(Error::KeyTooShort))?;
+    let mut o50 = [0u8; 50];
+    c.check(hkdf::hkdf_with::<Sha384>(b"", b"ikm", b"info", &mut o50).is_ok() && same(&o50, HKDF_384_EMPTY_SALT))?;
+    // The SHA-256 forms are the generic SHA-256.
+    let mut a = [0u8; 40];
+    let mut b = [0u8; 40];
+    c.check(hkdf::hkdf(b"s", b"i", b"n", &mut a).is_ok() && hkdf::hkdf_with::<Sha256>(b"s", b"i", b"n", &mut b).is_ok() && a == b)?;
+    Ok(())
+}
+
+fn bignum_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("bignum");
+    // Moduli that are refused: empty, even, leading zero byte, 1, too long.
+    c.check(Modulus::<4>::new(&[]).is_err())?;
+    c.check(Modulus::<4>::new(&[0x10]).is_err())?;
+    c.check(Modulus::<4>::new(&[0x00, 0x11]).is_err())?;
+    c.check(Modulus::<4>::new(&[0x01]).is_err())?;
+    c.check(Modulus::<1>::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]).is_err())?;
+    c.check(Modulus::<4>::new(&[0x03]).is_ok())?;
+    // from_be / to_be.
+    let v = bignum::from_be::<2>(&[0, 0, 1, 2, 3]);
+    c.check(v == Ok([0x010203, 0]))?;
+    c.check(bignum::from_be::<1>(&[1, 0, 0, 0, 0, 0, 0, 0, 0]).is_err())?;
+    c.check(bignum::from_be::<1>(&[0, 0xff, 0, 0, 0, 0, 0, 0, 0]).is_ok())?;
+    let mut o = [0u8; 3];
+    c.check(bignum::to_be(&[0x010203, 0], &mut o).is_ok() && o == [1, 2, 3])?;
+    let mut o = [0u8; 2];
+    c.check(bignum::to_be(&[0x010203, 0], &mut o) == Err(Error::InvalidLength))?;
+    // pow against Python big integers (64 to 4096 bits, also exponent 0, base 0, base m - 1).
+    let mut mb = [0u8; 512];
+    let mut bb = [0u8; 512];
+    let mut eb = [0u8; 512];
+    let mut rb = [0u8; 512];
+    for &(m, b, e, r) in BN_POW {
+        let m = bytes(m, &mut mb);
+        let Ok(md) = Modulus::<MAX_LIMBS>::new(m) else {
+            return c.check(false);
+        };
+        let base = bignum::from_be::<MAX_LIMBS>(bytes(b, &mut bb));
+        let want = bignum::from_be::<MAX_LIMBS>(bytes(r, &mut rb));
+        let e = bytes(e, &mut eb);
+        c.check(base.is_ok_and(|bv| want.is_ok_and(|w| md.pow(&bv, e) == w)))?;
+    }
+    // Montgomery round trip, add / sub at the edges (m - 1 + 1 = 0, 0 - 1 = m - 1).
+    let md = Modulus::<4>::new(&[0xff; 32]);
+    let Ok(md) = md else { return c.check(false) };
+    let mut m1 = *md.modulus();
+    m1[0] -= 1;
+    let one = [1u64, 0, 0, 0];
+    let zero = [0u64; 4];
+    c.check(md.add(&m1, &one) == zero && md.sub(&zero, &one) == m1)?;
+    c.check(md.from_mont(&md.to_mont(&m1)) == m1)?;
+    c.check(md.from_mont(&md.mul(&md.to_mont(&m1), &md.to_mont(&m1))) == one)?;
+    c.check(md.reduce(&[u64::MAX; 4]) == zero)?;
+    c.check(md.is_reduced(&m1) && !md.is_reduced(md.modulus()))?;
+    Ok(())
+}
+
+const RSA_MSG: &[u8] = b"DeSoOS signature test";
+
+fn rsa_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("rsa");
+    let mut nb = [0u8; 512];
+    let mut eb = [0u8; 4];
+    let mut sb = [0u8; 512];
+    for &(ki, kind, h, mgf, salt, sig) in RSA_SIGS {
+        let (n, e) = RSA_KEYS[ki];
+        let Ok(key) = rsa::PublicKey::new(bytes(n, &mut nb), bytes(e, &mut eb)) else {
+            return c.check(false);
+        };
+        let s = bytes(sig, &mut sb);
+        let k = s.len();
+        let p = PssParams { hash: h, mgf_hash: mgf, salt_len: salt };
+        let verify = |m: &[u8], s: &[u8]| if kind == 0 { key.verify_pkcs1(h, m, s) } else { key.verify_pss(&p, m, s) };
+        c.check(verify(RSA_MSG, s).is_ok())?;
+        // Another message, a flipped signature bit (low byte: stays below n), a flipped top byte.
+        c.check(verify(b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?;
+        let mut t = [0u8; 513];
+        t[..k].copy_from_slice(s);
+        t[k - 1] ^= 1;
+        c.check(verify(RSA_MSG, &t[..k]) == Err(Error::Mismatch))?;
+        // Wrong length either way.
+        c.check(verify(RSA_MSG, &s[..k - 1]) == Err(Error::InvalidSignature))?;
+        t[..k].copy_from_slice(s);
+        c.check(verify(RSA_MSG, &t[..k + 1]) == Err(Error::InvalidSignature))?;
+        // The other scheme / another hash does not accept it.
+        if kind == 0 {
+            c.check(key.verify_pss(&PssParams::tls(h), RSA_MSG, s) == Err(Error::Mismatch))?;
+            let other = if h == HashAlg::Sha256 { HashAlg::Sha384 } else { HashAlg::Sha256 };
+            c.check(key.verify_pkcs1(other, RSA_MSG, s) == Err(Error::Mismatch))?;
+        } else {
+            c.check(key.verify_pkcs1(h, RSA_MSG, s) == Err(Error::Mismatch))?;
+            let wrong_salt = PssParams { salt_len: if salt == 0 { 1 } else { salt - 1 }, ..p };
+            c.check(key.verify_pss(&wrong_salt, RSA_MSG, s) == Err(Error::Mismatch))?;
+            let wrong_mgf = PssParams { mgf_hash: if mgf == HashAlg::Sha256 { HashAlg::Sha512 } else { HashAlg::Sha256 }, ..p };
+            c.check(key.verify_pss(&wrong_mgf, RSA_MSG, s) == Err(Error::Mismatch))?;
+        }
+        // s = n and s = 0.
+        let n_bytes = bytes(n, &mut nb);
+        c.check(verify(RSA_MSG, n_bytes) == Err(Error::InvalidSignature))?;
+        let z = [0u8; 512];
+        c.check(verify(RSA_MSG, &z[..k]) == Err(Error::Mismatch))?;
+    }
+    // PKCS#1 without the NULL in the DigestInfo: refused (strict).
+    let Ok(key0) = rsa::PublicKey::new(bytes(RSA_KEYS[0].0, &mut nb), bytes(RSA_KEYS[0].1, &mut eb)) else {
+        return c.check(false);
+    };
+    c.check(key0.verify_pkcs1(HashAlg::Sha256, RSA_MSG, bytes(RSA_NO_NULL, &mut sb)) == Err(Error::Mismatch))?;
+    // A 2049-bit key: emBits = 2048, the PSS block one byte shorter than the signature.
+    let mut nb2 = [0u8; 512];
+    let Ok(k2049) = rsa::PublicKey::new(bytes(RSA_2049.0, &mut nb2), &[1, 0, 1]) else {
+        return c.check(false);
+    };
+    c.check(k2049.bits() == 2049)?;
+    c.check(k2049.verify_pss(&PssParams::tls(HashAlg::Sha256), RSA_MSG, bytes(RSA_2049.1, &mut sb)).is_ok())?;
+    c.check(k2049.verify_pss(&PssParams::tls(HashAlg::Sha256), RSA_MSG, bytes(RSA_2049_TOP, &mut sb)) == Err(Error::Mismatch))?;
+    // Crafted PKCS#1 blocks: the first (control) is right, the others almost.
+    let Ok(kc) = rsa::PublicKey::new(bytes(RSA_CRAFT_KEY, &mut nb2), &[1, 0, 1]) else {
+        return c.check(false);
+    };
+    for (i, sig) in RSA_PKCS1_BAD.iter().enumerate() {
+        let r = kc.verify_pkcs1(HashAlg::Sha256, RSA_MSG, bytes(sig, &mut sb));
+        c.check(if i == 0 { r.is_ok() } else { r == Err(Error::Mismatch) })?;
+    }
+    // PSS: the bit above emBits set in maskedDB.
+    c.check(kc.verify_pss(&PssParams::tls(HashAlg::Sha256), RSA_MSG, bytes(RSA_PSS_TOPBIT, &mut sb)) == Err(Error::Mismatch))?;
+
+    c.group("rsa keys");
+    let n = bytes(RSA_KEYS[0].0, &mut nb);
+    let mut t = [0u8; 513];
+    // e: even, 1, 2^32 + 1 (5 bytes), leading zero, empty.
+    c.check(rsa::PublicKey::new(n, &[1, 0, 0]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(n, &[1]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(n, &[1, 0, 0, 0, 1]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(n, &[0, 1, 0, 1]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(n, &[]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(n, &[0xff, 0xff, 0xff, 0xff]).is_ok())?;
+    // n: leading zero, even, 2047 bits, 4097 bits.
+    t[0] = 0;
+    t[1..257].copy_from_slice(n);
+    c.check(rsa::PublicKey::new(&t[..257], &[1, 0, 1]).err() == Some(Error::InvalidKey))?;
+    t[..256].copy_from_slice(n);
+    t[255] &= 0xfe;
+    c.check(rsa::PublicKey::new(&t[..256], &[1, 0, 1]).err() == Some(Error::InvalidKey))?;
+    t[..256].copy_from_slice(n);
+    t[0] = 0x7f;
+    c.check(rsa::PublicKey::new(&t[..256], &[1, 0, 1]).err() == Some(Error::InvalidKey))?;
+    t.fill(0xff);
+    t[0] = 0x01;
+    c.check(rsa::PublicKey::new(&t[..513], &[1, 0, 1]).err() == Some(Error::InvalidKey))?;
+    c.check(rsa::PublicKey::new(&t[1..513], &[1, 0, 1]).is_ok())?;
+    Ok(())
+}
+
+/// Builds DER SEQUENCE { INTEGER r, INTEGER s } from big-endian r and s (adds the sign byte).
+fn der_sig(r: &[u8], s: &[u8], out: &mut [u8; 160]) -> usize {
+    let mut n = 2;
+    for v in [r, s] {
+        let mut start = 0;
+        while start + 1 < v.len() && v[start] == 0 {
+            start += 1;
+        }
+        let v = &v[start..];
+        let pad = v[0] & 0x80 != 0;
+        out[n] = 0x02;
+        out[n + 1] = (v.len() + pad as usize) as u8;
+        n += 2;
+        if pad {
+            out[n] = 0;
+            n += 1;
+        }
+        out[n..n + v.len()].copy_from_slice(v);
+        n += v.len();
+    }
+    out[0] = 0x30;
+    out[1] = (n - 2) as u8;
+    n
+}
+
+const N256: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+const N384: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973";
+const P256_P: &str = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
+const P384_P: &str = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff";
+
+fn ecdsa_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("ecdsa");
+    let mut pk = [0u8; 97];
+    let mut sg = [0u8; 160];
+    for &(curve, key, sig) in EC_SIGS {
+        let key = bytes(key, &mut pk);
+        let mut sb = [0u8; 160];
+        let s = bytes(sig, &mut sb);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, s).is_ok())?;
+        c.check(ecdsa::verify(curve, key, b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?;
+        // The other curve refuses the key (wrong length).
+        let other = if curve == Curve::P256 { Curve::P384 } else { Curve::P256 };
+        c.check(ecdsa::verify(other, key, RSA_MSG, s) == Err(Error::InvalidKey))?;
+        // Trailing byte after the DER, truncated DER.
+        let n = s.len();
+        sg[..n].copy_from_slice(s);
+        sg[n] = 0;
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n + 1]) == Err(Error::InvalidSignature))?;
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &s[..n - 1]) == Err(Error::InvalidSignature))?;
+    }
+    // Edge digests: e > n, e = n (u1 = 0), e = 0, e = n + 1.
+    let mut db = [0u8; 48];
+    for &(curve, key, dg, sig) in EC_DIGESTS {
+        let key = bytes(key, &mut pk);
+        let mut sb = [0u8; 160];
+        let s = bytes(sig, &mut sb);
+        let d = bytes(dg, &mut db);
+        c.check(ecdsa::verify_digest(curve, key, d, s).is_ok())?;
+    }
+
+    c.group("ecdsa encodings");
+    let mut rb = [0u8; 48];
+    let mut sbb = [0u8; 48];
+    let mut nbuf = [0u8; 48];
+    let mut pbuf = [0u8; 48];
+    for &(curve, key, r, s) in EC_RS {
+        let key = bytes(key, &mut pk);
+        let r = bytes(r, &mut rb);
+        let s = bytes(s, &mut sbb);
+        let fl = curve.field_len();
+        let order = bytes(if curve == Curve::P256 { N256 } else { N384 }, &mut nbuf);
+        let n = der_sig(r, s, &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]).is_ok())?;
+        // High s (n - s) is a valid signature too – ECDSA has no low-s rule.
+        let mut hs = [0u8; 48];
+        let mut borrow = 0i16;
+        for i in (0..fl).rev() {
+            let v = order[i] as i16 - s[i] as i16 - borrow;
+            hs[i] = v.rem_euclid(256) as u8;
+            borrow = (v < 0) as i16;
+        }
+        let n = der_sig(r, &hs[..fl], &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]).is_ok())?;
+        // r = 0, s = 0, r = n, s = n: out of range.
+        let zero = [0u8; 1];
+        let n = der_sig(&zero, s, &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]) == Err(Error::InvalidSignature))?;
+        let n = der_sig(r, &zero, &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]) == Err(Error::InvalidSignature))?;
+        let n = der_sig(order, s, &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]) == Err(Error::InvalidSignature))?;
+        let n = der_sig(r, order, &mut sg);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &sg[..n]) == Err(Error::InvalidSignature))?;
+        // A needless leading zero byte in r (non-minimal DER).
+        let n = der_sig(r, s, &mut sg);
+        let mut bad = [0u8; 160];
+        bad[0] = 0x30;
+        bad[1] = sg[1] + 1;
+        bad[2] = 0x02;
+        bad[3] = sg[3] + 1;
+        bad[4] = 0;
+        bad[5..n + 1].copy_from_slice(&sg[4..n]);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &bad[..n + 1]) == Err(Error::InvalidSignature))?;
+        // Long-form length of the SEQUENCE (0x81 0xNN) – not DER for lengths < 128.
+        bad[0] = 0x30;
+        bad[1] = 0x81;
+        bad[2] = sg[1];
+        bad[3..3 + n - 2].copy_from_slice(&sg[2..n]);
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &bad[..n + 1]) == Err(Error::InvalidSignature))?;
+        // A negative r (sign bit set, no zero byte) and a wrong tag.
+        let n = der_sig(r, s, &mut sg);
+        let mut neg = sg;
+        if neg[3] == fl as u8 + 1 {
+            // r had a sign byte: drop it so r looks negative.
+            neg[1] -= 1;
+            neg[3] -= 1;
+            neg.copy_within(5..n, 4);
+            c.check(ecdsa::verify(curve, key, RSA_MSG, &neg[..n - 1]) == Err(Error::InvalidSignature))?;
+        }
+        let mut tag = sg;
+        tag[0] = 0x31;
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &tag[..n]) == Err(Error::InvalidSignature))?;
+        tag[0] = 0x30;
+        tag[2] = 0x03;
+        c.check(ecdsa::verify(curve, key, RSA_MSG, &tag[..n]) == Err(Error::InvalidSignature))?;
+
+        // Public keys: compressed prefix, y + 1 (not on the curve), x = p, wrong length.
+        let n = der_sig(r, s, &mut sg);
+        let kl = key.len();
+        let mut k2 = [0u8; 97];
+        k2[..kl].copy_from_slice(key);
+        k2[0] = 0x02;
+        c.check(ecdsa::verify(curve, &k2[..kl], RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+        k2[0] = 0x04;
+        k2[kl - 1] ^= 1;
+        c.check(ecdsa::verify(curve, &k2[..kl], RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+        k2[..kl].copy_from_slice(key);
+        let p = bytes(if curve == Curve::P256 { P256_P } else { P384_P }, &mut pbuf);
+        k2[1..1 + fl].copy_from_slice(p);
+        c.check(ecdsa::verify(curve, &k2[..kl], RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+        c.check(ecdsa::verify(curve, &key[..kl - 1], RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+        // A point with a small x: accepted as a key (the signature is not its), but the same
+        // point written with x + p (still fits in the field length) is refused.
+        let (good, big) = if curve == Curve::P256 { P256_SMALL_X } else { P384_SMALL_X };
+        let r1 = ecdsa::verify(curve, bytes(good, &mut k2), RSA_MSG, &sg[..n]);
+        c.check(r1 == Err(Error::Mismatch))?;
+        c.check(ecdsa::verify(curve, bytes(big, &mut k2), RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+    }
+    Ok(())
+}
+
+/// cryptotest speed runs: `iterations` verifications of one stored signature (0 = RSA-2048
+/// PKCS#1 v1.5 SHA-256, 1 = ECDSA P-256, 2 = ECDSA P-384); false if one does not verify.
+pub fn sig_bench(kind: u8, iterations: u32) -> bool {
+    let mut kb = [0u8; 512];
+    let mut sb = [0u8; 512];
+    if kind == 0 {
+        let (n, e) = RSA_KEYS[0];
+        let mut eb = [0u8; 4];
+        let Ok(key) = rsa::PublicKey::new(bytes(n, &mut kb), bytes(e, &mut eb)) else { return false };
+        let (_, _, h, _, _, sig) = RSA_SIGS[0];
+        let s = bytes(sig, &mut sb);
+        return (0..iterations).all(|_| key.verify_pkcs1(h, RSA_MSG, s).is_ok());
+    }
+    let (curve, key, sig) = EC_SIGS[if kind == 1 { 1 } else { 4 }];
+    let key = bytes(key, &mut kb);
+    let s = bytes(sig, &mut sb);
+    (0..iterations).all(|_| ecdsa::verify(curve, key, RSA_MSG, s).is_ok())
+}
+
+/// The Wycheproof sets in vectors/wycheproof.bin (see gen-wycheproof.py for the format):
+/// "valid" must verify, "invalid" and "acceptable" (only MissingNull here) must not.
+/// The failing case is reported by its Wycheproof tcId.
+pub fn wycheproof(data: &[u8]) -> Result<usize, Failure> {
+    let mut c = Checks { group: "wycheproof", case: 0, passed: 0 };
+    wycheproof_sets(&mut c, data)?;
+    Ok(c.passed)
+}
+
+struct Reader<'a> {
+    d: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let s = self.d.get(self.pos..self.pos.checked_add(n)?)?;
+        self.pos += n;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+    fn u16(&mut self) -> Option<usize> {
+        self.take(2).map(|b| (b[0] as usize) << 8 | b[1] as usize)
+    }
+    fn blob(&mut self) -> Option<&'a [u8]> {
+        let n = self.u16()?;
+        self.take(n)
+    }
+}
+
+fn hash_id(v: u8) -> Option<HashAlg> {
+    match v {
+        1 => Some(HashAlg::Sha256),
+        2 => Some(HashAlg::Sha384),
+        3 => Some(HashAlg::Sha512),
+        _ => None,
+    }
+}
+
+fn wycheproof_sets(c: &mut Checks, data: &[u8]) -> Result<(), Failure> {
+    c.group("wycheproof");
+    let mut r = Reader { d: data, pos: 0 };
+    let head_ok = r.take(4) == Some(b"DSWP") && r.u16() == Some(1);
+    c.check(head_ok)?;
+    let Some(sets) = r.u16() else { return c.check(false) };
+    for _ in 0..sets {
+        let (Some(kind), Some(h), Some(mgf), Some(salt), Some(a), Some(b), Some(cases)) = (r.u8(), r.u8(), r.u8(), r.u16(), r.blob(), r.blob(), r.u16()) else {
+            return c.check(false);
+        };
+        let hash = hash_id(h);
+        let rsa_key = if kind == 3 { None } else { rsa::PublicKey::new(a, b).ok() };
+        for _ in 0..cases {
+            let (Some(tc), Some(expect), Some(msg), Some(sig)) = (r.u16(), r.u8(), r.blob(), r.blob()) else {
+                return c.check(false);
+            };
+            let ok = match (kind, hash, &rsa_key) {
+                (1, Some(h), Some(k)) => k.verify_pkcs1(h, msg, sig).is_ok(),
+                (2, Some(h), Some(k)) => {
+                    let Some(m) = hash_id(mgf) else { return c.check(false) };
+                    k.verify_pss(&PssParams { hash: h, mgf_hash: m, salt_len: salt }, msg, sig).is_ok()
+                }
+                (3, Some(HashAlg::Sha256), _) => ecdsa::verify(Curve::P256, a, msg, sig).is_ok(),
+                (3, Some(HashAlg::Sha384), _) => ecdsa::verify(Curve::P384, a, msg, sig).is_ok(),
+                _ => return c.check(false),
+            };
+            // Report the Wycheproof tcId as the case number.
+            c.case = tc.saturating_sub(1);
+            c.check(ok == (expect == 1))?;
+        }
+    }
+    c.check(r.pos == data.len())
+}
+
+// ---- expected values (Python hashlib / hmac / cryptography) ----
+
+const WYCHEPROOF: &[u8] = include_bytes!("vectors/wycheproof.bin");
+
+const SHA512_EDGES: &[(usize, &str, &str)] = &[
+    (1, "8a6c69af6fb6247635f837958446fb8f10e39bd5fbc244f7e635176339a3be614f6394247f01dbe1126c178c7bd48cb5", "e45bf5817ddf94aa2f7a407071f0eedc6beb98f768b4cd33d1176d44d1563a45a5d7212290eb7670c6786b13591aedac86478993895e8b24e612014abaa6ba04"),
+    (111, "341388a9dc2275074e90cf394323761919761c805fd9e370977c9966a0e8c81a52135f02577670b0071638a4a26dbc31", "68cffa6d0d76f309c9ce0d35280939f8e25990c43b7b086ccdf709be35b07d4ddba599541ff2b1c19d34ea49aeafb9659adb7ac3c0b078bb30a22d57fc6687ef"),
+    (112, "619cc5d06138526d70659eccf602d197e63e1050e22039a7feb40a30a5b2b08fb03729e291df12f8c576e6f1cd8af22a", "d0865c524d1dddf7c23b799c413f5adcd7caefd3f66a9b49750ec81066012c25a8bcf94ddea6dc525691673097ca40e0101e897fc97218cfdb0704084e2bef4b"),
+    (113, "484a92d02b61b620ccae687fce4cd073eb995294a777d5deb5356bc8c1e2ce984f63f16420058ac5da666fda410a4feb", "606314353bd419f9f7720e8297f2af8a9ed5f0bb0bed29b716bf18e34577623ae7effa46f496bd4282134e7e895284a4760a910d2ad8ec11e9dd75863058cd9c"),
+    (127, "f8234ab81f5f9641c656680825a9bbb3c2616bcc80b65d5e479a4d96742e1b8742330c9e8256ef5f03caa932487044ca", "e0b6a20f1c0c88970a9340152cd5a1c1ecf3d3b8de55102741879438079473540133b812706e5dbec322c8c9523b6fc8c6d16ee626e87ad5fe3d2916afedc369"),
+    (128, "e8480e9c4dd90f88104a79cbaccec48edbd798a142b4f241d726dc252f1502350e824c7d18dadd59d7d716919fb8f9bf", "99b16f17aa0b969a5b8f08f367719d516e330ccd2660b6f0688ec031dbc783de50a1cd185a2568dba75070a2403d17d4741d163578515dfd2ff756ddfe4d47b1"),
+    (129, "430173387764874661acba1e914e50f6d0fbac534809e859b1da4396fad3d5f24c25c6a2d02486d8fbda3994713d981a", "a1556e29185778aa5991e34b8884c840d589f0fbb4b8ed590e51e9ac4eb03a008125000db2671f8fe7f485b59a77b518670078ecb41a54b4cd02a7f1d2ca4c6d"),
+    (239, "fc75ded15c6080ff96ac03391fc1302ca180128e4b6a4a2f17782f2ec016fc3f79b48b5fed3305fb7fdff9fd29434525", "18ee83f30261c3c645d52aee6a209105b25bba39d33845ef48984cc238e4f21661fb7bd7dd4336f71c40fe87d95e5115d6c7be52e0d3e7e7877d24500b5b58df"),
+    (240, "4c4bc5dae174dd68cb5a62e066e01e339e4980e4a35531b732dcf88e9c579e66f7c0d044779e2eda8a597684ca7cffd6", "9d60ee60d29ec4fa0b9690c04c1c29413bbe3ed345639182d9d53dcc05926b77b04f4fec1562fb85182954c96b7cbb5d5e4410251ff4f352d09a2da90419fb13"),
+    (255, "15f3347894a150a64eb82a7044bb5ec8b1d33488716fce4932ba73beb97eabd1ad796bc0a569129ba98120ae1ed7edce", "c2e3bb67012f9eb526202efa59997933f7d3e75e7ded738818bc27d94977f4573afddb1b2793745701e62affa3b7a1c8262c992a321f488a6b1942a4795bab98"),
+    (256, "23f0634552ba15289fa02c8a37e3a391e79e230dca05db03a7696630c5ba3a3352d1624f52832e4d6183c0eb70198e9a", "e49c208e41556e859d1a52d14784a061c2d5ae2c8690a5360e9f9344f60861c1362a9ec05a9f08a4167b3da41bdd122a387413dd06976470e4beff5053f2ac71"),
+    (1000, "94c38db521ca733b8904c2d14b6e82d33dcfcc26e1318c579dbee1fc2f472019034e792263b9d46e90e700de2f6e7e91", "00e36fccf193e59697a92b5ab24666ce6326d7fa16bf10832d0991ddc591112e9dfa6a636950ed9c4d67344a760654c2ff7785e1d60094d651038735b5dccabd"),
+];
+const HMAC_4231: [(&str, &str); 7] = [
+    ("afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6", "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"),
+    ("af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649", "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"),
+    ("88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27", "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb"),
+    ("3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb", "b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3dba91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd"),
+    ("3abf34c3503b2a23a46efc619baef897", "415fad6271580a531d4179bc891d87a6"),
+    ("4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952", "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598"),
+    ("6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e", "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58"),
+];
+const HMAC_512_EDGES: [(usize, &str, &str); 3] = [
+    (0, "962166748e08ee8bc8f622dae1e1d50ddf5a91701a0651de95eb3a520419a6e0a3ea84a0a8989de07ce29906b8892e5f", "aee650458ddcbcd4557531b27f1cded4c577f576079b086f57f3c6b9e037a7c0b3cdf7ff58afa09fe279076d1107d5d554f4d34fc6f03d8fd12f93d892802ac3"),
+    (128, "72a22e9ebcc6a94b499849f469ea197279396bd26fda49d9536a319f72f9f3d5ebc0bc7fd910ba558dd16fdb89bfa75a", "ec34d7168687da0580e5356f05fae4ff03bc68cbef844dabd9259f3b2e330293b9df812f98dc42119324a449bdaa22435dfed1dab7c47c00bfbed91c5368a4e5"),
+    (129, "c2a91ba1f1ff2ce24a2eef235f76b5359a8be2b927ad88b663a9b60d06cbee1d51b387971d46dc0487ec293db7cf3fb2", "e20ad36395957b307b7fd625b8ce91af5331c3a519ef627db890c13953a3517696ff237bef9ac4bea933fcc7dcf29abdcfd011663b46e736ea4c858ee523d043"),
+];
+const HKDF_512: [(&str, &str, &str); 2] = [
+    ("384", "704b39990779ce1dc548052c7dc39f303570dd13fb39f7acc564680bef80e8dec70ee9a7e1f3e293ef68eceb072a5ade", "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5"),
+    ("512", "665799823737ded04a88e47e54a5890bb2c3d247c7a4254a8e61350723590a26c36238127d8661b88cf80ef802d57e2f7cebcf1e00e083848be19929c61b4237", "832390086cda71fb47625bb5ceb168e4c8e26a1a16ed34d9fc7fe92c1481579338da362cb8d9f925d7cb"),
+];
+const HKDF_384_MAX_SHA256: &str = "54d1725121d8a835a8b7007b936d9b526b6edde2db50331bddb594cfc8a1732a";
+const HKDF_384_EMPTY_SALT: &str = "63d28c560efc8cbe4bdc3f288766fd915740592c873b7a4063d237761454b17cdae9288eb91ecc048996537868d25ca1cfd2";
+const BN_POW: &[(&str, &str, &str, &str)] = &[
+    ("9f492fba47a1fca7", "7aeff54e808c46a6", "677cbb5a6d12d9b29d96345e044c3396cf760198b72ee2002f", "9aab92c8c5449b37"),
+    ("0180212c2684950c17", "1c42d0fe736d4796", "d2bc", "545a89cf66fa293c"),
+    ("7532b37906813a3cdaaf12a5c7a20213", "3fc5a1b86c1fb2918ec411835a28ede2", "43eff197220e54e30ddafc13092e2aa17d6efba0f4fdb48b3f", "0db63e725c3c7e57c908302e3d1bc9cf"),
+    ("c990de4c33d5e11798477fdb9196d3df", "173f70c7db0c5225b64c807ce00347ce", "cc475e68b77f9295", "157a553e6836a0953449d4bcdc91eb85"),
+    ("ba9eca13215a4348f36f7cdd4bb5c20ee26799f4597c9683", "455a45c6cdf6fd5ccd804afcde2d841437a14fe006230f06", "016a87", "63e8c0f22817c2d2881646fb0baea389a7e47a4a8d12fb3b"),
+    ("740f64312b8a29f081332e623ca58fe7daaa2a0dc31ffcfced853d3b0c86a0c3", "536bb0f814f8b2f8adf634b6c8cedf09152e4cfd1593411d6e0a309a9d087986", "00", "01"),
+    ("fcb2331fe51a3914c40cdc95c4ad705476567a56706c7724247ec6198e75f0c3", "33efc9314dc922f0dba670fa598007ba3de789868f7fb9a1b569a803d0b727e3", "00", "01"),
+    ("e917c3f05c99387e16fc55d7f9210155b80c9b59a9a24bf10f191b2ad7ccac0964894f116d9cc45acd9f53b01bc2e777", "8c594afff6c04a88d008402e1f9e5536ec8c3c0f3d977f2522f2ca1417be4b547d44c6f8c782313257d923532ae9c601", "01b61c", "e7b5f1e67ec42b1f5d5ef04a5193625abd6eee2d0f90454fd918c97aa5885d291d64842eaaa716db381f92bc02c9c14c"),
+    ("011142fc419ee5b9cdfaa230bfceeedd230c1acc2ba9186f58fac4a61af4bfce4ca20892c1c77d12210f14bded0f6855931ab6523db242488f8c6989291762cf9f87", "2d11d45593ac3eb6875e046e704503fdee1121c24db6ff4226a2d54230867ba5475d2d85554ce5f5657ee3006ce51e1f472bbb3e07637bda7d7886c2db689b75ca", "5fa1de012fb782afc0cb151db689b46c1d7db2473083277565", "e611aa39b306fe336c58efb46d641a61859b0d852bf2f371924f69c4395e3f418a304af206e4fdb05e5871df1fee2bc641c7c54c34b465782d10fe8dffdfffef31"),
+    ("9997eb0053f2180dab31fa83c60ca2df82f22cca7bd868a447c2684ccf56477a368ef2b05ee3ff990cdd2bc91f0dd59aa0c9e6039346b715badcc8bd3366b66e0bc3057700362d3bc5e1f4a469a83d6976fdfe40741bde51b2d8584362e1d357e629660b86daf3e6d96b757e51c9c7e4f93e07a5a04a1b3d157fb4da84dae8d1", "26b1f7adbeb926a42b94d16464dee4b194ede011af06f4e0c128ad2496fefbcb72515bf1a62387bbce24f819a32bddeab393881c30463b9a1e8c0281b9bae9c88559ae92eee2c941e84dcf815de18d1400ca786cdbf39a460076d3bf5c093cfea1c3b4117b9ec332cd980245c2061acb5d2aaa48716017be80d4f4bc0009d05b", "1d9a81c41b5c1d5f40c2e9d7c20173d2b3c87c0d2706f47ad0", "2614af3d31fdf7f66f889df2e2a1cee08e5f70b1b6646e2ade3e329fde7520c7f4ad0011713099fb4070e4705468b438dd9e115d4faf54fe0442b54c91bb3f16a5fb8694dcc4fb4875b975c8f7be4a8a71201d7c365446b9867a2db8ed4c15ee7b7b540158407e6d6110758e3526ae8ed3944d26288024d1b299705c113dc543"),
+    ("b9e2e6f93e40ebc6523cd508f54a6b09ab0fb6400fb66e30374c7bcb2c9b87993e886cca1cc1fdd70449684eafd49de68b3292acbd925ab4320b6ac0452a5779f04310346ff41fe77f45017426d84158be318a5f36e49cbddcddea89dab3a09bb7a27d83657e02c5d7777262a10ad5683b30e4536424b729805b62f2084bc5cdb2d10021c776216047482b553528d496353e7341d3e8832f410f628ddbbf502296eb7ea3365004a1573518e822431b8ba43b6cc1e4fc6741b4d2c3c6dce4d8fa37f342d5dc58512ed82f7c547f21c92dfca02edf5f3d17d2a42b29217ebdd20516c875107d45456fadbe585d181822daf62c257a39947bab6a02849488071d6f", "5e2625e64f19e56357282d9791a284314552a9fcc2864031057e85744e9e82a6437fcada2be05f17540728c90de8f62b18077fa7d7ade0ba06cac9c3d36cfde58bfc881fff9e0de33a95c3e5880dda901e693c4008276bed2af5489a765fcf976eb6c1ad9af31a39a8bb9cd9d614ff4672d0e1f06543591f329bd9590345073a941c979349519dc03c7c915df6495a48f582c6852a5a2c72bcbe8720eca1b980eccaded66947b8dc418bb05052ead0a867bf4625b3e9f967276311e38c1831fd6de73c00f6ae92d31a32c13157d37185bef1d29381cff9709c4ece84b49e505c375e26bf28b5d9f9cc709f8a6ee21836d1e4111e4b1902c5119d81aa2cde8350", "00", "01"),
+    ("dfef6f41f6bef33af8f0c414a2efd915a8bbe4fe1ae232b988cec47f18823f53233e9a546edfedb66a8bdd923b8837b863fcbeab9c3936cc4caac4f3c080078b83fe7ac8fc04220ef79ce76d9ad2640bf11c34a9c005411f85f7ab91424f4d26658953a6de1b8f1397df2fc88155e0749c68d467bf8004979bce7e5e44560d40539331f309661d690511f2802413e313c3f47183c6f6a32a6b63db846c536eaaa560aba43f8820dc5f7ce8cef5c56afbff854cffa07e50c088cb407041e4098726684a6f0aed4fa2d24671edff790c33cc85d209410b77f0aebe130551b118b484471622fa50a29e80cac2afa302739e401c103892b331579dff754705b0f6cbe45f5c996989254ff77dbd7862c21a492f8033ace4cb63a30850430bbe2c8053273a5b4488b79d57e76b7f93c696a29bd92b23d649cc1437da4dd0381df7219f12b6873f509c153d96bbb69d005dfadefcb32c52b323d00951d878ef989dbdc64b886e30ecc42a5caa5ae81c9d066e4453ac691ea5c7fea5e7e5a79f4dea58dd", "2cbbfea8c8eaec7300a2dfdf7a624dc7252d1dad23182cfd3b120b0b10b8546e746364d6863fb15e6e9da4e97666353099eee301f6d542972e9d4b70958a76655622bc38e60be6dd3a5158c6d266e0c62f90955c845c85fa2f5b94c22bde772d5de4883fa676b7ee35846932058b91e841401766f9352b1a699879e8525320155b4e31c99cdd181c9290d0bdc6d3dfb8faef9df3e35c4f1b7b99cc35b6c16489b6bfb36435107c904eccd7d95b6c6a4d672ca3e85801c2e1ad15ebdd9836ec046adbd126b9eb3cb7f70abce8828d272f084cccdde8ea08d251b02926ce55217be5adc8d563fac6723b80d9486192d16a51c9472ee4a563a3a9e7da43868cc7ae7dbc3df020bfe6854c7ec6eee36ee5398d29a31c54a8633abfc14a43843223785f4b7a0037dab83cfcb084a8051b7e024fb208aef27eea20382de15a3d78b220ac4635cd6186c283276acd901ce47cb6a2fde162ec9d194ef5fb6456fa01d02b72d2395bcda5ae14d73b2b17bc3fd9b83148e00e48b9403df5771ccb8ce92d75", "c91e", "8217f65f77c47c04501b4859849a6d9d587299a58fa4225617853100f726878a444f11902368221ca2d93f02f714156d8ce596d3a73a615468fd946373171ea03d08b0b01cf336ce0c73f02eeeb24e5ca2bce01bb8f785fe1cc928e12d8363f29a12d8d03b83b70f3dc5093f68c20950973ce83f4e5b13f080524b878e0bf3365c02a02bb0a8405ed0110492aa8e37d209ce727821b1a2934ea8b5b64402f631ef89d57da7a96b85a991c00eaaf06de20d7eff877bd29261a4f86d99e2aae857541c5ca28d32666d968b654287cdc1a43badfc81810cba30ec2914302d8b35e7ec48c2bd59210c69dc6b2f6bb1ce2f63be95f19978c404183795b5c09b459234297ffa4e92a65d8090922943f92ca9ae5aa61818a61df1e006092af677fbc0f661198a0bb7680f4c08b55486c79017faf06918c4bb62e99e64749526cc6ba396d146c5a30b0a9169e1b6d04d64bcabd31b257aaae22a886a3db9c830def9aab09094f030c18acdbad80128467db4cf94b401cadefff0c5a0db491873419abbb7"),
+    ("afcf2144a03351a9179b6a299c849367462ae66b66b102482435c618674450ac564953d3fd9cc36944c5e7b283dd427ed93932081f7cdf36edc1e6a7b296f7ba6915e2a78f110dddb3e7cb5bc8953a0c3847aedf82f418f7b74959ea09ff7b5ea62382ec8141df9ed0f5d49f2ddebf85acbdceb78071ee168f4181b3ba3c3cf7acfe7aa454d1bf727d3609bd788ca6a4801d63a7e1c40f4dda43e68f099e9d9d1a1f7b04d8b78b7611e00328f14db95954a6cf1388d7511c169bb75be264978bca555c4e796a699a6c074ad4b1380ce8ea09d39c354fdc898358956ae575138651974a3077a9f5c6aabae10e6426f1ef9be493e4b89611bda0e625244a21df32882f0edec45b450e166101fa656505c2b6b980d9ddca38ea309d16e6c2b0bbdae713b9947ede6a101bedd71fcd925c62a09233abfa1192f467a5801e2dfe23d588703b97da7b6e4a87e82ec6ce956868af519e6d577e730d25aa05fc9864c932a302a4a32b4eb248b47e6ff2603c4ebfbdf1ddac645c902b54e271da1f9a92fa8c1d606fc64b86441a439fa29a268b145a7627ecb7b5baa94984b0acc9b6745b9858f6718895cc7f7d3258bb687fc2d5afb9588fbf773693a424da669d754347247b01bff6d50476bb9422b080e9eaf05d0b4985d8388ba02ab6bf4519ce894d44582922c1b7f01a849cf28871df442c1477e9347c082f98f0dfcf76df4970b5", "6e40baa31355290aaf03a73fccab6b07ae67e9385d9d21de293cff5ce37e763113f1a080c48c4a67d6a232f7021ecb0a74f4dfebf70f65f9694a34dbe9d7b872d91c6b637918e6896f84df3996c9d1782e0076cd4b7b96dd2d06f1ff77da6638c76c545b8ade42d5f3656836df23b4de06e00a141b311dd533be893a6fac7bf231dab0e0cd36067d26f93838e2bb8796fe883ddb0004b4d2b1082834a533287f53ee43f1f194194582d7402cd0400bb27b2f283dfb8cf5c31ebb441c3d7190d4c8f2a8eb4e5ae36a475e5485141b536df0629e78b3d1dae4ffbd6e0dbd3a7c66c6992ecbdc1d34f2b7db3cc664e7959de766b006b3a267828bf2185b32a51c2ce5594f83eda01b9dc15664a0c2f078381a22b091c0d15ca1c8421f4316d34fa53ee656f8ec36771d85933e0159834b3737a8dc37f538c046e393964dacf85e6974dce4507e51d71c7ed8bc44b4cab1c344412f674e2d038704ad97a12830a0c519510e3d8d6eb4dd43c2ba5de134904f1a6a069a0bd44d34f949696eb08ef9f406531ab4fdb4da34e77a6a2fb3754c27abb178c1cb95fbdff20c8870cc8b250f0599b7e65b97164795e649746725322ff5ae6a070a97d63bd1c6a9d57e005a47d9e28822e4c51bf500507ef2f413b9014b3b36800b6adfd861dae8e9da4ca945d825795fd7da96e97b77a4bf60b233bfb7368141ceff6bafce0f09347ee1916a", "00", "01"),
+    ("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff42", "02", "01"),
+    ("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43", "00", "05", "00"),
+    ("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43", "1234", "00", "01"),
+];
+/// RSA keys (n, e) made with Python `cryptography`: 2048/e=65537, 2048/e=3, 3072, 4096.
+const RSA_KEYS: [(&str, &str); 4] = [
+    ("8b11fa6310a4ad612a5581e71c112db0c4a8cb2d764a1d65302638df639ebab4cdc79cb361a1245f0cd71948f1ad328196d7840f7626de6558e53d860706ae6c47b8fc1d6fa74cc327d6be967400ae976d138446b8aa90c3acb04802eb8f11b11c90bd44a9ef993d1512d6927c1bd2134af4d56a1bbe0d63d7cf594fbdad6bb64e39b9dc5684c50f43c92976ac1368e0130bc3c7508a066a12c40b9470975cf477e591f2e9a32fd356708e81d17b86da25f7286ac88ca7a2ff02e9ca30630bb1e67f8a544143b04c1c4b0ebdd4b8c44016654785f90637e4e102fa906c444e26aecfe85c3d9ac7c0f0d30b9f9d73f7f4f47bbd8f63c06fe29071fa260320f425", "010001"),
+    ("e33730b2a7760c6ca6a55375c8cc8fb7dfd86df9256cad0ce6ba358b6db6e289073987fe57101b835712379aa17b82e5b66f2edb5e47cead3e19e7b4aa773b987742a89cc53b9f68915a14b2f1a9291b7fd02a10bcad2873c65c9479a0d10638565b17411c920cddd3a58b9ff6f1693b76c4dc408ed4f0e49c8ba316f5d999e44f85ccdc109ac32879f69bcdb0e0c4cd5e43ef282636f3a161eb96ae4918809454e971efddb2ed2567caa8d3477495f792d96cb4108a5c9e9387f78576ab3ad9a6fd91ffcf2e47550cd1f36b53e74d92f48f241464c2b869531ae1798ffc753036376741de203e59caa526535f2412797bf8cdb59a1f283903406983fa932be3", "03"),
+    ("9c24a63abe9f1fea3af55a76c7be16dacd2887b2770472f22b8a14ab061e35fcf144e714e310a143cca9a4935a852fa6b199abfb20743cac3eda43a47e2611cf3da38402d0119d52d4a57d1ab700d46e9fa6f58420f6fe1ff89d208f4ae4abbf329c26ed4e00f0bace298f687abadae553d378b5107a9510e1ed9f7f98f93a26f6237032c794a59a8790bb080c70446fa6684784b2d2e1fc85f21a01765b88d8cf5444556d41ab0ed7cc61fbda8f5c60f9a7717bb62b2fe282dd3aaafda62c1cb45b13d51f915796d1024878e6ab5653e1647402d7017efc49919c953e7aa27bab94b3b377972eec6ab34c2121158d502d5c4e5386fbba04377a7e9cb373dc7ec78d9d161fbdde9dd5fb86be89b7d67d501bc816c2d2f0c65016181ce6ab39ad50a1e503960440b0fa6ac2084ee5ecbf5ee0620738024a101b8927f9e3d5116811e03c3aa6ab6dbe504a3ecb3e5e6a6ad05a7e3b4816f1b98822e448d94fdee87c3e5f22d2505916b6b4036a318c99366269c5da68901c48c3bf4dc279c198b5", "010001"),
+    ("9397d0248cacc453e04e55c5cbb4e6c54bf2e4946a9048cdb83927ea4f3842392e6c94c5d52de619ed8f9cef62fbe5414ce5890e66cdcc5c795d9c3239d3a5a4f030be54ca2b7d17fe1c6846af55f62cd562b7cbaff6ffd1cf9e40b226eeabdca1fee9d28679bd8db8cdfc6457b5e7063fac0df3597c1da3106e45b10db0288625bf7c95eb012bcf3377873e61b071fa754953b06bf170421366e93c9478151467d1bc605ed9ae9faa25179d7dcae3833b455a871b815f41d9451bc2aa7b42918ee883a4232a5000039e3440e24b6a65e70ba84b8192278661415b1904b59a304bebac4c989ff9e0658ae77cce9fcde7ddf43847553881080cf5ea83940047926e6fc6d089565c6e73f25c9e6a094cc02e313f4cb2d2d5e4e544987ff0683622c4956cb26b9ccb3005419e6fd4bc22cf5acf8c69c92548e4b2be49001e5d208286d960c6dd398fad3b0d883041a6761d5acb37fb8aaec935e0a694ac347905529ec2d52f1c137c86645e1a8e1e87813a93544c47f7ccfed1854384f3d202103fc466fe3731dca0b81e1029a44e02417ff803b21c8e031e373ed7573634e0efdb8167b54897e2bcdc842b7289ed4a5e00e5cc2aa950795ef96c52ff10ddda95d9d11ab9c2be6b14624efe83c310d3a3667a1a0afdd2249a506073a442fc5c3ed5eb80a2cee5081b896e4e6497e9c60b1dced526461ec3d3b8b18660121b167de3", "010001"),
+];
+/// (key, PKCS#1 = 0 / PSS = 1, hash, MGF1 hash, salt length, signature of RSA_MSG).
+const RSA_SIGS: &[(usize, u8, HashAlg, HashAlg, usize, &str)] = &[
+    (0, 0, HashAlg::Sha256, HashAlg::Sha256, 0, "6ce1a3ec81abcc4c771f190ba98bb14ee86e66437b85310d5354514d3dc9184e4bf4238f6d33f224d92d3f0559becd3e6104ec5280246b9a5d86fc6a0a9724782a375b3217e2204d023ddfae5065eaa40a8a5e5c38039f93f188c0c34e6f762c1acaba87c944a18008174b99866af281687f8b215a1125a7a07390ac5cc3d34f9561d69b0e60efff697d94590632ef26102eda316374b9133b0a8cbf260448087fe9c6286ae8d58ecd4e68d6a9ade9fc652d6e1a8abb12b391da637a4be2ef99d87efcd62d233ff83764456c4f5ce5f0693736ded70984ec5334b96786b1a8a0ae1b6eac9dbd4d998c4296a7f80f5bfae3a349a6c176d45898bfba2e00ba7802"),
+    (0, 0, HashAlg::Sha384, HashAlg::Sha384, 0, "86dbb6bf535ba93e070611fc1f69c31b37ae60b72066afb8103a37266d6e47ac86b3710272c6011b93f5339f84fadcf634cb03cfd70cc718affbb145f9ad9e8e15d686d225e8aaa02d3d54b13c722152889ea9526ee319de7115d3e584f3111ace0941ea8befc4d7a246138a4c1363be85eb5087e40d3a7ae8830e0dddc61cd5702044b5d1662458754466c67391f75ed486f8458dd8a3d781ed16c1064ef0a01d98a71a70212f978f7bb116182f2a4beed6bfa8236c015fbab28ad84e4c14b2f32d10a7cc36edc20b6e90161de1472e5dd4097365c255758453b45d2f0a277fd1bee414d9563df7f56a5c3a597312ce08da2166b5392f13697ada0fde424684"),
+    (0, 0, HashAlg::Sha512, HashAlg::Sha512, 0, "48c864b63278927a76bde4c7353e3859813b4402c27519dd7b4711802d38198c50a18585ffa9013a66fbeaac7183e2bc22b0f8b6fff09225133caf836afaaad60f00b82080fcb20a232b37cd88eaa2be9111afef504646a055689088c84c4886af0191939516bf0589e4fdb22129e3e8d1fb4231b0c17f003cb3cd056dd1642769fd0dfaded916571e1edb6342b55e05030b23a8921d8c71d817840411e96913606180ea392809f38ae6e903115dd17bde71cc960c5ed07a8e3a06552549b8295999fff5217a353b78877197552d8150704da3dbd16a93d1976eaa54040450ce3deccb45705357054ce12ea563a6789b2af82aba29eb6c9cb7b77824b6e54c2d"),
+    (0, 1, HashAlg::Sha256, HashAlg::Sha256, 32, "70d029416e75de5b993d921b52e67e8757ae8dfcf9f1c13bf4b32da45367e19678cccb15566e4dcb80e618747a813736621ad0ded2b611140e454b3850336894534ea690192158a9666d06bee704f0900402865a72810ed2d2bedc24d93dd7f40785ac169473ad068916421a92891d098fdd913645b02febedd72c28caadbe07a19ad2c83965a33fd2e0d8929c3c486d4a8e216646ef625d42518210ab21e570367cee77425dde7b57d18629149d90e0434afe730d0061b3e16250956616c9d67bb40a1a86a098431a4cb58f811efa9edfb9d5b194aaa67509b449cd709570d3919b21e7fd03564eeed4cedbdb0dfa196063741bff96853b4dc4b392855f4543"),
+    (0, 1, HashAlg::Sha384, HashAlg::Sha384, 48, "4723302387e7d666c607c0ed84b200520c031b37b20ac86bfa765ce896535fc114b2ec6fa0c6d0f5fa9073f1876ef54a47dec9f1ace451d7c78e076ea81540eb0948c267a253bc38b0d5815f27071d191e225c8eea8df6a88b7443b3e68aba405efa84be0e54c3a0463b15dfec6789900ecc3bf001c8ce14f650e865fb071b3b56d77abb882148199d0b43aa0a6b3a27d397484c28c50dffcf1f47ffba156031626aa76d0df686851dde3f9a50a4b7100d412bbc181a01d9e40500709b153f1db1711dfc1279615ba411417ef554b76008308a4134174a13c2b4c534a3a470f33ad283e96dc4cd6c90707303ebae4f92982185af4441548e5346702164c49d55"),
+    (0, 1, HashAlg::Sha512, HashAlg::Sha512, 64, "65d6beda41803c8a451493eda302648777ade5c7047c1ce9bda6884d0086078d51ae1539931a70b3995800f1fb4b3d1d6d399675cc72958b64fc3621732b2990fee689e48c1b8aec30e7963e066c5b8a65ba3a350b05ac6b6a33d027bb9c8ef00efa9186fd51d6f72b9166ce53391b5360e10b2f5d02d3db6214a859afe640f63be964ca52f88e42de0277301316a78ec089dcb18258e2f444a9dd9212d5ca9c0f07eaf476e28bf40d126d6e69aac348ae81111624e5dd5c1188e0b1c250768c6ce296c67d97c903c5c9b4ec34ed6fc32fc2812a0e5f84bca4257a775560222669cf4dbfe2c79ac2212f06f71fc40e32a4d2d9ec671b046740f570ab1ebe39b5"),
+    (1, 0, HashAlg::Sha256, HashAlg::Sha256, 0, "365347c2c559ef115801578190c0620863fb9266c96143e0ca1180493e273eba0f3a7c9225bd9f379b63b005890966996c3086ffbcee061308d369ade22caa5efa807c903b1ec24e2702e68739c21345750ebdb17102331a6308273ce568ddc55676f5b04831e3af0f047cafed5ea402c3847eb7cf17d32391478abaa2c46fc6644130e27f37727668d319ddd559b50be850a9b0b3661d1786c0923706204856aeb5d8845a668fd2c248b2561eeb0d88f07e4e0c1294316ba14d649f9026ccb221e2fbb310501855b7ec6791bc1cb4e16b39f03a8ce362ae3b244d1f09f2a716359151a1c31465d77e3d2178408b997d0e14d7092a6fa0d5e94032f5be0d039d"),
+    (1, 1, HashAlg::Sha256, HashAlg::Sha256, 32, "b1b47a1831f34a82ada023879a8c6b118a4ab74f57c64d93e84126bb947dc35b3367852944d7e65ac388ede079eb642fc6284f36cc28e19b7a8c28cc085456451c6aadd54b3b63111486da68d9a8e1247fa68532d539c511f8eefc9c23e80d121e7dd3ef99f983e4ab948ea8d93ac0d267b5b51f5bbfb603a6dabc412f102ff79be021ccae1204272c346594386b212c5069b26aa1cd0deceef5142bd168f9106a2af972f4a658bf682b2449cdcf02c4749ea79832deb67fe4277d6cba95e1cdf83bdb106c6858dd8fe92ddcb12da97b67f9611df384bb21ee5dd0d103c564c41edc019943b250858198a42eb204f265ae90939970be7643d1e8829726c2ec15"),
+    (2, 0, HashAlg::Sha384, HashAlg::Sha384, 0, "665ef4504a71467ef75af632a503d354d5e4fe70e28d749a54931e5b01b8b356b2ffb3c2d09bef514eb1454f92a26203a242de75eb6f7d6e2e243437d620546be3949fb453fcac088f25881cb20cde5e95aef7ca8df11639ab12f94ce958015732b7ba1826ed904a1cd38d307e203c3c084872ffef392d04c931afce60327c8ade4eb948e9559ee2aed6218fc92f41725fae41f024aea3c06505fb4cef1d299a6f1f7ea659b3a717f1801f3d4f27c98d3346cac3d520c2d605dac23cdf957df1903e70e359fe4517ac161f97f9462b277846e5ced3547703119560f03c5110cff966666ed8faf861f70492c9bc68e7d7ee8720c1f62e7e85ceb725d5889e6544b92437ece04cd15c80f8a7f87ff810538caaa9db10381e8e01c0973b968b08414792ce86b55995ea7c0ef3f926af6255a26ba326f6ec7ebcc226961bf6181c5cc096f9d022ec427433756e0efe8fb391d645d1f69541e214d0f1e2844c65068f7a30343fa5eddf2dd18190647e0a4c56f474a72e205cd73b55ac6550b05c0682"),
+    (2, 1, HashAlg::Sha384, HashAlg::Sha384, 48, "28e45c1c1294e5ee2843cd388630d271907bba784a1f75cabffb0ca2242663ac3176845d6a9895a34f5c01f75e154ea26ff0e6256a8610403b7fe8038ce926c407e182c6916c72490b24c62e20e7fcbbf8df8c274e766c51cd556dadf20b6513bc257a7b6c0bee8ed58d6e7e7c84493683aeec03b8877b46eed47ec35767eab60ce0459867edbba6310721ac2dde1ff1e12d15921e488ae3c100aeec863e2f7e31b7a085d9ad7c8972b9b9674aa813d8d565f0704cddd68f01193b1f2393ad3f0ae0b7856f6eb8fe26fdb76e081b64124dc8c33c7abd8c64b52fc6913ffbd635068e2836467739fe42401bbe72999a7eaab9315255376a196b324fd9f1e54a12b037e9bbf33e0c3c11db0f9042183b38409d9243274d1aa41ed93e1f93c2382df8c83462892aedd20f6e0e4e08acb7f6b5b08a599f00c7c461bd6f16e9b6348c1fdc2f48bd42405d873f18992cf6eb9901b5f1bbafd1b23c2e5c56f350c3f50b32b126fe91e9ab56acce794d7f15850d44f794b5dabcc8b13bd695ea78e6757e"),
+    (3, 0, HashAlg::Sha512, HashAlg::Sha512, 0, "06802501981e7e0b176e127ff75370c3be64ac9357eb5516286f18d876a3631a235d815194b573719a8ae4365021edf3d08c5a20b7b77183e33d0dda2d3111639522386816f4cbc7b89021d1f1a461728e2fe249f1ee0cde22c61855c9202f4afddf6e37383dfc457aef0a52a7aa57a30387aca0cdb1145babed20afc143b5d727fc57c7ccec6468c232cdb006ad7b6cf665cc996d3fb237f57389c75aea368bb2eae6642a655aa77b791f985858da976a51f86ff98bd91607052eeaa640b2f04eb2def2f9feb335910d119dc561dc89bcfd99b53f935e48ace13a8fbadc581c9165cf441dd3ebcd3b5fd0651ef0aefebb1d62deb7ca1bcd28e01b8c1d155afb023713a09e0e15323f8fc3a3fef9757892af65485200d4dcda13159196d4a3c103fe12597120ecce47ba1d8b8ab03f5491b8d1f9d854337cfe2027c0d06862bdec9f6d58c7cc8fea906f92d29165284b9c8fd421ec480187fc72aa5c55f21ad72ac7a28212ebd45a13c36758459ebf9818b3b325afe10c55f5b91b30383615425c6fade4439bd583fa8283feb0abde177e51bc3d4a24b1fe83cc745e963fe0c6bac6a38656c9c7df85df1f869b3329d7d1ea31c4cd7e54cbda1873fd091bf34c9d93125d3ec3536515a37e876a65875061bebd2b0a0cf8b2ec3df16bb82924d53f4a029634e15f82586282db4d457c20de07957277502a13bf0203ab50fc324f"),
+    (3, 1, HashAlg::Sha512, HashAlg::Sha512, 64, "1ae1a25f62ad59771f474bd8e92b4131190fdc7c4c36c254ee70a33f1e5e0e2f7c582d9993c8a73db878960aeaf77c611cd0636d271d3c0138e4e220d3da61dc091634253030e81e004e0458693f71046bf02dd02497ba8d7e9fed69c807347730ec14f1ce58d7db1beaf48e10d15ddbf3609c0741b580aedc601f0e7b362e9b3cc801141db69577f782fe55666a5c7322317cf6a93282c97ebf16573c03b8e60dcc6c74a867537e978914ed530e80f61fdc9748e91e004b45d3437d4f7be5058c2b1cf594bea66c9526e3ad174f86d8cd63f9f00f0e9f29299f1614d0e3b68290f78897c0b58b7ce82c4648464a26a6c1fbbeee5aa3fb28e2778dfa179ec05f8fc2f931fd8b4921c0b1203e41a917c44ee2c0b731ad2975407b5138ea649ac2f119859d46b47bdc9a2342100c54bbca0adbc724c5dc7efd038976d1bf5a541d291fde9ad363a03e6e8d5ac4762c8fbb0e559363532858b307970c94b7c913a387376bf10874dc3414e1a6ab1e467fd2f7fa22c4fb75a11c5190a2dec53d71e08217f57c11afa1c13db5b98affedb3c91777f8228fce3e5beb3e937a12385125b84b361310395fdc4a7ddba15abf0a4610d575bab8381d7929615f827b166e3f17b9cc0615255ff1a24874757a6011769731da0d3674a5514b5c342c26b7c5f0e2c3e762d222dfe4151ca984f9e714fc6fcd9e87ae19d6e23fad4eb92b86719d"),
+    (3, 1, HashAlg::Sha256, HashAlg::Sha256, 32, "648f0d5dc786b5b38269a940ef701785c4c6972051b9c9c06dcc6178f04ac739aa0da7c516ba1e946d1fa3ca8b219e526b69ab140a398ea2d2947b8545ed5ddcf3a8056ec8ded39fbbf3aed62a1247b7e021e02689471059ba1c7ff66cf9f187ed4519125506dd11d34ee1662e4ba74ad9376a683c2da15708a7802c358ac51e3e7eb4690426ae2a34c1cd57a30cffb87ff96f1a6b16f2efd0fff9916f5ccb147e46fa228c63bc90785e012b5ac2eb2cc465786508aa4418dbebe9f8795ff3c7fa1d7898d0062f012f718efe2298ad0311d414ee59c18d5096c94e608470bedc7327596df087c6ccdc828a827d002d8712bdd51a23dcf2253dcca2c0af17ebc2b5412b7d91f24afabec97c3ff999a6e60fc5f6f6b65182d33446c406495c93e96d15258b644be6ac21eaeec7ae8a111f6218f602654ed9d8ecf482026c6162f11d098c3d322d8c1d82f9762b2e428c7deff2c50344df0f12315ce2ca018f2a27a6f890b04d0e839a37ed8f36d923749246aecae7536e431bcfa34e70bff08f6f23db76753c0d4502b735b45dd911d96c9836bd04fcab3a0059bbaa39e344920c32f94dd223b0b842a296beaf67861da8b71bb6b64622ee133c3361015f1c69af0ec23e2c1f4552d9f2d748b6a894d6eaf5b4827fe7cb356203fa0389e75bb7af4f45b7a1d78adfd0f1f74b1d9696189ec0a05119f2acdcfd6cea6d3a947303a1"),
+    (0, 1, HashAlg::Sha256, HashAlg::Sha256, 0, "1ee4328282f09bfb667fe4d739e0d3d7eb12cb83b0ce88360b41eb7a5d4f9dcc1b9b7fc320876e8f0520ab2da756ba9cf511d1332e37deb2294a545ad03c7272cff68d56cb40a9136034fc833ce648b8ac5ed20578605210a00c0876f1ea1dc38b37f068a4614a34fa0794b1e31b3caf7e3f3f1ffdd60d37631a1cbc5d798b4d4597cc2e052803d57d8377c67a5caf9d144b5e4c22133c9e0fca15039e0b179187782beab2b991d8dc6861fcbf4324a6c7e21b9b3e710b605ea4972d2a7d1f4c0d2e7ac7e5b44780ae545d2cf4b63a292baea67bef9888bdb72c306f5aa3ea57bc5b510bf2ed7fac449f6ac7931f37baca53d3a68077da0115841e5dc0e70ba8"),
+    (0, 1, HashAlg::Sha256, HashAlg::Sha256, 20, "0c99e794220dd4972e78c63b91d40344c9dc0f1e0863965f90b0c3c22cd6488b68a4df0e326ccd90c64d06084c4c113e3ec6bf02a66c44f862b3598479f17bf7d05680aef6a8584b9853f2b918dbb051aa26b9c0adbc41c537bb5735dbab1360f6ecc392cd3c3998f96afe98524c79979903652127e018ea4e2018d372c7df13c6da2084076b1cee3991f56e10df65d7d86680daef38dc31f8917aa30129f68cd6e66538c0f4ea1b75acdb396e33cce6e954733df0dc12f80c486e5756a80f12875f08e109a0409b0c61467fe9b2519c59069e9fecbce0e9690c25e1f1c5e7e70b3cc46c9a0228ca609d21778fe8e3d7a419718eb709bbd872b44fc09dd32db8"),
+    (0, 1, HashAlg::Sha256, HashAlg::Sha384, 0, "2ac133dba8c235afb0340ca18acc0cee643e908d57ebd1afc7db1f1a195f4b0ea9a1129ad1e2e800a624868e6ddb2aea491ce83ebfd479b7cdc82a8351ba4b38f8dec4c0b2c7934acccfd477cfebe89ee738ab6de3db4c8f4327e51d52c9aa1e959dd74f4933171c84fd07b2934fbf41023e3c4ea0911a076e6419505f136a1be0e61a5eef14c9cbfd2da0347e589fdc2972644f3d4452bb9303b137cfca220848ec43f62ee3f86d6cbb4c0c121bca2b1518aca0bdf7b4ef4fb9fee34207489c523d1a9ea8a881a98f9f67c70ed788c6b171247a1576a8e9e21a68f20b15aab0a9bfedb099123ebf564d4fb4cef4488b30daf491d29547c50c3990b932074802"),
+    (0, 1, HashAlg::Sha512, HashAlg::Sha512, 100, "5888de6496ec11fca05ddcb9ac2883f3a4b9294cd2df166f861ec01f9b2b8e30bda4a9a71f593de4cd108c8a262215193506b3299df72260ce3a4a0cb75b69212b017df41e7f8570208a19d970cd09a911881ac65ab084945d1625dfa0da4ebcf7c7d0f31e0d752d5cbf710128857a55dce94fdd68de354492d2c7694558199c0fddcbce7a6964b5e1f89077e2fe359dc7d4c637ff0ef02ee25a64286c7130fc430188cee52f7b11af05abd5150d34d6386db37837e6ffcf70e2cba9fc785b5e682fa91fdf7d6a67fc23823986669d0b17f100d8f2c35e572376b2bf26dca54a0526eb7402e3d1ef8662fd289086449211b3f2b4b853e1ab5973531f1118c4ad"),
+];
+const RSA_NO_NULL: &str = "17af52c91de38dc86b2b26a240b5e5a849f0aa07ec2295fe59012a2cc6660ab04f2b166e3ae331c58374dd60722e34188093f738eb8361ea38e98ff81a26a1b20a7b0486c73a934ffa90b3f7d9010531f6d0454190f119acbb1886513e980bfcd700fe850097a7daf2cf86ed8b346e38b1c8657f385932829dc2c2013a6ba7aa83463aa8125dc310134b63b562021aca73d34201e6aa799a630e3fdb77b2343dda74acfd71b458ed5236613fe73c97b696c8ab63a6e52fc8e668eb2b13eaecf454226b81881ae1fadfb71df9d2a013f3f766380c541c53f9fca3ffa983fde074abbc294d5b5ae9c5875d49dbaf8d1db4ef2cdebebfce5a188a30f56a977fad2f";
+const RSA_2049: (&str, &str) = ("0150e20da1a60a58707863b5294a7b1ea8d27af332685fe8ad27a2bae4d1ef4f8c0acc03c4bd8a38220c11576a022541cc082bf7882af7e2cbee824f71be074f5b3afda40636762d5b29a8be63febe303b85f505ede82a7060bf66de9c3aea6af5ab17fadbbbd06fc82fd7ebdce2f8ff1e1d35f0f030fea5e9c3f0d3918d978b88627286b67e57cfcac88f30485c96fbfaecc33bd222b43acbe39d76ce5fcf15c8682ca20e8ac579015922f32d1ebba86da3120977de0f073cbc85cfa5a2a66e6b67927e930cf4bcc539d0db8846f950120a7cca50f56a2f3f7ebd984de99b97e7dae73f69f5e3738c97db443baae47ec9d1bc0b69b1bd62cbb017adcc4c086ac1", "007acd4e02750c3980122a89e88d8378679dabee4d6f78ec9c561b917eb0761deb2832ff08f327e22ada4f88ab73778e38f467a08deb4e3e488d832760023281a1b9436c7801c7306782e0e91d6fbef6df551bd2ecb70015591ca83071b93f85b3993c079020d6bb709b0e99c315b236cee506f63fc88b3099fc6ddad446ab934ce1108a8dd55528e22a4af8a514f3f1d16ecbb764367c78bc2260d8ddf598089392cfba63cd4525774c5af0ed3a5cadf0aed9931519ff131f13fa63ad08038daf24aea3b1babdea6016b6e5771a1faa65eec4c3de66bc662908811c3d1f2d5137ff6d463ae3bb8369e34dada6fb054dab4fa4d6054fa6d5c4ae125e4889ae4dba");
+/// A PSS block that is right in its last 256 bytes, but m has a non-zero byte above them
+/// (m = 2^2048 + EM) – must be refused.
+const RSA_2049_TOP: &str = "000700a639f463f8e8b36a2db98a0c43ff41ba73e353817112957f435b05d621f33e9ea77d91d1c3f40499ced6544b2ceb691997564450ccf848d30230eefe515a0bcb22d0947468d099bb57e855793806afcda61cbe244a19069faec320dba9ad1f4a1c64da16c87ba3b184b2bb75312532c24a24fad2d060f18397cb9cb6f31a37c7d90f8d616b3f20a1406e4e75ac81b0172ecb4a67eab887d2dfd645fe653c8386913a8abc4548a5489d057980c8dfc2af17934de9af680f87242c9261e1b58fe06b192154852833866ba70293d5b3283917c663cf63231c66d5651340b40db0c92e29ba4e3bbbb40eb22fd9141e9f588019e3c7c2b99d451016ed2f94d1cf";
+/// ECDSA: (curve, public key, DER signature of RSA_MSG) – Python `cryptography`; the key
+/// of private value 1 (public key = G) and random keys.
+const EC_SIGS: &[(Curve, &str, &str)] = &[
+    (Curve::P256, "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", "304402205609aafce0bf574ba5fbee1c0e970b22485157272f3695c0abe89f75e22bbda70220082ad555a6eb37e2f4f6dfdef5cd6e00cac6a20c109697ec6d9fbe4a51c2f46c"),
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "30450221009d90a7145d3b018a6b1aea000fefa3e851975e1c535e0ec7f38620042351d91b02201713be4a5bd167ecae4c6c244f7e99f253d2ce204d09c8a56faa2e60d04b1e6b"),
+    (Curve::P256, "04b49217886e296800b74f1013f8563b3d8617a58d3fa87b025342e150b7013a9cf134c36b73c2c9fd8baf3cf1e1c85a566c5149b02bbfafdf489a8bd7169461da", "30450220442de0c978b21abbbb30002131fe27c3da580ed30f7251d1c891df3d89e5cd28022100cc3761a80e20559ce6aa5cbce7385285549032aaea0f43715e68f07bef2db1f5"),
+    (Curve::P384, "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f", "30640230723436f981e9de99d2cf069279cdea24d805c931d3b2b071f22d301f681cb3c0a92e7ace1193ea5ee7b4ab0d973579ef023062e5c0f3740cf07d30d894994d1276b8fbf27b59fa39a07fac0cd417ab0c5c2c30957da7b5f8cf97c216b7bc11f6cb8f"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "306502300e09d933040cb8bcb46dcdc7f5043abc6cace0efc6fb89532fb76689ffbd41f801e0fce4827747077b9ac3c8563035fe023100eca7f3554aa6b4a10ebdb726e3b7bf920e32bce3026909b633a485e8c84f59912f45404e9286dea66d11c5affce99e9c"),
+    (Curve::P384, "0455947cc9ee5642e04443e6be1844a8961c54b3b3df1ac34ee2f050b84c89b42c85b513aa0c22f42cb7d33cb79140e8ef5a944a489b45a1dcf5432de8c273139e0069214d54ee5b33a48d00ebae84d7a36bdd4a8a06a42841ed4ab432690167ee", "3065023100c72f4c935f00f98649ebc1893570600e9ffb1fbf2987887e33d09d0e8727eb4b62fbd069a62104b1c07dc2bcfa8e4506023054b9af258bdc56bd93cd3279c27ec9321c3c33bc725ac2a86f0fd173e40cc22785a27120c213e7ead723668e1e881411"),
+];
+/// (curve, public key, digest, DER signature) – edge digests: all ones (e > n), e = n
+/// (u1 = 0), e = 0, e = n + 1; signed as pre-hashed digests.
+const EC_DIGESTS: &[(Curve, &str, &str, &str)] = &[
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "3045022100da9503137fa28bf04692a9aa3dbeddaa4fbdbb6a104857e3b2ad5c9aee88442b02205fcc510fe4c922210a10291860bd9409fbd55c8f88e56952a7fea952ce6e4d97"),
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", "304502206d0dd0445e4d501d2585113a1ab0b88189b29c909617f27efc94537b2e6fc3ae022100b720eaf5fda1b1ba4576607a65cd9f82ed8654a43cd5cf98fe0885b50624c4a4"),
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "0000000000000000000000000000000000000000000000000000000000000000", "3045022100d3465e17a1d4344d158cd26a5cfedf7bdb3a54f332433dc69b39f6d21d69475102200183ad86f54b26889ad314fe7cc0fd9a1730d54047414c8e02af88a1d317d262"),
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552", "3046022100913e1a63457061ceabe247e9987e0cf65b57828ae45279aa7c49ee162f151ed2022100dc756a54b5018575fa8de3b8caf960499305fc85d71ce41f722733a17e958731"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "306502303af50d51cb3b3fbbe5623f4532a9b33e17ef2c0a663b863e53417b9eb5815c3340fbf483f1b507eb0be4631b093ec5f5023100ab9f056cd7559d5ceeeb8caee84b7335f29875af7f0dc6f09ad107e0ebd6441cc3a970441d1b9210b515c58199c962ac"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973", "3065023100d0390fd0517322d20eefb9a6dc44fa2b5fb2a3aa9a1f37beb55dd0c8082b8d95a3b754053678b39f760282b791f9027902305a9b88229615c7eaadf6dd6cee4d87f23e966a393b9c70082b75fe5e8d43b45ad6a79d7372c70ce55f40d25fea29daff"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "3066023100f9636dc5e99001068080bd9d85d9f1da4497e9a05df5e518b32be4b1e1343a36ae35b8b9947761941913f1fba5b7b662023100f71af115559766b6df3fba8aa824687e72bc89929b8af873ac6166cd7b9a22fe4cc47f07469671a711af5e34473201d5"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52974", "3065023036cc41a0437142e2c63c59913d7048d52da3f2d97f8e28493cdfdf20981f18a47ad9f22bb145d1596d396837e700bb93023100c93e0afeb84d473a5eaefcde183a27664a9d1c87f4ffa0fdf6b99b121c3c495f3e8391999ac939c30b5623385b54ea06"),
+];
+/// (curve, public key, r, s) of a valid signature – the tests build DER variants from it.
+const EC_RS: &[(Curve, &str, &str, &str)] = &[
+    (Curve::P256, "04a527a172ecee7d0fc64664b36a789634d0a29e3aed8068cc73315a0ae1cd7744fb0a93385f8efe80057e5605d37f427c520ceba677a1fb955bb00d9b48596056", "8afa7cfd53ef10c3a80ff1cb711d0db6061aa31f993323ee69aab30b7f1d8563", "f5b0b590cd0aa58240658a42722ce985294c93f1074b64f396ad1541e8113dfc"),
+    (Curve::P384, "047ebda0f1f4dd81325f0da070b3a0900eba7fd7f13d7a104f99f3074e3edd0cdce163dcb72dd5938a1845d0c2ab8d444548bd9ebe59a2f0c5475a29df397fd56fec41e1d454af8cc0638613e33ddcc61f661e5155658c06a634dfee96e2baae90", "21941a90958ba7794063e1ecc1e286925acc66ee70b2fa38fd6a8322e20a4b6bf5437836a054591e72db8764747dc8c0", "744c79bf5ac5b2be3463c2ac4b89db256109a47f953b8fdc05e3914a9eed18609d35caf5f1d250ba7ea650c4c26c5a53"),
+];
+const RSA_CRAFT_KEY: &str = "d33e702fa9d478a16080fb1278e81472c4617bc9622021db688aeabf914f4d7b23084d9d73e90e59cb82d8f64e2b999a146f1ee7bf1158eb58b8d186771c5bb3ffff598e6dc0529d5786bdaeafc4de1238a41f7b0b763ada7d6bf51636eca1ef4175ad5d7853a111f39e4a9acff1f366d21ed125c24fde48bcae04d31b7831a2a86bb13a1a88bb9d1a7970a1a7c5c0f4151d5bc22eb3c5176501c54bc34fe948afa8502ec4b8f0742554dd43808fddbb11eabe3988aa8c465e4b9828cd6b26c4a7b8a0d7b63755c96e755cdf3a054ec66cac80d26e4ebbc3fb50dfd0ba5c399312454f85839166fbed66c4d58227cb0fa9f4b7853d4374f627477e2a23c38d87";
+/// PKCS#1 v1.5 blocks that are almost right (raw RSA with the private key of RSA_CRAFT_KEY).
+const RSA_PKCS1_BAD: &[&str] = &[
+    // correct (control)
+    "14f32994836c1c0d8af720a79087f4c04b68f5ef998c71acc280cedd5901b9fbdfb344c7eaafe00c247da2b44fcac7819f18ecbf7f487a92b3b3cf4114f789f3e5b65591f72c300c3a125c1ea10aa6201e90c217f7197415a6169c424f11a864d946810e15a8aa1ae033a52d9acb2c7583b54a6d2f739415726c7c5cadc5ab3e5588a2d2b22b9130f3affb41003cdfbbfac02bef48fff65de61d126c5325a0f19a56ee66cf13d326953bdc917abc825aa4d9a49fb7062eed496dec0ca0b9fb7186a96aa887a7f157e95a6729b091a75bc2f2f3231b173fa7e19a16a34b812159af1fc42ddfb57769f1a3ea97aa9429d9c182e914d64b2b5873b677ec64816747",
+    // padding bytes 0xfe
+    "263c25375ed46e5b8eed2896b97188b381727ca47d0bf03d72a1bd423b69d318e32f0f18437e79a6c716014c9b3992ad2c6fd05e8ea0ab4827a8d8a74f3507edf92fc15d04bca02027e528a7c8e8ea9513bc3a795f36d715d6f565068c509ca57b3e571e9bcf2a7b50f39c79b2966d8365e5adddfd270cfd53187d97b40cf06fc0f3246225a21ab4d51b10445899a41b76dfc823167d7ebd8ea6abaada92fd3f8bbb66ca151068feca8f83020af9182a466af1a2c4e03705a83102c55e2de69d02018367afa612a81132367930cb7a4d65d3d0e7e955071bdf962f3c5917e59bf246d36f4f45299e43ab12423d24855b5f231d28262e37c40865d55867e0b01d",
+    // block type 2
+    "364c5378dd4f547280825753577b2074dede6610d4fbc060e3a24bceffdd1170d73dfbea38e33b41af93e084e0b5afc2b9494048797ed0f7737dce4db408d0cda7d8dd5150193613986112ff7873a6a75045b5cf0e1c8a0dd59fa1c7277d659fa8645fbf0c0c4b347150203424884ae652f6271ec08420f91f8bfebb42044ed7962503af8662779992c9faaa39c6a9a0b7a4e06d0e99406fe3a474bd04a2e150347991b1e79af20396b4c0b64d2728dc4de40858ac263cf699f9f7535a66eea03520e5522926f2d248a8584add02338431cbfcbb6729f4e2886f832d63dc443610d39ab13c3f20d5dafc19c9a8eb8f5610d29754141d8940d27927a7e1127628",
+    // no zero separator
+    "b1e328ff54b1fb48417d768168d393a5435dcb9dc89cb2fd16e3e61c63cff9c4f07c6b23d881eff8f9a2682382fcdb0e52483f72978aaf71e4c67d792106735deb0ee11ac507e701435a6830dd49e14506ed879aad903377dc503b6218cea0a5ff0528eba5cc03afd3a0a6fbfbf45507f64f92bc9e54be98188e154c1364fe8e24a907dbe554f4e5782eeecdf201ae9a9f4fd2425d67e09241bcbbe81b33978f2907f6e4d28d28041dc97ec8b1564971298814a6626b5e57c08e2ad576b9aa6616733bf7d656fe7a2baca2a6385752dd82be3f51e3b6fbc44faec9d6fdcbe3e7abf453ce0ba196135607879da5ee8ed42dbcf7e13ced42a85fece7116545bf66",
+    // one 0xff short, extra byte after the hash
+    "afa87914b2e351326bc0455d0861a529bc63e4a107a4bf73087201455a5bc7e907ac4530b4ba3aa86d0c0a403c645d708d76fdad2e791b9d10094869635abb02c0ac6211496f1b6b2fead4c789a9d31b7a365459c2bd98817dc0cbdfea78fd7a2615d5cda583ab84a0cae999b59b0d56632d23bf0cda2a71b720c47431aed9e73f503dbb7985ba049996cf520206078be95b17dadcc96127a675feacfb31a7e9f165b02dde91fe6a0ee3f997318028e51284a04723a4704f0a8459268217c7f5505fe53d365668337ab108f15228e90f59903b267cd1910f7ef048d6acec226d04738b63ff088e0dd7bdd0ae47c072a9ffacea4506013114e31dab6abbd19e72",
+    // first byte 1
+    "693bb203e14f4698981bed143bd5f36f36df0aee8da05fc78536b4531388b1b72c5dd20c136a28411294c232b110381fcaf18feeba05ce1784c04a526bf9318dcc24d5d96ae9969364bcce1a9193dfdb73da0144f80720015880197136a421fe8d042349763b24658df2afbb6ff344d6d755f65047d67b9909c98397c811352bcda6701a88b3f9015600573fb21de7b5ffcbc43ef36a76aa595073aa512c84ba5d83e168096614cee84f498345bfe0c30d7b52fff3237968f2308d4ef2c3db1596013383ec95ba8c8eb1462d6f84fda8f7fd144b22a4d032197d20c37d75ded9d38529085ced63960c69ed3663275533c14725d2094a7a7ac14270fe6e4cc4a1",
+];
+/// A PSS block, right except that the top bit of maskedDB (above emBits = 2047) is set.
+const RSA_PSS_TOPBIT: &str = "6ef722fa252db061b3f7e763a5514736aee0bb70706e33f08532be06e184847ea8fe03b5417312808ad345bb7d9ee22c22bb5294501f91932d413d0fd8716b21f735026d1f61808e01615acdd11067e84451f2b5f29dbf2e8b935b2185d5e0f8095670a0ab94359bfbfc05bd4b79d330de46b2c9b19d8a903b8a60c712b0247875e735f9559316038b9ca231bf5f8a9673edaf9031029ec084e25493869a009fc7e4cbdeb5ee8de2943c67ceb9cc8bbffec6e598e2c1d5dba135b75f87a756a08e57b3654ecd1644db67a9a09496f21e83f4a25c11b73d6d0e1fa9c590dc838c151b9081f2297da37ca2158e973fe5a465578cf98db4f569fa4c2553b3f9f6a6";
+/// P256: a point with a small x (0): (x, y) and the same with x + p (> p, refused).
+const P256_SMALL_X: (&str, &str) = ("04000000000000000000000000000000000000000000000000000000000000000066485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4", "04ffffffff00000001000000000000000000000000ffffffffffffffffffffffff66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4");
+/// P384: a point with a small x (0): (x, y) and the same with x + p (> p, refused).
+const P384_SMALL_X: (&str, &str) = ("04000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c306610fb0ae5a159cf45c06069f22a6c5eb3641c602d42dea2c4b4f75550793406d80d2b91ad54f9048bd487af1ade1", "04fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffffc306610fb0ae5a159cf45c06069f22a6c5eb3641c602d42dea2c4b4f75550793406d80d2b91ad54f9048bd487af1ade1");
