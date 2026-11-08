@@ -15,6 +15,16 @@
 //   HKDF     RFC 5869 test cases 1-3 (SHA-256)
 //   ChaCha20 RFC 8439 sections 2.3.2, 2.4.2, appendix A.1 (1-5) and A.2 (2)
 //   rng      the fast-key-erasure generator against the same construction in Python
+//   Poly1305 RFC 8439 2.5.2; the A.3 edge cases #1, #5-#9 (their structure) and limbs at
+//            their maximum, the final reduction of h = p - 1, p, p + 1, 2^130 - 1, ...;
+//            expected values from Python big integers (the RFC formula, no limbs), each
+//            also checked against the `cryptography` library
+//   AEAD     RFC 8439 2.8.2; lengths 0-1000 with and without aad (Python `cryptography`);
+//            a wrong tag / aad / nonce / key / ciphertext bit leaves the buffer untouched
+//   X25519   RFC 7748 5.2 (two vectors), the iteration 1 and 1000 times, 6.1 Alice / Bob;
+//            the seven low-order points (also with the top bit set) refused; field
+//            operations on edge values (1, 2, p - 1, p, 2^255 - 20, 2^255 - 1) against
+//            Python big integers; cswap for 0 and 1
 // The other expected values (block-edge lengths, empty key, 8160-byte output) were
 // computed with an independent implementation (Python hashlib / hmac).
 
@@ -23,8 +33,11 @@
 use super::desocrypto::hkdf::{self, MAX_OUTPUT};
 use super::desocrypto::hmac::{HmacSha256, MIN_TAG_LEN, hmac_sha256};
 use super::desocrypto::chacha20;
+use super::desocrypto::aead;
+use super::desocrypto::poly1305::{self, Poly1305};
 use super::desocrypto::rng::KeyErasureRng;
 use super::desocrypto::sha256::{MAX_BYTES, Sha256, sha256};
+use super::desocrypto::x25519;
 use super::desocrypto::{Error, equal_ct, hex};
 
 /// The first failed check: group and case number (1-based).
@@ -120,6 +133,14 @@ pub fn run() -> Result<usize, Failure> {
     chacha_vectors(&mut c)?;
     chacha_edges(&mut c)?;
     rng_checks(&mut c)?;
+    wipe_checks(&mut c)?;
+    poly_vectors(&mut c)?;
+    poly_ranges(&mut c)?;
+    aead_vectors(&mut c)?;
+    aead_tamper(&mut c)?;
+    x25519_field(&mut c)?;
+    x25519_vectors(&mut c)?;
+    x25519_low_order(&mut c)?;
     misc(&mut c)?;
     Ok(c.passed)
 }
@@ -501,6 +522,509 @@ fn rng_checks(c: &mut Checks) -> Result<(), Failure> {
     b.fill(&mut p);
     b.fill(&mut q);
     c.check(p != q)?;
+    Ok(())
+}
+
+/// `wipe` on any length (also 0) zeroes everything.
+fn wipe_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("wipe");
+    let mut buf = [0u8; 4096];
+    for len in [0usize, 1, 31, 32, 33, 4096] {
+        for b in buf.iter_mut() {
+            *b = 0xA5;
+        }
+        super::desocrypto::wipe(&mut buf[..len]);
+        c.check(buf[..len].iter().all(|&b| b == 0) && buf[len..].iter().all(|&b| b == 0xA5))?;
+    }
+    let mut w = [u64::MAX; 5];
+    super::desocrypto::wipe_words64(&mut w);
+    c.check(w == [0; 5])?;
+    Ok(())
+}
+
+fn key32(h: &str) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    unhex(h, &mut k);
+    k
+}
+
+/// RFC 8439 2.5.2 and the structure of A.3 #1, #5-#9 (expected values from Python).
+fn poly_vectors(c: &mut Checks) -> Result<(), Failure> {
+    c.group("poly1305 vectors");
+    let k = key32("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
+    c.check(same(&poly1305::poly1305(&k, b"Cryptographic Forum Research Group"), "a8061dc1305136c6c22b8baf0c0127a9"))?;
+    // In pieces = at once; verify accepts the tag and refuses a changed one.
+    let mut p = Poly1305::new(&k);
+    p.update(b"Cryptographic ");
+    p.update(b"");
+    p.update(b"Forum Research Group");
+    c.check(same(&p.finish(), "a8061dc1305136c6c22b8baf0c0127a9"))?;
+    let mut tag = [0u8; 16];
+    unhex("a8061dc1305136c6c22b8baf0c0127a9", &mut tag);
+    let mut p = Poly1305::new(&k);
+    p.update(b"Cryptographic Forum Research Group");
+    c.check(p.verify(&tag).is_ok())?;
+    tag[15] ^= 1;
+    let mut p = Poly1305::new(&k);
+    p.update(b"Cryptographic Forum Research Group");
+    c.check(p.verify(&tag) == Err(Error::Mismatch))?;
+    let mut p = Poly1305::new(&k);
+    p.update(b"Cryptographic Forum Research Group");
+    c.check(p.verify(&tag[..15]) == Err(Error::Mismatch))?;
+    // A.3 #1: zero key, 64 zero bytes.
+    let mut m = [0u8; 256];
+    c.check(same(&poly1305::poly1305(&[0; 32], &m[..64]), "00000000000000000000000000000000"))?;
+    // #5: r = 2, msg ff*16 -> 3 (h reaches 2^130 + ... and wraps).
+    let r2 = key32("0200000000000000000000000000000000000000000000000000000000000000");
+    c.check(same(&poly1305::poly1305(&r2, &[0xff; 16]), "03000000000000000000000000000000"))?;
+    // #6: r = 2, s = ff*16, msg 02 -> 3 (h + s carries out of 128 bits).
+    let mut m6 = [0u8; 16];
+    m6[0] = 2;
+    c.check(same(&poly1305::poly1305(&key32("02000000000000000000000000000000ffffffffffffffffffffffffffffffff"), &m6), "03000000000000000000000000000000"))?;
+    // #7, #8: r = 1, three blocks around 2^130 - 5.
+    let r1 = key32("0100000000000000000000000000000000000000000000000000000000000000");
+    m[..16].copy_from_slice(&[0xff; 16]);
+    m[16] = 0xf0;
+    m[17..32].copy_from_slice(&[0xff; 15]);
+    m[32] = 0x11;
+    m[33..48].copy_from_slice(&[0; 15]);
+    c.check(same(&poly1305::poly1305(&r1, &m[..48]), "05000000000000000000000000000000"))?;
+    m[16] = 0xfb;
+    m[17..32].copy_from_slice(&[0xfe; 15]);
+    m[32..48].copy_from_slice(&[0x01; 16]);
+    c.check(same(&poly1305::poly1305(&r1, &m[..48]), "00000000000000000000000000000000"))?;
+    // #9: r = 2, msg fd ff*15 -> fa ff*15 (h = p - ... after reduction).
+    let mut m9 = [0xffu8; 16];
+    m9[0] = 0xfd;
+    c.check(same(&poly1305::poly1305(&r2, &m9), "faffffffffffffffffffffffffffffff"))?;
+    // A pattern key over lengths around the block size.
+    let mut pk = [0u8; 32];
+    for (i, b) in pk.iter_mut().enumerate() {
+        *b = (i as u32 * 13 + 7) as u8;
+    }
+    let mut long = [0u8; 1000];
+    pattern(&mut long);
+    for (len, want) in POLY_LENS.iter() {
+        c.check(same(&poly1305::poly1305(&pk, &long[..*len]), want))?;
+    }
+    Ok(())
+}
+
+/// Python: the pattern message (byte i = i*7 + 3) under the key byte i = i*13 + 7.
+const POLY_LENS: [(usize, &str); 13] = [
+    (0, "d7e4f1fe0b1825323f4c596673808d9a"),
+    (1, "f627694ac2286d8e852d72035a327778"),
+    (15, "8f615a36a2a6e823246193b8338f9864"),
+    (16, "cc826591634f0b956c91295c0347a264"),
+    (17, "c47f392194cc28e85b0f05dc8a2dceb6"),
+    (31, "d230ab5e752edaf168c2818fa713df79"),
+    (32, "09697061b57a4374bc22abb60e88c88f"),
+    (33, "043338b382f6608520ed0edd571db2f6"),
+    (63, "263504faf64783e15efda1b0633a9db0"),
+    (64, "3842943aee408f8341e2c5d6310bd9e4"),
+    (65, "12fcf03054ed21b35bca4c0e2132ed4e"),
+    (100, "6e155d384ae5aba2f58f42e6885ccbbd"),
+    (1000, "291d147b27e60a79c87775a838c65ba8"),
+];
+
+/// Limbs at their maximum (every key bit the clamp allows, s = all ones, blocks of all
+/// ones – the largest products and carries), and the final reduction around p.
+fn poly_ranges(c: &mut Checks) -> Result<(), Failure> {
+    c.group("poly1305 ranges");
+    let kmax = [0xffu8; 32];
+    let ones = [0xffu8; 256];
+    c.check(same(&poly1305::poly1305(&kmax, &ones), "c30c8c6a3af35fc6645a7e3a51df3f04"))?;
+    c.check(same(&poly1305::poly1305(&kmax, &ones[..17]), "7cfe7ff768f81f2763f8bf565df85f86"))?;
+    c.check(same(&poly1305::poly1305(&kmax, &ones[..1]), "23feffef23f8ffef23f8ffef23f8ffef"))?;
+    // The same 256 bytes fed one byte at a time (every carry path of the buffer).
+    let mut p = Poly1305::new(&kmax);
+    for b in ones.chunks(1) {
+        p.update(b);
+    }
+    c.check(same(&p.finish(), "c30c8c6a3af35fc6645a7e3a51df3f04"))?;
+    // Final reduction: (h mod p) mod 2^128 for h around p = 2^130 - 5 and the limits.
+    for (h, want) in POLY_FREEZE.iter() {
+        let mut hb = [0u8; 17];
+        unhex(h, &mut hb);
+        c.check(same(&poly1305::freeze_for_test(&hb), want))?;
+    }
+    Ok(())
+}
+
+/// Python: (h mod (2^130 - 5)) mod 2^128 – h as 17 little-endian bytes.
+const POLY_FREEZE: [(&str, &str); 8] = [
+    ("faffffffffffffffffffffffffffffff03", "faffffffffffffffffffffffffffffff"), // p - 1
+    ("fbffffffffffffffffffffffffffffff03", "00000000000000000000000000000000"), // p
+    ("fcffffffffffffffffffffffffffffff03", "01000000000000000000000000000000"), // p + 1
+    ("ffffffffffffffffffffffffffffffff03", "04000000000000000000000000000000"), // 2^130 - 1
+    ("0000000000000000000000000000000004", "05000000000000000000000000000000"), // 2^130
+    ("ffffffffffffffffffffffffffffffff07", "09000000000000000000000000000000"), // 2^131 - 1
+    ("0000000000000000000000000000000000", "00000000000000000000000000000000"), // 0
+    ("f5ffffffffffffffffffffffffffffff07", "faffffffffffffffffffffffffffffff"), // 2p - 1
+];
+
+/// RFC 8439 2.8.2 (encryption and back) and lengths around the block sizes.
+fn aead_vectors(c: &mut Checks) -> Result<(), Failure> {
+    c.group("aead vectors");
+    let mut k = [0u8; 32];
+    range(0x80, &mut k);
+    let n = nonce_from("070000004041424344454647");
+    let mut aad = [0u8; 12];
+    unhex("50515253c0c1c2c3c4c5c6c7", &mut aad);
+    let mut buf = [0u8; 1000];
+    let t = &mut buf[..RFC_2_4_2_TEXT.len()];
+    t.copy_from_slice(RFC_2_4_2_TEXT);
+    let tag = aead::seal(&k, &n, &aad, t);
+    c.check(matches!(tag, Ok(tg) if same(&tg, "1ae10b594f09e26a7e902ecbd0600691")))?;
+    c.check(same(&t[..16], "d31a8d34648e60db7b86afbc53ef7ec2") && same(&sha256(t)[..], AEAD_282_CT_SHA))?;
+    let tag = tag.unwrap_or([0; 16]);
+    c.check(aead::open(&k, &n, &aad, t, &tag).is_ok() && t == RFC_2_4_2_TEXT)?;
+    // Lengths 0..1000, aad "header" (6 bytes: padding) and none.
+    let mut ak = [0u8; 32];
+    for (i, b) in ak.iter_mut().enumerate() {
+        *b = (i as u32 * 11 + 5) as u8;
+    }
+    let an = nonce_from("000000000102030405060708");
+    for (len, with_aad, ct_sha, want_tag) in AEAD_LENS.iter() {
+        let a: &[u8] = if *with_aad { b"header" } else { b"" };
+        let m = &mut buf[..*len];
+        pattern(m);
+        let tag = aead::seal(&ak, &an, a, m);
+        c.check(matches!(tag, Ok(tg) if same(&tg, want_tag)) && same(&sha256(m), ct_sha))?;
+        let tag = tag.unwrap_or([0; 16]);
+        c.check(aead::open(&ak, &an, a, m, &tag).is_ok())?;
+        let mut want = [0u8; 1000];
+        pattern(&mut want[..*len]);
+        c.check(m == &want[..*len])?;
+    }
+    Ok(())
+}
+
+/// SHA-256 of the RFC 8439 2.8.2 ciphertext (114 bytes, computed with Python).
+const AEAD_282_CT_SHA: &str = "eaf0adc045b86e7b8107ed2d6a8c2466cfb1c1f1a943dd5d37c578ee75a06829";
+
+/// Python `cryptography` ChaCha20Poly1305: (length, aad "header"?, SHA-256 of the
+/// ciphertext, tag) for the pattern message, key byte i = i*11 + 5, nonce 00000000 01..08.
+const AEAD_LENS: [(usize, bool, &str, &str); 18] = [
+    (0, true, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "3a15a269de9fa0385b6fa22cee562c3d"),
+    (0, false, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "15c019332f0abd145816dddb2034cf33"),
+    (1, true, "30a5bfa58e128af9e5a4955725d8ad26d4d574a537b58b7dc6d357acad578572", "df216f5879f2276bb4955c80135317af"),
+    (1, false, "30a5bfa58e128af9e5a4955725d8ad26d4d574a537b58b7dc6d357acad578572", "d36bdd0dd25f5bdd92ac2ef20eab6451"),
+    (15, true, "f0c297c80b821dac88746348373b7bb9389727153a2cdc55bcc677531396b8d4", "a552feec9fffd095250458a452d3712d"),
+    (15, false, "f0c297c80b821dac88746348373b7bb9389727153a2cdc55bcc677531396b8d4", "949c6ca2f86c0408041b2a164e2bbfcf"),
+    (16, true, "b6d9e2d19079502e897f28db38cf3bc6e12846ca21e79f66c4798c78e5762886", "28e222f82b162b2c9bc268fe32442574"),
+    (16, false, "b6d9e2d19079502e897f28db38cf3bc6e12846ca21e79f66c4798c78e5762886", "1c2c91ad84835e9e79d93a702e9c7216"),
+    (17, true, "7e5f23ffab0205c184cb35dc054ca17b4768a5babde23373bc70dc46545a0d5a", "3534c9c20f9fe5b62b4be3f9428560a8"),
+    (17, false, "7e5f23ffab0205c184cb35dc054ca17b4768a5babde23373bc70dc46545a0d5a", "1d48a329be8a484d4a6975d74b1a18ee"),
+    (63, true, "d74ad6af975cd81a9fc9ed6b0f1dd80e60f084a16b7c05ccd1340e080a023c89", "bb2cf81c5fadbfd2a02a0889064ad06f"),
+    (63, false, "d74ad6af975cd81a9fc9ed6b0f1dd80e60f084a16b7c05ccd1340e080a023c89", "d7089afe3b7739a35a97544a89493acd"),
+    (64, true, "0f354e5f4bac32829b571be2e339419f1698a75a0a868b1ab604a59302895e8f", "90a4c8fd5aae96fa57ae622afb30cb41"),
+    (64, false, "0f354e5f4bac32829b571be2e339419f1698a75a0a868b1ab604a59302895e8f", "a7806adf377810cb111bafeb7d30359f"),
+    (65, true, "a5355571cd21f6c840312b1c38ed23457b1b1dd6e42d6fd012db66ad9bef4f9c", "8f687bd90db5aff7a8a4e2546e1346d0"),
+    (65, false, "a5355571cd21f6c840312b1c38ed23457b1b1dd6e42d6fd012db66ad9bef4f9c", "37297d4b69c6f8995ff0b66e22618167"),
+    (1000, true, "0d5cacd5975c407db388815d7d4c3a0e37c145ba137b4f4c3892a2fecc15d795", "4c4b3a78f74addeba3fc155b57fe46ec"),
+    (1000, false, "0d5cacd5975c407db388815d7d4c3a0e37c145ba137b4f4c3892a2fecc15d795", "519f318c480740f7f77e05b44013e3d7"),
+];
+
+/// A wrong tag, aad, nonce, key or one flipped ciphertext bit (first, middle, last byte):
+/// Err(Mismatch) and the buffer byte for byte as before; inside a larger array the bytes
+/// before and after the slice stay untouched too.
+fn aead_tamper(c: &mut Checks) -> Result<(), Failure> {
+    c.group("aead tamper");
+    let mut k = [0u8; 32];
+    range(0x40, &mut k);
+    let n = nonce_from("0a0b0c0d0e0f101112131415");
+    let aad = b"associated";
+    for len in [0usize, 1, 15, 16, 17, 63, 64, 65, 1000] {
+        // The message sits in the middle of a larger array (guards of 0xEE on both sides).
+        let mut arr = [0xEEu8; 1100];
+        let (start, end) = (50, 50 + len);
+        pattern(&mut arr[start..end]);
+        let tag = match aead::seal(&k, &n, aad, &mut arr[start..end]) {
+            Ok(t) => t,
+            Err(_) => return c.check(false),
+        };
+        let sealed = arr;
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 0x80;
+        let mut bad_n = n;
+        bad_n[11] ^= 1;
+        let mut bad_k = k;
+        bad_k[31] ^= 1;
+        let cases: [(&[u8; 32], &[u8; 12], &[u8], &[u8; 16]); 4] = [(&k, &n, aad, &bad_tag), (&k, &n, b"associatee", &tag), (&k, &bad_n, aad, &tag), (&bad_k, &n, aad, &tag)];
+        for (kk, nn, aa, tt) in cases.iter() {
+            let r = aead::open(kk, nn, aa, &mut arr[start..end], tt);
+            c.check(r == Err(Error::Mismatch) && arr == sealed)?;
+        }
+        // One ciphertext bit flipped at the start, the middle and the end.
+        if len > 0 {
+            for pos in [start, start + len / 2, end - 1] {
+                arr[pos] ^= 0x01;
+                let flipped = arr;
+                let r = aead::open(&k, &n, aad, &mut arr[start..end], &tag);
+                c.check(r == Err(Error::Mismatch) && arr == flipped)?;
+                arr[pos] ^= 0x01;
+            }
+        }
+        // The right tag opens it; the guards are still 0xEE.
+        c.check(aead::open(&k, &n, aad, &mut arr[start..end], &tag).is_ok())?;
+        let mut want = [0u8; 1000];
+        pattern(&mut want[..len]);
+        c.check(arr[start..end] == want[..len] && arr[..start].iter().all(|&b| b == 0xEE) && arr[end..].iter().all(|&b| b == 0xEE))?;
+    }
+    c.check(aead::MAX_LEN == (1u64 << 38) - 64)?;
+    Ok(())
+}
+
+/// Field operations mod 2^255 - 19 on edge values (expected: Python `a * b % p`, ...).
+fn x25519_field(c: &mut Checks) -> Result<(), Failure> {
+    c.group("x25519 field");
+    let get = |name: &str| FE_IN.iter().find(|(n, _)| *n == name).map(|(_, v)| key32(v)).unwrap_or([0; 32]);
+    for (op, a, b, want) in FE_OPS.iter() {
+        let fb = if *b == "-" { [0u8; 32] } else { get(b) };
+        c.check(same(&x25519::field_for_test(*op, &get(a), &fb), want))?;
+    }
+    // cswap: 0 keeps, 1 swaps (both values canonical afterwards).
+    let (a, b) = (get("two"), get("big"));
+    let (a0, b0) = x25519::cswap_for_test(0, &a, &b);
+    let (a1, b1) = x25519::cswap_for_test(1, &a, &b);
+    c.check(a0 == a && b0 == b && a1 == b && b1 == a)?;
+    Ok(())
+}
+
+const FE_IN: [(&str, &str); 7] = [
+    ("one", "0100000000000000000000000000000000000000000000000000000000000000"),
+    ("two", "0200000000000000000000000000000000000000000000000000000000000000"),
+    ("pm1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    ("p", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    ("t255m20", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    ("t255m1", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    ("big", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+];
+const FE_OPS: [(u8, &str, &str, &str); 160] = [
+    (0, "one", "one", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (3, "one", "one", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "one", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "one", "two", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (3, "one", "two", "0300000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "two", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "one", "pm1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "one", "pm1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "pm1", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (0, "one", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "one", "p", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "p", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "one", "t255m20", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "one", "t255m20", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "t255m20", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (0, "one", "t255m1", "1200000000000000000000000000000000000000000000000000000000000000"),
+    (3, "one", "t255m1", "1300000000000000000000000000000000000000000000000000000000000000"),
+    (4, "one", "t255m1", "dcffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "one", "big", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (3, "one", "big", "abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "one", "big", "4455555555555555555555555555555555555555555555555555555555555555"),
+    (1, "one", "-", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (2, "one", "-", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "one", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (3, "two", "one", "0300000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "one", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "two", "0400000000000000000000000000000000000000000000000000000000000000"),
+    (3, "two", "two", "0400000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "two", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "pm1", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "two", "pm1", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "pm1", "0300000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "two", "p", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "p", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "t255m20", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "two", "t255m20", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "t255m20", "0300000000000000000000000000000000000000000000000000000000000000"),
+    (0, "two", "t255m1", "2400000000000000000000000000000000000000000000000000000000000000"),
+    (3, "two", "t255m1", "1400000000000000000000000000000000000000000000000000000000000000"),
+    (4, "two", "t255m1", "ddffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "two", "big", "5455555555555555555555555555555555555555555555555555555555555555"),
+    (3, "two", "big", "acaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "two", "big", "4555555555555555555555555555555555555555555555555555555555555555"),
+    (1, "two", "-", "0400000000000000000000000000000000000000000000000000000000000000"),
+    (2, "two", "-", "f7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff3f"),
+    (0, "pm1", "one", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "pm1", "one", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (4, "pm1", "one", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "pm1", "two", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "pm1", "two", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "pm1", "two", "eaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "pm1", "pm1", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (3, "pm1", "pm1", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "pm1", "pm1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "pm1", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "pm1", "p", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "pm1", "p", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "pm1", "t255m20", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (3, "pm1", "t255m20", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "pm1", "t255m20", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "pm1", "t255m1", "dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "pm1", "t255m1", "1100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "pm1", "t255m1", "daffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "pm1", "big", "4355555555555555555555555555555555555555555555555555555555555555"),
+    (3, "pm1", "big", "a9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "pm1", "big", "4255555555555555555555555555555555555555555555555555555555555555"),
+    (1, "pm1", "-", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (2, "pm1", "-", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "p", "one", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "one", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "p", "one", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "p", "two", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "two", "0200000000000000000000000000000000000000000000000000000000000000"),
+    (4, "p", "two", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "p", "pm1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "pm1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "p", "pm1", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "p", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (4, "p", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "p", "t255m20", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "t255m20", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "p", "t255m20", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "p", "t255m1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "t255m1", "1200000000000000000000000000000000000000000000000000000000000000"),
+    (4, "p", "t255m1", "dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "p", "big", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "p", "big", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "p", "big", "4355555555555555555555555555555555555555555555555555555555555555"),
+    (1, "p", "-", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m20", "one", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "t255m20", "one", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m20", "one", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "t255m20", "two", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "t255m20", "two", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m20", "two", "eaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "t255m20", "pm1", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m20", "pm1", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "t255m20", "pm1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m20", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m20", "p", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "t255m20", "p", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "t255m20", "t255m20", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m20", "t255m20", "ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (4, "t255m20", "t255m20", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m20", "t255m1", "dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "t255m20", "t255m1", "1100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m20", "t255m1", "daffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "t255m20", "big", "4355555555555555555555555555555555555555555555555555555555555555"),
+    (3, "t255m20", "big", "a9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "t255m20", "big", "4255555555555555555555555555555555555555555555555555555555555555"),
+    (1, "t255m20", "-", "0100000000000000000000000000000000000000000000000000000000000000"),
+    (2, "t255m20", "-", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (0, "t255m1", "one", "1200000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m1", "one", "1300000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "one", "1100000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "two", "2400000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m1", "two", "1400000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "two", "1000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "pm1", "dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "t255m1", "pm1", "1100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "pm1", "1300000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m1", "p", "1200000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "p", "1200000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "t255m20", "dbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    (3, "t255m1", "t255m20", "1100000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "t255m20", "1300000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "t255m1", "4401000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m1", "t255m1", "2400000000000000000000000000000000000000000000000000000000000000"),
+    (4, "t255m1", "t255m1", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (0, "t255m1", "big", "6600000000000000000000000000000000000000000000000000000000000000"),
+    (3, "t255m1", "big", "bcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "t255m1", "big", "5555555555555555555555555555555555555555555555555555555555555555"),
+    (1, "t255m1", "-", "4401000000000000000000000000000000000000000000000000000000000000"),
+    (2, "t255m1", "-", "89e3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388e23"),
+    (0, "big", "one", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (3, "big", "one", "abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "one", "a9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "two", "5455555555555555555555555555555555555555555555555555555555555555"),
+    (3, "big", "two", "acaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "two", "a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "pm1", "4355555555555555555555555555555555555555555555555555555555555555"),
+    (3, "big", "pm1", "a9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "pm1", "abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "p", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (3, "big", "p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "p", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "t255m20", "4355555555555555555555555555555555555555555555555555555555555555"),
+    (3, "big", "t255m20", "a9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "t255m20", "abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "t255m1", "6600000000000000000000000000000000000000000000000000000000000000"),
+    (3, "big", "t255m1", "bcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (4, "big", "t255m1", "98aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    (0, "big", "big", "32c7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711c47"),
+    (3, "big", "big", "5455555555555555555555555555555555555555555555555555555555555555"),
+    (4, "big", "big", "0000000000000000000000000000000000000000000000000000000000000000"),
+    (1, "big", "-", "32c7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711c47"),
+    (2, "big", "-", "0d0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"),
+];
+
+/// RFC 7748 5.2 and 6.1 (expected values computed again with Python integers and the
+/// `cryptography` library).
+fn x25519_vectors(c: &mut Checks) -> Result<(), Failure> {
+    c.group("x25519 vectors");
+    let v = [
+        ("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552"),
+        ("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493", "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957"),
+    ];
+    for (s, u, want) in v.iter() {
+        c.check(matches!(x25519::x25519(&key32(s), &key32(u)), Ok(r) if same(&r, want)))?;
+    }
+    // The top bit of u is ignored.
+    let mut u = key32(v[0].1);
+    u[31] |= 0x80;
+    c.check(matches!(x25519::x25519(&key32(v[0].0), &u), Ok(r) if same(&r, v[0].2)))?;
+    // Iterations: k = u = 9; (k, u) = (x25519(k, u), k).
+    let mut k = [0u8; 32];
+    k[0] = 9;
+    let mut uu = k;
+    for i in 1..=1000 {
+        let r = match x25519::x25519(&k, &uu) {
+            Ok(r) => r,
+            Err(_) => return c.check(false),
+        };
+        uu = k;
+        k = r;
+        if i == 1 {
+            c.check(same(&k, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"))?;
+        }
+    }
+    c.check(same(&k, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51"))?;
+    // 6.1: Alice and Bob.
+    let a = key32("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+    let b = key32("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+    let (pa, pb) = (x25519::public_key(&a), x25519::public_key(&b));
+    c.check(same(&pa, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a") && same(&pb, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"))?;
+    let shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+    c.check(matches!(x25519::x25519(&a, &pb), Ok(r) if same(&r, shared)) && matches!(x25519::x25519(&b, &pa), Ok(r) if same(&r, shared)))?;
+    Ok(())
+}
+
+/// The seven points of low order (0, 1, two of order 8, p - 1, p, p + 1), also with the
+/// top bit set: the result is all zeros – always refused.
+fn x25519_low_order(c: &mut Checks) -> Result<(), Failure> {
+    c.group("x25519 low order");
+    let low = [
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ];
+    let s = key32("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+    for u in low.iter() {
+        let mut p = key32(u);
+        c.check(x25519::x25519(&s, &p) == Err(Error::Mismatch))?;
+        p[31] |= 0x80;
+        c.check(x25519::x25519(&s, &p) == Err(Error::Mismatch))?;
+    }
     Ok(())
 }
 

@@ -19,6 +19,10 @@
 // counts 1/64 of a bit and why jitter and interrupts are one class (max).
 //   RTC, HPET, CPUID, disk serial numbers           0 – they only tell machines apart
 //
+// Trust policy (build time): DESOOS_TRUST_CPU=0 – RDSEED counts 0; DESOOS_TRUST_BOOTLOADER=0 –
+// the firmware's RAW bytes count 0.  Both are still mixed in and health-checked; with both
+// off only the timing class counts (the start may then wait – a line every second).
+//
 // Sources that may share a generator are not added up: the firmware's RNG often IS
 // the CPU's RDRAND/RDSEED (OVMF does exactly that), so the hardware class counts
 // max(UEFI, RDSEED); jitter and interrupt times both come from the TSC and can be
@@ -408,8 +412,42 @@ fn drain_irq(pool: &mut Pool) -> u32 {
 // The generator state
 // ------------------------------------------------------------
 
+/// Which sources may count entropy (DESOOS_TRUST_CPU / DESOOS_TRUST_BOOTLOADER at build
+/// time, default both).  A source not trusted is still mixed into the pool and still
+/// health-checked – only its counted bits are 0.  It never changes the classes: UEFI RAW
+/// and RDSEED stay one hardware class (max).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Policy {
+    pub trust_cpu: bool,
+    pub trust_bootloader: bool,
+}
+
+impl Policy {
+    pub const ALL: Policy = Policy { trust_cpu: true, trust_bootloader: true };
+
+    /// The build's policy (`./build.sh` checks the values are 0 or 1).
+    pub const fn from_build() -> Policy {
+        Policy { trust_cpu: !build_flag_off(option_env!("DESOOS_TRUST_CPU")), trust_bootloader: !build_flag_off(option_env!("DESOOS_TRUST_BOOTLOADER")) }
+    }
+}
+
+impl Default for Policy {
+    fn default() -> Policy {
+        Policy::ALL
+    }
+}
+
+const fn build_flag_off(v: Option<&str>) -> bool {
+    matches!(v, Some(s) if s.len() == 1 && s.as_bytes()[0] == b'0')
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Stats {
+    pub policy: Policy,
     pub ready_ms: u64,
     pub credit_at_ready: Credit,
     pub reseeds: u64,
@@ -425,20 +463,41 @@ pub struct State {
     pub rdrand: HwSource,
     last_check_ms: u64,
     last_check_irqs: u64,
+    pub policy: Policy,
     pub stats: Stats,
 }
 
 impl State {
+    /// A state that trusts every source (tests); the kernel's uses `with_policy`.
+    #[cfg_attr(not(selftest), allow(dead_code))]
     pub fn new(rdseed: HwSource, rdrand: HwSource) -> State {
-        State { generator: None, pool: Pool::new(), rdseed, rdrand, last_check_ms: 0, last_check_irqs: 0, stats: Stats::default() }
+        State::with_policy(rdseed, rdrand, Policy::ALL)
     }
 
-    /// Hardware words into the pool: RDSEED counted (32 bits per healthy word), RDRAND
-    /// mixed only.
+    pub fn with_policy(rdseed: HwSource, rdrand: HwSource, policy: Policy) -> State {
+        let stats = Stats { policy, ..Stats::default() };
+        State { generator: None, pool: Pool::new(), rdseed, rdrand, last_check_ms: 0, last_check_irqs: 0, policy, stats }
+    }
+
+    /// Hardware words into the pool: RDSEED counted (32 bits per healthy word) when the
+    /// policy trusts the CPU, RDRAND mixed only.
     pub fn collect_hw(&mut self, words: usize) {
         let got = self.pool.mix_hw(&mut self.rdseed, words);
-        self.pool.credit.rdseed = self.pool.credit.rdseed.saturating_add(got * 32);
+        if self.policy.trust_cpu {
+            self.pool.credit.rdseed = self.pool.credit.rdseed.saturating_add(got * 32);
+        }
         let _ = self.pool.mix_hw(&mut self.rdrand, words);
+    }
+
+    /// The firmware's 64 bytes: always mixed; counted per `uefi_credit` when the policy
+    /// trusts the bootloader.  Returns the counted bits.
+    pub fn take_firmware_seed(&mut self, kind: u64, seed: &[u8; 64]) -> u32 {
+        if kind != SEED_NONE {
+            self.pool.mix(seed);
+        }
+        let bits = if self.policy.trust_bootloader { uefi_credit(kind, seed) } else { 0 };
+        self.pool.credit.uefi = self.pool.credit.uefi.max(bits);
+        bits
     }
 
     /// Starts the generator from the pool once it holds READY_BITS (false: not yet).
@@ -556,9 +615,10 @@ pub fn is_ready() -> bool {
 /// as it must – with a line every second – instead of pretending.
 pub fn init() {
     let t0 = crate::time::uptime_ms();
-    let mut st = State::new(
+    let mut st = State::with_policy(
         HwSource::new("RDSEED", rdseed_once, 100, has_rdseed()),
         HwSource::new("RDRAND", rdrand_once, 10, has_rdrand()),
+        Policy::from_build(),
     );
     // Not counted: they only tell machines and boots apart.
     let rtc = crate::drivers::rtc::now().to_unix();
@@ -575,11 +635,9 @@ pub fn init() {
     // SAFETY: written once by take_boot_seed before this; single CPU at boot.
     let mut seed = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BOOT_SEED)) };
     let kind = BOOT_SEED_KIND.load(Ordering::SeqCst);
-    if kind != SEED_NONE {
-        st.pool.mix(&seed);
-    }
-    st.pool.credit.uefi = uefi_credit(kind, &seed);
+    st.take_firmware_seed(kind, &seed);
     let uefi = match (kind, st.pool.credit.uefi) {
+        (SEED_RAW, 0) if !st.policy.trust_bootloader => "RAW (not counted: DESOOS_TRUST_BOOTLOADER=0)",
         (SEED_RAW, 0) => "RAW, implausible (not counted)",
         (SEED_RAW, _) => "RAW",
         (SEED_DEFAULT, _) => "default algorithm (a DRBG – mixed, not counted)",
@@ -622,7 +680,7 @@ pub fn init() {
     st.last_check_irqs = irq_total();
     st.try_start(now);
     crate::serial_println!(
-        "[RNG] ready in {} ms: {} bits counted (hardware max(uefi {}, rdseed {}) + timing max(jitter {}, irq {})); UEFI RNG {}, RDSEED {}, RDRAND {} (mixed, 0 bits)",
+        "[RNG] ready in {} ms: {} bits counted (hardware max(uefi {}, rdseed {}) + timing max(jitter {}, irq {})); UEFI RNG {}, RDSEED {}, RDRAND {} (mixed, 0 bits); trust: cpu {}, bootloader {}",
         now - t0,
         c.total(),
         c.uefi,
@@ -631,7 +689,9 @@ pub fn init() {
         c.irq,
         uefi,
         src_state(&st.rdseed),
-        src_state(&st.rdrand)
+        src_state(&st.rdrand),
+        on_off(st.policy.trust_cpu),
+        on_off(st.policy.trust_bootloader)
     );
     st.stats.ready_ms = now - t0;
     // Tests: the first bytes of this start (tests/test.sh compares them with the

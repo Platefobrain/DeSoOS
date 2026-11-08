@@ -1621,6 +1621,9 @@ syscall per operation, and a mistake in it can only hurt the program that uses i
 | `hkdf` | `extract`, `expand`, `hkdf` | RFC 5869 |
 | `chacha20` | `block`, `xor_stream` (refuses a wrapping counter) | RFC 8439 |
 | `rng` | `KeyErasureRng::new / fill / reseed` – ChaCha20 with fast key erasure | – |
+| `poly1305` | `Poly1305::new / update / finish / verify`, `poly1305(key, msg)` – one-time authenticator, limbs 44/44/42 bits | RFC 8439 §2.5 |
+| `aead` | `seal(key, nonce, aad, buf) -> tag`, `open(key, nonce, aad, buf, tag)` – ChaCha20-Poly1305 in place | RFC 8439 §2.8 |
+| `x25519` | `x25519(secret, their_public)`, `public_key(secret)` – Montgomery ladder, five 51-bit limbs; an all-zero result refused | RFC 7748 (+ RFC 8446 §7.4.2) |
 | `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `wipe`, `VERSION` | – |
 
 Rules of the code:
@@ -1633,22 +1636,42 @@ Rules of the code:
 - **Arithmetic** is explicitly wrapping (`wrapping_add`, `rotate_right`) – correct with or without overflow checks.
 - **Keys** are wiped (volatile writes): `Sha256` and `HmacSha256` clear their whole state when dropped (also
   without `finish`, e.g. on an error path) – the inner SHA-256 state of HMAC is a hash of the key and as good as the
-  key; HKDF wipes its PRK and blocks; ChaCha20 wipes its state and key stream, the generator its key. Temporary
-  copies in registers or on the stack (the message schedule in `compress`) are not wiped – no full guarantee.
-  Tags are compared in constant time; SHA-256 and ChaCha20 use no tables and no branches on secret data.
+  key; HKDF wipes its PRK and blocks; ChaCha20 wipes its state and key stream, the generator its key; Poly1305 its
+  r, s, accumulator and buffer; the AEAD the counter-0 block and the one-time Poly1305 key cut from it; X25519 the
+  clamped scalar and the ladder state (x2, z2, x3, z3, the inverse, the product before encoding), and a refused
+  all-zero result. Keys come by reference and are not copied by the API. Wiping a structure does not wipe its
+  copies: copies in registers or on the stack (the message schedule in `compress`, values the compiler spills) are
+  not covered – no full guarantee.
+- **Timing:** the implementation avoids branches and table look-ups that depend on secrets (the conditional swap of
+  X25519 and the final reduction of Poly1305 use masks; the X25519 inverse uses a fixed public exponent; the zero
+  check ORs all bytes first). It has not been formally verified or audited for timing. Tags are compared with
+  `equal_ct`.
+- **Arithmetic ranges:** every product and sum of Poly1305 and X25519 has its upper bound written next to it, and in
+  test builds (`--cfg selftest` / `desocrypto_test`) the bounds are asserted (`bound!`) – far below 2^128.
+- **AEAD nonces:** reusing a (key, nonce) pair is a serious security failure (the XOR of the plaintexts leaks, the
+  Poly1305 key repeats and tags can be forged). DeSoCrypto does not choose nonces – there is no generator or counter
+  for them until there is key management to keep them safe. `open` checks the tag before decrypting: with a wrong
+  tag the buffer stays exactly as it was.
 - **Test-only code stays out:** `assume_length` (a pretended length counter for the limit tests) exists only with
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
-Tests: `common/desocrypto/tests.rs` (124 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439 vectors; the
-generator against the same construction in Python; block-edge lengths;
+Tests: `common/desocrypto/tests.rs` (486 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439, RFC 7748 vectors;
+Poly1305 limbs at their maximum and the final reduction around 2^130 − 5; X25519 field operations on edge values,
+`cswap`, the seven low-order points; AEAD with a wrong tag / aad / nonce / key / ciphertext bit leaving the buffer
+untouched; expected values from Python big integers – the RFC formulas, not the limb code – and the `cryptography`
+library; the generator against the same construction in Python; block-edge lengths;
 every split of a message; length limits with a pretended counter; wrong tags and parameters). `mod.rs` does not
 include it, so it is not in the kernel or ordinary programs: only `/bin/cryptotest` and CRYPTO TEST (selftest build)
 include it. CRYPTO TEST runs it in the kernel and in user space, checks `sha256sum` against the kernel's own result
 and measures the speed (`[RESULT-CRYPTO]`).
 
-Next: Poly1305, ChaCha20-Poly1305 and X25519 (DeSoCrypto 0.3.0), AES-128-GCM with AES-NI and a constant-time
-fallback (0.4.0); then DeSoTLS (TLS 1.3) – signatures, X.509 and the protocol itself are a separate step.
+Passing the RFC vectors shows agreement with chosen cases of the standards; it does not prove the implementation
+secure. DeSoCrypto is not for production use without an audit. Nothing in the system uses the AEAD or X25519 yet –
+they are the base for DeSoTLS.
+
+Next: AES-128-GCM with AES-NI and a fallback without key-dependent tables (0.4.0); then DeSoTLS (TLS 1.3) –
+signatures, X.509 and the protocol itself are a separate step.
 
 ## Random numbers (`kernel/random.rs`, v0.70.0)
 
@@ -1668,6 +1691,13 @@ a second process.
 | TSC jitter at boot – 64-sample windows of a short memory-touching loop | yes | 1 bit per window that passes the timing check |
 | interrupt times – the TSC at every IRQ / MSI, per-CPU mixing words | yes | 1 bit per 64 events whose time difference is not 0 and not the previous one |
 | RTC, HPET, CPUID, NVMe serial numbers | yes | 0 |
+
+**Trust policy** (build time, like Linux `random.trust_cpu` / `random.trust_bootloader`): `DESOOS_TRUST_CPU=0` –
+RDSEED counts 0; `DESOOS_TRUST_BOOTLOADER=0` – the firmware's RAW bytes count 0. A source not trusted is still mixed
+into the pool and health-checked; the classes do not change (UEFI RAW and RDSEED stay one, max). With both off only
+the timing class counts (the test laptop: jitter 64 of 64 windows – a fraction of a second; KVM: about 16 s of
+interrupt times). Shown in `[RNG] ready … trust: cpu on|off, bootloader on|off`, `[RESULT-RNG]` and `sysinfo
+counters` (`rng_trust_cpu`, `rng_trust_bootloader`).
 
 **Not counting the same entropy twice.** The firmware's RNG may be the CPU's RDRAND/RDSEED (OVMF does exactly
 that), so UEFI and RDSEED form one hardware class counted as max(UEFI, RDSEED). Jitter and interrupt times both

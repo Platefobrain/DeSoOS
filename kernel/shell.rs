@@ -361,6 +361,8 @@ fn cmd_counters(_: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = writeln!(out, "rng_reseeds {}", rs.reseeds);
     let _ = writeln!(out, "rng_bytes_out {}", rs.bytes_out);
     let _ = writeln!(out, "rng_sources_disabled {}", src.iter().filter(|(_, st)| *st == "disabled").count());
+    let _ = writeln!(out, "rng_trust_cpu {}", rs.policy.trust_cpu as u8);
+    let _ = writeln!(out, "rng_trust_bootloader {}", rs.policy.trust_bootloader as u8);
     let _ = writeln!(out, "tasks {}", tasks.len());
     let _ = writeln!(out, "tasks_dead {}", dead);
     let _ = writeln!(out, "processes {}", crate::user::process::LIVE_PROCS.load(core::sync::atomic::Ordering::Relaxed));

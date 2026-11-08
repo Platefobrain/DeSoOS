@@ -69,7 +69,7 @@ pub fn self_test() {
     let r = desocrypto_tests::run();
     check!(r.is_ok(), "in the kernel: {:?}", r.err());
     let n = r.unwrap_or(0);
-    serial_println!("[CRYPTO TEST] 1/4 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 RFC 8439, the key-erasure generator, limits) in {} ms PASS", n, ticks() - t0);
+    serial_println!("[CRYPTO TEST] 1/4 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 / Poly1305 / AEAD RFC 8439, X25519 RFC 7748, the key-erasure generator, arithmetic ranges, limits) in {} ms PASS", n, ticks() - t0);
 
     // 2. The same in user space.
     let r = run("/bin/cryptotest", &["cryptotest"], &[], 60_000);
@@ -79,6 +79,8 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && out.contains(&alloc::format!("{} checks OK", n)), "cryptotest: {:?} {:?}", kind, out);
     let user_kbs = number_after(out, "sha256 ");
     let hmac_kbs = number_after(out, "hmac ");
+    let aead_kbs = number_after(out, "aead ");
+    let x25519_ops = number_after(out, "x25519 ");
     serial_println!("[CRYPTO TEST] 2/4 user space: {} PASS", out);
 
     // 3. sha256sum: files (empty, "abc", 300 KiB + 13 bytes) against the kernel's
@@ -128,13 +130,15 @@ pub fn self_test() {
     let kernel_kbs = kib * 1000 / ms;
     serial_println!("[CRYPTO TEST] 4/4 speed: SHA-256 {} KiB/s in the kernel, {} KiB/s in user space; HMAC {} KiB/s PASS", kernel_kbs, user_kbs, hmac_kbs);
     serial_println!(
-        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={}",
+        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={} aead_user_kbs={} x25519_user_ops={}",
         crate::shell::VERSION,
         desocrypto::VERSION,
         n,
         kernel_kbs,
         user_kbs,
-        hmac_kbs
+        hmac_kbs,
+        aead_kbs,
+        x25519_ops
     );
     serial_println!("[CRYPTO TEST] All crypto tests passed!");
     crate::selftest::pass();

@@ -78,10 +78,14 @@ timings move by ±15% from run to run on the same build).
   uses the byte position (stable)
 
 **Cryptography (DeSoCrypto)**
-- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20 and the kernel's random number generator; no authenticated encryption
-  (Poly1305), key exchange (X25519), AES-GCM or signatures yet, no TLS – `netget https://` is refused
-- not audited; SHA-256 and ChaCha20 use no tables or branches on secrets, but nothing is verified against timing side
-  channels; keys are wiped when objects are dropped, but temporary copies in registers and on the stack are not
+- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519 and the kernel's random number
+  generator; no AES-GCM, signatures, X.509 or TLS yet – `netget https://` is refused; nothing in the system uses the
+  AEAD or X25519 yet
+- not audited and not for production use: the code avoids branches and table look-ups that depend on secrets, but it
+  has not been formally verified or audited for timing; passing the RFC vectors is not a proof of security; keys are
+  wiped when objects are dropped, but copies in registers and on the stack are not
+- AEAD nonces are the caller's job (no generator or counter) – reusing one with the same key breaks confidentiality
+  and authenticity
 - random numbers: the entropy each source counts (RDSEED and the firmware's RNG ½ bit per bit, RDRAND 0, timing 1 bit
   per 64 samples) is a trust policy, not something the health checks prove; the health checks are our own simple
   ones, not NIST SP 800-90B; one generator for all CPUs under one lock (a 4 KiB request ~tens of µs); reseeding is
@@ -89,9 +93,10 @@ timings move by ±15% from run to run on the same build).
   RAW source is the CPU's own cannot be told – it forms one hardware class with RDSEED); the default algorithm counts 0
 - a machine without RDSEED and without a RAW firmware RNG, whose clock fails the jitter check, waits about 16 s at
   boot for interrupt times
-- the timing check is strict: under KVM none of the 64 jitter windows passed (in TCG 43 of 64), so a machine
-  without RDSEED and without the firmware's RNG waits at boot for interrupt times – that path is tested only with
-  substituted sources; QEMU's OVMF here gives no `EFI_RNG_PROTOCOL` (QEMU and the test laptop start from RDSEED)
+- the timing check is strict: under KVM none of the 64 jitter windows passed (in TCG 43 of 64, on the test laptop
+  64 of 64), so a machine without RDSEED and without a RAW firmware RNG waits at boot for interrupt times – that path
+  is tested only with substituted sources; QEMU's OVMF gives no `EFI_RNG_PROTOCOL` (the test laptop's firmware gives
+  RAW)
 
 **Hardware**
 - INTx interrupts on real hardware: a device's IRQ line requires ACPI AML (_PRT) – drivers use MSI/MSI-X
@@ -139,6 +144,62 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.71.0 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM). DeSoCrypto 0.3.0: Poly1305, ChaCha20-Poly1305 and X25519 (not audited, not for
+production use); the random number generator's trust policy set at build time (`DESOOS_TRUST_CPU`,
+`DESOOS_TRUST_BOOTLOADER`, both 1 by default).**
+
+### What is new since the last report (v0.70.1)
+
+| Version | Change |
+|---|---|
+| v0.71.0 | trust policy of the generator (an untrusted source mixed but counting 0, classes unchanged); Poly1305 with asserted arithmetic bounds; ChaCha20-Poly1305 (`open` checks the tag first, the buffer untouched on a wrong tag; no nonce generator); X25519 (an all-zero result refused); 486 checks with expected values from Python big integers; 10 mutations, each caught by its own test |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 288 s (restart 23 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 287 tests PASS | 224 s (restart 12 s, soak 126 s) |
+
+Before delivery: a build with `DESOOS_TRUST_CPU=0 DESOOS_TRUST_BOOTLOADER=0` started from jitter alone (TCG, 256 timing
+bits in 16 ms) and passed RNG TEST.
+
+### The new primitives (`[RESULT-CRYPTO]`, user space)
+
+| | TCG | KVM |
+|---|---|---|
+| ChaCha20-Poly1305 `seal`, 64 KiB pieces | 60 160 KiB/s | 393 600 KiB/s |
+| X25519 shared secrets | 1 490 / s | 10 805 / s |
+| checks (kernel and `/bin/cryptotest`) | 486 | 486 |
+
+`[RESULT-RNG]`: `trust_cpu=1 trust_bootloader=1`; TCG 256 (RDSEED) + 2 (jitter) = 258 bits, KVM 256 + 0 – the jitter
+count in TCG varies from run to run (43, 47, 2 of 64 windows), RDSEED alone is enough here.
+
+### Performance against the previous release (v0.70.1 → v0.71.0, same machine)
+
+| | TCG v0.70.1 | TCG v0.71.0 | KVM v0.70.1 | KVM v0.71.0 |
+|---|---|---|---|---|
+| irq_user_ns | 8 310 | 9 877 | 66 733 | 65 876 |
+| fact_user_ns | 67 773 | 81 665 | 90 826 | 95 374 |
+| fact_svc_ns | 208 116 | 219 298 | 104 931 | 102 774 |
+| restart_us | 4 200 | 4 800 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 52 512 | 68 266 | 97 523 | 67 147 |
+| rights gate_ns | 25 | 53 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 48 158 / 48 398 | 48 941 / 51 520 | 180 480 / 218 560 | 180 480 / 212 160 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 641 / 12 740 | 8 055 / 12 641 | 14 948 / 53 894 | 17 246 / 53 894 |
+| DeSoFS 1000 small files create / read (ms) | 12 869 / 3 695 | 12 251 / 3 491 | 7 760 / 865 | 7 838 / 820 |
+| `desofs check` (ms) | 916 | 974 | 298 | 279 |
+| short soak: file operations in 2 min | 6 421 | 6 664 | 28 212 | 28 000 |
+
+Verdict: no regression – the kernel and the system paths did not change (only DeSoCrypto, its tests and the
+generator's policy check). The KVM 8 MiB write is back at 17 246 KiB/s, so the 14 948 of v0.70.1 was a single-run dip.
+KVM usbd read −31 % and TCG `gate_ns` 25 → 53 are on untouched paths: single-run spread (usbd has been 34 133 –
+99 902 KiB/s in earlier reports); to be watched in the next runs.
+
+---
+
 ## v0.70.1 — 2026-11-07
 
 **Status: stable on QEMU (TCG and KVM); fix only – the firmware's RNG counts entropy only with the RAW algorithm (its
@@ -164,6 +225,22 @@ firmware's default algorithm counted 256 bits").
 `[RESULT-RNG]`: QEMU's OVMF gives no `EFI_RNG_PROTOCOL` (`uefi=no`), so nothing changes here: TCG 256 (RDSEED) + 47
 (jitter) = 303 bits, ready after 5 ms; KVM 256 + 0, 1 ms. `getrandom` 104 580 / 389 000 KiB/s, the generator in the
 kernel 134 080 / 485 460 KiB/s (TCG / KVM).
+
+### Real hardware (test laptop: Ryzen 7 4800H, Lenovo UEFI) – a normal start of v0.70.1
+
+```
+[RNG] ready in 0 ms: 320 bits counted (hardware max(uefi 256, rdseed 256) + timing max(jitter 64, irq 0)); UEFI RNG RAW, RDSEED on, RDRAND on (mixed, 0 bits)
+```
+
+| What | Result |
+|---|---|
+| firmware RNG | `EFI_RNG_PROTOCOL` present and gives the RAW algorithm – 256 bits counted (the new v0.70.1 path, first seen on real firmware) |
+| RDSEED / RDRAND | both on, no source switched off by the health checks |
+| counted | 320 bits: hardware max(256, 256) = 256 (UEFI and RDSEED once, not 512) + timing max(jitter 64, interrupts 0) = 64 |
+| ready after | 0 ms – no waiting |
+| after the start | init, services and the shell as usual; `net0` got its address by DHCP |
+
+Unlike under KVM (0 of 64), every jitter window passed on the hardware (64 bits).
 
 ### Performance against the previous release (v0.70.0 → v0.70.1, same machine)
 

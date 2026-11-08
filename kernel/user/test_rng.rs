@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::desocrypto::rng::KeyErasureRng;
-use crate::random::{self, Credit, Health, HwSource, Pool, State};
+use crate::random::{self, Credit, Health, HwSource, Policy, Pool, State};
 use crate::time::ticks;
 
 macro_rules! check {
@@ -193,7 +193,33 @@ fn sources() -> bool {
     ck!(random::uefi_credit(random::SEED_RAW, &seed) == 256, "plausible RAW bytes: {} bits", random::uefi_credit(random::SEED_RAW, &seed));
     ck!(random::uefi_credit(random::SEED_DEFAULT, &seed) == 0, "the firmware's default algorithm counted {} bits", random::uefi_credit(random::SEED_DEFAULT, &seed));
     ck!(random::uefi_credit(random::SEED_RAW, &halves) == 0 && random::uefi_credit(random::SEED_NONE, &seed) == 0, "implausible RAW bytes / no bytes counted");
-    serial_println!("[RNG TEST] 1/3 sources: the firmware's RNG counts only with the RAW algorithm (default DRBG 0); 16 start-up words count nothing; health checks switch off a constant, zero, all-ones, repeating and never-succeeding source; RDSEED 32 bits/word, RDRAND 0; UEFI+RDSEED counted once (max), jitter+interrupts once (max); no start below 256 bits; equal clock steps count 0 PASS");
+    // The trust policy: a source not trusted is still mixed, but counts 0; the classes stay.
+    let good_hw = || (HwSource::new("RDSEED", fake_good, 3, true), HwSource::new("RDRAND", fake_good, 3, true));
+    let (a, b) = good_hw();
+    let mut s = State::with_policy(a, b, Policy { trust_cpu: false, trust_bootloader: true });
+    let m0 = s.pool.mixed_bytes;
+    s.collect_hw(8);
+    ck!(s.pool.credit.rdseed == 0 && s.rdseed.words == 8 + random::STARTUP_WORDS as u64 && s.pool.mixed_bytes > m0, "trust_cpu=0: RDSEED counted {} bits ({} words mixed)", s.pool.credit.rdseed, s.rdseed.words);
+    ck!(s.take_firmware_seed(random::SEED_RAW, &seed) == 256 && s.pool.credit.total() == 256, "trust_cpu=0 changed the firmware's count: {:?}", s.pool.credit);
+    let (a, b) = good_hw();
+    let mut s = State::with_policy(a, b, Policy { trust_cpu: true, trust_bootloader: false });
+    let m0 = s.pool.mixed_bytes;
+    ck!(s.take_firmware_seed(random::SEED_RAW, &seed) == 0 && s.pool.mixed_bytes == m0 + 64, "trust_bootloader=0: the firmware's RAW bytes counted or were not mixed");
+    s.collect_hw(8);
+    ck!(s.pool.credit.rdseed == 256 && s.pool.credit.total() == 256, "trust_bootloader=0 changed RDSEED's count: {:?}", s.pool.credit);
+    let (a, b) = good_hw();
+    let mut s = State::with_policy(a, b, Policy { trust_cpu: false, trust_bootloader: false });
+    s.take_firmware_seed(random::SEED_RAW, &seed);
+    s.collect_hw(8);
+    ck!(s.pool.credit.total() == 0 && !s.try_start(0), "both off: {:?} counted, or the generator started", s.pool.credit);
+    s.pool.credit.jitter = 256;
+    ck!(s.try_start(0), "both off: 256 timing bits did not start the generator");
+    let (a, b) = good_hw();
+    let mut s = State::new(a, b);
+    s.take_firmware_seed(random::SEED_RAW, &seed);
+    s.collect_hw(8);
+    ck!(s.pool.credit.hardware() == 256 && s.pool.credit.total() == 256, "both trusted: UEFI + RDSEED counted {} (want max = 256)", s.pool.credit.total());
+    serial_println!("[RNG TEST] 1/3 sources: the firmware's RNG counts only with the RAW algorithm (default DRBG 0); trust policy: an untrusted RDSEED / RAW is mixed but counts 0, both off start from timing only, UEFI+RDSEED still max; 16 start-up words count nothing; health checks switch off a constant, zero, all-ones, repeating and never-succeeding source; RDSEED 32 bits/word, RDRAND 0; UEFI+RDSEED counted once (max), jitter+interrupts once (max); no start below 256 bits; equal clock steps count 0 PASS");
     true
 }
 
@@ -339,12 +365,14 @@ pub fn self_test() {
     let (st, src) = random::summary();
     let c = st.credit_at_ready;
     serial_println!(
-        "[RESULT-RNG] ver={} lib={} uefi={} rdseed={} rdrand={} credited={} hw_bits={} timing_bits={} ready_ms={} reseeds={} getrandom_kbs={} chacha20_kbs={}",
+        "[RESULT-RNG] ver={} lib={} uefi={} rdseed={} rdrand={} trust_cpu={} trust_bootloader={} credited={} hw_bits={} timing_bits={} ready_ms={} reseeds={} getrandom_kbs={} chacha20_kbs={}",
         crate::shell::VERSION,
         crate::desocrypto::VERSION,
         random::boot_seed_kind(),
         src[0].1,
         src[1].1,
+        st.policy.trust_cpu as u8,
+        st.policy.trust_bootloader as u8,
         c.total(),
         c.hardware(),
         c.timing(),

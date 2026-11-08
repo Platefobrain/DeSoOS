@@ -2,6 +2,42 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.71.0 — 2026-11-08
+
+### Added – DeSoCrypto 0.3.0: Poly1305, ChaCha20-Poly1305, X25519; the generator's trust policy
+- **Trust policy** of the random number generator, set at build time: `DESOOS_TRUST_CPU=0` – RDSEED counts 0,
+  `DESOOS_TRUST_BOOTLOADER=0` – the firmware's RAW bytes count 0 (both default 1). A source not trusted is still mixed
+  in and health-checked; UEFI RAW and RDSEED stay one class (max). Shown in `[RNG] ready`, `[RESULT-RNG]`,
+  `sysinfo counters` (`rng_trust_cpu`, `rng_trust_bootloader`).
+- **Poly1305** (RFC 8439 §2.5, `poly1305.rs`): limbs 44/44/42 bits, products in u128, the upper bound of every product
+  and sum written in the code and asserted in test builds; the final reduction with a mask.
+- **ChaCha20-Poly1305** (RFC 8439 §2.8, `aead.rs`): `seal` / `open` in place; `open` checks the tag first – with a
+  wrong tag the buffer stays exactly as it was; at most 2^38 − 64 bytes. No nonce generator: reusing a nonce with the
+  same key is a serious security failure, and the documentation says so.
+- **X25519** (RFC 7748, `x25519.rs`): five 51-bit limbs, the Montgomery ladder with a mask swap, the inverse by a
+  fixed exponent; an all-zero result (a low-order point) always refused, as TLS 1.3 requires (RFC 8446 §7.4.2).
+- Wiped with volatile writes: the Poly1305 key and state, the AEAD's counter-0 block and one-time key, the X25519
+  clamped scalar and ladder state; `wipe_words64`. The documentation states that copies in registers and on the stack
+  are not covered and that the code is not formally verified, not audited for timing and not for production use.
+- `[RESULT-CRYPTO]`: `aead_user_kbs`, `x25519_user_ops`. The `MAX_PIECE` comment corrected (2^24 + 1 blocks).
+
+### Tests
+- 486 checks in DeSoCrypto (in the kernel and in `/bin/cryptotest`): `wipe` on 0–4096 bytes; Poly1305 RFC 8439 2.5.2,
+  the A.3 edge cases, limbs at their maximum, byte-by-byte input, the final reduction of h = p − 1, p, p + 1, 2^130 − 1,
+  2^130, 2^131 − 1, 2p − 1; AEAD 2.8.2 and lengths 0–1000 with and without aad, a wrong tag / aad / nonce / key and
+  one flipped ciphertext bit (first, middle, last byte) – Mismatch and the buffer (in the middle of a larger array,
+  guards included) byte for byte unchanged; X25519 RFC 7748 5.2, 1 and 1000 iterations, Alice / Bob, the seven
+  low-order points (also with the top bit set), field multiplication, squaring, inverse, addition and subtraction on
+  1, 2, p − 1, p, 2^255 − 20, 2^255 − 1, `cswap`. Expected values from Python big integers (the RFC formulas, no
+  limbs) and the `cryptography` library.
+- RNG TEST 1: the trust policy (an untrusted RDSEED / RAW mixed but counting 0, both off start from timing only, the
+  classes still max). A build with both off started from jitter alone (TCG: 256 timing bits, 16 ms) and passed.
+- Mutations, each caught by the test meant for it: Poly1305 r mask (poly1305 vectors 1), no final reduction
+  (poly1305 vectors 7), `open` decrypting before the tag check (aead tamper 7 – the first non-empty buffer), no aad
+  length (aead vectors 1), no aad padding (aead vectors 1), lengths in the wrong order (aead vectors 1), no clamp
+  (x25519 vectors 1), no zero check (x25519 low order 1), a wrong ladder step (x25519 vectors 1), `trust_cpu=0` still
+  counting RDSEED (RNG TEST 1). 34 suites, 287 tests.
+
 ## v0.70.1 — 2026-11-07
 
 ### Fixed – entropy counting (DeSoCrypto 0.2.1), after a review of v0.70.0

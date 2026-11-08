@@ -40,6 +40,18 @@ fi
 if [ "$DESOOS_AUTOSOAK" != 0 ] && [ "$DESOOS_AUTOSTRESS" != 0 ]; then
   echo "--autosoak and --autostress together: choose one"; exit 1
 fi
+# The random number generator's trust policy (kernel/random.rs): 0 = the source is still
+# mixed into the pool, but its entropy is not counted.  DESOOS_TRUST_CPU – RDSEED;
+# DESOOS_TRUST_BOOTLOADER – the firmware's RNG (RAW algorithm).  Default 1 (counted).
+export DESOOS_TRUST_CPU="${DESOOS_TRUST_CPU:-1}"
+export DESOOS_TRUST_BOOTLOADER="${DESOOS_TRUST_BOOTLOADER:-1}"
+case "$DESOOS_TRUST_CPU$DESOOS_TRUST_BOOTLOADER" in
+  00|01|10|11) ;;
+  *) echo "DESOOS_TRUST_CPU / DESOOS_TRUST_BOOTLOADER: 0 or 1 (got: $DESOOS_TRUST_CPU / $DESOOS_TRUST_BOOTLOADER)"; exit 1 ;;
+esac
+if [ "$DESOOS_TRUST_CPU$DESOOS_TRUST_BOOTLOADER" != 11 ]; then
+  echo "Random numbers: RDSEED counted: $DESOOS_TRUST_CPU, firmware RNG counted: $DESOOS_TRUST_BOOTLOADER"
+fi
 # DESOOS_STRESS_POOL=P – stress with P processes per CPU (full load);
 # unset / 0 = comparison mode (3 per CPU, at most 48 – the default).
 export DESOOS_STRESS_POOL="${DESOOS_STRESS_POOL:-0}"

@@ -22,19 +22,31 @@
 // `compress`) – no full guarantee.
 #![allow(dead_code)]
 
+pub mod aead;
 pub mod chacha20;
 pub mod hkdf;
 pub mod hmac;
+pub mod poly1305;
 pub mod rng;
 pub mod sha256;
+pub mod x25519;
 
-pub const VERSION: &str = "0.2.1";
+pub const VERSION: &str = "0.3.0";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {
     for b in buf.iter_mut() {
         // SAFETY: `b` is a valid, aligned &mut u8.
         unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// The same for 64-bit words (limbs of Poly1305 / X25519).
+pub fn wipe_words64(buf: &mut [u64]) {
+    for w in buf.iter_mut() {
+        // SAFETY: `w` is a valid, aligned &mut u64.
+        unsafe { core::ptr::write_volatile(w, 0) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }

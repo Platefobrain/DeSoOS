@@ -1,4 +1,4 @@
-# DeSoOS v0.70.1
+# DeSoOS v0.71.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -44,7 +44,8 @@ More documentation:
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
 - Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
-  HMAC-SHA256, HKDF-SHA256, ChaCha20 (no heap, no syscalls); tools `sha256sum`, `random`.
+  HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519 (no heap, no syscalls; not audited
+  – not for production use); tools `sha256sum`, `random`.
 - Random numbers: the kernel's generator (ChaCha20 with fast key erasure) fed by the firmware's RNG, RDSEED,
   RDRAND, TSC jitter and interrupt times, with health checks and careful entropy counting; the kernel waits at boot
   until 256 bits are counted; `getrandom` for programs (no right needed, never blocks); `netd` uses it for TCP
@@ -92,6 +93,8 @@ Build-time environment variables:
 |---|---|---|
 | `DESOOS_AUTOSTRESS=S` | `0` (off) | Same as `--autostress=S`: stress test for S seconds 5 s after boot. |
 | `DESOOS_AUTOSOAK=S` | `0` (off) | Same as `--autosoak=S`: the soak test for S seconds (at least 60) on a RAM disk before init. Not together with `DESOOS_AUTOSTRESS`. |
+| `DESOOS_TRUST_CPU=0/1` | `1` | Whether RDSEED counts entropy in the kernel's random number generator (0: still mixed in, counts nothing). |
+| `DESOOS_TRUST_BOOTLOADER=0/1` | `1` | Whether the firmware's RNG (RAW algorithm) counts entropy (0: still mixed in, counts nothing). |
 | `DESOOS_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
 | `DESOOS_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
 | `DESOOS_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |

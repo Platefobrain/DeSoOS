@@ -21,7 +21,8 @@ use super::chacha20::{self, BLOCK_LEN, KEY_LEN, NONCE_LEN};
 use super::sha256::Sha256;
 
 const NONCE: [u8; NONCE_LEN] = [0; NONCE_LEN];
-/// Largest output of one key: 1 GiB (2^24 blocks – far below the counter's 2^32).
+/// Largest output of one key: 1 GiB – with the 32 bytes of the next key 2^24 + 1 blocks,
+/// far below the counter's 2^32.
 pub const MAX_PIECE: usize = 1 << 30;
 
 pub struct KeyErasureRng {
