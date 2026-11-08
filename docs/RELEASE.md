@@ -146,6 +146,60 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.72.1 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM); fix only – `/bin/cryptotest` prints the AES-GCM results on their own line and
+`cryptotest xmm` takes a run time (for the test laptop); two documentation corrections. No change to DeSoCrypto.**
+
+### What is new since the last report (v0.72.0)
+
+| Version | Change |
+|---|---|
+| v0.72.1 | `cryptotest`: a second output line for `aesni`, `pclmul`, `aesgcm`, `aesgcm_soft` (the one long line was cut off on a 240-column screen); `cryptotest xmm <n> [seconds]`; the README sentence about test-only code / `desocrypto_no_simd` split; the v0.72.0 speed conclusion made precise (KVM vs emulated TCG) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 296 s (restart 30 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 224 s (restart 12 s, soak 125 s) |
+
+### Performance against the previous release (v0.72.0 → v0.72.1, same machine)
+
+| | TCG v0.72.0 | TCG v0.72.1 | KVM v0.72.0 | KVM v0.72.1 |
+|---|---|---|---|---|
+| irq_user_ns | 5 906 | 9 168 | 65 616 | 65 659 |
+| fact_user_ns | 72 385 | 76 277 | 91 449 | 94 339 |
+| fact_svc_ns | 187 969 | 171 526 | 104 275 | 103 950 |
+| restart_us | 6 800 | 3 500 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 58 514 | 51 848 | 80 313 | 85 333 |
+| rights gate_ns | 24 | 43 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 49 425 / 50 240 | 21 126 / 49 600 | 180 855 / 216 000 | 181 760 / 216 000 |
+| AES-GCM hardware / software (KiB/s) | 54 720 / 9 320 | 52 480 / 8 871 | 530 560 / 26 613 | 533 120 / 26 746 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 742 / 12 525 | 6 267 / 7 663 | 17 847 / 54 251 | 18 244 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 12 526 / 3 482 | 16 128 / 5 520 | 8 835 / 866 | 6 932 / 808 |
+| `desofs check` (ms) | 923 | 1 185 | 304 | 292 |
+| short soak: file operations in 2 min | 6 782 | 6 546 | 27 998 | 28 554 |
+
+Verdict: no regression – only the test program and documentation changed; KVM is unchanged or better (small files
+back to 6 932 ms). The TCG run was slow as a whole: the kernel's SHA-256 ran at 21 126 KiB/s instead of ~49 000, and
+the DeSoFS reads (SHA-256 bound) fell with it – a loaded host, not code (the same SHA-256 in user space ran normally).
+
+### Real hardware (test laptop: Ryzen 7 4800H) – normal build, by hand in the shell
+
+| What | Result |
+|---|---|
+| `cryptotest` | `2429 checks OK (DeSoCrypto 0.4.0)`; SHA-256 248 640, HMAC 247 680, ChaCha20-Poly1305 414 400 KiB/s, X25519 11 110 / s |
+| AES-GCM | `aesni yes, pclmul yes`; hardware **609 280 KiB/s**, software 30 248 KiB/s (an earlier run the same: 608 960 / 30 248) |
+| `cryptotest xmm 1..4 20` – four at once (three with `&`, the last in the foreground) | 4 × `rounds OK (aesni yes, pclmul yes)`: 1 524 088, 1 293 436, 1 378 728, 1 690 503 rounds – they overlapped (the background ones reported `done` after the fourth), XMM patterns intact after every yield, hardware AES-GCM = software every round |
+| after it | the shell as usual |
+
+On the real CPU AES-GCM with AES-NI is 1.5 times faster than ChaCha20-Poly1305 (609 vs 414 MB/s) and 20 times faster
+than the software AES-GCM. With this, the v0.72.0 hardware check is complete: AES-NI and PCLMULQDQ detected, every
+check passed, and the XMM state survives task switches between processes using it on a 16-thread CPU.
+
+---
+
 ## v0.72.0 — 2026-11-08
 
 **Status: stable on QEMU (TCG and KVM). DeSoCrypto 0.4.0: AES-128-GCM – AES-NI and PCLMULQDQ in programs, a bitsliced
@@ -176,8 +230,21 @@ delivery a kernel without FXRSTOR made CRYPTO TEST 5 fail ("xmm0 changed across 
 | AES-128-GCM, software (bitsliced + bit-by-bit GHASH) | 9 320 KiB/s | 26 613 KiB/s |
 | ChaCha20-Poly1305 (for comparison) | 71 360 KiB/s | 363 520 KiB/s |
 
-With the CPU's instructions AES-GCM is the fastest AEAD here; without them ChaCha20-Poly1305 is 14 times faster than the
-software AES-GCM – the same trade-off TLS 1.3 clients make when they prefer ChaCha20 on CPUs without AES-NI.
+Under KVM, with native AES-NI and PCLMULQDQ, AES-GCM is faster than ChaCha20-Poly1305 (530 560 vs 363 520 KiB/s). TCG
+emulates those instructions, so its numbers (54 720 vs 71 360 KiB/s) do not show the speed of hardware AES. Without the
+instructions ChaCha20-Poly1305 is 14 times faster than the software AES-GCM (KVM) – the trade-off TLS 1.3 clients make
+when they prefer ChaCha20 on CPUs without AES-NI.
+
+### Real hardware (test laptop: Ryzen 7 4800H) – first run, normal build, by hand in the shell
+
+| What | Result |
+|---|---|
+| `cryptotest` | `2429 checks OK (DeSoCrypto 0.4.0)`; SHA-256 247 040, HMAC 247 680, ChaCha20-Poly1305 414 400 KiB/s, X25519 11 100 / s; `aesni yes` – the AES-GCM speeds were cut off by the screen (one line over 240 columns; split in v0.72.1) |
+| `cryptotest xmm 1..4` | 4 × `rounds OK (aesni yes, pclmul yes)`: 48 937, 48 948, 48 793, 49 056 rounds – XMM patterns intact after every yield, hardware AES-GCM = software |
+| after it | the shell as usual |
+
+Not covered by this run: the four XMM tests did not overlap (each ran 0.4 s; typing the next command took longer), so
+on the laptop each was switched against the shell and the services, not against the others – v0.72.1 adds a run time.
 
 ### Performance against the previous release (v0.71.0 → v0.72.0, same machine)
 

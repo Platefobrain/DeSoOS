@@ -85,7 +85,7 @@ pub fn self_test() {
     let gcm_soft_kbs = number_after(out, "aesgcm_soft ");
     let aesni = if out.contains("aesni yes") { "yes" } else { "no" };
     let pclmul = if out.contains("pclmul yes") { "yes" } else { "no" };
-    serial_println!("[CRYPTO TEST] 2/5 user space: {} PASS", out);
+    serial_println!("[CRYPTO TEST] 2/5 user space: {} PASS", out.replace('\n', "; "));
 
     // 3. sha256sum: files (empty, "abc", 300 KiB + 13 bytes) against the kernel's
     // result, standard input, a missing file (error, exit 1, the others still listed).

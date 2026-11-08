@@ -37,7 +37,7 @@ cases, not security. Keys are wiped when objects are dropped (volatile writes), 
 stack are not, and wiping a structure does not wipe its copies. AEAD nonces are the caller's job – reusing one with
 the same key is a serious security failure. Test-only code (`assume_length`, `key_for_test`, `freeze_for_test`,
 `field_for_test`, `cswap_for_test`, `round_keys_for_test`, `sbox_for_test`, `ghash::mul_for_test`, the `bound!`
-asserts). The kernel is built with `--cfg desocrypto_no_simd`: no AES-NI / PCLMULQDQ code in it exists only in `--cfg selftest` / `--cfg desocrypto_test`
-builds.
+asserts) exists only in `--cfg selftest` / `--cfg desocrypto_test` builds. The kernel is built with
+`--cfg desocrypto_no_simd`, so it contains no AES-NI / PCLMULQDQ paths.
 
 Design: `docs/ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".

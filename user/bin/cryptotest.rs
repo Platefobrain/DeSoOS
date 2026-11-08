@@ -1,11 +1,14 @@
 // cryptotest – DeSoCrypto in user space: every test vector and edge case
 // (common/desocrypto/tests.rs – AES-GCM with every AES-NI / PCLMULQDQ combination this CPU
 // allows), then the speeds.
-// Output: "cryptotest: N checks OK (DeSoCrypto x.y.z); sha256 K KiB/s, hmac K KiB/s,
-// aead K KiB/s, x25519 N ops/s, aesni yes|no, pclmul yes|no, aesgcm K KiB/s,
-// aesgcm_soft K KiB/s"; on a failure "cryptotest: FAIL <group> case <n>" and exit code 1.
+// Output, two lines short enough for the screen (240 columns):
+//   "cryptotest: N checks OK (DeSoCrypto x.y.z); sha256 K KiB/s, hmac K KiB/s, aead K KiB/s,
+//    x25519 N ops/s"
+//   "cryptotest: aesni yes|no, pclmul yes|no, aesgcm K KiB/s, aesgcm_soft K KiB/s"
+// on a failure "cryptotest: FAIL <group> case <n>" and exit code 1.
 //
-// `cryptotest xmm <n>`: the XMM test – rounds of (a) a pattern of its own (from n) in
+// `cryptotest xmm <n> [seconds]`: the XMM test (0.4 s unless seconds are given – e.g. 20 to
+// start several by hand in the shell with `&` while the first still runs) – rounds of (a) a pattern of its own (from n) in
 // xmm0-xmm15, a yield, the pattern read back and compared; (b) AES-GCM with the hardware
 // paths compared with the software result.  Several of these run at once (RNG / CRYPTO
 // TEST) so the CPU switches between them all the time.  Output "cryptotest xmm: R rounds
@@ -81,7 +84,7 @@ fn xmm_round(pat: &[u8; 256], back: &mut [u8; 256]) {
 }
 
 /// The XMM test (see the top).
-fn xmm_test(seed: u64) -> i32 {
+fn xmm_test(seed: u64, run_ms: u64) -> i32 {
     let key = [0x5au8 ^ seed as u8; 16];
     let nonce = [seed as u8; 12];
     let mut msg = [0u8; 4096];
@@ -98,7 +101,7 @@ fn xmm_test(seed: u64) -> i32 {
     let hw = AesGcm::new(&key);
     let start = desoos::uptime_ms();
     let mut rounds = 0u64;
-    while desoos::uptime_ms() - start < 400 || rounds < 20 {
+    while desoos::uptime_ms() - start < run_ms || rounds < 20 {
         let mut pat = [0u8; 256];
         for (i, b) in pat.iter_mut().enumerate() {
             *b = (i as u64).wrapping_mul(0x9e37).wrapping_add(seed * 977 + rounds * 13) as u8;
@@ -127,7 +130,8 @@ fn xmm_test(seed: u64) -> i32 {
 fn main(args: desoos::Args) -> i32 {
     if args.get(1) == Some("xmm") {
         let seed = args.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
-        return xmm_test(seed);
+        let run_ms = args.get(3).and_then(|s| s.parse::<u64>().ok()).map(|s| s.min(3600) * 1000).unwrap_or(400);
+        return xmm_test(seed, run_ms);
     }
     let n = match desocrypto_tests::run() {
         Ok(n) => n,
@@ -186,13 +190,16 @@ fn main(args: desoos::Args) -> i32 {
     let soft_kbs = gcm_speed(&AesGcm::with_features(&key16(), Features::NONE));
     let f = auto.features();
     println!(
-        "cryptotest: {} checks OK (DeSoCrypto {}); sha256 {} KiB/s, hmac {} KiB/s, aead {} KiB/s, x25519 {} ops/s, aesni {}, pclmul {}, aesgcm {} KiB/s, aesgcm_soft {} KiB/s",
+        "cryptotest: {} checks OK (DeSoCrypto {}); sha256 {} KiB/s, hmac {} KiB/s, aead {} KiB/s, x25519 {} ops/s",
         n,
         desocrypto::VERSION,
         sha_kbs,
         hmac_kbs,
         aead_kbs,
-        x25519_ops,
+        x25519_ops
+    );
+    println!(
+        "cryptotest: aesni {}, pclmul {}, aesgcm {} KiB/s, aesgcm_soft {} KiB/s",
         if f.aes { "yes" } else { "no" },
         if f.pclmul { "yes" } else { "no" },
         gcm_kbs,

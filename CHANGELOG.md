@@ -2,6 +2,18 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.72.1 — 2026-11-08
+
+### Fixed – the test program and the documentation, after a review of v0.72.0 and a first run on the test laptop
+- `/bin/cryptotest` prints the AES-GCM results (`aesni`, `pclmul`, `aesgcm`, `aesgcm_soft`) on a second line: on the
+  test laptop's screen (240 columns) the one long line was cut off before them.
+- `cryptotest xmm <n> [seconds]`: the XMM test can run longer (0.4 s by default), so several can be started by hand in
+  the shell with `&` and really run at the same time – by hand each 0.4 s run ended before the next one started.
+- `common/desocrypto/README.md`: a sentence about test-only code and `desocrypto_no_simd` that had been run together,
+  split in two. `docs/RELEASE.md` (v0.72.0): the speed conclusion made precise – AES-GCM is faster than
+  ChaCha20-Poly1305 under KVM with native AES-NI / PCLMULQDQ; TCG emulates those instructions, so its numbers do not
+  show hardware AES. No change to DeSoCrypto itself.
+
 ## v0.72.0 — 2026-11-08
 
 ### Added – DeSoCrypto 0.4.0: AES-128-GCM
