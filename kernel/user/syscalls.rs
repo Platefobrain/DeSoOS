@@ -310,6 +310,13 @@ pub const SYS_READDIR_PART: u64 = 57;
 /// Returns `len`; ERROR_INVALID_ARGUMENT (len > 4096, flags != 0),
 /// ERROR_INVALID_ADDRESS (the buffer is not writable user memory).
 pub const SYS_GETRANDOM: u64 = 58;
+/// time(out): the wall clock – writes three u64 to `out`: Unix seconds (UTC, from the RTC
+/// read at boot + the time since), 0 if the clock is plausible or the reason it is not
+/// (drivers/rtc.rs Implausible: 1 not read, 2 battery lost, 3 unstable, 4 bad fields,
+/// 5 before the build date, 6 after 2099), and the build date the lower bound comes from.
+/// No right needed (reading the time).  "Plausible" is a heuristic, not proof – see rtc.rs.
+/// Returns 0; ERROR_INVALID_ADDRESS (out is not 24 writable bytes).
+pub const SYS_TIME: u64 = 59;
 /// readdir_part: the cursor value after the last part.
 pub const DIR_END: u64 = u64::MAX;
 /// Maximum number of entries in the spawn_ex map.
@@ -383,6 +390,7 @@ fn fs_error(e: FsError) -> i64 {
         FsError::NotEmpty => ERROR_NOT_EMPTY,
         FsError::ReadOnly => ERROR_READ_ONLY,
         FsError::InUse(_) => ERROR_BUSY,
+        FsError::Immutable => ERROR_NOT_PERMITTED,
         _ => ERROR_IO,
     }
 }
@@ -658,6 +666,10 @@ fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
     // Writes to a read-only file system (USB stick, SSD) fail immediately.
     if write && fs::is_read_only(&path) {
         return Err(ERROR_READ_ONLY);
+    }
+    // A sealed file (the CA store) is not even opened for writing.
+    if write && fs::is_sealed(&path) {
+        return Err(ERROR_NOT_PERMITTED);
     }
     match fs::stat(&path) {
         Ok(m) if m.kind == FileType::Directory => return Err(ERROR_IS_DIRECTORY),
@@ -1373,6 +1385,19 @@ fn sys_getrandom(p: &mut Process, ptr: u64, len: u64, flags: u64) -> SysResult {
     r.map(|_| len)
 }
 
+fn sys_time(p: &mut Process, out: u64) -> SysResult {
+    let (secs, verdict) = crate::drivers::rtc::time_status();
+    let status = match verdict {
+        Ok(()) => 0u64,
+        Err(e) => e as u64,
+    };
+    let mut buf = [0u8; 24];
+    buf[..8].copy_from_slice(&secs.to_le_bytes());
+    buf[8..16].copy_from_slice(&status.to_le_bytes());
+    buf[16..].copy_from_slice(&crate::drivers::rtc::BUILD_EPOCH.to_le_bytes());
+    copy_to_user(p, out, &buf).map(|_| 0)
+}
+
 fn sys_readdir_part(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use core::fmt::Write;
     let path = dir_path(p, f.rdi, f.rsi, f.rdx, true)?;
@@ -1880,6 +1905,7 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_READDIRAT => dir_path(p, a0, a1, a2, true).and_then(|path| readdir_path(p, &path, frame.r10, frame.r8)),
         SYS_READDIR_PART => sys_readdir_part(p, frame),
         SYS_GETRANDOM => sys_getrandom(p, a0, a1, a2),
+        SYS_TIME => sys_time(p, a0),
         SYS_STATAT => dir_path(p, a0, a1, a2, true).and_then(|path| stat_path(p, &path, frame.r10)),
         SYS_MKDIRAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
         SYS_UNLINKAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),

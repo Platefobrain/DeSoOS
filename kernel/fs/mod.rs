@@ -49,6 +49,8 @@ pub enum FsError {
     /// Unmount refused: processes still use the mount point (open files,
     /// directory handles, current directories) – the number of pins.
     InUse(usize),
+    /// A sealed node (the trusted CA store): nothing may change, remove, rename or cover it.
+    Immutable,
 }
 
 impl From<BlockError> for FsError {
@@ -80,6 +82,7 @@ impl core::fmt::Display for FsError {
             FsError::TooMany => f.write_str("too many directory entries"),
             FsError::BadCursor => f.write_str("invalid directory position"),
             FsError::InUse(n) => write!(f, "in use ({} open file{} / director{})", n, if *n == 1 { "" } else { "s" }, if *n == 1 { "y" } else { "ies" }),
+            FsError::Immutable => f.write_str("protected (sealed) - cannot be changed"),
         }
     }
 }
@@ -206,6 +209,19 @@ pub trait ConcurrentFs {
         Err(FsError::Unsupported)
     }
     fn stats(&self) -> FsStats;
+    /// Seals a node (ramfs only): a file can no longer be written, truncated or removed; a
+    /// directory gets no new entries and loses none.  There is no unsealing.
+    fn seal(&self, _path: &str) -> Result<()> {
+        Err(FsError::Unsupported)
+    }
+    /// The node is sealed.
+    fn sealed(&self, _path: &str) -> bool {
+        false
+    }
+    /// The node or something under it is sealed (it may not be renamed or covered by a mount).
+    fn protects(&self, _path: &str) -> bool {
+        false
+    }
 }
 
 // ------------------------------------------------------------
@@ -558,12 +574,39 @@ fn with_fs<R>(
     resolve(path, excl)
 }
 
-/// Mounts a file system at `path` (the directory must exist, except for "/").
+/// Seals `path` (see ConcurrentFs::seal) – only ramfs can.
+pub fn seal(path: &str) -> Result<()> {
+    with_fs(path, |c, p| c.seal(p), |_, _| Err(FsError::Unsupported))
+}
+
+/// `path` is a sealed node.
+pub fn is_sealed(path: &str) -> bool {
+    let path = normalize("/", path);
+    let _g = FS_LOCK.read();
+    match find_mount(&path) {
+        Ok((i, rel)) => mounts()[i].fs.concurrent().is_some_and(|c| c.sealed(&rel)),
+        Err(_) => false,
+    }
+}
+
+/// `path` or something under it is sealed (under FS_LOCK).
+fn protects_locked(path: &str) -> bool {
+    match find_mount(path) {
+        Ok((i, rel)) => mounts()[i].fs.concurrent().is_some_and(|c| c.protects(&rel)),
+        Err(_) => false,
+    }
+}
+
+/// Mounts a file system at `path` (the directory must exist, except for "/").  Not over a
+/// sealed node or a directory holding one (it would hide it).
 pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
     let _g = FsWrite::lock();
     let path = normalize("/", path);
     if mounts().iter().any(|m| m.path == path) {
         return Err(FsError::Busy);
+    }
+    if path != "/" && protects_locked(&path) {
+        return Err(FsError::Immutable);
     }
     if path != "/" {
         match stat(&path) {
@@ -803,6 +846,18 @@ pub fn rename(from: &str, to: &str) -> Result<()> {
     let _g = FS_LOCK.read();
     if is_mount_point(&from) || is_mount_point(&to) || from == "/" {
         return Err(FsError::Busy);
+    }
+    // A sealed node (or a directory holding one) does not move and is not replaced, and a
+    // sealed directory neither loses nor gains an entry.
+    let sealed_parent = |p: &str| {
+        let (parent, _) = split_parent(p);
+        match find_mount(if parent.is_empty() { "/" } else { parent }) {
+            Ok((i, rel)) => mounts()[i].fs.concurrent().is_some_and(|c| c.sealed(&rel)),
+            Err(_) => false,
+        }
+    };
+    if protects_locked(&from) || protects_locked(&to) || sealed_parent(&from) || sealed_parent(&to) {
+        return Err(FsError::Immutable);
     }
     let (i, rf) = find_mount(&from)?;
     let (j, rt) = find_mount(&to)?;

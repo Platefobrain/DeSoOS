@@ -40,7 +40,8 @@
 //            wrong lengths, keys outside the rules, a DigestInfo without NULL
 //   ECDSA    P-256 / P-384 from Python `cryptography` (also the key with private value 1,
 //            digests e > n, e = n, e = 0); DER variants (non-minimal, long form, negative,
-//            trailing bytes), r / s = 0 or n, high s, public keys off the curve
+//            trailing bytes), r / s = 0 or n, high s, public keys off the curve (also
+//            check_public_key alone)
 //   Wycheproof  vectors/wycheproof.bin (gen-wycheproof.py, pinned commit): ECDSA P-256 and
 //            P-384, RSA PKCS#1 2048/SHA-256, PSS 2048/SHA-256 and the PSS "misc" sets
 // The other expected values (block-edge lengths, empty key, 8160-byte output) were
@@ -1898,6 +1899,7 @@ fn ecdsa_checks(c: &mut Checks) -> Result<(), Failure> {
         let mut sb = [0u8; 160];
         let s = bytes(sig, &mut sb);
         c.check(ecdsa::verify(curve, key, RSA_MSG, s).is_ok())?;
+        c.check(ecdsa::check_public_key(curve, key).is_ok())?;
         c.check(ecdsa::verify(curve, key, b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?;
         // The other curve refuses the key (wrong length).
         let other = if curve == Curve::P256 { Curve::P384 } else { Curve::P256 };
@@ -2005,7 +2007,17 @@ fn ecdsa_checks(c: &mut Checks) -> Result<(), Failure> {
         let (good, big) = if curve == Curve::P256 { P256_SMALL_X } else { P384_SMALL_X };
         let r1 = ecdsa::verify(curve, bytes(good, &mut k2), RSA_MSG, &sg[..n]);
         c.check(r1 == Err(Error::Mismatch))?;
+        c.check(ecdsa::check_public_key(curve, bytes(good, &mut k2)).is_ok())?;
         c.check(ecdsa::verify(curve, bytes(big, &mut k2), RSA_MSG, &sg[..n]) == Err(Error::InvalidKey))?;
+        c.check(ecdsa::check_public_key(curve, bytes(big, &mut k2)) == Err(Error::InvalidKey))?;
+        // The key alone: off the curve, compressed prefix, short.
+        k2[..kl].copy_from_slice(key);
+        k2[kl - 1] ^= 1;
+        c.check(ecdsa::check_public_key(curve, &k2[..kl]) == Err(Error::InvalidKey))?;
+        k2[kl - 1] ^= 1;
+        k2[0] = 0x03;
+        c.check(ecdsa::check_public_key(curve, &k2[..kl]) == Err(Error::InvalidKey))?;
+        c.check(ecdsa::check_public_key(curve, &key[..kl - 1]) == Err(Error::InvalidKey))?;
     }
     Ok(())
 }

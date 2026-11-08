@@ -5,6 +5,13 @@
 // a 10 MiB download wrote ~13 GB through memcpy).
 // Everything disappears on reboot – persistent data lives on /disk (FAT32).
 //
+// Sealed nodes (`seal`, used once at boot for the trusted CA store /etc/certs/roots, its
+// directory and /etc): a sealed file cannot be written, truncated, replaced or removed; a
+// sealed directory gets no new entry and loses none; a directory holding anything sealed
+// cannot be removed.  The VFS adds: no open for writing, no rename and no mount over
+// such a node.  Every process – and the kernel's own shell – gets FsError::Immutable; there
+// is no unsealing.
+//
 // ramfs runs concurrently (the VFS calls it holding FS_LOCK for
 // reading only – `ConcurrentFs`).  Its own locks:
 //   * the tree (directories) – `KRwLock`: lookups take it for reading, structural
@@ -185,11 +192,40 @@ impl Drop for FileInner {
 
 struct FileNode {
     inner: Mutex<FileInner>,
+    /// Sealed (seal): no write, truncate or removal any more – checked on every change, also
+    /// through an Arc taken before the seal.
+    sealed: core::sync::atomic::AtomicBool,
+}
+
+impl FileNode {
+    fn is_sealed(&self) -> bool {
+        self.sealed.load(core::sync::atomic::Ordering::Acquire)
+    }
 }
 
 enum Node {
     File(Arc<FileNode>),
-    Dir { children: BTreeMap<String, Node>, modified: DateTime },
+    /// `sealed`: no new entries and no entry removed (the entries' own contents are sealed
+    /// separately).
+    Dir { children: BTreeMap<String, Node>, modified: DateTime, sealed: bool },
+}
+
+impl Node {
+    fn is_sealed(&self) -> bool {
+        match self {
+            Node::File(f) => f.is_sealed(),
+            Node::Dir { sealed, .. } => *sealed,
+        }
+    }
+
+    /// This node or something under it is sealed.
+    fn holds_sealed(&self) -> bool {
+        self.is_sealed()
+            || match self {
+                Node::File(_) => false,
+                Node::Dir { children, .. } => children.values().any(Node::holds_sealed),
+            }
+    }
 }
 
 pub struct RamFs {
@@ -206,14 +242,17 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn new_file() -> Node {
-    Node::File(Arc::new(FileNode { inner: Mutex::new(FileInner { chunks: Vec::new(), len: 0, modified: rtc::now() }) }))
+    Node::File(Arc::new(FileNode {
+        inner: Mutex::new(FileInner { chunks: Vec::new(), len: 0, modified: rtc::now() }),
+        sealed: core::sync::atomic::AtomicBool::new(false),
+    }))
 }
 
 impl RamFs {
     pub fn new() -> Self {
         RamFs {
             tree: RwSpinLock::new("ramfs tree"),
-            root: UnsafeCell::new(Node::Dir { children: BTreeMap::new(), modified: rtc::now() }),
+            root: UnsafeCell::new(Node::Dir { children: BTreeMap::new(), modified: rtc::now(), sealed: false }),
         }
     }
 
@@ -267,8 +306,10 @@ impl RamFs {
         charge(node_cost(name))?;
         let _t = self.tree.write();
         let r = match Self::node_mut(self.root_mut(), parent) {
-            Ok(Node::Dir { children, modified }) => {
-                if children.contains_key(name) {
+            Ok(Node::Dir { children, modified, sealed }) => {
+                if children.get(name).is_some_and(Node::is_sealed) || *sealed {
+                    Err(FsError::Immutable)
+                } else if children.contains_key(name) {
                     Err(FsError::AlreadyExists)
                 } else {
                     children.insert(String::from(name), node);
@@ -383,6 +424,9 @@ impl ConcurrentFs for RamFs {
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();
+        if f.is_sealed() {
+            return Err(FsError::Immutable);
+        }
         // The offset from `seek` may be huge – no overflow, within the limit.
         let end = (offset as usize).checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
         if i.len < end {
@@ -396,6 +440,9 @@ impl ConcurrentFs for RamFs {
     fn write_whole(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let f = self.file_or_create(path)?;
         let mut i = f.inner.lock();
+        if f.is_sealed() {
+            return Err(FsError::Immutable);
+        }
         i.set_len(0)?;
         i.set_len(bytes.len())?;
         i.write_at(0, bytes);
@@ -406,6 +453,9 @@ impl ConcurrentFs for RamFs {
     fn append(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let f = self.file_or_create(path)?;
         let mut i = f.inner.lock();
+        if f.is_sealed() {
+            return Err(FsError::Immutable);
+        }
         let old = i.len;
         i.set_len(old.checked_add(bytes.len()).ok_or(FsError::NoSpace)?)?;
         i.write_at(old, bytes);
@@ -416,6 +466,9 @@ impl ConcurrentFs for RamFs {
     fn truncate(&self, path: &str, size: u64) -> Result<()> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();
+        if f.is_sealed() {
+            return Err(FsError::Immutable);
+        }
         i.set_len(usize::try_from(size).map_err(|_| FsError::NoSpace)?)?;
         i.modified = rtc::now();
         Ok(())
@@ -426,7 +479,7 @@ impl ConcurrentFs for RamFs {
     }
 
     fn mkdir(&self, path: &str) -> Result<()> {
-        self.insert(path, Node::Dir { children: BTreeMap::new(), modified: rtc::now() })
+        self.insert(path, Node::Dir { children: BTreeMap::new(), modified: rtc::now(), sealed: false })
     }
 
     fn remove(&self, path: &str) -> Result<()> {
@@ -438,11 +491,13 @@ impl ConcurrentFs for RamFs {
         let _removed = {
             let _t = self.tree.write();
             let (children, modified) = match Self::node_mut(self.root_mut(), parent)? {
-                Node::Dir { children, modified } => (children, modified),
+                Node::Dir { sealed: true, .. } => return Err(FsError::Immutable),
+                Node::Dir { children, modified, .. } => (children, modified),
                 Node::File(_) => return Err(FsError::NotADirectory),
             };
             match children.get(name) {
                 None => return Err(FsError::NotFound),
+                Some(n) if n.holds_sealed() => return Err(FsError::Immutable),
                 Some(Node::Dir { children: c, .. }) if !c.is_empty() => return Err(FsError::NotEmpty),
                 _ => {}
             }
@@ -453,6 +508,29 @@ impl ConcurrentFs for RamFs {
         Ok(())
     }
 
+
+    fn seal(&self, path: &str) -> Result<()> {
+        let _t = self.tree.write();
+        match Self::node_mut(self.root_mut(), path)? {
+            Node::File(f) => {
+                // Under the file lock: a write that already holds it finishes first.
+                let _i = f.inner.lock();
+                f.sealed.store(true, core::sync::atomic::Ordering::Release);
+            }
+            Node::Dir { sealed, .. } => *sealed = true,
+        }
+        Ok(())
+    }
+
+    fn sealed(&self, path: &str) -> bool {
+        let _t = self.tree.read();
+        Self::node(self.root(), path).is_ok_and(Node::is_sealed)
+    }
+
+    fn protects(&self, path: &str) -> bool {
+        let _t = self.tree.read();
+        Self::node(self.root(), path).is_ok_and(Node::holds_sealed)
+    }
 
     fn stats(&self) -> FsStats {
         let files = {

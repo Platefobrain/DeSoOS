@@ -1,4 +1,4 @@
-# DeSoCrypto v0.5.1
+# DeSoCrypto v0.6.0
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
@@ -20,7 +20,7 @@ DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel an
 | `aes_gcm.rs` | AES-128-GCM – `seal` / `open` in place; **never reuse a nonce with the same key** |
 | `bignum.rs` | big numbers (up to 4096 bits, Montgomery) for signature checks – **public data only, not constant time** |
 | `rsa.rs` | RSA signature **verification**: PKCS#1 v1.5 and PSS with explicit parameters; n 2048–4096 bits |
-| `ecdsa.rs` | ECDSA signature **verification**: P-256 with SHA-256, P-384 with SHA-384; strict DER, every range check |
+| `ecdsa.rs` | ECDSA signature **verification**: P-256 with SHA-256, P-384 with SHA-384; strict DER, every range check; `check_public_key` for a key alone |
 | `rng.rs` | a generator with fast key erasure (ChaCha20) – the kernel's CSPRNG, and programs' own generators keyed from `getrandom` |
 | `tests.rs` | test vectors and edge cases – included only by `/bin/cryptotest` and the kernel's CRYPTO TEST |
 | `vectors/` | `wycheproof.bin` (Wycheproof signature vectors used by `tests.rs`) and `gen-wycheproof.py`, which builds it from a pinned Wycheproof commit (every JSON file checked by SHA-256) |
@@ -34,7 +34,7 @@ mod desocrypto;
 let digest = desocrypto::sha256::sha256(b"abc");
 ```
 
-Users: the kernel (DeSoFS block checksums, the random number generator `kernel/random.rs`, CRYPTO TEST),
+Users: DeSoTLS (`common/desotls` – certificate signatures), the kernel (DeSoFS block checksums, the random number generator `kernel/random.rs`, CRYPTO TEST),
 `netd` (its own generator keyed from `getrandom`), `/bin/sha256sum`, `/bin/cryptotest`.
 
 Signatures: only verification – DeSoOS checks signatures made by others (certificates, TLS); it does not sign
@@ -51,4 +51,5 @@ the same key is a serious security failure. Test-only code (`assume_length`, `ke
 `ecdsa::verify_digest`, the `bound!` asserts) exists only in `--cfg selftest` / `--cfg desocrypto_test` builds. The kernel is built with
 `--cfg desocrypto_no_simd`, so it contains no AES-NI / PCLMULQDQ paths.
 
-Design: `docs/ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".
+Full description: `docs/desocrypto/` (`ALGORITHMS.md` – every module, the rules, the tests); its place in the system:
+`docs/ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".

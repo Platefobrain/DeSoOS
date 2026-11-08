@@ -80,6 +80,7 @@ pub const SYS_MKDIRAT: u64 = 55;
 pub const SYS_UNLINKAT: u64 = 56;
 pub const SYS_READDIR_PART: u64 = 57;
 pub const SYS_GETRANDOM: u64 = 58;
+pub const SYS_TIME: u64 = 59;
 /// Largest single `getrandom` syscall.
 pub const GETRANDOM_MAX: usize = 4096;
 /// readdir_part: the cursor after the last part.
@@ -320,6 +321,77 @@ pub fn getrandom(buf: &mut [u8]) -> Result<(), i64> {
         }
     }
     Ok(())
+}
+
+/// The wall clock (syscall 59).
+#[derive(Clone, Copy, Debug)]
+pub struct WallClock {
+    /// Unix seconds, UTC.
+    pub secs: u64,
+    /// 0 = plausible; otherwise why not (see `clock_reason`).
+    pub status: u64,
+    /// The build date the lower bound comes from.
+    pub build_epoch: u64,
+}
+
+impl WallClock {
+    pub fn plausible(&self) -> bool {
+        self.status == 0
+    }
+}
+
+pub fn time_unix() -> Result<WallClock, i64> {
+    let mut out = [0u64; 3];
+    let r = syscall3(SYS_TIME, out.as_mut_ptr() as u64, 0, 0);
+    if r < 0 {
+        return Err(r);
+    }
+    Ok(WallClock { secs: out[0], status: out[1], build_epoch: out[2] })
+}
+
+/// The text for a WallClock status (kernel drivers/rtc.rs Implausible).
+pub fn clock_reason(status: u64) -> &'static str {
+    match status {
+        0 => "plausible",
+        1 => "RTC not read yet",
+        2 => "RTC lost power (VRT clear)",
+        3 => "RTC readings do not agree",
+        4 => "RTC date or time out of range",
+        5 => "clock earlier than the build date",
+        6 => "clock later than 2099",
+        _ => "unknown",
+    }
+}
+
+/// "YYYY-MM-DD HH:MM:SS" of Unix seconds into `buf`.
+pub fn format_utc(secs: u64, buf: &mut [u8; 19]) -> &str {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    // civil_from_days (H. Hinnant)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    let put = |b: &mut [u8; 19], at: usize, v: u64, n: usize| {
+        let mut v = v;
+        for i in (0..n).rev() {
+            b[at + i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+    };
+    *buf = *b"0000-00-00 00:00:00";
+    put(buf, 0, y.max(0) as u64, 4);
+    put(buf, 5, m as u64, 2);
+    put(buf, 8, d as u64, 2);
+    put(buf, 11, rem / 3600, 2);
+    put(buf, 14, rem / 60 % 60, 2);
+    put(buf, 17, rem % 60, 2);
+    core::str::from_utf8(buf).unwrap_or("")
 }
 
 /// A handle for reading directory `path` in parts: (handle, path relative to it, whether

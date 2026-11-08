@@ -79,8 +79,8 @@ timings move by ±15% from run to run on the same build).
 
 **Cryptography (DeSoCrypto)**
 - SHA-256/384/512, HMAC and HKDF over them, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519, AES-128-GCM, RSA and
-  ECDSA signature verification and the kernel's random number generator; no X.509 or TLS yet – `netget https://` is
-  refused; nothing in the system uses the AEADs, X25519 or the signature checks yet
+  ECDSA signature verification and the kernel's random number generator; no TLS yet – `netget https://` is refused;
+  certificate chains are checked by DeSoTLS (`certcheck`), the AEADs and X25519 are not used yet
 - signatures: verification only (no signing, no RSA decryption); RSA 2048–4096 bits with 3 ≤ e < 2^32, PKCS#1 v1.5
   (DigestInfo with NULL only) and PSS; ECDSA only P-256 / SHA-256 and P-384 / SHA-384; no Ed25519, no SHA-1. The
   big-number and curve arithmetic is not constant time – fine for public keys and public data, the only use; it must
@@ -104,6 +104,27 @@ timings move by ±15% from run to run on the same build).
   64 of 64), so a machine without RDSEED and without a RAW firmware RNG waits at boot for interrupt times – that path
   is tested only with substituted sources; QEMU's OVMF gives no `EFI_RNG_PROTOCOL` (the test laptop's firmware gives
   RAW)
+
+**Certificates (DeSoTLS) and the clock**
+- no TLS yet (v0.75): certificate chains are checked (`certcheck`, CERT TEST), nothing connects with them
+- not checked: revocation (CRL, OCSP) and Certificate Transparency – a revoked certificate still within its dates is
+  accepted
+- the clock: "plausible" (syscall 59) is a heuristic – it refuses a lost RTC battery, a broken reading and dates
+  before the build date − 24 h or after 2099, but anyone with access to the firmware can set a date in that range
+  (an expired certificate becomes "valid"); an RTC kept in local time (Windows next to it) cannot be detected – a few
+  hours off can make a just-issued certificate "not yet valid"; no NTP and no saved last known time yet (the floor
+  moves only with a new image); the build date is the build time unless `SOURCE_DATE_EPOCH` is set
+- fail closed where real certificates may differ: name constraints with any type other than DNS names refuse the CA
+  (339 of the 5341 x509-limbo server cases are refused for that while the suite expects success); a CA certificate as
+  the server's own is refused; more than 256 names in a certificate (web-platform.test has 260), more than 8
+  presented certificates or a path longer than 8 are refused; RSA keys over 4096 bits, P-521 (one Mozilla root is
+  unusable), Ed25519 and ML-DSA are not supported; IP addresses as hosts are not supported yet
+- not enforced (CA conformance / CA/B Forum rules that browsers also do not check, x509-limbo marks them): missing
+  authority / subject key identifiers, a zero serial number, non-critical policy constraints, the commonName / SAN
+  consistency, public-suffix wildcards (`*.co.uk`), RSA sizes not divisible by 8; deliberately accepted:
+  non-critical name constraints (enforced anyway) and an anchor's non-critical basicConstraints
+- the CA store (Mozilla NSS_3_133_RTM, 118 anchors) changes only with a new image; it is sealed in ramfs (nothing,
+  not even the kernel's shell, can change it after boot)
 
 **Hardware**
 - INTx interrupts on real hardware: a device's IRQ line requires ACPI AML (_PRT) – drivers use MSI/MSI-X
@@ -148,6 +169,141 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.74.3 — 2026-11-08
+
+**Status: documentation only – DeSoCrypto and DeSoTLS get their own folders, `docs/desocrypto/` and `docs/desotls/`;
+`docs/ARCHITECTURE.md` keeps a summary of each. No code changed (only the version number), so the test results of
+v0.74.2 below apply; no new test run.**
+
+---
+
+## v0.74.2 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM); build change only – `build.sh` no longer uses git at all: the build date is
+`SOURCE_DATE_EPOCH` when it is set on purpose, otherwise the time of the build (as Android). No kernel code
+changed.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 297 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 228 s (restart 12 s, soak 126 s) |
+
+Both builds printed `Build date: 2026-11-08 … UTC (from build time)`; CERT TEST step 5 confirms the kernel and
+syscall 59 report that date.
+
+### Performance against the previous release (v0.74.1 → v0.74.2, same machine)
+
+| | TCG v0.74.1 | TCG v0.74.2 | KVM v0.74.1 | KVM v0.74.2 |
+|---|---|---|---|---|
+| irq_user_ns | 9 130 | 11 485 | 65 897 | 66 225 |
+| fact_svc_ns | 188 679 | 241 545 | 103 252 | 105 374 |
+| USB read_kbs (usbd) / kernel | 65 015 / 78 794 | 64 000 / 68 400 | 67 147 / 105 292 | 99 902 / 102 264 |
+| crypto sha256 kernel / user (KiB/s) | 48 640 / 50 880 | 49 425 / 51 582 | 180 480 / 216 320 | 174 080 / 216 320 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 200 / 411 / 173 | 2 180 / 448 / 180 | 13 020 / 3 960 / 1 380 | 13 100 / 3 820 / 1 366 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 971 / 11 393 | 6 954 / 12 118 | 21 501 / 54 251 | 19 230 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 12 882 / 3 674 | 13 358 / 3 686 | 7 604 / 822 | 7 954 / 826 |
+| `desofs check` (ms) | 1 028 | 970 | 250 | 277 |
+| short soak: file operations in 2 min | 6 478 | 5 977 | 27 781 | 28 150 |
+
+Verdict: no regression (the same kernel code). The KVM USB read through usbd is back at v0.73.0's level
+(99 902 KiB/s) – the dip in v0.74.0 was the host; it leaves the watch list. TCG fact_svc_ns moves between runs
+(emulated timing) and is not a trend.
+
+---
+
+## v0.74.1 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM); fix only – `build.sh` takes the build date from a git commit only when the
+project is the top of its own repository (it had taken a repository above the project: 2025-06-08). No kernel code
+changed.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 299 s (restart 24 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 227 s (restart 12 s, soak 126 s) |
+
+Both builds printed `Build date: 2026-11-08 … UTC (from build time)` – the test machine's project is not a git
+repository, so the build time is used; CERT TEST step 5 confirms the kernel and syscall 59 report that date.
+
+### Performance against the previous release (v0.74.0 → v0.74.1, same machine)
+
+| | TCG v0.74.0 | TCG v0.74.1 | KVM v0.74.0 | KVM v0.74.1 |
+|---|---|---|---|---|
+| irq_user_ns | 6 960 | 9 130 | 66 733 | 65 897 |
+| fact_svc_ns | 209 205 | 188 679 | 102 459 | 103 252 |
+| USB read_kbs (usbd) / kernel | 63 015 / 91 916 | 65 015 / 78 794 | 56 109 / 68 532 | 67 147 / 105 292 |
+| crypto sha256 kernel / user (KiB/s) | 49 425 / 51 840 | 48 640 / 50 880 | 181 760 / 216 960 | 180 480 / 216 320 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 280 / 440 / 182 | 2 200 / 411 / 173 | 13 200 / 4 040 / 1 400 | 13 020 / 3 960 / 1 380 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 809 / 12 226 | 6 971 / 11 393 | 18 745 / 53 894 | 21 501 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 13 372 / 3 538 | 12 882 / 3 674 | 9 334 / 846 | 7 604 / 822 |
+| `desofs check` (ms) | 959 | 1 028 | 328 | 250 |
+| short soak: file operations in 2 min | 6 092 | 6 478 | 27 669 | 27 781 |
+
+Verdict: no regression (the same kernel code). The KVM USB read through usbd is back up (56 109 → 67 147) and the
+kernel's own USB read rose too (68 532 → 105 292) with no USB change – the earlier fall was the host, not a trend;
+still lower than v0.73.0's 99 902, so it stays on the watch list.
+
+---
+
+## v0.74.0 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM). DeSoTLS 0.1 – certificate chains checked like TLS will check them, Mozilla's
+root store installed as `/etc/certs/roots` and sealed in ramfs, the wall clock with a plausibility verdict (syscall
+59), `certcheck`. No TLS connection yet (v0.75).**
+
+### What is new since the last report (v0.73.1)
+
+| Version | Change |
+|---|---|
+| v0.74.0 | `common/desotls` (DER, X.509, names, path building with every rule and limit, the store, PEM); `/etc/certs/roots` (NSS_3_133_RTM, 118 anchors) sealed with `/etc/certs` and `/etc`; ramfs sealed nodes; syscall 59 `time`; the build date in `build.sh`; `certcheck`, `certtest`, CERT TEST; DeSoCrypto 0.6.0 (`ecdsa::check_public_key`) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 298 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 228 s (restart 14 s, soak 125 s) |
+
+`[RESULT-CERTS]` (both runs): 257 DeSoTLS checks in the kernel and in `/bin/certtest`, 118 anchors (117 usable),
+store NSS_3_133_RTM, 36 attempts to change the sealed store refused (21 from a program, 15 from the kernel).
+`[RESULT-RIGHTS]` rows 58 → 59 (syscall 59). Before the release, on the host: x509-limbo 5341 server / DNS cases
+(4944 agree; the differences are in "Current limitations"), 3 million mutated certificates (no panic, none
+accepted), 56 mutations of the rules (55 caught, 1 equivalent).
+
+The build said `Build date: 2025-06-08 09:20:23 UTC (from git commit)`: `build.sh` found a git repository in a
+directory above the project (not the project's own) and took its last commit – an old date, so the lower bound of a
+plausible clock was weaker than it should be (not wrong: a clock is only refused when earlier than this). To fix:
+only the project's own repository counts (v0.74.1).
+
+### Performance against the previous release (v0.73.1 → v0.74.0, same machine)
+
+| | TCG v0.73.1 | TCG v0.74.0 | KVM v0.73.1 | KVM v0.74.0 |
+|---|---|---|---|---|
+| irq_user_ns | 8 401 | 6 960 | 66 357 | 66 733 |
+| fact_user_ns | 80 096 | 75 272 | 96 899 | 96 711 |
+| fact_svc_ns | 192 492 | 209 205 | 110 375 | 102 459 |
+| USB read_kbs (usbd) | 85 333 | 63 015 | 74 472 | 56 109 |
+| crypto sha256 kernel / user (KiB/s) | 48 941 / 50 880 | 49 425 / 51 840 | 179 582 / 215 360 | 181 760 / 216 960 |
+| SHA-512 (KiB/s) | 101 760 | 103 360 | 360 640 | 363 840 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 248 / 326 / 147 | 2 280 / 440 / 182 | 12 940 / 3 940 / 1 380 | 13 200 / 4 040 / 1 400 |
+| AES-GCM hardware / software (KiB/s) | 53 440 / 8 429 | 53 440 / 9 458 | 523 840 / 26 427 | 528 320 / 26 240 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 049 / 11 441 | 6 809 / 12 226 | 15 427 / 53 894 | 18 745 / 53 894 |
+| DeSoFS 1000 small files create / read (ms) | 13 349 / 3 864 | 13 372 / 3 538 | 8 051 / 824 | 9 334 / 846 |
+| `desofs check` (ms) | 1 108 | 959 | 299 | 328 |
+| short soak: file operations in 2 min | 6 234 | 6 092 | 28 097 | 27 669 |
+
+Verdict: no regression in what changed – crypto, the clock, ramfs (the seal check adds one flag test per change;
+the soak's file operations are within 2 %). To watch: the USB read through usbd under KVM fell again (99 902 in
+v0.73.0 → 74 472 → 56 109) while the kernel's own USB read (kread 68 532) is as before; no USB code changed in these
+three releases, so the next runs decide whether it is the host or a trend. DeSoFS small-file create under KVM
+(9 334 ms) is inside its earlier range (6 900–9 300).
 
 ---
 

@@ -1,4 +1,4 @@
-# DeSoOS v0.73.1
+# DeSoOS v0.74.3
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -16,8 +16,11 @@ More documentation:
 - `CHANGELOG.md` - every change, version by version.
 - `docs/` - the documentation of the whole system (index: `docs/README.md`): `docs/ARCHITECTURE.md` (what lives in
   the kernel, what runs in user space, syscalls and IPC), `docs/RELEASE.md` (tests, real hardware, performance and
-  current limitations per release), `docs/desofs/` (the DeSoFS file system and its on-disk format).
-- A `README.md` in the main code folders (`kernel/`, `kernel/fs/desofs/`, `user/`, `common/desocrypto/`, `tests/`)
+  current limitations per release), `docs/desofs/` (the DeSoFS file system and its on-disk format),
+  `docs/desocrypto/` (the cryptographic library: algorithms, rules, tests) and `docs/desotls/` (the TLS library:
+  how certificate chains are checked, the CA store, the clock).
+- A `README.md` in the main code folders (`kernel/`, `kernel/fs/desofs/`, `user/`, `common/desocrypto/`,
+  `common/desotls/`, `tests/`)
   – what the folder holds and where to start reading.
 
 ## Features
@@ -52,6 +55,11 @@ More documentation:
   RDRAND, TSC jitter and interrupt times, with health checks and careful entropy counting; the kernel waits at boot
   until 256 bits are counted; `getrandom` for programs (no right needed, never blocks); `netd` uses it for TCP
   sequence numbers, ports and DNS ids.
+- Certificates: DeSoTLS (`common/desotls`) checks a server's X.509 chain the way TLS will (strict DER, RSA / ECDSA
+  signatures, every RFC 5280 rule of its profile, name constraints, Mozilla's distrust dates, limits), against
+  Mozilla's root store installed as `/etc/certs/roots` and sealed – no program can change it; the wall clock says
+  whether it is plausible (syscall 59: RTC battery, readings, not before the build date); tool `certcheck`
+  (TLS itself comes next).
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
@@ -61,7 +69,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (34 suites, a restart phase and a short soak, 288 tests), stress tests and a long soak test
+- Built-in self-tests (35 suites, a restart phase and a short soak, 294 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -100,6 +108,7 @@ Build-time environment variables:
 | `DESOOS_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
 | `DESOOS_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
 | `DESOOS_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |
+| `SOURCE_DATE_EPOCH=S` | the build time | The build date (Unix seconds): a clock earlier than it minus 24 h is not plausible (certificates). `build.sh` prints the date and where it came from. |
 
 Outputs:
 
@@ -382,7 +391,8 @@ Line editing and console:
   it is mounted at `/disk` immediately and at every start. Until then `/disk` does not exist. `df` then shows two
   lines (`/` and `/disk`).
 - Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, `mount`, `df`,
-  `sync`, `date`, `desofs info <disk>` (read-only check of a
+  `sync`, `date` (also whether the clock is plausible), `certcheck <chain.pem> [host]` (a certificate chain against
+  Mozilla's store), `desofs info <disk>` (read-only check of a
   DeSoFS volume: which superblock, generation, nodes, snapshots, whether it could be mounted read-write),
   `desofs format <disk> [yes]` (erases the disk; refused on a read-only disk or a whole disk with a partition table),
   `desofs mount <disk>` (disk 0 at `/disk`, others at `/desofs` until reboot), `desofs unmount`, `desofs check <disk>` (unmounted
@@ -432,8 +442,8 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
   syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
 - `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
-- `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel) and DeSoCrypto
-  (`common/desocrypto/`, kernel and programs).
+- `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel), DeSoCrypto
+  (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
 - `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).

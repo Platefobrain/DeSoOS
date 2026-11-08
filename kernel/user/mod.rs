@@ -72,6 +72,9 @@ mod test_crypto;
 // The kernel's random number generator (random.rs) and getrandom.
 #[cfg(selftest)]
 mod test_rng;
+// DeSoTLS (common/desotls): certificates, the CA store, the clock.
+#[cfg(selftest)]
+mod test_certs;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -765,6 +768,8 @@ pub use test_rights::self_test as rights_self_test;
 pub use test_crypto::self_test as crypto_self_test;
 #[cfg(selftest)]
 pub use test_rng::self_test as rng_self_test;
+#[cfg(selftest)]
+pub use test_certs::self_test as certs_self_test;
 #[cfg(selftest)]
 pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]

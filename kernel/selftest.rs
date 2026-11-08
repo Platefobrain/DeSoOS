@@ -188,7 +188,7 @@ pub fn looping() -> bool {
 
 /// The suite names loop mode accepts (they run after SMP start and can repeat).  SVC TEST
 /// is not among them: the `edu` test device keeps state from the first round.
-pub const LOOPABLE: &[&str] = &["smp", "lock", "tlb", "alloc", "nobkl", "files", "ipc", "rights", "crypto", "rng", "desofs"];
+pub const LOOPABLE: &[&str] = &["smp", "lock", "tlb", "alloc", "nobkl", "files", "ipc", "rights", "crypto", "rng", "certs", "desofs"];
 
 /// Runs a repeatable suite: once normally; in loop mode only the named suite,
 /// `rounds` times, stopping at the first failed round.

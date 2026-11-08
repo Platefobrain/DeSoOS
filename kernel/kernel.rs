@@ -281,6 +281,9 @@ pub extern "sysv64" fn kernel_main(
     // The random number generator (random.rs) and getrandom.
     #[cfg(selftest)]
     selftest::suite("rng", user::rng_self_test);
+    // DeSoTLS – certificates, the sealed CA store, the clock (syscall 59), certcheck.
+    #[cfg(selftest)]
+    selftest::suite("certs", user::certs_self_test);
     // DeSoFS – read-only check of a volume (format 1, stage 1).
     #[cfg(selftest)]
     selftest::suite("desofs", fs::desofs::test::self_test);

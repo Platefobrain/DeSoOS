@@ -2,6 +2,78 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.74.3 — 2026-11-08
+
+### Changed – documentation: DeSoCrypto and DeSoTLS get their own folders in `docs/`
+- `docs/desocrypto/` – `README.md` (what the library has, who uses it, how it compares with Linux / Windows /
+  RedoxOS, where the code and the tests are) and `ALGORITHMS.md` (every module and its API, the rules of the code,
+  AES-NI / PCLMULQDQ and the kernel, the tests, speed figures).
+- `docs/desotls/` – `README.md` (what the library does so far and next, where things are) and `CERTIFICATES.md` (the
+  X.509 profile, the order of the checks, path building, a table of every refusal with the text `certcheck` prints,
+  the CA store file byte by byte, the clock verdicts and syscall 59's layout, the tests with the x509-limbo results).
+- `docs/ARCHITECTURE.md` – the two sections shortened to a summary with a pointer (the full text moved, not lost); one
+  outdated sentence fixed on the way (the signature checks are used by DeSoTLS since v0.74).
+- Pointers in `docs/README.md`, `README.md`, `common/desocrypto/README.md`, `common/desotls/README.md` and the
+  comment in `common/desotls/mod.rs`. No code changed.
+
+## v0.74.2 — 2026-11-08
+
+### Changed – the build date without git
+- `build.sh` no longer looks at git at all: the build date is `SOURCE_DATE_EPOCH` when someone sets it, otherwise the
+  build time (as Android does) – the most recent date possible, so the strongest floor for a plausible clock, and
+  the same in every directory, whether the sources came from a clone, a ZIP or anywhere else. A commit date could be
+  old or set by hand; it served only reproducible builds, which `SOURCE_DATE_EPOCH` still allows.
+
+## v0.74.1 — 2026-11-08
+
+### Fixed – the build date came from a git repository above the project
+- `build.sh` took the last commit of any git repository the project lies in: on the test machine the project is not
+  a repository, a directory above it is, and its last commit (2025-06-08) became the build date – the lower bound of
+  a plausible clock was older, so weaker, than meant (nothing was refused wrongly). Now the commit counts only when
+  `git rev-parse --show-toplevel` is the project directory itself; otherwise the build time is used (and printed).
+
+## v0.74.0 — 2026-11-08
+
+### Added – DeSoTLS 0.1: certificate chains, the trusted CA store, the wall clock (no TLS yet)
+- `common/desotls/` – a new library over DeSoCrypto (`core` only): `der.rs` (strict DER), `x509.rs` (one
+  certificate: v3, keys RSA / EC P-256 / P-384, signatures PKCS#1 / PSS with the certificate's parameters / ECDSA with
+  its curve's hash, extensions), `name.rs` (host names, one-label wildcards, DNS name constraints), `verify.rs`
+  (`verify::server` – depth-first path building with every check of the profile: validity, basicConstraints,
+  pathLenConstraint without self-issued intermediates, keyUsage, extKeyUsage, name constraints over everything
+  below a CA except self-issued intermediates, Mozilla distrust-after; limits 8 certificates, path 8, 32 signature
+  checks, 256 names, 64 subtrees), `roots.rs` (the store file), `pem.rs`. Fail closed: what is not understood is
+  refused; nothing turns a check off.
+- The CA store: `user/etc/certs/gen-roots.py` builds `user/etc/certs/roots` from Mozilla's `certdata.txt`
+  (NSS_3_133_RTM, SHA-256 pinned): the 118 anchors trusted for server certificates, with their distrust-after
+  dates. The kernel writes it to `/etc/certs/roots` at boot and seals it.
+- ramfs sealed nodes (`fs::seal`): a sealed file cannot be written, truncated, replaced or removed, a sealed
+  directory gets no entry and loses none, a directory holding something sealed is not removed; the VFS refuses
+  opening for writing, renaming from / to / into and mounting over it – `FsError::Immutable` / `ERROR_NOT_PERMITTED`
+  for every process and the kernel's shell. Sealed: `/etc/certs/roots`, `/etc/certs`, `/etc` (`/etc/services`
+  stays writable).
+- The wall clock: syscall 59 `time(out)` – Unix seconds, whether the clock is plausible (RTC VRT bit, two agreeing
+  readings, fields in range, not before the build date − 24 h, not after 2099) and the build date. `build.sh`
+  takes the build date from `SOURCE_DATE_EPOCH`, else the last git commit, else the build time, and prints it;
+  `date` shows the verdict. A heuristic – documented as such.
+- `/bin/certcheck <chain.pem|cert.der> [host] [--time S] [--anchor ca.pem]` – checks a chain offline with the same
+  code (exit 0 OK, 1 refused with the reason, 2 usage / file / clock).
+- DeSoCrypto 0.6.0: `ecdsa::check_public_key` (the key alone – the server's key is checked when its certificate is).
+- `/bin/certtest` and CERT TEST (suite `certs`, loopable) – 6 steps; `[RESULT-CERTS]`.
+
+### Tests
+- 35 suites, 294 tests. CERT TEST: 257 DeSoTLS checks in the kernel and in `/bin/certtest` – DER edge cases, times,
+  host names and wildcards, PEM, the store format, 115 made-up chains (`vectors/certs.bin`, `gen-certs.py`: every
+  rule right and wrong, each limit at and past its value; the impossible certificates made by editing DER and
+  signing again) and 12 real server chains (`vectors/real.bin` from the rustls/webpki test data, `gen-real.py`);
+  `/etc/certs/roots` equal to the image and sealed, the real chains against it; the seal attacked 21 ways from a
+  program and 15 from the kernel; 15 made-up clock readings, syscall 59 against the kernel; `certcheck` on a real
+  chain (OK, wrong host, expired, no certificate, missing file).
+- DeSoCrypto: 4204 checks (were 4188) – `check_public_key`.
+- On the host before the release: x509-limbo (5341 server / DNS cases: 4944 agree; the differences are listed in
+  docs/RELEASE.md – CRL tests, CA/B-Forum conformance rules not enforced, name constraints of non-DNS types
+  refused), 3 million mutated certificates (no panic, none accepted), 56 hand-made mutations of the rules (55
+  caught, 1 equivalent).
+
 ## v0.73.1 — 2026-11-08
 
 ### Fixed – DeSoCrypto 0.5.1: the shortest HMAC tag depends on the hash (after a review of v0.73.0)

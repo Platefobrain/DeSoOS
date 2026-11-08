@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights crypto rng desofs
+#                              suites: smp lock tlb alloc nobkl files ipc rights crypto rng certs desofs
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
@@ -209,6 +209,8 @@ grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # The random number generator – the [RESULT-RNG] line from RNG TEST.
 grep -a "^\[RESULT-RNG\]" "$LOG" | tail -n1 || true
+# DeSoTLS – the [RESULT-CERTS] line from CERT TEST.
+grep -a "^\[RESULT-CERTS\]" "$LOG" | tail -n1 || true
 # DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
 grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
 # Where the DeSoFS time goes per benchmark phase (I/O, SHA-256, writes, both flushes, commits).

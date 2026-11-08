@@ -2,6 +2,7 @@
 //
 //   ecdsa::verify(Curve::P256, public_key, msg, der_signature)?   // hash SHA-256
 //   ecdsa::verify(Curve::P384, public_key, msg, der_signature)?   // hash SHA-384
+//   ecdsa::check_public_key(Curve::P256, public_key)?             // the key alone
 //
 // Each curve has exactly one hash – the pairs TLS 1.3 names (ecdsa_secp256r1_sha256,
 // ecdsa_secp384r1_sha384) and DeSoTLS announces.  P-384 with SHA-256 or P-256 with SHA-384
@@ -249,6 +250,46 @@ impl<const N: usize> Field<N> {
     }
 }
 
+/// Checks a public key alone (uncompressed, coordinates < p, on the curve) – for a
+/// certificate's key before it is ever used.
+pub fn check_public_key(curve: Curve, public_key: &[u8]) -> Result<(), Error> {
+    fn check<const N: usize>(c: &Params, public_key: &[u8]) -> Result<(), Error> {
+        let mut buf = [0u8; 48];
+        let len = unhex(c.p, &mut buf);
+        let f = Field { m: Modulus::<N>::new(&buf[..len]).map_err(|_| Error::InvalidKey)? };
+        key_point(c, &f, public_key).map(|_| ())
+    }
+    match curve {
+        Curve::P256 => check::<4>(&P256, public_key),
+        Curve::P384 => check::<6>(&P384, public_key),
+    }
+}
+
+/// The public key as a point (x, y in Montgomery form), after every check.
+fn key_point<const N: usize>(c: &Params, f: &Field<N>, public_key: &[u8]) -> Result<([u64; N], [u64; N]), Error> {
+    let flen = 8 * N;
+    if public_key.len() != 1 + 2 * flen || public_key[0] != 0x04 {
+        return Err(Error::InvalidKey);
+    }
+    let qx = bignum::from_be::<N>(&public_key[1..1 + flen]).map_err(|_| Error::InvalidKey)?;
+    let qy = bignum::from_be::<N>(&public_key[1 + flen..]).map_err(|_| Error::InvalidKey)?;
+    if !f.m.is_reduced(&qx) || !f.m.is_reduced(&qy) {
+        return Err(Error::InvalidKey);
+    }
+    let mut buf = [0u8; 48];
+    let len = unhex(c.b, &mut buf);
+    let b = f.m.to_mont(&bignum::from_be::<N>(&buf[..len]).map_err(|_| Error::InvalidKey)?);
+    let xm = f.m.to_mont(&qx);
+    let ym = f.m.to_mont(&qy);
+    let x3 = f.mul(&f.sqr(&xm), &xm);
+    let three_x = f.add(&f.add(&xm, &xm), &xm);
+    let rhs = f.add(&f.sub(&x3, &three_x), &b);
+    if f.sqr(&ym) != rhs {
+        return Err(Error::InvalidKey);
+    }
+    Ok((xm, ym))
+}
+
 fn verify_n<const N: usize>(c: &Params, public_key: &[u8], digest: &[u8], sig_der: &[u8]) -> Result<(), Error> {
     let flen = 8 * N;
     let mut buf = [0u8; 48];
@@ -263,24 +304,7 @@ fn verify_n<const N: usize>(c: &Params, public_key: &[u8], digest: &[u8], sig_de
     let f = Field { m: fm };
 
     // The public key.
-    if public_key.len() != 1 + 2 * flen || public_key[0] != 0x04 {
-        return Err(Error::InvalidKey);
-    }
-    let qx = bignum::from_be::<N>(&public_key[1..1 + flen]).map_err(|_| Error::InvalidKey)?;
-    let qy = bignum::from_be::<N>(&public_key[1 + flen..]).map_err(|_| Error::InvalidKey)?;
-    if !f.m.is_reduced(&qx) || !f.m.is_reduced(&qy) {
-        return Err(Error::InvalidKey);
-    }
-    let len = unhex(c.b, &mut buf);
-    let b = f.m.to_mont(&bignum::from_be::<N>(&buf[..len]).map_err(|_| Error::InvalidKey)?);
-    let xm = f.m.to_mont(&qx);
-    let ym = f.m.to_mont(&qy);
-    let x3 = f.mul(&f.sqr(&xm), &xm);
-    let three_x = f.add(&f.add(&xm, &xm), &xm);
-    let rhs = f.add(&f.sub(&x3, &three_x), &b);
-    if f.sqr(&ym) != rhs {
-        return Err(Error::InvalidKey);
-    }
+    let (xm, ym) = key_point(c, &f, public_key)?;
 
     // The signature.
     let (r_be, s_be) = parse_sig(sig_der)?;

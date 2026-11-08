@@ -141,6 +141,10 @@ for svc in user/etc/services/*.svc; do
   echo "    (\"$(basename "$svc")\", include_bytes!(\"$ROOT/$svc\"))," >> "$INITRD"
 done
 echo "];" >> "$INITRD"
+# The trusted CA store (user/etc/certs/roots – user/etc/certs/gen-roots.py from Mozilla's root
+# store) -> /etc/certs/roots at boot, sealed (no process can change it).
+[ -f user/etc/certs/roots ] || { echo "user/etc/certs/roots missing (user/etc/certs/gen-roots.py)."; exit 1; }
+echo "pub static ETC_CERTS_ROOTS: &[u8] = include_bytes!(\"$ROOT/user/etc/certs/roots\");" >> "$INITRD"
 # DeSoFS reference image (tests/mkdesofs.py – an independent implementation of the
 # format) for DESOFS TEST; only in the self-test build.
 if [ "$MODE" = "selftest" ]; then
@@ -158,6 +162,20 @@ else
   echo "pub static DESOFS_FMT: &[u8] = &[];" >> "$INITRD"
 fi
 mv "$INITRD" build/user/initrd.rs
+
+# The build date – the lower bound of a plausible clock (kernel/drivers/rtc.rs: the RTC may
+# not be earlier than this minus 24 h).  SOURCE_DATE_EPOCH when someone sets it on purpose (as
+# Linux distributions do for reproducible builds), otherwise the time of this build (as Android:
+# the most recent date possible – the strongest floor).  No git: the date never depends on a
+# repository or on where the sources came from.
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  case "$SOURCE_DATE_EPOCH" in *[!0-9]*) echo "SOURCE_DATE_EPOCH is not a number of seconds."; exit 1 ;; esac
+  DESOOS_BUILD_EPOCH="$SOURCE_DATE_EPOCH"; DESOOS_BUILD_EPOCH_SOURCE="SOURCE_DATE_EPOCH"
+else
+  DESOOS_BUILD_EPOCH="$(date +%s)"; DESOOS_BUILD_EPOCH_SOURCE="build time"
+fi
+export DESOOS_BUILD_EPOCH DESOOS_BUILD_EPOCH_SOURCE
+echo "Build date: $(date -u -d "@$DESOOS_BUILD_EPOCH" '+%Y-%m-%d %H:%M:%S UTC') (from $DESOOS_BUILD_EPOCH_SOURCE)"
 
 # The kernel: --cfg desocrypto_no_simd – no AES-NI / PCLMULQDQ code in it at all (its own
 # code runs with CR0.TS = 1 and never saves XMM for itself; kernel/arch/x86_64/fpu.rs).

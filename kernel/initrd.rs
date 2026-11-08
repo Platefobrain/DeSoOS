@@ -8,6 +8,21 @@
 
 include!("../build/user/initrd.rs");
 
+/// The trusted CA store: /etc/certs/roots, then sealed – the file, /etc/certs and /etc (no
+/// process, not even the kernel's shell, can change, remove, rename or cover them; see
+/// fs/ramfs.rs).  This is the only time it is written: updating it means a new image.
+fn install_roots() {
+    use crate::fs;
+    let ok = (fs::stat("/etc/certs").is_ok() || fs::mkdir("/etc/certs").is_ok())
+        && fs::write_file("/etc/certs/roots", ETC_CERTS_ROOTS).is_ok()
+        && fs::seal("/etc/certs/roots").is_ok()
+        && fs::seal("/etc/certs").is_ok()
+        && fs::seal("/etc").is_ok();
+    if !ok {
+        crate::serial_println!("[FS] cannot install the CA store /etc/certs/roots - TLS will refuse every server");
+    }
+}
+
 /// Creates /bin and writes the programs, and /etc/services with the service manifests
 /// (init reads them once at its start).  Returns the number of programs.
 pub fn install() -> usize {
@@ -28,6 +43,7 @@ pub fn install() -> usize {
             }
         }
     }
+    install_roots();
     if fs::stat("/bin").is_err() && fs::mkdir("/bin").is_err() {
         return 0;
     }
