@@ -18,7 +18,9 @@ use super::hash::{Digest, MAX_BLOCK, MAX_OUT, Output};
 use super::sha256::{OUT_LEN, Sha256};
 use super::{Error, equal_ct};
 
-/// The shortest tag `verify` accepts (RFC 2104 section 5: not less than half the hash).
+/// The shortest tag `HmacSha256::verify` accepts (RFC 2104 section 5: not less than half
+/// the hash – 16 of SHA-256's 32 bytes).  `Hmac<D>::verify` uses `Hmac::<D>::MIN_TAG_LEN`
+/// = D::OUT_LEN / 2 (SHA-384: 24, SHA-512: 32).
 pub const MIN_TAG_LEN: usize = 16;
 
 /// HMAC with the hash `D`.
@@ -30,6 +32,9 @@ pub struct Hmac<D: Digest> {
 }
 
 impl<D: Digest> Hmac<D> {
+    /// The shortest truncated tag `verify` accepts: half the hash (RFC 2104 section 5).
+    pub const MIN_TAG_LEN: usize = D::OUT_LEN / 2;
+
     pub fn new(key: &[u8]) -> Self {
         let bl = D::BLOCK_LEN;
         let mut k = [0u8; MAX_BLOCK];
@@ -81,10 +86,10 @@ impl<D: Digest> Hmac<D> {
         Ok(r)
     }
 
-    /// Checks a received tag: full length or truncated to at least MIN_TAG_LEN bytes;
-    /// constant-time comparison.
+    /// Checks a received tag: full length or truncated to at least half the hash
+    /// (`Self::MIN_TAG_LEN`); constant-time comparison.
     pub fn verify(self, tag: &[u8]) -> Result<(), Error> {
-        if tag.len() < MIN_TAG_LEN || tag.len() > D::OUT_LEN {
+        if tag.len() < Self::MIN_TAG_LEN || tag.len() > D::OUT_LEN {
             return Err(Error::InvalidLength);
         }
         let full = self.finish()?;

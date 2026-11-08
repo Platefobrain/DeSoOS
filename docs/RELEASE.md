@@ -151,6 +151,50 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.73.1 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM); fix only – DeSoCrypto 0.5.1: `Hmac<D>::verify` accepts a truncated tag only
+from half the hash (SHA-256 16, SHA-384 24, SHA-512 32 bytes; RFC 2104 §5) – it accepted 16 bytes for every hash.**
+
+### What is new since the last report (v0.73.0)
+
+| Version | Change |
+|---|---|
+| v0.73.1 | `Hmac::<D>::MIN_TAG_LEN = D::OUT_LEN / 2`; `HmacSha256` unchanged (16); 7 new checks (4188); the mutation "constant 16" caught by the SHA-384 and the SHA-512 checks |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 299 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 228 s (restart 12 s, soak 126 s) |
+
+### Performance against the previous release (v0.73.0 → v0.73.1, same machine)
+
+| | TCG v0.73.0 | TCG v0.73.1 | KVM v0.73.0 | KVM v0.73.1 |
+|---|---|---|---|---|
+| irq_user_ns | 9 218 | 8 401 | 65 854 | 66 357 |
+| fact_user_ns | 73 800 | 80 096 | 97 608 | 96 899 |
+| fact_svc_ns | 199 401 | 192 492 | 100 100 | 110 375 |
+| USB read_kbs (usbd) | 73 142 | 85 333 | 99 902 | 74 472 |
+| crypto sha256 kernel / user (KiB/s) | 48 640 / 32 640 | 48 941 / 50 880 | 177 920 / 212 800 | 179 582 / 215 360 |
+| SHA-512 (KiB/s) | 102 400 | 101 760 | 356 800 | 360 640 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 200 / 470 / 162 | 2 248 / 326 / 147 | 12 980 / 3 820 / 1 360 | 12 940 / 3 940 / 1 380 |
+| AES-GCM hardware / software (KiB/s) | 51 200 / 9 458 | 53 440 / 8 429 | 522 240 / 26 240 | 523 840 / 26 427 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 454 / 11 473 | 7 049 / 11 441 | 18 004 / 53 194 | 15 427 / 53 894 |
+| DeSoFS 1000 small files create / read (ms) | 13 886 / 3 774 | 13 349 / 3 864 | 7 210 / 818 | 8 051 / 824 |
+| `desofs check` (ms) | 1 021 | 1 108 | 305 | 299 |
+| short soak: file operations in 2 min | 5 998 | 6 234 | 27 600 | 28 097 |
+
+Verdict: no regression – only `Hmac<D>::verify` and its tests changed. The TCG user-space SHA-256 is back at 50 880
+KiB/s (v0.73.0's 32 640 was the host). Under KVM the signature checks and SHA-512 are unchanged; the USB read
+(74 472), DeSoFS 8 MiB write (15 427) and small-file create (8 051 ms) are lower in this one run and touch no
+changed code – the usual spread of these measurements (earlier releases moved between 80 000–100 000, 17 800–18 300
+and 6 900–8 800); to watch in the next run. In TCG P-256 fell from 470 to 326 / s while RSA stayed – one 200 ms
+sample under emulation; under KVM P-256 is at 3 940 / s.
+
+---
+
 ## v0.73.0 — 2026-11-08
 
 **Status: stable on QEMU (TCG and KVM). DeSoCrypto 0.5.0 – signature verification: SHA-384/512, HMAC and HKDF over

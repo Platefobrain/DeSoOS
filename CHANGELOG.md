@@ -2,6 +2,17 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.73.1 — 2026-11-08
+
+### Fixed – DeSoCrypto 0.5.1: the shortest HMAC tag depends on the hash (after a review of v0.73.0)
+- `Hmac<D>::verify` accepted a truncated tag of 16 bytes for every hash – right for SHA-256 only. RFC 2104 §5 asks for
+  at least half the hash: now `Hmac::<D>::MIN_TAG_LEN = D::OUT_LEN / 2` (SHA-256 16, SHA-384 24, SHA-512 32 bytes).
+  `MIN_TAG_LEN = 16` stays for `HmacSha256` (unchanged behaviour). Nothing in the system used `verify` with SHA-384/512
+  (HKDF does not verify tags, TLS will compare full Finished values).
+- Tests (4188 checks, were 4181): SHA-384 24 bytes accepted, 23 and 16 refused; SHA-512 32 accepted, 31 and 65
+  refused, 64 accepted; SHA-256 16 accepted, 15 refused; the three minimums. The mutation that puts the constant 16
+  back is caught by the SHA-384 check (23 bytes accepted) and, with that check removed, by the SHA-512 one (31 bytes).
+
 ## v0.73.0 — 2026-11-08
 
 ### Added – DeSoCrypto 0.5.0: signature verification (the first step towards TLS)

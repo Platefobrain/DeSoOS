@@ -1,4 +1,4 @@
-# DeSoCrypto v0.5.0
+# DeSoCrypto v0.5.1
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
@@ -9,7 +9,7 @@ DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel an
 | `sha256.rs` | SHA-256 (FIPS 180-4), streaming and one-shot |
 | `sha512.rs` | SHA-512 and SHA-384 (FIPS 180-4), streaming and one-shot |
 | `hash.rs` | the hashes behind one interface: `Digest` (for generic code), `HashAlg` / `Hasher` (chosen at run time) |
-| `hmac.rs` | HMAC (RFC 2104 / RFC 4231) over any of the hashes – `HmacSha256` as before, `Hmac<Sha384>` etc.; tag check in constant time |
+| `hmac.rs` | HMAC (RFC 2104 / RFC 4231) over any of the hashes – `HmacSha256` as before, `Hmac<Sha384>` etc.; tag check in constant time, a truncated tag at least half the hash |
 | `hkdf.rs` | HKDF (RFC 5869) – SHA-256 as before, any hash with `extract_with` / `expand_with` / `hkdf_with` |
 | `chacha20.rs` | ChaCha20 (RFC 8439): the block function and the stream XOR |
 | `poly1305.rs` | Poly1305 (RFC 8439 §2.5) – one-time authenticator |

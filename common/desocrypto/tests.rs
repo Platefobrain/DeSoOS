@@ -1651,11 +1651,25 @@ fn hmac_hkdf_generic(c: &mut Checks) -> Result<(), Failure> {
     c.check(Hmac::<Sha512>::new(&k).chain(b"m").finish().is_ok_and(|a| Hmac::<Sha512>::new(&hk).chain(b"m").finish().is_ok_and(|b| a.as_bytes() == b.as_bytes())))?;
     // The generic SHA-256 is the old HmacSha256.
     c.check(Hmac::<Sha256>::new(b"Jefe").chain(b"what do ya want for nothing?").finish().is_ok_and(|t| t.as_bytes() == hmac_sha256(b"Jefe", b"what do ya want for nothing?")))?;
-    // verify: full, truncated, too short, too long, wrong byte.
+    // verify: full, truncated to half the hash (SHA-384: 24), one byte shorter, too long, wrong byte.
     let tag = Hmac::<Sha384>::new(b"k").chain(b"m").finish().unwrap_or_else(|_| HashAlg::Sha384.digest(b""));
     let v = || Hmac::<Sha384>::new(b"k").chain(b"m");
-    c.check(v().verify(tag.as_bytes()).is_ok() && v().verify(&tag.as_bytes()[..16]).is_ok())?;
-    c.check(v().verify(&tag.as_bytes()[..15]) == Err(Error::InvalidLength))?;
+    c.check(Hmac::<Sha256>::MIN_TAG_LEN == 16 && Hmac::<Sha384>::MIN_TAG_LEN == 24 && Hmac::<Sha512>::MIN_TAG_LEN == 32)?;
+    c.check(v().verify(tag.as_bytes()).is_ok() && v().verify(&tag.as_bytes()[..24]).is_ok())?;
+    c.check(v().verify(&tag.as_bytes()[..23]) == Err(Error::InvalidLength))?;
+    c.check(v().verify(&tag.as_bytes()[..16]) == Err(Error::InvalidLength))?;
+    // SHA-512: 32 bytes (half) accepted, 31 refused, 64 accepted, 65 refused.
+    let t5 = Hmac::<Sha512>::new(b"k").chain(b"m").finish().unwrap_or_else(|_| HashAlg::Sha512.digest(b""));
+    let v5 = || Hmac::<Sha512>::new(b"k").chain(b"m");
+    c.check(v5().verify(t5.as_bytes()).is_ok() && v5().verify(&t5.as_bytes()[..32]).is_ok())?;
+    c.check(v5().verify(&t5.as_bytes()[..31]) == Err(Error::InvalidLength))?;
+    let mut l5 = [0u8; 65];
+    l5[..64].copy_from_slice(t5.as_bytes());
+    c.check(v5().verify(&l5) == Err(Error::InvalidLength))?;
+    // SHA-256 generic = HmacSha256: 16 accepted, 15 refused.
+    let t2 = hmac_sha256(b"k", b"m");
+    c.check(Hmac::<Sha256>::new(b"k").chain(b"m").verify(&t2[..16]).is_ok())?;
+    c.check(Hmac::<Sha256>::new(b"k").chain(b"m").verify(&t2[..15]) == Err(Error::InvalidLength))?;
     let mut long = [0u8; 49];
     long[..48].copy_from_slice(tag.as_bytes());
     c.check(v().verify(&long) == Err(Error::InvalidLength))?;

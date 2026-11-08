@@ -1640,7 +1640,8 @@ Rules of the code:
   ring-3 programs.
 - **No silent wrong results:** SHA-256 counts the message length and refuses past 2^61 − 1 bytes
   (`Error::LengthOverflow`) instead of wrapping; HKDF refuses more than 255 × 32 = 8160 bytes (`OutputTooLong`) and a
-  PRK under 32 bytes (`KeyTooShort`) without touching the output; `verify` accepts tags of 16–32 bytes only.
+  PRK under 32 bytes (`KeyTooShort`) without touching the output; `verify` accepts a tag of at least half the hash and at most
+  the full hash (RFC 2104 §5: SHA-256 16–32, SHA-384 24–48, SHA-512 32–64 bytes – `Hmac::<D>::MIN_TAG_LEN`).
 - **Arithmetic** is explicitly wrapping (`wrapping_add`, `rotate_right`) – correct with or without overflow checks.
 - **Keys** are wiped (volatile writes): `Sha256` and `HmacSha256` clear their whole state when dropped (also
   without `finish`, e.g. on an error path) – the inner SHA-256 state of HMAC is a hash of the key and as good as the
@@ -1677,7 +1678,7 @@ Rules of the code:
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
-Tests: `common/desocrypto/tests.rs` (4181 checks; signatures: SHA-384/512 FIPS 180-4 examples and padding edges,
+Tests: `common/desocrypto/tests.rs` (4188 checks; signatures: SHA-384/512 FIPS 180-4 examples and padding edges,
 RFC 4231 for HMAC-SHA384/512, HKDF-SHA384/512 against Python `cryptography`; modular powers of 64–4096-bit numbers
 against Python integers; RSA keys and signatures from `cryptography` – PKCS#1 v1.5 and PSS with several parameter
 sets, a 2049-bit key (the PSS block one byte shorter than the signature), crafted almost-right blocks (padding 0xfe,
