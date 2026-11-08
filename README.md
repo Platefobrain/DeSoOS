@@ -1,4 +1,4 @@
-# DeSoOS v0.71.0
+# DeSoOS v0.72.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -44,8 +44,9 @@ More documentation:
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
 - Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256,
-  HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519 (no heap, no syscalls; not audited
-  – not for production use); tools `sha256sum`, `random`.
+  HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519, AES-128-GCM (AES-NI and PCLMULQDQ
+  in programs, a bitsliced fallback without tables) (no heap, no syscalls; not audited – not for production use);
+  tools `sha256sum`, `random`.
 - Random numbers: the kernel's generator (ChaCha20 with fast key erasure) fed by the firmware's RNG, RDSEED,
   RDRAND, TSC jitter and interrupt times, with health checks and careful entropy counting; the kernel waits at boot
   until 256 bits are counted; `getrandom` for programs (no right needed, never blocks); `netd` uses it for TCP
@@ -59,7 +60,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (34 suites, a restart phase and a short soak, 287 tests), stress tests and a long soak test
+- Built-in self-tests (34 suites, a restart phase and a short soak, 288 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 

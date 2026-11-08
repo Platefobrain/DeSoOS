@@ -120,7 +120,7 @@ for src in user/bin/*.rs; do
     -C relocation-model=static \
     -C opt-level=2 \
     -C link-arg=-Tuser/user.ld \
-    --check-cfg 'cfg(selftest, desocrypto_test)' \
+    --check-cfg 'cfg(selftest, desocrypto_test, desocrypto_no_simd)' \
     "${EXTRA_CFG[@]}" \
     -o "build/user/$name.full" \
     "$src"
@@ -159,6 +159,8 @@ else
 fi
 mv "$INITRD" build/user/initrd.rs
 
+# The kernel: --cfg desocrypto_no_simd – no AES-NI / PCLMULQDQ code in it at all (its own
+# code runs with CR0.TS = 1 and never saves XMM for itself; kernel/arch/x86_64/fpu.rs).
 rustc \
   --edition=2024 \
   --target x86_64-unknown-none \
@@ -168,7 +170,8 @@ rustc \
   -C opt-level=2 \
   -C overflow-checks=on \
   -C link-arg=-Tkernel/linker.ld \
-  --check-cfg 'cfg(selftest, desocrypto_test)' \
+  --check-cfg 'cfg(selftest, desocrypto_test, desocrypto_no_simd)' \
+  --cfg desocrypto_no_simd \
   "${SELFTEST_CFG[@]}" \
   -o build/kernel.elf \
   kernel/kernel.rs

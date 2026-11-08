@@ -1,4 +1,4 @@
-# DeSoCrypto v0.3.0
+# DeSoCrypto v0.4.0
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
@@ -13,6 +13,9 @@ DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel an
 | `poly1305.rs` | Poly1305 (RFC 8439 §2.5) – one-time authenticator |
 | `aead.rs` | ChaCha20-Poly1305 (RFC 8439 §2.8) – `seal` / `open` in place; **never reuse a nonce with the same key** |
 | `x25519.rs` | X25519 (RFC 7748) – shared secrets, public keys; an all-zero result refused |
+| `aes.rs` | AES-128 encryption (FIPS-197): AES-NI in programs, bitsliced without tables everywhere |
+| `ghash.rs` | GHASH (SP 800-38D): PCLMULQDQ in programs, bit by bit with masks everywhere |
+| `aes_gcm.rs` | AES-128-GCM – `seal` / `open` in place; **never reuse a nonce with the same key** |
 | `rng.rs` | a generator with fast key erasure (ChaCha20) – the kernel's CSPRNG, and programs' own generators keyed from `getrandom` |
 | `tests.rs` | test vectors and edge cases – included only by `/bin/cryptotest` and the kernel's CRYPTO TEST |
 
@@ -33,7 +36,8 @@ data; it has not been formally verified or audited for timing. Passing the RFC v
 cases, not security. Keys are wiped when objects are dropped (volatile writes), but copies in registers and on the
 stack are not, and wiping a structure does not wipe its copies. AEAD nonces are the caller's job – reusing one with
 the same key is a serious security failure. Test-only code (`assume_length`, `key_for_test`, `freeze_for_test`,
-`field_for_test`, `cswap_for_test`, the `bound!` asserts) exists only in `--cfg selftest` / `--cfg desocrypto_test`
+`field_for_test`, `cswap_for_test`, `round_keys_for_test`, `sbox_for_test`, `ghash::mul_for_test`, the `bound!`
+asserts). The kernel is built with `--cfg desocrypto_no_simd`: no AES-NI / PCLMULQDQ code in it exists only in `--cfg selftest` / `--cfg desocrypto_test`
 builds.
 
 Design: `docs/ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".

@@ -23,7 +23,10 @@
 #![allow(dead_code)]
 
 pub mod aead;
+pub mod aes;
+pub mod aes_gcm;
 pub mod chacha20;
+pub mod ghash;
 pub mod hkdf;
 pub mod hmac;
 pub mod poly1305;
@@ -31,7 +34,7 @@ pub mod rng;
 pub mod sha256;
 pub mod x25519;
 
-pub const VERSION: &str = "0.3.0";
+pub const VERSION: &str = "0.4.0";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {

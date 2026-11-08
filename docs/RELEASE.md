@@ -78,14 +78,16 @@ timings move by ±15% from run to run on the same build).
   uses the byte position (stable)
 
 **Cryptography (DeSoCrypto)**
-- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519 and the kernel's random number
-  generator; no AES-GCM, signatures, X.509 or TLS yet – `netget https://` is refused; nothing in the system uses the
-  AEAD or X25519 yet
+- SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519, AES-128-GCM and the kernel's
+  random number generator; no signatures, X.509 or TLS yet – `netget https://` is refused; nothing in the system uses
+  the AEADs or X25519 yet
+- AES-GCM: only AES-128, 12-byte nonces and 16-byte tags; AES-NI / PCLMULQDQ only in programs (the kernel has the
+  software path only – it does not save XMM for its own code); the software path is slow (bit-by-bit GHASH)
 - not audited and not for production use: the code avoids branches and table look-ups that depend on secrets, but it
   has not been formally verified or audited for timing; passing the RFC vectors is not a proof of security; keys are
   wiped when objects are dropped, but copies in registers and on the stack are not
 - AEAD nonces are the caller's job (no generator or counter) – reusing one with the same key breaks confidentiality
-  and authenticity
+  and authenticity (with AES-GCM it can, under certain conditions, reveal H and allow forged tags)
 - random numbers: the entropy each source counts (RDSEED and the firmware's RNG ½ bit per bit, RDRAND 0, timing 1 bit
   per 64 samples) is a trust policy, not something the health checks prove; the health checks are our own simple
   ones, not NIST SP 800-90B; one generator for all CPUs under one lock (a 4 KiB request ~tens of µs); reseeding is
@@ -141,6 +143,61 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.72.0 — 2026-11-08
+
+**Status: stable on QEMU (TCG and KVM). DeSoCrypto 0.4.0: AES-128-GCM – AES-NI and PCLMULQDQ in programs, a bitsliced
+fallback without tables (the only path in the kernel); not audited, not for production use.**
+
+### What is new since the last report (v0.71.0)
+
+| Version | Change |
+|---|---|
+| v0.72.0 | AES-128 (AES-NI / bitsliced), GHASH (PCLMULQDQ / bit by bit), AES-128-GCM with the tag checked first; features detected and chosen separately; the kernel built with `--cfg desocrypto_no_simd`; CRYPTO TEST 5 – XMM state across task switches; 2429 checks; 10 mutations, each caught by its own test |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 289 s (restart 23 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 34/34 suites + restart 1/1 + short soak (RAM disk), 288 tests PASS | 227 s (restart 13 s, soak 126 s) |
+
+Both runs: AES-NI and PCLMULQDQ present (TCG emulates them with `-cpu max`), all four feature combinations equal,
+CRYPTO TEST 5 (four processes, XMM patterns checked after every yield, hardware AES-GCM = software) PASS. Before
+delivery a kernel without FXRSTOR made CRYPTO TEST 5 fail ("xmm0 changed across a yield").
+
+### AES-GCM speed (`[RESULT-CRYPTO]`, user space, 64 KiB pieces)
+
+| | TCG | KVM |
+|---|---|---|
+| AES-128-GCM, AES-NI + PCLMULQDQ | 54 720 KiB/s | **530 560 KiB/s** |
+| AES-128-GCM, software (bitsliced + bit-by-bit GHASH) | 9 320 KiB/s | 26 613 KiB/s |
+| ChaCha20-Poly1305 (for comparison) | 71 360 KiB/s | 363 520 KiB/s |
+
+With the CPU's instructions AES-GCM is the fastest AEAD here; without them ChaCha20-Poly1305 is 14 times faster than the
+software AES-GCM – the same trade-off TLS 1.3 clients make when they prefer ChaCha20 on CPUs without AES-NI.
+
+### Performance against the previous release (v0.71.0 → v0.72.0, same machine)
+
+| | TCG v0.71.0 | TCG v0.72.0 | KVM v0.71.0 | KVM v0.72.0 |
+|---|---|---|---|---|
+| irq_user_ns | 9 877 | 5 906 | 65 876 | 65 616 |
+| fact_user_ns | 81 665 | 72 385 | 95 374 | 91 449 |
+| fact_svc_ns | 219 298 | 187 969 | 102 774 | 104 275 |
+| restart_us | 4 800 | 6 800 | 1 200 | 1 200 |
+| USB read_kbs (usbd) | 68 266 | 58 514 | 67 147 | 80 313 |
+| rights gate_ns | 53 | 24 | 5 | 5 |
+| crypto sha256 kernel / user (KiB/s) | 48 941 / 51 520 | 49 425 / 50 240 | 180 480 / 212 160 | 180 855 / 216 000 |
+| DeSoFS 8 MiB write / read (KiB/s) | 8 055 / 12 641 | 7 742 / 12 525 | 17 246 / 53 894 | 17 847 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 12 251 / 3 491 | 12 526 / 3 482 | 7 838 / 820 | 8 835 / 866 |
+| `desofs check` (ms) | 974 | 923 | 279 | 304 |
+| short soak: file operations in 2 min | 6 664 | 6 782 | 28 000 | 27 998 |
+
+Verdict: no regression – only DeSoCrypto, its tests and `build.sh` changed. The two values noted last time are back
+in range (KVM usbd 80 313 KiB/s, TCG `gate_ns` 24). KVM small-file creation +13 % is on an untouched path: the profile
+shows the time in the disk writes and the first flush (host I/O), not in DeSoFS code.
 
 ---
 

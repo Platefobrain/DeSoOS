@@ -2,6 +2,39 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.72.0 — 2026-11-08
+
+### Added – DeSoCrypto 0.4.0: AES-128-GCM
+- `aes.rs`: AES-128 encryption (FIPS-197) – AES-NI where the CPU has it, otherwise bitsliced (four blocks in eight
+  64-bit planes, the Boyar–Peralta S-box circuit – no tables); the key schedule through the same circuit. A last group
+  of 1–3 blocks and a tail under 16 bytes go through a local array.
+- `ghash.rs`: GHASH (SP 800-38D) – PCLMULQDQ on bit-reversed values with a shift reduction, otherwise bit by bit with
+  masks.
+- `aes_gcm.rs`: AES-128-GCM `seal` / `open` in place; 12-byte nonce, 16-byte tag, at most 2^36 − 32 bytes; `open`
+  checks the tag first – a wrong tag leaves the buffer untouched; no nonce generator, a strong warning about reuse.
+- AES-NI and PCLMULQDQ detected and chosen separately (`Features::detect`, `limit` only switches off). The hardware
+  paths are inline assembly (the soft-float target cannot hold vector values in Rust code) and clear their XMM
+  registers. The kernel is built with `--cfg desocrypto_no_simd` (`build.sh`): no AES-NI / PCLMULQDQ code in it – it
+  runs with CR0.TS = 1 and does not save XMM for itself.
+- Wiped: round keys (bytes and planes), H, E_K(J0), key-stream blocks, the GHASH state, the computed tag in `open`.
+- `[RESULT-CRYPTO]`: `aesni`, `pclmul`, `aesgcm_user_kbs`, `aesgcm_soft_kbs`. `cryptotest xmm <n>` – the XMM test.
+
+### Tests
+- 2429 checks (kernel – software path – and `/bin/cryptotest` – every AES-NI / PCLMULQDQ combination the CPU allows,
+  all equal): FIPS-197 C.1 and A.1; the circuit S-box for all 256 inputs; 1–5 blocks; GF(2^128) products (0, 1, all
+  ones, patterns) and GHASH of 0–1000 bytes against SP 800-38D written on Python integers; NIST (McGrew–Viega) Test
+  Cases 1–4; every length 0–95 and 1000 inside guard bytes, with and without aad; aad of 1 / 15 / 16 / 17 bytes; a
+  wrong tag / aad / nonce / key / ciphertext bit – Mismatch and the buffer unchanged. Expected values from Python
+  (AES from its definition, GF(2^128) on integers) and the `cryptography` library.
+- CRYPTO TEST 5: four `cryptotest xmm` processes at once – a pattern of their own in xmm0–xmm15 checked after every
+  yield, and AES-GCM on the hardware paths compared with the software result every round.
+- Mutations, each caught by the test meant for it: one AES-NI round fewer (aes 3), a wrong AES-NI round key (aes 3),
+  one S-box gate changed (aes 1 – the 256 inputs), a wrong Rcon (aes 2 – A.1), a wrong GHASH reduction (ghash 13 – the
+  first product that needs it), no bit reflection in GHASH (ghash 27), data from counter 1 (aes-gcm vectors 2 – Test
+  Case 2), the lengths in the wrong order (aes-gcm vectors 2), no aad padding (aes-gcm vectors 4 – Test Case 4),
+  `open` decrypting before the tag check (aes-gcm tamper 7 – the first non-empty buffer). Also: the kernel without
+  FXRSTOR – caught by CRYPTO TEST 5 ("xmm0 changed across a yield") as well as FPU TEST. 34 suites, 288 tests.
+
 ## v0.71.0 — 2026-11-08
 
 ### Added – DeSoCrypto 0.3.0: Poly1305, ChaCha20-Poly1305, X25519; the generator's trust policy

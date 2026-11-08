@@ -69,7 +69,7 @@ pub fn self_test() {
     let r = desocrypto_tests::run();
     check!(r.is_ok(), "in the kernel: {:?}", r.err());
     let n = r.unwrap_or(0);
-    serial_println!("[CRYPTO TEST] 1/4 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 / Poly1305 / AEAD RFC 8439, X25519 RFC 7748, the key-erasure generator, arithmetic ranges, limits) in {} ms PASS", n, ticks() - t0);
+    serial_println!("[CRYPTO TEST] 1/5 in the kernel: {} checks (SHA-256 FIPS 180-4, HMAC RFC 4231, HKDF RFC 5869, ChaCha20 / Poly1305 / AEAD RFC 8439, X25519 RFC 7748, AES FIPS-197, GHASH / AES-GCM SP 800-38D (software path in the kernel), the key-erasure generator, arithmetic ranges, limits) in {} ms PASS", n, ticks() - t0);
 
     // 2. The same in user space.
     let r = run("/bin/cryptotest", &["cryptotest"], &[], 60_000);
@@ -81,7 +81,11 @@ pub fn self_test() {
     let hmac_kbs = number_after(out, "hmac ");
     let aead_kbs = number_after(out, "aead ");
     let x25519_ops = number_after(out, "x25519 ");
-    serial_println!("[CRYPTO TEST] 2/4 user space: {} PASS", out);
+    let gcm_kbs = number_after(out, "aesgcm ");
+    let gcm_soft_kbs = number_after(out, "aesgcm_soft ");
+    let aesni = if out.contains("aesni yes") { "yes" } else { "no" };
+    let pclmul = if out.contains("pclmul yes") { "yes" } else { "no" };
+    serial_println!("[CRYPTO TEST] 2/5 user space: {} PASS", out);
 
     // 3. sha256sum: files (empty, "abc", 300 KiB + 13 bytes) against the kernel's
     // result, standard input, a missing file (error, exit 1, the others still listed).
@@ -111,7 +115,7 @@ pub fn self_test() {
     check!(r.is_some(), "sha256sum (stdin) did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.trim() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -", "sha256sum (stdin): {:?} {:?}", kind, out);
-    serial_println!("[CRYPTO TEST] 3/4 sha256sum: 3 files = kernel result, stdin, missing file -> exit 1 PASS");
+    serial_println!("[CRYPTO TEST] 3/5 sha256sum: 3 files = kernel result, stdin, missing file -> exit 1 PASS");
 
     // 4. Speed of SHA-256 in the kernel (256 KiB pieces, at least 200 ms).
     let start = ticks();
@@ -128,9 +132,29 @@ pub fn self_test() {
     let ms = (ticks() - start).max(1);
     check!(h.finish().is_ok(), "kernel speed run: hash refused");
     let kernel_kbs = kib * 1000 / ms;
-    serial_println!("[CRYPTO TEST] 4/4 speed: SHA-256 {} KiB/s in the kernel, {} KiB/s in user space; HMAC {} KiB/s PASS", kernel_kbs, user_kbs, hmac_kbs);
+    serial_println!("[CRYPTO TEST] 4/5 speed: SHA-256 {} KiB/s in the kernel, {} KiB/s in user space; HMAC {} KiB/s PASS", kernel_kbs, user_kbs, hmac_kbs);
+    // 5. XMM across task switches: four processes at once, each with its own pattern in
+    // xmm0-xmm15 checked after every yield and AES-GCM (hardware paths) compared with the
+    // software result every round.
+    let opts = SpawnOptions { capture: true, ..SpawnOptions::default() };
+    let mut ids = Vec::new();
+    for k in 0..4 {
+        let seed = alloc::format!("{}", k + 1);
+        let id = exec("/bin/cryptotest", &["cryptotest", "xmm", &seed], "/", &opts);
+        check!(id.is_ok(), "cryptotest xmm did not start");
+        ids.push(id.unwrap_or(0));
+    }
+    let mut rounds = 0u64;
+    for id in ids {
+        check!(wait_for(60_000, || sched::task_info(id).is_none()), "cryptotest xmm did not finish");
+        let kind = exit_info(id).map(|e| e.kind);
+        let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
+        check!(kind == Some(ExitKind::Exit(0)) && out.contains("rounds OK"), "cryptotest xmm: {:?} {:?}", kind, out.trim());
+        rounds += number_after(&out, "xmm: ");
+    }
+    serial_println!("[CRYPTO TEST] 5/5 XMM: 4 processes at once, {} rounds of xmm0-15 patterns checked after every yield and AES-GCM (AES-NI {}, PCLMULQDQ {}) = software PASS", rounds, aesni, pclmul);
     serial_println!(
-        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={} aead_user_kbs={} x25519_user_ops={}",
+        "[RESULT-CRYPTO] ver={} lib={} checks={} sha256_kernel_kbs={} sha256_user_kbs={} hmac_user_kbs={} aead_user_kbs={} x25519_user_ops={} aesni={} pclmul={} aesgcm_user_kbs={} aesgcm_soft_kbs={}",
         crate::shell::VERSION,
         desocrypto::VERSION,
         n,
@@ -138,7 +162,11 @@ pub fn self_test() {
         user_kbs,
         hmac_kbs,
         aead_kbs,
-        x25519_ops
+        x25519_ops,
+        aesni,
+        pclmul,
+        gcm_kbs,
+        gcm_soft_kbs
     );
     serial_println!("[CRYPTO TEST] All crypto tests passed!");
     crate::selftest::pass();

@@ -1624,6 +1624,9 @@ syscall per operation, and a mistake in it can only hurt the program that uses i
 | `poly1305` | `Poly1305::new / update / finish / verify`, `poly1305(key, msg)` – one-time authenticator, limbs 44/44/42 bits | RFC 8439 §2.5 |
 | `aead` | `seal(key, nonce, aad, buf) -> tag`, `open(key, nonce, aad, buf, tag)` – ChaCha20-Poly1305 in place | RFC 8439 §2.8 |
 | `x25519` | `x25519(secret, their_public)`, `public_key(secret)` – Montgomery ladder, five 51-bit limbs; an all-zero result refused | RFC 7748 (+ RFC 8446 §7.4.2) |
+| `aes` | `Aes128::new(key, features)`, `encrypt_blocks` – AES-NI or bitsliced (4 blocks in 8 planes, Boyar–Peralta S-box circuit); `Features::detect / limit` | FIPS-197 |
+| `ghash` | `Ghash::new(h, features)`, `update / pad / finish` – PCLMULQDQ or bit by bit with masks | SP 800-38D §6.4 |
+| `aes_gcm` | `AesGcm::new / with_features`, `seal / open` in place; 12-byte nonce, 16-byte tag | SP 800-38D |
 | `mod.rs` | `Error`, `hex`, `equal_ct` (constant-time compare), `wipe`, `VERSION` | – |
 
 Rules of the code:
@@ -1656,7 +1659,10 @@ Rules of the code:
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
-Tests: `common/desocrypto/tests.rs` (486 checks: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439, RFC 7748 vectors;
+Tests: `common/desocrypto/tests.rs` (2429 checks; AES-GCM: FIPS-197 C.1 / A.1, the circuit S-box for all 256 inputs,
+1–5 blocks, GF(2^128) products and GHASH against SP 800-38D written on Python integers, NIST Test Cases 1–4, every
+length 0–95 and 1000 inside guard bytes, aad of 1 / 15 / 16 / 17 bytes, a wrong tag leaving the buffer untouched –
+each with every AES-NI / PCLMULQDQ combination the CPU allows; before that: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439, RFC 7748 vectors;
 Poly1305 limbs at their maximum and the final reduction around 2^130 − 5; X25519 field operations on edge values,
 `cswap`, the seven low-order points; AEAD with a wrong tag / aad / nonce / key / ciphertext bit leaving the buffer
 untouched; expected values from Python big integers – the RFC formulas, not the limb code – and the `cryptography`
@@ -1666,12 +1672,25 @@ include it, so it is not in the kernel or ordinary programs: only `/bin/cryptote
 include it. CRYPTO TEST runs it in the kernel and in user space, checks `sha256sum` against the kernel's own result
 and measures the speed (`[RESULT-CRYPTO]`).
 
+**AES-GCM and the CPU.** AES-NI (CPUID 1 ECX bit 25) and PCLMULQDQ (bit 1) are detected separately and chosen
+separately: hardware AES with software GHASH and the reverse are possible; `Features::limit` can only switch a feature
+off (the tests run all four combinations; one the CPU lacks is never forced). The hardware paths use inline assembly
+(programs are built for the soft-float target, where LLVM cannot handle 128-bit vector values in Rust code) and clear
+the XMM registers they used before returning. They exist only in programs: the kernel is built with
+`--cfg desocrypto_no_simd` and has no AES-NI / PCLMULQDQ code at all, because its own code runs with CR0.TS = 1 and
+never saves XMM for itself – a process's XMM state is saved and restored with FXSAVE / FXRSTOR on every task switch
+(`fpu.rs`), and CRYPTO TEST 5 checks it with four processes at once (a pattern in xmm0–xmm15 checked after every
+yield, hardware AES-GCM compared with the software result). The fallback is bitsliced AES (four blocks at once; a
+last group of 1–3 blocks and a tail under 16 bytes go through a local array – nothing outside the slice is touched)
+and bit-by-bit GHASH; both avoid tables and branches on secrets. GCM nonce reuse: it reveals the XOR of the plaintexts
+and, under certain conditions, can make it possible to recover H and forge tags – the caller must keep nonces unique.
+
 Passing the RFC vectors shows agreement with chosen cases of the standards; it does not prove the implementation
 secure. DeSoCrypto is not for production use without an audit. Nothing in the system uses the AEAD or X25519 yet –
 they are the base for DeSoTLS.
 
-Next: AES-128-GCM with AES-NI and a fallback without key-dependent tables (0.4.0); then DeSoTLS (TLS 1.3) –
-signatures, X.509 and the protocol itself are a separate step.
+Next: DeSoTLS (TLS 1.3) – signatures (RSA-PSS, ECDSA P-256), X.509, the handshake and the record layer are a
+separate step.
 
 ## Random numbers (`kernel/random.rs`, v0.70.0)
 
@@ -1776,7 +1795,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 ## Measurement and testing
 
-- **Self-tests:** `tests/test.sh` – 34 self-test suites, a restart phase and a short soak (287 tests) in QEMU (TCG
+- **Self-tests:** `tests/test.sh` – 34 self-test suites, a restart phase and a short soak (288 tests) in QEMU (TCG
   or `ACCEL=kvm`, 1–4 CPUs);
   loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
