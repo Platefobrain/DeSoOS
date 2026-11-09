@@ -52,6 +52,7 @@ pub fn run() -> Result<usize, Failure> {
     der_checks(&mut c)?;
     time_checks(&mut c)?;
     host_checks(&mut c)?;
+    constraint_checks(&mut c)?;
     pem_checks(&mut c)?;
     store_checks(&mut c)?;
     chain_cases(&mut c, "chains", CERTS, None)?;
@@ -245,6 +246,78 @@ fn host_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(!m("*.*.example.com", "a.b.example.com"))?;
     c.check(!m("example.com.", "example.com") && !m("", "example.com"))?;
     c.check(m("xn--bcher-kva.example", "xn--bcher-kva.example") && !m("bücher.example", "xn--bcher-kva.example"))?;
+    Ok(())
+}
+
+/// A list of excluded / permitted subtrees (GeneralSubtree SEQUENCEs with dNSName bases)
+/// written into `out`; its length.
+fn subtrees(names: &[&str], out: &mut [u8; 256]) -> usize {
+    let mut n = 0;
+    for name in names {
+        let b = name.as_bytes();
+        out[n] = 0x30;
+        out[n + 1] = (b.len() + 2) as u8;
+        out[n + 2] = 0x82;
+        out[n + 3] = b.len() as u8;
+        out[n + 4..n + 4 + b.len()].copy_from_slice(b);
+        n += 4 + b.len();
+    }
+    n
+}
+
+/// Name constraints on a wildcard, each of the two checks on its own (a change to one cannot
+/// hide behind the other), and the same subtrees against plain names.
+fn constraint_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("name constraints");
+    let mut buf = [0u8; 256];
+    // (excluded subtree, any_subtree on "*.example.com", wildcard_covers_any, check_constraints refuses)
+    let wild: [(&str, bool, bool, bool); 8] = [
+        ("example.com", true, false, true),
+        ("com", true, false, true),
+        ("EXAMPLE.COM", true, false, true),
+        ("foo.example.com", false, true, true),
+        ("Foo.Example.Com", false, true, true),
+        ("a.foo.example.com", false, false, false),
+        ("notexample.com", false, false, false),
+        ("example.org", false, false, false),
+    ];
+    for (ex, sub, cover, refused) in wild {
+        let n = subtrees(&[ex], &mut buf);
+        let list = &buf[..n];
+        c.check(name::any_subtree(list, b"*.example.com") == Ok(sub))?;
+        c.check(name::wildcard_covers_any(list, b"*.example.com") == Ok(cover))?;
+        let nc = x509::NameConstraints { permitted: None, excluded: Some(list) };
+        let san = [0x82, 13, b'*', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o', b'm'];
+        let r = name::check_constraints(&nc, Some(&san));
+        c.check(r == if refused { Err(Error::NameConstraintViolation) } else { Ok(()) })?;
+    }
+    // Plain names: (name, excluded subtree, refused) – the wildcard rule never applies.
+    let plain: [(&str, &str, bool); 9] = [
+        ("www.example.com", "example.com", true),
+        ("example.com", "example.com", true),
+        ("www.example.com", "com", true),
+        ("www.example.com", "www.example.com", true),
+        ("www.example.com", "foo.example.com", false),
+        ("www.example.com", "a.www.example.com", false),
+        ("foo.example.com", "a.foo.example.com", false),
+        ("notexample.com", "example.com", false),
+        ("example.com", "www.example.com", false),
+    ];
+    for (host, ex, refused) in plain {
+        let n = subtrees(&[ex], &mut buf);
+        let list = &buf[..n];
+        c.check(name::wildcard_covers_any(list, host.as_bytes()) == Ok(false))?;
+        let mut san = [0u8; 64];
+        san[0] = 0x82;
+        san[1] = host.len() as u8;
+        san[2..2 + host.len()].copy_from_slice(host.as_bytes());
+        let nc = x509::NameConstraints { permitted: None, excluded: Some(list) };
+        let r = name::check_constraints(&nc, Some(&san[..2 + host.len()]));
+        c.check(r == if refused { Err(Error::NameConstraintViolation) } else { Ok(()) })?;
+    }
+    // Two subtrees: the wildcard is hit by the second.
+    let n = subtrees(&["a.foo.example.com", "bar.example.com"], &mut buf);
+    c.check(name::wildcard_covers_any(&buf[..n], b"*.example.com") == Ok(true))?;
     Ok(())
 }
 

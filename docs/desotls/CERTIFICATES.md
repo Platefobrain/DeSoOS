@@ -49,10 +49,32 @@ off.
   server certificate and self-issued intermediates), name constraints over everything below it (not over
   self-issued intermediates, always over the server certificate; dNSName only – any other name type in the
   constraints refuses the CA; a leading period or a wildcard in a constraint refuses it; non-critical constraints
-  are enforced too; a wildcard name is refused when any name it stands for is excluded – CVE-2025-61727), and an
+  are enforced too; a wildcard name – see "Wildcards and excluded subtrees" below), and an
   anchor's Mozilla distrust-after date (a server certificate issued after it is refused);
 - "self-issued" = issuer and subject byte-identical: a strict subset of RFC 5280 §7.1 (names equal only after
   normalisation count as different – counted and constrained; never more lenient).
+
+## Wildcards and excluded subtrees
+
+A wildcard name in a server certificate is checked against the excluded subtrees twice (`name.rs`,
+`check_constraints`):
+
+1. **as written** – `any_subtree`: "*.example.com" lies under example.com and com like any name;
+2. **for the names it stands for** – `wildcard_covers_any`: "*.example.com" stands for every name with exactly one
+   label before example.com (foo.example.com), so an excluded foo.example.com is hit too (CVE-2025-61727 – RFC
+   5280 does not say how wildcards meet name constraints; the safe reading).
+
+| Excluded subtree | "*.example.com" | Which check | A plain www.example.com |
+|---|---|---|---|
+| example.com | refused | 1 | refused |
+| com | refused | 1 | refused |
+| foo.example.com | refused | 2 | allowed |
+| a.foo.example.com | allowed – no name the wildcard stands for lies inside it | – | allowed |
+| notexample.com | allowed | – | allowed |
+
+Until v0.74.3 check 2 also refused a.foo.example.com (any subtree under a name the wildcard stands for) – safe,
+but a valid certificate was refused. The tests check each of the two functions on its own, so a change to one
+cannot hide behind the other, and the same subtrees against plain names.
 
 ## The order of the checks
 
@@ -183,8 +205,8 @@ attacks the sealed store.
 
 ## Tests
 
-`common/desotls/tests.rs` – 257 checks: DER edge cases, times (leap years, 2049 / 1950, 2100), host names
-and wildcards, PEM, the store format and damaged stores, `vectors/certs.bin` (115 chains made with Python
+`common/desotls/tests.rs` – 307 checks: DER edge cases, times (leap years, 2049 / 1950, 2100), host names
+and wildcards, name constraints on a wildcard with each of the two checks on its own (below), PEM, the store format and damaged stores, `vectors/certs.bin` (122 chains made with Python
 `cryptography`, the impossible ones by editing DER and signing again – every rule of the profile right and wrong,
 each limit at and past its value) and `vectors/real.bin` (12 real server chains from the rustls/webpki test data:
 Amazon's four roots, Cloudflare, Netflix, Sanofi, an expired one). CERT TEST runs them in the kernel and in

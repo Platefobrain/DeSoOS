@@ -2,6 +2,28 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.74.4 — 2026-11-09
+
+### Fixed – a wildcard against an excluded subtree deeper than it reaches
+- `common/desotls/name.rs`: `wildcard_covers_any` refused "*.example.com" under a CA that excluded
+  a.foo.example.com – a subtree below a name the wildcard stands for, although "*.example.com" stands only for
+  one-label names (foo.example.com) and none of them lies inside it. Now only an excluded name with exactly one label
+  before the wildcard's domain hits it. Safe before too (a valid certificate refused, never a bad one accepted);
+  excluded example.com and com were and are refused by `any_subtree` (the wildcard as written).
+- Tests: 50 new checks (257 → 307) – `any_subtree` and `wildcard_covers_any` each on their own for eight excluded
+  subtrees, `check_constraints` for the wildcard and for plain names (the wildcard rule never applies to them);
+  7 new chains in `certs.bin` (115 → 122, regenerated: new random keys, the same old cases). On the host 7
+  mutations of the rules (no one-label rule, never covered, no `any_subtree` for wildcards, no dot boundary,
+  case-sensitive suffix, the wildcard rule for plain names, no wildcard check) – all 7 caught.
+- `docs/desotls/CERTIFICATES.md`: a section "Wildcards and excluded subtrees" with the table of cases.
+
+### Changed – documentation: the layers diagram brought up to date
+- `docs/ARCHITECTURE.md`, "Layers": the diagram showed an AUDIO service and a page cache that do not exist; now it
+  shows what there is – the file systems (ramfs, DeSoFS, FAT32) and the DeSoFS block cache, the serial,
+  framebuffer and RTC drivers, the random number generator and the wall clock, audio and GUI marked as later, and
+  DeSoCrypto / DeSoTLS as libraries (not services). The table below it: DeSoFS instead of "a future native FS",
+  no page cache; rows for the generator and clock and for the two libraries.
+
 ## v0.74.3 — 2026-11-08
 
 ### Changed – documentation: DeSoCrypto and DeSoTLS get their own folders in `docs/`

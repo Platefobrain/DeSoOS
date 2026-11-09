@@ -14,7 +14,7 @@ certificate chain – the TLS 1.3 handshake and record layer come next (v0.75). 
 | `roots.rs` | the trusted CA store file (`/etc/certs/roots`) and other anchor lists |
 | `pem.rs` | PEM text to DER (for `certcheck` and the tests) |
 | `tests.rs` | tests – included only by `/bin/certtest` and the kernel's CERT TEST |
-| `vectors/` | `certs.bin` (115 made-up chains: every rule right and wrong, the limits) from `gen-certs.py`; `real.bin` (12 real server chains from the rustls/webpki test data) from `gen-real.py` |
+| `vectors/` | `certs.bin` (122 made-up chains: every rule right and wrong, the limits) from `gen-certs.py`; `real.bin` (12 real server chains from the rustls/webpki test data) from `gen-real.py` |
 
 Use it from a program:
 

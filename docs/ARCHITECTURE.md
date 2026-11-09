@@ -36,15 +36,21 @@ syscalls + handles ────────── boundary ───────
         │                                                       │
   ┌─────┼────────────┬───────────┬─────────────┐                │
  MM Scheduler       IPC         VFS         drivers         services
-  │  + locks     channels,       │         (console,      ┌─────┼─────┐
-  │            shared memory     │        PS/2, PCI,     USB   NET  AUDIO
-  │                  │      page cache   NVMe, virtio)          │
-  │                  │           │             │                │
-  │                  ╚═══════════╪═════════════╪════════════════╡  data: shared memory
-  │                            block           │                │
-  │                                            ╘════════════════╛  control: MMIO, IRQ→handle, DMA, (IOMMU)
+  │  + locks     channels,  ramfs, DeSoFS  (console,       ┌────┴────┐
+  │            shared memory   FAT32       serial, fb,    USB       NET    (audio, GUI
+  │                  │           │         PS/2, PCI,                │      – later)
+  │                  │      block cache    NVMe, virtio,             │
+  │                  │           │         RTC)                      │
+  │                  │           │             │                     │
+  │                  ╚═══════════╪═════════════╪═════════════════════╡  data: shared memory
+  │                            block           │                     │
+  │                                            ╘═════════════════════╛  control: MMIO, IRQ→handle, DMA, (IOMMU)
   │
+  ├──────── random numbers (getrandom), wall clock (time) ────────
   └──────── arch / SMP: per-CPU, APIC, IPI, spinlocks, TLB shootdown ────────
+
+  libraries (included in the code that uses them, not services):
+  DeSoCrypto – kernel and programs; DeSoTLS – programs
 ```
 
 | Component | Where | Why / condition |
@@ -52,8 +58,10 @@ syscalls + handles ────────── boundary ───────
 | memory, scheduler, syscalls, IPC | kernel | core of the system |
 | interrupts, timers, SMP | kernel | must be on time |
 | console, serial, framebuffer, PS/2 | kernel | needed for boot and diagnostics |
+| random numbers (`getrandom`), wall clock (`time`, RTC) | kernel | one source for every program; the generator must be seeded before the first process |
+| DeSoCrypto, DeSoTLS | libraries, not services | included by the code that uses them (DeSoCrypto: kernel and programs; DeSoTLS: programs) – no syscall per operation |
 | PCI, disks (virtio, NVMe), GPT | kernel | on the path of every file read |
-| VFS, page cache, FAT32, a future native FS | **kernel, permanently** | every `open`/`read`/`write` |
+| VFS, ramfs, FAT32, DeSoFS (with its block cache) | **kernel, permanently** | every `open`/`read`/`write` |
 | init, shell, tools | user space | |
 | networking | user space (`/bin/netd`, one per card) | card driver + ARP/IPv4/ICMP/UDP/TCP/DHCP/DNS in one process; programs talk to it over channels |
 | USB + HID + USB storage | user space (`/bin/usbd`) | keyboard events go to the kernel via `input_inject`, disk sectors via `ublk`; a crashed usbd is restarted by init |
@@ -1746,7 +1754,7 @@ In short:
   fields and a date between the build date − 24 h and 2099; the build date is `SOURCE_DATE_EPOCH` or the build
   time (`build.sh`, no git). A heuristic, not proof – NTP (preferably NTS) and a saved last known time come later;
   TLS will refuse to connect without a plausible clock;
-- tools `certcheck` (a chain offline, the same code) and `certtest`; 257 checks in CERT TEST, x509-limbo, fuzzing and
+- tools `certcheck` (a chain offline, the same code) and `certtest`; 307 checks in CERT TEST, x509-limbo, fuzzing and
   mutations on the host.
 
 Not checked: revocation (CRL, OCSP) and Certificate Transparency. Not audited, not for production use.

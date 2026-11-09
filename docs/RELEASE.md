@@ -172,6 +172,50 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.74.4 — 2026-11-09
+
+**Status: stable on QEMU (TCG and KVM). DeSoTLS: a wildcard server name is no longer refused under a CA that
+excludes a name deeper than the wildcard reaches (a.foo.example.com for "*.example.com") – safe before too, a valid
+certificate was refused; 50 new name-constraint checks (257 → 307), 7 new chains. Documentation: the layers diagram
+brought up to date.**
+
+### What is new since the last report (v0.74.3)
+
+| Version | Change |
+|---|---|
+| v0.74.4 | `name.rs` `wildcard_covers_any` – only an excluded name with exactly one label before the wildcard's domain hits it; `any_subtree` and `wildcard_covers_any` tested each on its own, plain names unchanged; `certs.bin` 122 chains; 7 of 7 host mutations caught; `docs/ARCHITECTURE.md` "Layers" (no AUDIO service, no page cache; file systems, block cache, generator and clock, the two libraries) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 306 s (restart 23 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 35/35 suites + restart 1/1 + short soak (RAM disk), 294 tests PASS | 226 s (restart 11 s, soak 125 s) |
+
+`[RESULT-CERTS]` (both runs): 307 DeSoTLS checks in the kernel and in `/bin/certtest`, the store unchanged (118
+anchors, 117 usable), 36 attempts on the sealed store refused.
+
+### Performance against the previous measured release (v0.74.2 → v0.74.4, same machine)
+
+| | TCG v0.74.2 | TCG v0.74.4 | KVM v0.74.2 | KVM v0.74.4 |
+|---|---|---|---|---|
+| irq_user_ns | 11 485 | 10 912 | 66 225 | 67 136 |
+| fact_svc_ns | 241 545 | 202 429 | 105 374 | 100 806 |
+| USB read_kbs (usbd) / kernel | 64 000 / 68 400 | 63 015 / 62 811 | 99 902 / 102 264 | 58 514 / 67 205 |
+| crypto sha256 kernel / user (KiB/s) | 49 425 / 51 582 | 49 671 / 50 880 | 174 080 / 216 320 | 177 920 / 217 600 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 180 / 448 / 180 | 2 280 / 425 / 182 | 13 100 / 3 820 / 1 366 | 12 720 / 3 940 / 1 366 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 954 / 12 118 | 7 488 / 12 900 | 19 230 / 53 542 | 17 504 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 13 358 / 3 686 | 12 272 / 3 531 | 7 954 / 826 | 6 900 / 813 |
+| `desofs check` (ms) | 970 | 888 | 277 | 295 |
+| short soak: file operations in 2 min | 5 977 | 6 575 | 28 150 | 28 564 |
+
+Verdict: no regression – only DeSoTLS name constraints changed. The KVM USB read through usbd fell again (99 902 →
+58 514) and the kernel's own USB read with it (102 264 → 67 205), with no USB code changed since v0.72: across the
+last five runs it moved between 56 000 and 100 000 KiB/s both ways, so it is the host's USB passthrough, not the
+code – it stays on the watch list only to catch a fall below that band.
+
+---
+
 ## v0.74.3 — 2026-11-08
 
 **Status: documentation only – DeSoCrypto and DeSoTLS get their own folders, `docs/desocrypto/` and `docs/desotls/`;

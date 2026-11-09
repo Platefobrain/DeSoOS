@@ -334,6 +334,17 @@ def main():
     case("excluded subtree, name beside", "OK", "notbad.example.com", [build("x", "Test ICA", L, I, san=["notbad.example.com"]), inx], [root])
     inxb = build("Test ICA", "Test Root", I, R, ca=True, nc=ncx(excluded=["bar.example.com"]))
     case("excluded name covered by a wildcard (CVE-2025-61727)", "NameConstraintViolation", "foo.example.com", [wild, inxb], [root])
+    # the wildcard "*.example.com" against other excluded subtrees: under the subtree as written (example.com, com),
+    # exactly one name it stands for (foo.example.com), deeper than it reaches (a.foo.example.com), beside it
+    for ex, want in (("example.com", "NameConstraintViolation"), ("com", "NameConstraintViolation"),
+                     ("foo.example.com", "NameConstraintViolation"), ("a.foo.example.com", "OK"),
+                     ("notexample.com", "OK")):
+        ica = build("Test ICA", "Test Root", I, R, ca=True, nc=ncx(excluded=[ex]))
+        case("wildcard, excluded " + ex, want, "bar.example.com", [wild, ica], [root])
+    # the same for a plain name: the wildcard rule does not apply
+    for ex, want in (("example.com", "NameConstraintViolation"), ("a.www.example.com", "OK")):
+        ica = build("Test ICA", "Test Root", I, R, ca=True, nc=ncx(excluded=[ex]))
+        case("plain name, excluded " + ex, want, "www.example.com", [leaf, ica], [root])
     inc_nc = build("Test ICA", "Test Root", I, R, ca=True, nc=ncx(permitted=["example.com"], crit=False))
     case("non-critical name constraints are enforced", "NameConstraintViolation", "www.other.org",
          [build("o", "Test ICA", L, I, san=["www.other.org"]), inc_nc], [root])

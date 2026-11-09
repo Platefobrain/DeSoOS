@@ -13,8 +13,10 @@
 // * Name constraints (RFC 5280 4.2.1.10) on dNSName: "example.com" covers example.com and
 //   every name under it; "" everything (a leading period or a wildcard in a constraint is not
 //   RFC 5280 – the extension is refused when parsed).  A name inside an excluded subtree is
-//   refused; with permitted subtrees a name must be inside one.  A wildcard name is refused
-//   when any name it stands for is excluded (wildcard_covers_any).
+//   refused; with permitted subtrees a name must be inside one.  A wildcard name is checked
+//   twice: as written ("*.example.com" lies under an excluded example.com or com –
+//   any_subtree), and for the names it stands for (an excluded bar.example.com –
+//   wildcard_covers_any).
 
 use super::Error;
 use super::der::{self, Reader};
@@ -105,8 +107,9 @@ fn in_subtree(name: &[u8], base: &[u8]) -> bool {
     name.len() > base.len() + 1 && ends_with_ci(name, base) && name[name.len() - base.len() - 1] == b'.'
 }
 
-/// Some subtree of the list (GeneralSubtree SEQUENCEs with dNSName bases) contains `name`.
-fn any_subtree(list: &[u8], name: &[u8]) -> Result<bool, Error> {
+/// Some subtree of the list (GeneralSubtree SEQUENCEs with dNSName bases) contains `name`
+/// (a wildcard name as written: "*.example.com" is under example.com).
+pub fn any_subtree(list: &[u8], name: &[u8]) -> Result<bool, Error> {
     let mut r = Reader::new(list);
     while !r.is_empty() {
         let mut sub = r.nested(der::SEQUENCE)?;
@@ -118,18 +121,23 @@ fn any_subtree(list: &[u8], name: &[u8]) -> Result<bool, Error> {
     Ok(false)
 }
 
-/// A wildcard name ("*.example.com") stands for every one-label name under it: an excluded
-/// subtree that is such a name (bar.example.com) or lies under one is hit too (RFC 9525 vs
-/// RFC 5280 – the safe reading; CVE-2025-61727).
-fn wildcard_covers_any(list: &[u8], wildcard: &[u8]) -> Result<bool, Error> {
-    let rest = &wildcard[2..];
+/// A wildcard name ("*.example.com") stands for every one-label name under it
+/// (foo.example.com, never a.foo.example.com): an excluded subtree that is exactly such a
+/// name is hit (RFC 9525 vs RFC 5280 – the safe reading; CVE-2025-61727).  An excluded
+/// a.foo.example.com is not – no name the wildcard stands for lies inside it.  Subtrees the
+/// wildcard itself lies under (example.com, com) are any_subtree's job.
+pub fn wildcard_covers_any(list: &[u8], wildcard: &[u8]) -> Result<bool, Error> {
+    let Some(rest) = wildcard.strip_prefix(b"*.") else { return Ok(false) };
     let mut r = Reader::new(list);
     while !r.is_empty() {
         let mut sub = r.nested(der::SEQUENCE)?;
         let base = sub.read(der::context_primitive(2))?.value;
-        // base = label.rest, or anything under such a name (a.label.rest).
+        // base = label.rest with exactly one label before rest.
         if base.len() > rest.len() + 1 && ends_with_ci(base, rest) && base[base.len() - rest.len() - 1] == b'.' {
-            return Ok(true);
+            let label = &base[..base.len() - rest.len() - 1];
+            if !label.contains(&b'.') {
+                return Ok(true);
+            }
         }
     }
     Ok(false)

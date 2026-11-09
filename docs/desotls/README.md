@@ -23,7 +23,7 @@ Where things are:
 | Path | What |
 |---|---|
 | `common/desotls/` | the code (file map in its `README.md`) |
-| `common/desotls/tests.rs`, `vectors/` | 257 checks, 115 made-up chains, 12 real ones |
+| `common/desotls/tests.rs`, `vectors/` | 307 checks, 122 made-up chains, 12 real ones |
 | `user/etc/certs/` | the CA store `roots` and `gen-roots.py`, which makes it from Mozilla's `certdata.txt` |
 | `kernel/drivers/rtc.rs` | the wall clock and its verdict |
 | `user/bin/certcheck.rs`, `user/bin/certtest.rs` | the tools |
