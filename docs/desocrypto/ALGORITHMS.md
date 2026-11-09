@@ -1,6 +1,6 @@
 # DeSoCrypto – algorithms and rules
 
-The detailed description of DeSoCrypto 0.6.0 (`common/desocrypto/`): every module, the rules the code keeps, the CPU
+The detailed description of DeSoCrypto 0.6.1 (`common/desocrypto/`): every module, the rules the code keeps, the CPU
 paths and the tests. What it is and where it is used: `README.md` in this folder; how it fits into the system:
 `../ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".
 
@@ -127,5 +127,4 @@ Speed (`[RESULT-CRYPTO]`, v0.74.2, QEMU on the test machine, 4 CPUs):
 
 Passing the RFC and Wycheproof vectors shows agreement with chosen cases of the standards; it does not prove the
 implementation secure. DeSoCrypto is not for production use without an audit. The signature checks are used by DeSoTLS
-(certificate chains, since v0.74); the AEADs and X25519 not yet – they are for the TLS 1.3 handshake and records
-(v0.75).
+(certificate chains and CertificateVerify), the AEADs, X25519 and HKDF by its TLS 1.3 connections (since v0.75).

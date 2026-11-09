@@ -79,8 +79,7 @@ timings move by ±15% from run to run on the same build).
 
 **Cryptography (DeSoCrypto)**
 - SHA-256/384/512, HMAC and HKDF over them, ChaCha20, Poly1305, ChaCha20-Poly1305, X25519, AES-128-GCM, RSA and
-  ECDSA signature verification and the kernel's random number generator; no TLS yet – `netget https://` is refused;
-  certificate chains are checked by DeSoTLS (`certcheck`), the AEADs and X25519 are not used yet
+  ECDSA signature verification and the kernel's random number generator; used by DeSoTLS (TLS 1.3, certificates)
 - signatures: verification only (no signing, no RSA decryption); RSA 2048–4096 bits with 3 ≤ e < 2^32, PKCS#1 v1.5
   (DigestInfo with NULL only) and PSS; ECDSA only P-256 / SHA-256 and P-384 / SHA-384; no Ed25519, no SHA-1. The
   big-number and curve arithmetic is not constant time – fine for public keys and public data, the only use; it must
@@ -105,8 +104,20 @@ timings move by ±15% from run to run on the same build).
   is tested only with substituted sources; QEMU's OVMF gives no `EFI_RNG_PROTOCOL` (the test laptop's firmware gives
   RAW)
 
+**TLS (DeSoTLS) – the connection**
+- TLS 1.3 client only: no TLS 1.2 (a server that offers only it is refused), no server side
+- key exchange X25519 only: a server without X25519 is refused (P-256 / P-384 ECDHE and ML-KEM hybrids not offered);
+  HelloRetryRequest never accepted
+- cipher suites TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256 only (no AES-256-GCM)
+- no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), no ALPN,
+  no OCSP stapling
+- `netget`: HTTP/1.0 only (no keep-alive, no chunked answers – refused), GET only, no redirects, at most 8 TCP
+  connections per netd; a duplicated Content-Length is refused even with the same value (curl and Go accept it)
+- a `Client` is ~120 KiB and lives in a static, so `netget` and `tlstest` are ~330 KB files (the transcript's
+  starting values keep it out of .bss)
+- tested against OpenSSL 3 (Python `ssl`) in QEMU; real servers on the internet only on real hardware
+
 **Certificates (DeSoTLS) and the clock**
-- no TLS yet (v0.75): certificate chains are checked (`certcheck`, CERT TEST), nothing connects with them
 - not checked: revocation (CRL, OCSP) and Certificate Transparency – a revoked certificate still within its dates is
   accepted
 - the clock: "plausible" (syscall 59) is a heuristic – it refuses a lost RTC battery, a broken reading and dates
@@ -146,7 +157,7 @@ timings move by ±15% from run to run on the same build).
 - hard-coded keyboard layout (Polish programmer's)
 
 **Network**
-- no TLS (`https://` refused), no IPv6, no UDP sockets for programs (UDP only inside netd: DHCP, DNS)
+- no IPv6, no UDP sockets for programs (UDP only inside netd: DHCP, DNS); TLS – see "TLS (DeSoTLS)"
 - 8 TCP connections per netd (1 MiB receive ring each), 8 KiB send ring (uploads slow)
 - cards: Intel 8254x / 82574 (QEMU) and Realtek 8168g/8168h; no USB Ethernet, no Wi-Fi
 - DMA without an IOMMU: netd and usbd are trusted system code
@@ -169,6 +180,60 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.75.0 — 2026-11-09
+
+**Status: stable on QEMU (TCG and KVM). DeSoTLS 0.2 – TLS 1.3 client (X25519, AES-128-GCM and ChaCha20-Poly1305,
+ECDSA and RSA-PSS server signatures, KeyUpdate, close_notify), `netget https://` with strict HTTP framing and exit 5
+for a refused connection; TLS TEST (suite 36). Plan D (DeSoTLS) complete.**
+
+### What is new since the last report (v0.74.4)
+
+| Version | Change |
+|---|---|
+| v0.75.0 | `common/desotls/client.rs`, `record.rs`, `schedule.rs`; `netget https://` (`--cipher`, `--anchor`, `--key-update`, exit 5, strict framing also for http://); `/bin/tlstest`, TLS TEST, `tests/tls-stub.py` and `tests/tls/`; `docs/desotls/HANDSHAKE.md`; DeSoCrypto 0.6.1 (a test-only RSA constructor) |
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 305 s (restart 24 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 234 s (restart 12 s, soak 126 s) |
+
+`[RESULT-TLS]` (new):
+
+| | TCG | KVM |
+|---|---|---|
+| library checks (RFC 8448, scripted servers) | 134 | 134 |
+| `netget https://` cases against OpenSSL (tests/tls-stub.py) | 33 | 33 |
+| a whole `/hello` – handshake, request, answer (ms) | 98 | 53 |
+| `/big` 1 MiB over TLS (KiB/s) | 4 047 | 6 649 |
+
+The 1 MiB speed under KVM is far below the AEAD speed (AES-GCM 534 080 KiB/s): the limit is netd's TCP path and
+QEMU's user network, not the cryptography (plain HTTP in NET TEST is in the same range). Before the release, on the
+host: 32 hand-made mutations of the TLS code, all caught; a host client with the same library against OpenSSL 3.5 on
+every tls-stub port.
+
+### Performance against the previous release (v0.74.4 → v0.75.0, same machine)
+
+| | TCG v0.74.4 | TCG v0.75.0 | KVM v0.74.4 | KVM v0.75.0 |
+|---|---|---|---|---|
+| irq_user_ns | 10 912 | 7 917 | 67 136 | 65 445 |
+| fact_svc_ns | 202 429 | 208 550 | 100 806 | 100 959 |
+| USB read_kbs (usbd) / kernel | 63 015 / 62 811 | 70 620 / 95 965 | 58 514 / 67 205 | 67 147 / 81 210 |
+| crypto sha256 kernel / user (KiB/s) | 49 671 / 50 880 | 47 921 / 50 880 | 177 920 / 217 600 | 181 760 / 217 920 |
+| RSA-2048 / P-256 / P-384 verifications / s | 2 280 / 425 / 182 | 2 268 / 433 / 179 | 12 720 / 3 940 / 1 366 | 13 140 / 4 020 / 1 393 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 488 / 12 900 | 7 217 / 12 082 | 17 504 / 54 251 | 17 466 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 12 272 / 3 531 | 12 886 / 3 675 | 6 900 / 813 | 8 123 / 858 |
+| `desofs check` (ms) | 888 | 956 | 295 | 303 |
+| short soak: file operations in 2 min | 6 575 | 6 687 | 28 564 | 28 177 |
+
+Verdict: no regression – the kernel changed only by the self-test switch of the clock and the new suite; the
+other numbers move within their usual ranges (DeSoFS small-file create under KVM 8 123 ms is inside 6 900–9 300).
+The image is 8.1 MiB (was 7.5): `netget` and `tlstest` carry a ~120 KiB TLS client each (in .data – in "Current
+limitations").
 
 ---
 

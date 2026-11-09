@@ -306,6 +306,11 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::net_self_test();
     }
+    // HTTPS – DeSoTLS handshake and records, netget https:// against tests/tls-stub.py.
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::tls_self_test();
+    }
     #[cfg(selftest)]
     if !selftest::looping() {
         user::stress_self_test();

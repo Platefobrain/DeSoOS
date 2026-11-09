@@ -1,6 +1,6 @@
 # DeSoCrypto
 
-DeSoOS's own cryptographic library (`common/desocrypto/`, v0.6.0): hashes, MACs, key derivation, two AEADs, X25519,
+DeSoOS's own cryptographic library (`common/desocrypto/`, v0.6.1): hashes, MACs, key derivation, two AEADs, X25519,
 signature verification and the random number generator's core. Written for DeSoOS only – no Cargo crate, no outside
 code. It is a library, not a service: whoever needs it includes the files (`#[path]`) and calls them directly – the
 kernel and programs alike. `core` only: no heap, no syscalls.
@@ -16,7 +16,7 @@ What it has (every module, its API and the rules: `ALGORITHMS.md`):
 | signatures – verification only | RSA PKCS#1 v1.5 and PSS (2048–4096 bits), ECDSA P-256 / SHA-256 and P-384 / SHA-384 |
 | random numbers | ChaCha20 with fast key erasure – the kernel's generator (`kernel/random.rs`) and programs' own |
 
-Who uses it: DeSoTLS (certificate signatures), the kernel (DeSoFS block checksums, the random number generator, CRYPTO
+Who uses it: DeSoTLS (certificate and CertificateVerify signatures; the AEADs, X25519 and HKDF in TLS 1.3), the kernel (DeSoFS block checksums, the random number generator, CRYPTO
 TEST), `netd` (its own generator keyed from `getrandom`), `/bin/sha256sum`, `/bin/cryptotest`.
 
 How it compares:

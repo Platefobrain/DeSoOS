@@ -46,7 +46,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod x25519;
 
-pub const VERSION: &str = "0.6.0";
+pub const VERSION: &str = "0.6.1";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {

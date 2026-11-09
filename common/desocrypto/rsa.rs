@@ -92,6 +92,23 @@ impl PublicKey {
         Ok(PublicKey { n, k: n_be.len(), bits, e })
     }
 
+    /// Like `new`, but from 1024 bits – only for the RFC 8448 test trace (its server key has
+    /// 1024 bits); not in ordinary builds.
+    #[cfg(any(selftest, desocrypto_test, desotls_test))]
+    pub fn new_for_test(n_be: &[u8], e_be: &[u8]) -> Result<PublicKey, Error> {
+        if n_be.is_empty() || n_be[0] == 0 || n_be.len() > MAX_BYTES || e_be.is_empty() || e_be[0] == 0 || e_be.len() > 4 {
+            return Err(Error::InvalidKey);
+        }
+        let n = Modulus::<MAX_LIMBS>::new(n_be).map_err(|_| Error::InvalidKey)?;
+        let bits = n.bits();
+        if !(1024..=MAX_BITS).contains(&bits) {
+            return Err(Error::InvalidKey);
+        }
+        let mut e = [0u8; 4];
+        e[4 - e_be.len()..].copy_from_slice(e_be);
+        Ok(PublicKey { n, k: n_be.len(), bits, e })
+    }
+
     pub fn bits(&self) -> usize {
         self.bits
     }

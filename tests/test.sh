@@ -147,6 +147,9 @@ DNS_PID=$!
 # HTTP server for NET TEST (TCP; the guest connects to 10.0.2.2:58080).
 python3 "$T/http-stub.py" 58080 &
 HTTP_PID=$!
+# HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).
+python3 "$T/tls-stub.py" 58443 &
+TLS_PID=$!
 
 if [ "$VERBOSE" = 1 ]; then
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG"
@@ -155,8 +158,8 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
-wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" 2>/dev/null
+kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$TLS_PID" 2>/dev/null
+wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$TLS_PID" 2>/dev/null
 
 # Second start on the same test disk (only after a passing first one, not in loop mode).
 LOG2="$ROOT/logs/test-restart.log"
@@ -209,8 +212,9 @@ grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # The random number generator – the [RESULT-RNG] line from RNG TEST.
 grep -a "^\[RESULT-RNG\]" "$LOG" | tail -n1 || true
-# DeSoTLS – the [RESULT-CERTS] line from CERT TEST.
+# DeSoTLS – the [RESULT-CERTS] line from CERT TEST, [RESULT-TLS] from TLS TEST.
 grep -a "^\[RESULT-CERTS\]" "$LOG" | tail -n1 || true
+grep -a "^\[RESULT-TLS\]" "$LOG" | tail -n1 || true
 # DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
 grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
 # Where the DeSoFS time goes per benchmark phase (I/O, SHA-256, writes, both flushes, commits).

@@ -1,14 +1,13 @@
 # DeSoTLS – certificates, the CA store and the clock
 
-The detailed description of what DeSoTLS 0.1 (`common/desotls/`) checks before it trusts a server: the X.509
+The detailed description of what DeSoTLS (`common/desotls/`, certificates since 0.1) checks before it trusts a server: the X.509
 profile, path building, every refusal, the trusted CA store file, the wall clock, and how it was tested. What the
 library is: `README.md` in this folder; how it fits into the system: `../ARCHITECTURE.md`, section "DeSoTLS".
 
 DeSoOS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
-programs that use it. So far it checks certificate chains; the TLS 1.3 handshake and record layer are
-v0.75. Client only. The rule above all: **either the certificate is fully checked and the
-connection is safe, or no application data is sent** – no "insecure" switch, no fallback, nothing that turns a check
-off.
+programs that use it; the TLS 1.3 connection that uses these checks is in `HANDSHAKE.md`. Client only. The rule
+above all: **either the certificate is fully checked and the connection is safe, or no application data is sent** –
+no "insecure" switch, no fallback, nothing that turns a check off.
 
 ## Compared with other systems
 
@@ -178,8 +177,8 @@ disk, NTP; DeSoOS has the first, the other two are a later step (NTP preferably 
 by anyone on the network). It is a heuristic, not proof: it refuses a lost battery, a
 broken reading and dates older than the image, but anyone with access to the firmware can set any date inside the
 range (and so make an expired certificate "valid" again); an RTC kept in local time (Windows next to it) cannot be
-detected. Without NTP the check of a certificate's dates is as good as the RTC. TLS (v0.75) refuses to connect
-without a plausible clock – before sending ClientHello.
+detected. Without NTP the check of a certificate's dates is as good as the RTC. `netget https://` refuses to
+connect without a plausible clock – before anything is sent.
 
 Why the clock is not plausible (the status of syscall 59, `date` and `certcheck` print the text):
 

@@ -113,6 +113,8 @@ for src in user/bin/*.rs; do
   # program that tests it – not in ordinary programs.
   EXTRA_CFG=()
   [ "$name" = cryptotest ] && EXTRA_CFG=(--cfg desocrypto_test)
+  # DeSoTLS's test hooks (RFC 8448's own ClientHello, its 1024-bit key) – only in tlstest.
+  [ "$name" = tlstest ] && EXTRA_CFG=(--cfg desotls_test)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \
@@ -120,7 +122,7 @@ for src in user/bin/*.rs; do
     -C relocation-model=static \
     -C opt-level=2 \
     -C link-arg=-Tuser/user.ld \
-    --check-cfg 'cfg(selftest, desocrypto_test, desocrypto_no_simd)' \
+    --check-cfg 'cfg(selftest, desocrypto_test, desotls_test, desocrypto_no_simd)' \
     "${EXTRA_CFG[@]}" \
     -o "build/user/$name.full" \
     "$src"
@@ -188,7 +190,7 @@ rustc \
   -C opt-level=2 \
   -C overflow-checks=on \
   -C link-arg=-Tkernel/linker.ld \
-  --check-cfg 'cfg(selftest, desocrypto_test, desocrypto_no_simd)' \
+  --check-cfg 'cfg(selftest, desocrypto_test, desotls_test, desocrypto_no_simd)' \
   --cfg desocrypto_no_simd \
   "${SELFTEST_CFG[@]}" \
   -o build/kernel.elf \

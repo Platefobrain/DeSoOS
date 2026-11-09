@@ -14,7 +14,7 @@ tests/soak.sh              the soak test: everything at once, 1 hour with KVM (D
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
 restart), then a short soak runs (2 minutes, `soak.sh` on a RAM disk). The end of the output has the summary and the `[RESULT-…]`
-lines (services, USB, rights, crypto, random numbers, certificates, DeSoFS, soak) copied into `docs/RELEASE.md`. Logs: `logs/test.log`,
+lines (services, USB, rights, crypto, random numbers, certificates, TLS, DeSoFS, soak) copied into `docs/RELEASE.md`. Logs: `logs/test.log`,
 `logs/test-restart.log`, `logs/test-soak.log`. Exit code: 0 PASS, 1 FAIL, 2 timeout, 3 QEMU stopped otherwise.
 
 `soak.sh` starts QEMU with the fw_cfg phase `soak <seconds> <seed>`: the boot tests are skipped and `/bin/soak`
@@ -30,4 +30,6 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests, `--format` for a disk image |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
 | `dns-stub.py`, `http-stub.py` | small DNS and HTTP servers on the host for the network tests and the soak |
+| `tls-stub.py` | HTTPS servers on the host for TLS TEST (Python `ssl` = OpenSSL): good and bad certificates, TLS 1.2 only, no X25519, the framing pages, and men in the middle that change, replay, cut, join or re-key records with the server's keys |
+| `tls/` | the test certificates and keys of `tls-stub.py` (`gen-test-certs.py` makes them; test keys only) |
 | `qemu-hotplug.py` | plugs and unplugs USB devices during the test (QEMU monitor) |

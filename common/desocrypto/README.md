@@ -1,4 +1,4 @@
-# DeSoCrypto v0.6.0
+# DeSoCrypto v0.6.1
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
@@ -48,7 +48,8 @@ cases, not security. Keys are wiped when objects are dropped (volatile writes), 
 stack are not, and wiping a structure does not wipe its copies. AEAD nonces are the caller's job – reusing one with
 the same key is a serious security failure. Test-only code (`assume_length`, `key_for_test`, `freeze_for_test`,
 `field_for_test`, `cswap_for_test`, `round_keys_for_test`, `sbox_for_test`, `ghash::mul_for_test`,
-`ecdsa::verify_digest`, the `bound!` asserts) exists only in `--cfg selftest` / `--cfg desocrypto_test` builds. The kernel is built with
+`ecdsa::verify_digest`, the `bound!` asserts; `rsa::PublicKey::new_for_test` – RSA from 1024 bits for RFC 8448's trace,
+also in `--cfg desotls_test`) exists only in `--cfg selftest` / `--cfg desocrypto_test` builds. The kernel is built with
 `--cfg desocrypto_no_simd`, so it contains no AES-NI / PCLMULQDQ paths.
 
 Full description: `docs/desocrypto/` (`ALGORITHMS.md` – every module, the rules, the tests); its place in the system:

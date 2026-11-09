@@ -11,7 +11,7 @@
 //   - TCP against tests/http-stub.py (10.0.2.2:58080): a page, 1 MiB with a
 //     pattern, two slow downloads at once, a page cut short, a server reset,
 //     refused / unreachable / unknown, a program leaving mid-download; /bin/netget
-//     to a file, an error status, a cut page, https refused,
+//     to a file, an error status, a cut page, a bad option (HTTPS: /bin/tlstest),
 //   - rights: the shell's program channel – no DNS change, other services and listen
 //     allowed; through the shell a program is refused admin, netconfig is not;
 //     a narrowed service channel (nofiles --net) – no listen, no DNS
@@ -541,7 +541,7 @@ fn main(args: Args) -> i32 {
     check!(n, code == 0 && k == 20 && &fb[..20] == b"Hello from the host\n", "netget -o: code {}, {} bytes", code, k);
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/missing"]) == 4, "netget of a missing page must exit 4");
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/short"]) == 3, "netget of a cut page must exit 3");
-    check!(n, run_netget(&["netget", "https://example.com/"]) == 1, "netget https must be refused");
+    check!(n, run_netget(&["netget", "--cipher", "none", "https://example.com/"]) == 1, "netget with a bad option must exit 1");
 
     let r = ask("dns auto");
     check!(n, r.starts_with("DNS server 10.0.2.3 (from DHCP)"), "dns auto: {:?}", r.trim());

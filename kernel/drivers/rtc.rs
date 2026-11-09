@@ -282,8 +282,16 @@ pub fn assess(dt: &DateTime, vrt: bool, stable: bool, build_epoch: u64) -> Resul
 static VERDICT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(Implausible::NotRead as u8);
 
 /// Unix seconds now, and whether the clock is plausible (syscall 59, DeSoTLS).
+/// TLS TEST: makes the clock report "not plausible" (only in the self-test build).
+#[cfg(selftest)]
+pub static FORCE_IMPLAUSIBLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn time_status() -> (u64, Result<(), Implausible>) {
     let secs = now().to_unix();
+    #[cfg(selftest)]
+    if FORCE_IMPLAUSIBLE.load(Ordering::Acquire) {
+        return (secs, Err(Implausible::BatteryLost));
+    }
     let v = VERDICT.load(Ordering::Acquire);
     let verdict = match Implausible::from_u8(v) {
         None if secs > LATEST => Err(Implausible::TooLate),

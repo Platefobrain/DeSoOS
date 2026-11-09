@@ -30,7 +30,7 @@ def answer(qid, question, name):
     """List of datagrams to send back (possibly none)."""
     ok = 0x8180  # response, recursion desired + available
     q = b"\xc0\x0c"  # pointer to the question name
-    if name == "router.desoos":
+    if name in ("router.desoos", "tls.desoos"):
         return [header(qid, ok, 1) + question + rr_a(q, "10.0.2.2")]
     if name == "multi.desoos":
         return [header(qid, ok, 2) + question + rr_a(q, "10.0.2.2", 60) + rr_a(q, "10.0.2.77", 60)]

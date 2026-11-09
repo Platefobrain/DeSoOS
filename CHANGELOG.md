@@ -2,6 +2,54 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.75.0 — 2026-11-09
+
+### Added – DeSoTLS 0.2: TLS 1.3, netget https://
+- `common/desotls/client.rs` – the TLS 1.3 client (RFC 8446): ClientHello (X25519, TLS_AES_128_GCM_SHA256 and
+  TLS_CHACHA20_POLY1305_SHA256, signature_algorithms without PKCS#1 and signature_algorithms_cert with it, a random
+  session id), the ServerHello checks, EncryptedExtensions, Certificate (the chain through `verify::server`),
+  CertificateVerify (ECDSA P-256 / P-384, RSA-PSS rsae; the signed content 64 × 0x20 ‖ context ‖ 0 ‖ transcript
+  hash), Finished in constant time, our Finished, then application data, KeyUpdate both ways (only the sender's
+  direction; update_requested answered once), close_notify, a TCP end without it reported as truncated.
+  HelloRetryRequest is never accepted – the five cases have their own alerts and messages; PSK, 0-RTT, client
+  certificates refused; every error sends its alert and leaves the connection dead. `Transport` carries the bytes;
+  no heap, no syscalls; `Client` ~120 KiB in a static.
+- `record.rs` (record protection, nonce = iv XOR record number, TLSInnerPlaintext, limits 2^14 / 2^14 + 256, the
+  number never wraps) and `schedule.rs` (HKDF-Expand-Label, Derive-Secret, handshake / master / traffic secrets,
+  Finished, KeyUpdate; every secret wiped when dropped).
+- `netget https://` with `--cipher aes|chacha`, `--anchor ca.pem`, `--key-update`: the clock must be plausible and
+  the CA store readable before anything is sent; the request goes only after the server's Finished; a summary line
+  with the cipher suite, group, signature and CA. New exit code 5 – TLS refused (certificate, clock, handshake,
+  record, server alert); 1 – 4 as before.
+- `common/desotls/tls_tests.rs` (134 checks) and `/bin/tlstest`: RFC 8448 §3 byte for byte (our ClientHello record,
+  every secret, key and iv, the server's CertificateVerify by the RFC's key, our Finished = the RFC's client
+  verify_data; vectors from tlslite-ng's copy of the RFC, the expected values computed with Python's hashlib / hmac),
+  records in pieces and joined, KeyUpdate generations computed independently, every HelloRetryRequest row, broken
+  ServerHellos, changed server flights, refused records. 32 hand-made mutations on the host – all caught.
+- TLS TEST (suite 36): the library, then `init test /bin/tlstest net` – 33 `netget https://` cases against
+  `tests/tls-stub.py` (Python `ssl` = OpenSSL; certificates in `tests/tls/` from `gen-test-certs.py`): both cipher
+  suites, RSA and ECDSA, 1 MiB, KeyUpdate answered by OpenSSL, the framing cases, and the refusals (unknown CA,
+  expired, not yet valid, another name, a broken signature, a man in the middle with another CA, TLS 1.2 only, no
+  X25519) with no request reaching the server; a man in the middle holding the server's keys (its keylog, a
+  ChaCha20-Poly1305 in pure Python) changes the Finished or the CertificateVerify, changes or replays a record,
+  cuts the stream into 1–7 byte pieces, joins records, inserts three server KeyUpdates. Then a clock made not
+  plausible (`rtc::FORCE_IMPLAUSIBLE`, self-test build only): netget refuses before connecting. `[RESULT-TLS]`.
+- `tests/dns-stub.py`: `tls.desoos` (10.0.2.2). DeSoCrypto 0.6.1: `rsa::PublicKey::new_for_test` (1024-bit keys for
+  RFC 8448's trace, only in test builds).
+
+### Changed – netget's HTTP framing (also http://)
+- Strict: a status line "HTTP/1.x NNN", "name: value" lines (no space before the colon, no folded lines),
+  Content-Length at most once (also refused when repeated with the same value – curl and Go accept that) and a
+  decimal number, no Transfer-Encoding (we ask with HTTP/1.0), more bytes than Content-Length refused – also when
+  they come in a later record. Malformed answers exit 4. https without a length needs the server's close_notify.
+- NET TEST: the "https refused" check became a bad-option check (HTTPS is tested by TLS TEST).
+
+### Docs
+- `docs/desotls/HANDSHAKE.md` (new): the handshake, every refusal, the key schedule, records and limits, KeyUpdate,
+  the end of a connection, netget https://, the tests. README (features, 36 suites, 297 tests, netget), ARCHITECTURE
+  (DeSoTLS, netget), RELEASE "Current limitations" (TLS 1.3 only, X25519 only, no resumption / ALPN / client
+  certificates, HTTP/1.0), `docs/desotls/` README and CERTIFICATES, `docs/desocrypto/`, folder READMEs.
+
 ## v0.74.4 — 2026-11-09
 
 ### Fixed – a wildcard against an excluded subtree deeper than it reaches

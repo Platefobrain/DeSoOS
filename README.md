@@ -1,4 +1,4 @@
-# DeSoOS v0.74.4
+# DeSoOS v0.75.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -18,7 +18,7 @@ More documentation:
   the kernel, what runs in user space, syscalls and IPC), `docs/RELEASE.md` (tests, real hardware, performance and
   current limitations per release), `docs/desofs/` (the DeSoFS file system and its on-disk format),
   `docs/desocrypto/` (the cryptographic library: algorithms, rules, tests) and `docs/desotls/` (the TLS library:
-  how certificate chains are checked, the CA store, the clock).
+  the TLS 1.3 connection, how certificate chains are checked, the CA store, the clock).
 - A `README.md` in the main code folders (`kernel/`, `kernel/fs/desofs/`, `user/`, `common/desocrypto/`,
   `common/desotls/`, `tests/`)
   – what the folder holds and where to start reading.
@@ -58,8 +58,11 @@ More documentation:
 - Certificates: DeSoTLS (`common/desotls`) checks a server's X.509 chain the way TLS will (strict DER, RSA / ECDSA
   signatures, every RFC 5280 rule of its profile, name constraints, Mozilla's distrust dates, limits), against
   Mozilla's root store installed as `/etc/certs/roots` and sealed – no program can change it; the wall clock says
-  whether it is plausible (syscall 59: RTC battery, readings, not before the build date); tool `certcheck`
-  (TLS itself comes next).
+  whether it is plausible (syscall 59: RTC battery, readings, not before the build date); tool `certcheck`.
+- HTTPS: DeSoTLS speaks TLS 1.3 as a client (X25519, AES-128-GCM and ChaCha20-Poly1305, ECDSA and RSA-PSS
+  server signatures, KeyUpdate, close_notify) – no TLS 1.2, no "insecure" mode: either the server is fully
+  authenticated or nothing is sent; `netget https://` downloads over it (strict HTTP framing, its own exit code for a
+  refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
@@ -69,7 +72,7 @@ More documentation:
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control; a kernel
   emergency shell as a fallback.
-- Built-in self-tests (35 suites, a restart phase and a short soak, 294 tests), stress tests and a long soak test
+- Built-in self-tests (36 suites, a restart phase and a short soak, 297 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -352,8 +355,11 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
 - `ping <address or name> [count]` - ICMP echo, one per second (default 4), each answer with its time, then a
   summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSoOS also answers pings
   to its own address. Several programs can use the network at the same time.
-- `netget [-o file] [-v] http://host[:port]/path` - download a page over HTTP (TCP through netd); the body to the
-  console or to a file, a summary with the speed to stderr. `https://` needs TLS - not supported yet.
+- `netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path` -
+  download a page over HTTP or HTTPS (TLS 1.3 with DeSoTLS, TCP through netd); the body to the console or to a file,
+  a summary (speed; for https the cipher suite, signature and CA) to stderr. https checks the server's certificate
+  against `/etc/certs/roots` (or only `--anchor`) and needs a plausible clock. Exit 0 whole 2xx answer, 1 usage,
+  2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused (`docs/desotls/HANDSHAKE.md`).
 - `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
   file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
   port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it

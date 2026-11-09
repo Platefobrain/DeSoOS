@@ -1,5 +1,5 @@
-// DeSoTLS – the DeSoOS TLS library (version: VERSION below).  So far: X.509 certificates
-// and the checking of a server's certificate chain (the TLS 1.3 handshake comes next).
+// DeSoTLS – the DeSoOS TLS library (version: VERSION below): a TLS 1.3 client and the
+// checking of a server's X.509 certificate chain.
 //
 // Plain code over DeSoCrypto, like it: no heap, no syscalls, only `core`; whoever uses it
 // includes both (`#[path]`) as siblings:
@@ -7,6 +7,9 @@
 //   #[path = ".../common/desocrypto/mod.rs"] mod desocrypto;
 //   #[path = ".../common/desotls/mod.rs"]    mod desotls;
 //
+//   client  the TLS 1.3 client: handshake, application data, KeyUpdate, close
+//   record  records: protection with the two AEADs, TLSInnerPlaintext, limits
+//   schedule  the TLS 1.3 key schedule (HKDF-Expand-Label, traffic secrets, Finished)
 //   der     strict DER reading
 //   x509    one certificate: fields, algorithms, keys, extensions (RFC 5280 profile below)
 //   name    host names, subjectAltName matching (one-label wildcards), name constraints
@@ -14,21 +17,24 @@
 //   roots   the trusted CA store file (/etc/certs/roots, made from Mozilla's root store)
 //   pem     "-----BEGIN CERTIFICATE-----" text to DER
 //
-// The rules (docs/desotls/CERTIFICATES.md): fail closed – anything not understood is
+// The rules (docs/desotls/HANDSHAKE.md, CERTIFICATES.md): fail closed – anything not understood is
 // refused; no switch turns a check off.  Not checked: revocation (CRL, OCSP) and
 // Certificate Transparency.  Not audited.
 #![allow(dead_code)]
 
 use super::desocrypto as crypto;
 
+pub mod client;
 pub mod der;
 pub mod name;
 pub mod pem;
+pub mod record;
 pub mod roots;
+pub mod schedule;
 pub mod verify;
 pub mod x509;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.2.0";
 
 /// Why a certificate or chain was refused.  `as_str` gives the text `certcheck` prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

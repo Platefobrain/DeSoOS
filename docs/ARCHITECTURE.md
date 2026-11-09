@@ -1228,9 +1228,11 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   ring and the TCP window closes until the program reads. Peer closed + everything delivered → netd closes its end
   of the channel (the program sees `ERROR_CLOSED`) and finishes the closing. The program closes its end → FIN, or a RST if
   received data was never read; data arriving for a program that is gone → RST.
-- **`netget [-o file] [-v] http://host[:port]/path`:** HTTP/1.0 GET, the body to the console or a file, a summary to
-  stderr; exit 0 complete, 2 no connection, 3 cut short (fewer bytes than Content-Length), 4 HTTP error.
-  `https://` is refused – TLS comes with DeSoTLS v0.75 (certificate checking is there since v0.74).
+- **`netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path`:**
+  HTTP/1.0 GET, the body to the console or a file, a summary to stderr; https through DeSoTLS (TLS 1.3 in the
+  program – netd carries only ciphertext; section "DeSoTLS"). Strict framing for both: Content-Length once and at
+  most that many bytes, no Transfer-Encoding, without a length https needs the server's close_notify. Exit 0
+  complete, 1 usage, 2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused.
 - Tests: `/bin/tcptest` (NET TEST 4/6) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
   windows, window scaling, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
   every closing path, wraparound at 2^32, hostile segments, 20 000 random segments. `tests/http-stub.py` (started
@@ -1360,7 +1362,8 @@ then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLO
 - `netconfig` – every card: link, address, lease, DNS, counters, the last TCP connection; `netconfig renew / dns /
   set / dhcp / rxrestart` – the only program with the admin right.
 - `ping <address or name> [count]`, `host <name>` (DNS), `netarp <a.b.c.d>` (one ARP request).
-- `netget [-o file] [-v] http://host[:port]/path` – HTTP/1.0 download with the speed; `https://` is refused (no TLS).
+- `netget [-o file] [-v] [--cipher …] [--anchor …] [--key-update] http[s]://host[:port]/path` – HTTP/1.0 download
+  with the speed; https with TLS 1.3 (DeSoTLS).
 - `netweb [-n count] <port> < page` – a minimal web server; `nofiles --listen netweb 8080 < /index.html` runs it
   with no file access.
 
@@ -1645,7 +1648,7 @@ In short:
   use.
 
 Used by DeSoTLS (certificate signatures), DeSoFS (block checksums), the random number generator (below), `netd`,
-`sha256sum`. The AEADs and X25519 are for the TLS 1.3 handshake and records (v0.75).
+`sha256sum`; the AEADs, X25519 and HKDF by DeSoTLS's TLS 1.3 connections (`netget https://`).
 
 ## Random numbers (`kernel/random.rs`, v0.70.0)
 
@@ -1726,14 +1729,14 @@ Tests: RNG TEST (substituted sources that fail on purpose, the counting classes,
 erasure, a stolen key, the reseed rules; 1 MiB without a repeated block; `getrandom` edge cases and four processes
 at once through `/bin/rngtest`), the first bytes of the two starts in `tests/test.sh` compared, `[RESULT-RNG]`.
 
-## DeSoTLS (`common/desotls/`, v0.74.0)
+## DeSoTLS (`common/desotls/`, v0.74.0 certificates, v0.75.0 TLS 1.3)
 
 DeSoOS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
-programs that use it. So far it checks certificate chains; the TLS 1.3 handshake and record layer are v0.75. Client
-only. The rule above all: **either the certificate is fully checked and the connection is safe, or no application
-data is sent** – no "insecure" switch, no fallback, nothing that turns a check off. **Full description: `desotls/`
-(`README.md`, `CERTIFICATES.md` – the profile, the order of the checks, path building, every refusal, the store
-format, the clock, the tests).**
+programs that use it: a TLS 1.3 client and the check of server certificate chains. The rule above all: **either the
+server is fully authenticated – certificate chain, CertificateVerify, Finished – or no application data is sent** –
+no "insecure" switch, no fallback to an older version, nothing that turns a check off. **Full description:
+`desotls/` (`README.md`; `HANDSHAKE.md` – the handshake, records, KeyUpdate, every refusal, netget https://;
+`CERTIFICATES.md` – the profile, the order of the checks, path building, the store format, the clock).**
 
 | | Linux | Windows | RedoxOS | DeSoOS |
 |---|---|---|---|---|
@@ -1742,6 +1745,11 @@ format, the clock, the tests).**
 | clock | `CLOCK_REALTIME` (NTP); systemd: the build time as a floor | system time (NTP) | `clock_gettime` | syscall 59: the RTC + "plausible" (a heuristic), the build date − 24 h as a floor |
 
 In short:
+- the connection (`client.rs`, `record.rs`, `schedule.rs`): TLS 1.3 only, X25519 only, TLS_AES_128_GCM_SHA256 and
+  TLS_CHACHA20_POLY1305_SHA256, CertificateVerify with ECDSA P-256 / P-384 or RSA-PSS; HelloRetryRequest, PSK,
+  0-RTT and client certificates refused; KeyUpdate both ways, close_notify, a TCP end without it reported as
+  truncated; the record and message limits of RFC 8446; `Transport` carries the bytes (netd's TCP in netget), the
+  keys stay in the program – netd sees only ciphertext;
 - `verify::server(chain, anchors, host, now)`: strict DER, X.509 v3, RSA 2048–4096 / EC P-256 / P-384 keys, PKCS#1,
   PSS (parameters from the certificate) and ECDSA signatures, no SHA-1; the server certificate's subjectAltName must
   match the host (one-label wildcards, the commonName ignored); each CA on the path: valid, cA = TRUE, keyUsage,
@@ -1753,9 +1761,11 @@ In short:
 - the clock (`drivers/rtc.rs`, syscall 59): RTC once at boot + uptime; "plausible" needs VRT, stable readings, valid
   fields and a date between the build date − 24 h and 2099; the build date is `SOURCE_DATE_EPOCH` or the build
   time (`build.sh`, no git). A heuristic, not proof – NTP (preferably NTS) and a saved last known time come later;
-  TLS will refuse to connect without a plausible clock;
-- tools `certcheck` (a chain offline, the same code) and `certtest`; 307 checks in CERT TEST, x509-limbo, fuzzing and
-  mutations on the host.
+  netget refuses https without a plausible clock, before anything is sent;
+- tools `certcheck` (a chain offline, the same code), `certtest`, `tlstest`; 307 checks in CERT TEST, x509-limbo,
+  fuzzing and mutations on the host; TLS TEST: RFC 8448 byte for byte, 134 checks against scripted servers, 33
+  `netget https://` cases against OpenSSL (`tests/tls-stub.py`) including a man in the middle holding the server's
+  keys, 32 of 32 mutations caught on the host.
 
 Not checked: revocation (CRL, OCSP) and Certificate Transparency. Not audited, not for production use.
 
