@@ -246,11 +246,15 @@ fn net() -> i32 {
         }
         cases += 1;
     }
-    let code = get(58443, "/reset", &[]);
-    if code != 3 {
-        fail!("/reset: exit {} (expected 3)", code);
+    // Resets (netd's empty message): in the middle, without a length – cut (3); after the
+    // whole answer by its Content-Length – a warning only (0, as curl and Go).
+    for (path, want) in [("/reset", 3u64), ("/nocl-reset", 3), ("/cl-reset", 0)] {
+        let code = get(58443, path, &[]);
+        if code != want {
+            fail!("{}: exit {} (expected {})", path, code, want);
+        }
+        cases += 1;
     }
-    cases += 1;
 
     // Refusals: exit 5, and the request never reached the server.
     let before = seen(58443);

@@ -1,6 +1,6 @@
 # DeSoTLS
 
-DeSoOS's own TLS library (`common/desotls/`, v0.2.0), over DeSoCrypto and like it a library: `core` only, no heap,
+DeSoOS's own TLS library (`common/desotls/`, v0.2.1), over DeSoCrypto and like it a library: `core` only, no heap,
 no syscalls, included by the programs that use it. Client only. The rule above all: **either the server is fully
 authenticated – certificate chain, CertificateVerify, Finished – or no application data is sent** – no "insecure"
 switch, no fallback to an older version.

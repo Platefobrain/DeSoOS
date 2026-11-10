@@ -109,8 +109,12 @@ impl Transport for Chan {
         if self.pos == self.len {
             let mut info = RecvInfo::default();
             let r = chan_recv(self.c, msg, 0, &mut info);
-            if r <= 0 {
-                // netd closes the channel when the TCP connection ends (FIN or reset).
+            if r == 0 {
+                // An empty message: netd's "the connection was reset" (or timed out).
+                return Err(());
+            }
+            if r < 0 {
+                // The channel closed: the TCP connection ended with the peer's FIN.
                 return Ok(0);
             }
             self.pos = 0;
@@ -126,10 +130,12 @@ impl Transport for Chan {
 /// What one read of the answer gave.
 enum Got {
     Data(usize),
-    /// A clean end: the TCP end for http, the server's close_notify for https.
+    /// A clean end: the peer's FIN for http, the server's close_notify for https.
     End,
     /// https ended without close_notify (FIN or reset).
     Cut,
+    /// The TCP connection was reset (or timed out) – netd's empty message.
+    Reset,
     Refused(TlsError),
 }
 
@@ -471,11 +477,16 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
                 Ok(0) => Got::End,
                 Ok(k) => Got::Data(k),
                 Err(e) if e.is_security() => Got::Refused(e),
+                Err(TlsError { kind: client::Kind::Reset, .. }) => Got::Reset,
                 Err(_) => Got::Cut,
             }
         } else {
             let r = chan_recv(c, body_buf, 0, &mut info);
-            if r < 0 { Got::End } else { Got::Data(r as usize) }
+            match r {
+                0 => Got::Reset,
+                r if r < 0 => Got::End,
+                r => Got::Data(r as usize),
+            }
         };
         let k = match got {
             Got::Data(k) => k,
@@ -550,6 +561,16 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
         }
         Got::Cut => {
             eprintln!("netget: cut short - the connection ended without close_notify after {} bytes", body);
+            close(c);
+            return EXIT_CUT;
+        }
+        // A reset after the whole answer (complete by its Content-Length – for https a length
+        // inside the authenticated stream): a warning, as curl and Go do.
+        Got::Reset if complete && a.length.is_some() => {
+            eprintln!("netget: warning: the connection was reset after the whole answer (complete by its Content-Length)");
+        }
+        Got::Reset => {
+            eprintln!("netget: cut short - the connection was reset after {} bytes", body);
             close(c);
             return EXIT_CUT;
         }

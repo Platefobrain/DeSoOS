@@ -183,6 +183,43 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.75.1 — 2026-11-10
+
+**Status: stable on QEMU (TCG and KVM); fix – netd tells a program that its TCP connection was reset (an empty
+message before the channel closes), so `netget` no longer takes an http answer without a length ended by a reset
+for a whole one (exit 3 now); after an answer complete by its Content-Length a reset is a warning (exit 0).**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 306 s (restart 23 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 238 s (restart 14 s, soak 126 s) |
+
+`[RESULT-TLS]`: 35 cases (was 33 – `/nocl-reset` exit 3 and `/cl-reset` exit 0 over https); TCG `/hello` 88 ms,
+1 MiB 4 432 KiB/s; KVM 48 ms, 7 160 KiB/s. NET TEST checks that `/reset` brings netd's empty message and `/short`
+(a FIN) does not, and the same two netget cases over http.
+
+### Performance against the previous release (v0.75.0 → v0.75.1, same machine)
+
+| | TCG v0.75.0 | TCG v0.75.1 | KVM v0.75.0 | KVM v0.75.1 |
+|---|---|---|---|---|
+| irq_user_ns | 7 917 | 11 031 | 65 445 | 65 811 |
+| fact_svc_ns | 208 550 | 198 412 | 100 959 | 102 616 |
+| USB read_kbs (usbd) / kernel | 70 620 / 95 965 | 60 235 / 68 671 | 67 147 / 81 210 | 78 769 / 72 793 |
+| crypto sha256 kernel / user (KiB/s) | 47 921 / 50 880 | 49 920 / 52 218 | 181 760 / 217 920 | 181 760 / 200 320 |
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 98 / 4 047 | 88 / 4 432 | 53 / 6 649 | 48 / 7 160 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 217 / 12 082 | 7 914 / 12 720 | 17 466 / 54 251 | 14 222 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 12 886 / 3 675 | 12 379 / 3 430 | 8 123 / 858 | 10 072 / 850 |
+| `desofs check` (ms) | 956 | 962 | 303 | 307 |
+| short soak: file operations in 2 min | 6 687 | 6 378 | 28 177 | 28 773 |
+
+Verdict: no regression – only netd's end of a TCP connection and netget changed. DeSoFS small-file create under
+KVM (10 072 ms) is above its earlier range (6 900–9 300) with no DeSoFS change and the read side unchanged – the
+host's disk timing; to watch in the next run.
+
+---
+
 ## v0.75.0 — 2026-11-09
 
 **Status: stable on QEMU (TCG and KVM). DeSoTLS 0.2 – TLS 1.3 client (X25519, AES-128-GCM and ChaCha20-Poly1305,

@@ -1226,7 +1226,10 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   message fits (otherwise netd does not read – the program's `chan_send` waits: flow control from TCP back to the
   program); received data goes to the program without blocking – when its channel is full, the data stays in the
   ring and the TCP window closes until the program reads. Peer closed + everything delivered → netd closes its end
-  of the channel (the program sees `ERROR_CLOSED`) and finishes the closing. The program closes its end → FIN, or a RST if
+  of the channel (the program sees `ERROR_CLOSED`) and finishes the closing. The connection reset (or timed out) →
+  netd first sends an **empty message**, then closes the channel – data never comes as an empty message, so a
+  program tells a cut connection from the peer's FIN (as ECONNRESET versus 0 from `recv` on Linux and Windows);
+  received data still in netd when the reset arrives is dropped. The program closes its end → FIN, or a RST if
   received data was never read; data arriving for a program that is gone → RST.
 - **`netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path`:**
   HTTP/1.0 GET, the body to the console or a file, a summary to stderr; https through DeSoTLS (TLS 1.3 in the
@@ -1763,7 +1766,7 @@ In short:
   time (`build.sh`, no git). A heuristic, not proof – NTP (preferably NTS) and a saved last known time come later;
   netget refuses https without a plausible clock, before anything is sent;
 - tools `certcheck` (a chain offline, the same code), `certtest`, `tlstest`; 307 checks in CERT TEST, x509-limbo,
-  fuzzing and mutations on the host; TLS TEST: RFC 8448 byte for byte, 134 checks against scripted servers, 33
+  fuzzing and mutations on the host; TLS TEST: RFC 8448 byte for byte, 134 checks against scripted servers, 35
   `netget https://` cases against OpenSSL (`tests/tls-stub.py`) including a man in the middle holding the server's
   keys, 32 of 32 mutations caught on the host.
 

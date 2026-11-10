@@ -2,6 +2,23 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.75.1 — 2026-11-10
+
+### Fixed – a TCP reset looked like the peer's FIN
+- netd closed a program's TCP channel the same way after a reset or a time-out as after the peer's FIN, so a
+  program could not tell a cut connection from a finished one: `netget http://` took an answer without a length
+  ended by a reset for a whole one (exit 0), and https could not say "reset". Now netd sends an **empty message**
+  before closing the channel after a reset or a time-out (data never arrives as an empty message – the socket
+  protocol's ECONNRESET); `netd.rs` keeps the connection until that message fits into the channel.
+- `netget`: a reset before the answer is complete – also http without a length – is "cut short" (exit 3); after an
+  answer complete by its Content-Length, a warning and exit 0 (as curl and Go; for https the length is inside the
+  authenticated stream). DeSoTLS 0.2.1: `Kind::Reset` next to `Kind::Truncated` (the transport's `Err`).
+- Tests: NET TEST – `/short` ends without the reset message, `/reset` with it, `netget http://` of `/nocl-reset`
+  exits 3 and of `/cl-reset` 0 (`tests/http-stub.py`); TLS TEST – `/nocl-reset` 3, `/cl-reset` 0 over https
+  (`tests/tls-stub.py`; 33 → 35 cases); the library test of a reset expects `Kind::Reset`.
+- Docs: ARCHITECTURE (the socket protocol), `docs/desotls/HANDSHAKE.md` (the end of a connection, netget's framing
+  and exit codes, TLS TEST).
+
 ## v0.75.0 — 2026-11-09
 
 ### Added – DeSoTLS 0.2: TLS 1.3, netget https://

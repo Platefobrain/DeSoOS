@@ -164,8 +164,9 @@ length decode_error, a KeyUpdate that is not the last message of its record unex
 
 ## The end of a connection
 
-The server's close_notify is the clean end: `read` returns 0 from then on. A TCP end (FIN or reset) without it is
-an error of its own kind (`Kind::Truncated`) – the data may be cut. `close` sends our close_notify once. A fatal
+The server's close_notify is the clean end: `read` returns 0 from then on. A TCP end without it is an error of its
+own kind – `Kind::Truncated` after the peer's FIN, `Kind::Reset` after a reset (the transport's `Err`; for netget,
+netd's empty message) – the data may be cut. `close` sends our close_notify once. A fatal
 alert from the server ends the connection with `Kind::PeerAlert`.
 
 ## netget https://
@@ -190,14 +191,17 @@ The answer's framing (the same rules for http://):
 | Content-Length twice – also with the same value | error (RFC 9110 8.6 allows identical ones, as curl and Go do; netget refuses – a simple, strict client) |
 | a malformed header block: a status line other than "HTTP/1.x NNN", a line without ":", space before ":", a folded line, more than 8 KiB, a Content-Length that is not a decimal number | error |
 
-A TCP end without close_notify after an answer already complete by its Content-Length is only a warning (as curl).
+A TCP end without close_notify – FIN or reset – after an answer already complete by its Content-Length is only a
+warning (as curl and Go; for https the length is inside the authenticated stream). Without a length, or before the
+length is reached, both are "cut short" (3) – for http too: netd tells a reset apart with an empty message, so an
+http answer without a length ended by a reset is no longer taken for a whole one.
 
 | Exit | Meaning |
 |---|---|
 | 0 | a whole 2xx answer |
 | 1 | wrong usage, a file problem |
 | 2 | no connection (netd, DNS, TCP, the server closed during the handshake) |
-| 3 | cut short: fewer bytes than Content-Length, or https ended without close_notify before the answer was complete, or a reset |
+| 3 | cut short: fewer bytes than Content-Length, or https ended without close_notify before the answer was complete, or a reset before the answer was complete (also http without a length) |
 | 4 | an HTTP status other than 2xx, or a malformed answer (framing, headers) |
 | 5 | TLS refused: certificate, clock, handshake, record, a server alert |
 
@@ -228,10 +232,10 @@ A TCP end without close_notify after an answer already complete by its Content-L
   client's context string, the transcript missing a message or in the wrong order, the wrong KeyUpdate direction,
   record numbers not counting, the nonce without the number, padding kept, limits removed, …) – all 32 caught.
 
-**TLS TEST 2** – `init test /bin/tlstest net`: `/bin/netget https://` against `tests/tls-stub.py` on the host
+**TLS TEST 2** – `init test /bin/tlstest net` (35 cases): `/bin/netget https://` against `tests/tls-stub.py` on the host
 (Python `ssl` = OpenSSL; certificates in `tests/tls/`, made by `gen-test-certs.py`): both cipher suites, an RSA
 and an ECDSA server, 1 MiB with a pattern, `--key-update` (OpenSSL answers with its own KeyUpdate), the framing
-cases above, a reset, and the refusals – unknown CA (without `--anchor`), expired, not yet valid, another name, a
+cases above, resets (in the middle, without a length – 3; after a whole answer – 0), and the refusals – unknown CA (without `--anchor`), expired, not yet valid, another name, a
 broken signature, a man in the middle with a certificate from another CA, a TLS 1.2-only server, a server without
 X25519 – each exit 5 with tls-stub's counter showing that no request reached the server. A man in the middle that
 holds the server's keys (from its keylog) changes the Finished and the CertificateVerify (exit 5, no request),

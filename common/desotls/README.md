@@ -1,4 +1,4 @@
-# DeSoTLS v0.2.0
+# DeSoTLS v0.2.1
 
 DeSoOS's own TLS library, used only inside DeSoOS: a TLS 1.3 client and the check of a server's X.509 certificate
 chain. Plain Rust over DeSoCrypto, like it: `core` only, no heap, no syscalls. Client only; there is no switch that

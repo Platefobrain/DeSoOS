@@ -3,7 +3,8 @@
 # 127.0.0.1:<port> (default 58080); in QEMU's user network the guest reaches it
 # as 10.0.2.2:<port>.  Fixed pages exercise the guest's TCP: a short page, 1 MiB
 # with a known pattern, a page sent in slow pieces, a page cut short, a page
-# ended with a reset, a page without a length, an error status.
+# ended with a reset, a page without a length, an error status; /nocl-reset (no
+# length, then a reset) and /cl-reset (whole by its length, then a reset).
 import socket
 import socketserver
 import struct
@@ -59,6 +60,14 @@ class Handler(socketserver.BaseRequestHandler):
                     s.sendall(b"s" * 100)
             elif path == "/short":
                 s.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 100000\r\n\r\n" + b"x" * 5000)
+            elif path in ("/nocl-reset", "/cl-reset"):
+                # A page without a length, or a whole page by its length – then a reset.
+                if path == "/cl-reset":
+                    s.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 6\r\n\r\nwhole\n")
+                else:
+                    s.sendall(b"HTTP/1.0 200 OK\r\n\r\npart of a page")
+                time.sleep(0.5)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             elif path == "/reset":
                 s.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 100000\r\n\r\n" + b"r" * 3000)
                 time.sleep(0.2)

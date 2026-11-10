@@ -151,6 +151,8 @@ struct Got {
     pattern: bool,
     head: [u8; 32],
     ms: u64,
+    /// netd's empty message came before the end: the connection was reset.
+    reset: bool,
 }
 
 /// HTTP GET over netd's TCP (the socket protocol, without /bin/netget).
@@ -181,7 +183,7 @@ fn tcp_get(host: &str, port: &str, path: &str, leave_after: u32) -> Result<Got, 
         n += p.len();
     }
     chan_send(c, &req[..n], 0);
-    let mut g = Got { status: 0, body: 0, pattern: true, head: [0; 32], ms: 0 };
+    let mut g = Got { status: 0, body: 0, pattern: true, head: [0; 32], ms: 0, reset: false };
     let mut header = true;
     let mut hb = [0u8; 4];
     let mut msgs = 0;
@@ -189,6 +191,10 @@ fn tcp_get(host: &str, port: &str, path: &str, leave_after: u32) -> Result<Got, 
         let r = chan_recv(c, buf, 0, &mut info);
         if r < 0 {
             break;
+        }
+        if r == 0 {
+            g.reset = true;
+            continue;
         }
         msgs += 1;
         let mut data = &buf[..r as usize];
@@ -508,9 +514,9 @@ fn main(args: Args) -> i32 {
     let slow_ms = uptime_ms() - t;
     check!(n, both && sa >= 1000 && sb >= 1000 && slow_ms < 1800, "two slow downloads at once: {} + {} bytes in {} ms", sa, sb, slow_ms);
     let g = tcp_get("10.0.2.2", "58080", "/short", 0);
-    check!(n, matches!(&g, Ok(g) if g.body == 5000), "page cut short by the server: {:?}", g.as_ref().map(|g| g.body));
+    check!(n, matches!(&g, Ok(g) if g.body == 5000 && !g.reset), "page cut short by the server (FIN, no reset): {:?}", g.as_ref().map(|g| (g.body, g.reset)));
     let g = tcp_get("10.0.2.2", "58080", "/reset", 0);
-    check!(n, matches!(&g, Ok(g) if g.body <= 3000 && g.ms < 3000), "server reset: {:?}", g.as_ref().map(|g| (g.body, g.ms)));
+    check!(n, matches!(&g, Ok(g) if g.body <= 3000 && g.ms < 3000 && g.reset), "server reset (netd's empty message): {:?}", g.as_ref().map(|g| (g.body, g.ms, g.reset)));
     let g = tcp_get("10.0.2.2", "58081", "/", 0);
     check!(n, matches!(g, Err(e) if e.contains("connection refused")), "closed port: {:?}", g.err());
     let g = tcp_get("10.0.2.77", "80", "/", 0);
@@ -541,6 +547,8 @@ fn main(args: Args) -> i32 {
     check!(n, code == 0 && k == 20 && &fb[..20] == b"Hello from the host\n", "netget -o: code {}, {} bytes", code, k);
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/missing"]) == 4, "netget of a missing page must exit 4");
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/short"]) == 3, "netget of a cut page must exit 3");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/nocl-reset"]) == 3, "netget of a page without a length ended by a reset must exit 3");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/cl-reset"]) == 0, "netget of a whole page (Content-Length) then a reset must exit 0");
     check!(n, run_netget(&["netget", "--cipher", "none", "https://example.com/"]) == 1, "netget with a bad option must exit 1");
 
     let r = ask("dns auto");

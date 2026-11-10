@@ -34,7 +34,7 @@ pub mod schedule;
 pub mod verify;
 pub mod x509;
 
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.2.1";
 
 /// Why a certificate or chain was refused.  `as_str` gives the text `certcheck` prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

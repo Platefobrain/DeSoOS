@@ -26,7 +26,8 @@
 # record), /nocl-notify (no length, close_notify at the end), /nocl-fin (no length, TCP closed
 # without close_notify), /cut (Content-Length 100000, 5000 bytes, no close_notify),
 # /cl-fin (complete by Content-Length, then no close_notify), /reset (Content-Length 100000,
-# 3000 bytes, then a TCP reset), /404, /badhdr (a header line without ':').
+# 3000 bytes, then a TCP reset), /cl-reset (complete by Content-Length, then a reset),
+# /nocl-reset (no length, then a reset), /404, /badhdr (a header line without ':').
 import hashlib
 import hmac
 import os
@@ -85,6 +86,10 @@ def page(path):
         return ok(b"complete\n"), "fin"
     if path == "/reset":
         return [b"HTTP/1.0 200 OK\r\nContent-Length: 100000\r\n\r\n" + b"r" * 3000], "reset"
+    if path == "/cl-reset":
+        return ok(b"whole\n"), "reset"
+    if path == "/nocl-reset":
+        return [b"HTTP/1.0 200 OK\r\n\r\n", b"part of a page"], "reset"
     if path == "/badhdr":
         return [b"HTTP/1.0 200 OK\r\nno colon here\r\nContent-Length: 2\r\n\r\nok"], "notify"
     return [b"HTTP/1.0 404 Not Found\r\nContent-Length: 10\r\n\r\nnot found\n"], "notify"
@@ -135,7 +140,7 @@ def serve_tls(port, ctx, force_end=None):
                     except (ssl.SSLError, OSError):
                         pass
                 elif end == "reset":
-                    time.sleep(0.2)
+                    time.sleep(0.5)
                     raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                     raw.close()
                 else:

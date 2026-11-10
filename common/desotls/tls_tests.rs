@@ -738,7 +738,7 @@ fn record_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(matches!(r, Err(TlsError { kind: Kind::Truncated, .. })))?;
     let (cl, mut s) = connected(c)?;
     s.reset = true;
-    c.check(matches!(cl.read(&mut s, &mut out), Err(TlsError { kind: Kind::Truncated, .. })))?;
+    c.check(matches!(cl.read(&mut s, &mut out), Err(TlsError { kind: Kind::Reset, .. })))?;
     // A fatal alert from the server.
     let (cl, mut s) = connected(c)?;
     let (_, mut sp) = server_app();

@@ -150,8 +150,10 @@ pub enum Kind {
     Local(u8),
     /// The server sent this fatal alert.
     PeerAlert(u8),
-    /// The connection ended without close_notify (FIN or reset) – the data may be cut.
+    /// The connection ended with the peer's FIN but without close_notify – the data may be cut.
     Truncated,
+    /// The connection was reset (the transport's Err) – the data may be cut.
+    Reset,
     /// The connection is gone (reset or a failed send).
     Transport,
 }
@@ -200,7 +202,7 @@ impl fmt::Display for TlsError {
                 write!(f, " (alert {})", alert_name(a))
             }
             Kind::PeerAlert(a) => write!(f, "server refused: alert {} ({})", alert_name(a), a),
-            Kind::Truncated => f.write_str(self.what),
+            Kind::Truncated | Kind::Reset => f.write_str(self.what),
             Kind::Transport => f.write_str(self.what),
         }
     }
@@ -519,7 +521,7 @@ impl Io {
             match t.recv(&mut self.rbuf[self.rlen..]) {
                 Ok(0) => return Err(TlsError { kind: Kind::Truncated, what: "connection closed without close_notify (truncated)", arg: 0 }),
                 Ok(n) => self.rlen += n.min(RBUF - self.rlen),
-                Err(()) => return Err(TlsError { kind: Kind::Truncated, what: "connection reset (truncated)", arg: 0 }),
+                Err(()) => return Err(TlsError { kind: Kind::Reset, what: "connection reset (truncated)", arg: 0 }),
             }
         }
     }

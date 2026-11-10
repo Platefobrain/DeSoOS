@@ -36,7 +36,9 @@
 //                  "connected a.b.c.d:port from ..." the connection is the
 //                  socket: every message is data to send, every message from netd
 //                  is received data, and closing it closes the connection (the
-//                  program sees the end as ERROR_CLOSED when the peer closes).
+//                  program sees the end as ERROR_CLOSED when the peer closes; when
+//                  the connection was reset or timed out, an empty message comes
+//                  first – data never arrives as an empty message).
 // Rights per connection come from init with the connection ("net0 admin listen"
 // for netconfig, "net0 client listen" for the shell's other programs, "net0
 // client [listen]" for sandboxed ones with a narrowed service channel): "dns",
@@ -516,11 +518,14 @@ struct Conn {
     op: Op,
     /// The client closed its end – removed at the end of the loop pass.
     dead: bool,
+    /// Its TCP connection ended abnormally (reset, timed out): an empty message still has to
+    /// reach the program before the channel closes (the socket protocol's "reset").
+    ending: bool,
     /// K_ADMIN / K_LISTEN (from init with the connection; 0 for accepted sockets).
     kind: u8,
 }
 
-const NO_CONN: Conn = Conn { chan: 0, op: Op::Idle, dead: true, kind: 0 };
+const NO_CONN: Conn = Conn { chan: 0, op: Op::Idle, dead: true, ending: false, kind: 0 };
 /// DNS server and DHCP renew.
 const K_ADMIN: u8 = 1;
 /// TCP servers.
@@ -1111,6 +1116,10 @@ impl Nic {
     fn ops_deadline(&self) -> u64 {
         let mut d = u64::MAX;
         for c in &self.conns[..self.nconns] {
+            if c.ending {
+                // The "reset" message did not fit yet – try again soon.
+                d = d.min(uptime_ms() + 10);
+            }
             let t = match c.op {
                 Op::Idle => u64::MAX,
                 Op::Arp { t0, .. } => t0 + 1000,
@@ -1795,7 +1804,7 @@ impl Nic {
             return;
         }
         let k = self.nconns;
-        self.conns[k] = Conn { chan: mine, op: Op::Tcp { slot, open: true }, dead: false, kind: 0 };
+        self.conns[k] = Conn { chan: mine, op: Op::Tcp { slot, open: true }, dead: false, ending: false, kind: 0 };
         self.nconns += 1;
         self.tcp[slot].owner = k;
         self.tcp_accepted += 1;
@@ -1868,8 +1877,14 @@ impl Nic {
                         let _ = writeln!(t, "tcp: {}:{}: {}", ip_text(m.rip), m.rport, why);
                         self.tell(owner, &t);
                     } else {
-                        // The program sees the end of the data (ERROR_CLOSED).
-                        self.conns[owner].dead = true;
+                        // The program sees the end of the data (ERROR_CLOSED); after a reset
+                        // or a time-out first an empty message (like ECONNRESET), so it can
+                        // tell a cut connection from the peer's FIN.
+                        if matches!(tcbs()[slot].end, tcp::End::Reset | tcp::End::TimedOut) {
+                            self.conns[owner].ending = true;
+                        } else {
+                            self.conns[owner].dead = true;
+                        }
                         let why = match tcbs()[slot].end {
                             tcp::End::Reset => "reset by the peer",
                             tcp::End::TimedOut => "timed out (no answer to our data)",
@@ -2863,7 +2878,7 @@ fn main(args: Args) -> i32 {
             } else if r >= 0 && info.handles == 1 {
                 if nic.nconns < MAX_CONNS {
                     let kind = kind_of(core::str::from_utf8(&msg[..r as usize]).unwrap_or(""));
-                    nic.conns[nic.nconns] = Conn { chan: hs[0], op: Op::Idle, dead: false, kind };
+                    nic.conns[nic.nconns] = Conn { chan: hs[0], op: Op::Idle, dead: false, ending: false, kind };
                     nic.nconns += 1;
                 } else {
                     // Full: tell the program instead of leaving it waiting.
@@ -2878,7 +2893,7 @@ fn main(args: Args) -> i32 {
                 continue;
             }
             let j = map[e];
-            if nic.conns[j].dead {
+            if nic.conns[j].dead || nic.conns[j].ending {
                 continue;
             }
             if let Op::Tcp { slot, open: true } = nic.conns[j].op {
@@ -2919,6 +2934,16 @@ fn main(args: Args) -> i32 {
         nic.run_loopback();
         nic.tcp_sweep(now);
         nic.run_loopback();
+        // Abnormal TCP ends: the empty "reset" message, then the channel closes.
+        for j in 0..nic.nconns {
+            if nic.conns[j].ending {
+                let r = chan_send(nic.conns[j].chan, &[], CHAN_NONBLOCK);
+                if r == 0 || r == ERROR_CLOSED {
+                    nic.conns[j].ending = false;
+                    nic.conns[j].dead = true;
+                }
+            }
+        }
         // Closed clients: their operations end with them.
         let mut j = 0;
         while j < nic.nconns {
