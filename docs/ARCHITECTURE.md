@@ -590,6 +590,13 @@ execute `hlt`.
 - `desofs` works in the shell started by init (sysctl, `SYSCTL` handle). Raw disk writes (`disk read/write`) and
   asm test programs (`run`) are available only in the kernel emergency shell; `/bin/sh` answers "only in the kernel
   emergency shell".
+- **The line editor** (`/bin/sh` and the kernel emergency shell, the same design): lines up to 4096 characters; the
+  prompt and the line fit one row of the screen console (its columns – `console::columns()`, for `/bin/sh` sysinfo
+  `columns`; 80 without a screen), so a longer line scrolls sideways – the part around the cursor is shown, the
+  rest is kept (as linenoise's single-line mode). After Enter such a line is printed again whole and the terminal
+  wraps it, so the screen keeps the command that ran. History, Tab, Home / End, Ctrl+U work on the whole line.
+  The serial port gets the same output and does not report its size: there a line wider than the serial
+  terminal wraps and its redraws mix rows (Linux keeps a size per terminal – `TIOCGWINSZ`).
 
 ## Hardware and data safety
 

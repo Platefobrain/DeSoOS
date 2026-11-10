@@ -39,8 +39,12 @@ use desoos::{
 
 entry!(main);
 
-const TERMINAL_WIDTH: usize = 80;
+/// The terminal width when the kernel does not say (sysinfo "columns").
+const DEFAULT_COLUMNS: usize = 80;
+/// The shown part of the line is never narrower than this (a narrow screen, a long prompt).
 const MIN_LINE: usize = 24;
+/// The longest line (characters); longer than the screen – the line scrolls sideways.
+const LINE_MAX: usize = 4096;
 const HISTORY_MAX: usize = 32;
 
 const BUILTINS: &[(&str, &str)] = &[
@@ -100,6 +104,11 @@ struct LineEditor {
     draft: Vec<char>,
     prompt: String,
     prompt_width: usize,
+    /// The first character shown (the line scrolls sideways when it is wider than the
+    /// screen).
+    scroll: usize,
+    /// The terminal's width in columns (the kernel's screen console, sysinfo "columns").
+    columns: usize,
 }
 
 impl LineEditor {
@@ -112,6 +121,8 @@ impl LineEditor {
             draft: Vec::new(),
             prompt: String::new(),
             prompt_width: 0,
+            scroll: 0,
+            columns: terminal_columns(),
         }
     }
 
@@ -121,8 +132,20 @@ impl LineEditor {
         self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
     }
 
-    fn max_len(&self) -> usize {
-        TERMINAL_WIDTH.saturating_sub(self.prompt_width + 1).max(MIN_LINE)
+    /// How many characters of the line fit after the prompt, one column left for the cursor.
+    fn view_width(&self) -> usize {
+        self.columns.saturating_sub(self.prompt_width + 1).max(MIN_LINE)
+    }
+
+    /// Keeps the cursor inside the shown part, and as much of the line shown as fits.
+    fn fix_scroll(&mut self) {
+        let w = self.view_width();
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor > self.scroll + w {
+            self.scroll = self.cursor - w;
+        }
+        self.scroll = self.scroll.min(self.buf.len().saturating_sub(w));
     }
 
     fn line(&self) -> String {
@@ -137,14 +160,26 @@ impl LineEditor {
     fn reset(&mut self) {
         self.buf.clear();
         self.cursor = 0;
+        self.scroll = 0;
         self.browsing = None;
         self.draft.clear();
     }
 
     fn handle(&mut self, key: Key) -> Edit {
+        let before = self.scroll;
+        let e = self.handle_key(key);
+        self.fix_scroll();
+        // A character at the end can only be echoed when the line did not scroll.
+        match e {
+            Edit::Echo(_) if self.scroll != before => Edit::Redraw,
+            e => e,
+        }
+    }
+
+    fn handle_key(&mut self, key: Key) -> Edit {
         match key {
             Key::Char(c) => {
-                if self.buf.len() >= self.max_len() {
+                if self.buf.len() >= LINE_MAX {
                     return Edit::Nothing;
                 }
                 self.buf.insert(self.cursor, c);
@@ -263,13 +298,35 @@ impl LineEditor {
         }
     }
 
+    /// The prompt and the shown part of the line, the cursor in its place.
     fn render(&self) -> String {
-        let mut s = format!("\r{}{}\x1b[K", self.prompt, self.line());
-        let back = self.buf.len() - self.cursor;
+        let end = (self.scroll + self.view_width()).min(self.buf.len());
+        let shown: String = self.buf[self.scroll..end].iter().collect();
+        let mut s = format!("\r{}{}\x1b[K", self.prompt, shown);
+        let back = end - self.cursor;
         if back > 0 {
             s.push_str(&format!("\x1b[{}D", back));
         }
         s
+    }
+
+    /// After Enter: a line wider than the window was shown scrolled – it is printed again
+    /// whole (the terminal wraps it), so the screen keeps the command that ran.
+    fn render_submitted(&self, line: &str) -> String {
+        if line.chars().count() > self.view_width() {
+            format!("\r{}{}\x1b[K", self.prompt, line)
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// The screen console's width from the kernel (80 when it does not say).
+fn terminal_columns() -> usize {
+    let mut buf = [0u8; 16];
+    match desoos::sysinfo("columns", &mut buf) {
+        Ok(n) => core::str::from_utf8(&buf[..n]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(DEFAULT_COLUMNS),
+        Err(_) => DEFAULT_COLUMNS,
     }
 }
 
@@ -1127,6 +1184,7 @@ impl Shell {
                     out(&self.editor.render());
                 }
                 Edit::Submit(line) => {
+                    out(&self.editor.render_submitted(&line));
                     out("\n");
                     self.run_line(&line);
                     return;

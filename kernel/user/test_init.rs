@@ -135,8 +135,12 @@ disk read 0 0\n\
 reboot\n\
 lspci -x\n\
 kill 1\n\
-kill net0\n\
-exit 7\n";
+kill net0\n";
+    // A command wider than the screen: shown scrolled while typed, printed whole after Enter.
+    let long = "0123456789".repeat(30);
+    let mut full = script.to_vec();
+    full.extend_from_slice(alloc::format!("echo {}\nexit 7\n", long).as_bytes());
+    let script: &[u8] = &full;
     let sh = start("/bin/sh", &["sh"], script);
     check!(sh.is_some(), "cannot start /bin/sh");
     let r = finish(sh.unwrap(), 20_000);
@@ -167,9 +171,10 @@ exit 7\n";
         check!(out.contains(e), "sh output lacks {:?}:\n{}", e, out);
     }
     check!(out.matches("\naXbc\n").count() == 2, "history (Up) did not repeat the line:\n{}", out);
+    check!(out.contains(&alloc::format!("$ echo {}\x1b[K\n{}\n", long, long)), "a long command is not shown whole after Enter:\n{}", out);
     check!(kind == ExitKind::Exit(7), "sh ended with {:?}", kind);
     check!(crate::fs::read_file("/m16/c").ok().as_deref() == Some(b"text\nmore\n".as_slice()), "cp content");
-    serial_println!("[INIT TEST] 4/10 user shell: builtins, /bin programs, > >> <, quotes, line editing, sysinfo, kernel-only commands / reboot refused PASS");
+    serial_println!("[INIT TEST] 4/10 user shell: builtins, /bin programs, > >> <, quotes, line editing (a command wider than the screen shown whole after Enter), sysinfo, kernel-only commands / reboot refused PASS");
 
     // 5. No zombies: the shell collected the status of every child.
     check!(procs::zombies().is_empty(), "zombies left: {:?}", procs::zombies());

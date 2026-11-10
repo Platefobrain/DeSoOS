@@ -2,6 +2,33 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.75.3 — 2026-11-10
+
+### Fixed – a long command lost its start on the screen after Enter
+- A line wider than the editing window stayed shown scrolled after Enter, so the screen kept `tget -v …` for
+  `netget -v …` (seen on the test laptop). Now both line editors print such a line again whole after Enter – the
+  terminal wraps it.
+- The window was 80 columns on every screen; now it is the screen console's width (`console::columns()`: the
+  framebuffer's columns, 80 without one; `/bin/sh` asks with sysinfo `columns`) – on a 1920-pixel screen 240
+  columns instead of 80. The serial port gets the same output: a line wider than a serial terminal wraps there and
+  its redraws mix rows (a serial terminal does not report its size).
+- Tests: CON TEST 8 – the long line printed whole after Enter (a short one not), the same 200 characters unscrolled
+  at 240 columns; INIT TEST 4 – a 305-character `echo` through `/bin/sh` is on the screen whole after Enter.
+- Docs: ARCHITECTURE (the line editor), README, RELEASE.
+
+## v0.75.2 — 2026-11-10
+
+### Fixed – the shell cut commands at about 70 characters
+- The line editor of `/bin/sh` and of the kernel emergency shell refused every character after 80 columns minus the
+  prompt (69 characters at `desoos:/$ `), so a long command – e.g. `netget -o … https://…?bytes=10000000` on the test
+  laptop – could not be typed. Now a line holds up to 4096 characters and scrolls sideways inside the 80-column
+  window: the part around the cursor is shown, the rest is kept; history, Tab, Home / End and Ctrl+U work on the
+  whole line. Sideways scrolling instead of wrapping onto the next line: the same output goes to the framebuffer
+  (wider) and the serial port (often 80 columns), so a wrapped layout would differ between them.
+- CON TEST 8: a 200-character line (the end shown while typing, the start after Home, moving right scrolls),
+  4096 characters at most, the long line submitted whole.
+- Docs: ARCHITECTURE (the line editor), README, RELEASE "Current limitations".
+
 ## v0.75.1 — 2026-11-10
 
 ### Fixed – a TCP reset looked like the peer's FIN

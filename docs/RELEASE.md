@@ -34,7 +34,7 @@ timings move by ±15% from run to run on the same build).
 - snapshots: no automatic ones, no snapshot of a single directory (one live file system per volume in format 1), no creation time (the format stores only the generation); `snapshot delete` / `restore` and `snapshot list` walk the volume (like a mount; one walk per snapshot for the list); a snapshot whose name came from another tool and breaks the stricter rules can be listed but not mounted or deleted through the shell
 - "in use" says how many handles, not which process (`ps`, `dcp` show it); mounting a file system over a directory inside a mount in use is not refused
 - PID = scheduler task number (0 = BSP idle, 1 = kernel startup task, then the idle tasks of the other cores – with 4 CPUs init has PID 5)
-- shell: line max ~70 characters (fits in 80 columns), no scripts, variables or `$?`
+- shell: lines up to 4096 characters shown in one row of the screen that scrolls sideways (wrapped only when printed again after Enter); the serial port has no size of its own, so a line wider than a serial terminal wraps and its redraws mix rows there; no scripts, variables or `$?`
 - directory handles hold a path, not the directory: a directory removed and created again under the same name is
   reached through the old handle; the shell's `cd` and unsandboxed programs still use global paths
 - IPC: no futex and no ring buffers in the library
@@ -112,7 +112,9 @@ timings move by ±15% from run to run on the same build).
 - no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), no ALPN,
   no OCSP stapling
 - `netget`: HTTP/1.0 only (no keep-alive, no chunked answers – refused), GET only, no redirects, at most 8 TCP
-  connections per netd; a duplicated Content-Length is refused even with the same value (curl and Go accept it)
+  connections per netd; a duplicated Content-Length is refused even with the same value (curl and Go accept it);
+  servers that answer HTTP/1.0 without a length and close without close_notify (Google) end in exit 3 although
+  the page is whole – HTTP/1.1 with chunked answers would fix it
 - a `Client` is ~120 KiB and lives in a static, so `netget` and `tlstest` are ~330 KB files (the transcript's
   starting values keep it out of .bss)
 - tested against OpenSSL 3 (Python `ssl`) in QEMU; real servers on the internet only on real hardware
@@ -183,6 +185,105 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.75.3 — 2026-11-10
+
+**Status: stable on QEMU (TCG and KVM); fix – a long command stays on the screen whole after Enter, and the editing
+window is as wide as the screen console (was 80 columns).**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 313 s (restart 24 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 235 s (restart 12 s, soak 125 s) |
+
+CON TEST 8 adds the long line printed whole after Enter (a short one not) and the same 200 characters unscrolled at
+240 columns; INIT TEST 4 a 305-character `echo` through `/bin/sh`, whole on the screen after Enter.
+
+### Performance against the previous release (v0.75.2 → v0.75.3, same machine)
+
+| | TCG v0.75.2 | TCG v0.75.3 | KVM v0.75.2 | KVM v0.75.3 |
+|---|---|---|---|---|
+| irq_user_ns | 8 139 | 9 156 | 65 402 | 65 125 |
+| fact_svc_ns | 187 441 | 183 992 | 100 401 | 106 157 |
+| USB read_kbs (usbd) / kernel | 66 064 / 80 737 | 69 423 / 58 577 | 91 022 / 70 153 | 105 025 / 111 964 |
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 88 / 4 079 | 89 / 4 031 | 50 / 6 440 | 51 / 5 720 |
+| DeSoFS 8 MiB write / read (KiB/s) | 3 708 / 3 797 | 7 236 / 12 226 | 16 582 / 53 542 | 16 718 / 52 178 |
+| DeSoFS 1000 small files create / read (ms) | 26 964 / 11 087 | 13 065 / 3 653 | 8 452 / 835 | 7 462 / 811 |
+| `desofs check` (ms) | 1 925 | 951 | 337 | 290 |
+| short soak: file operations in 2 min | 6 124 | 6 297 | 27 984 | 28 303 |
+
+Verdict: no regression – only the line editors and one sysinfo topic changed. The TCG DeSoFS numbers are back at
+the v0.75.1 level (8 MiB write 7 236 against 7 914, small-file create 13 065 against 12 379), which confirms that
+the host was busy during the v0.75.2 TCG run; the USB and TLS differences are within the usual spread.
+
+### Real hardware (Legion laptop, 1920-pixel screen = 240 columns)
+
+- The editing window is as wide as the screen; a 230-character command wraps onto two rows after Enter and stays
+  whole on the screen, its error message too.
+- `netget -v -o /big.bin https://speed.cloudflare.com/__down?bytes=10000000`: TLS_AES_128_GCM_SHA256, 3 certificates
+  up to GTS Root R4, 200, 10 000 000 B in 912 ms (10 707 KiB/s) – as in v0.75.2.
+- A first attempt typed `https:/` (one slash) and was refused with "the address must start with http:// or
+  https://", as it should be.
+
+---
+
+## v0.75.2 — 2026-11-10
+
+**Status: stable on QEMU (TCG and KVM); fix – the shell's line editor holds up to 4096 characters (was ~70) and
+scrolls a long line sideways inside the 80-column window.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 340 s (restart 52 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 297 tests PASS | 237 s (restart 13 s, soak 126 s) |
+
+CON TEST 8 checks a 200-character line (the end shown while typing, the start after Home, moving right scrolls),
+the 4096-character limit and the long line submitted whole.
+
+### Performance against the previous release (v0.75.1 → v0.75.2, same machine)
+
+| | TCG v0.75.1 | TCG v0.75.2 | KVM v0.75.1 | KVM v0.75.2 |
+|---|---|---|---|---|
+| irq_user_ns | 11 031 | 8 139 | 65 811 | 65 402 |
+| fact_svc_ns | 198 412 | 187 441 | 102 616 | 100 401 |
+| USB read_kbs (usbd) / kernel | 60 235 / 68 671 | 66 064 / 80 737 | 78 769 / 72 793 | 91 022 / 70 153 |
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 88 / 4 432 | 88 / 4 079 | 48 / 7 160 | 50 / 6 440 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 914 / 12 720 | **3 708 / 3 797** | 14 222 / 54 251 | 16 582 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 12 379 / 3 430 | **26 964 / 11 087** | 10 072 / 850 | 8 452 / 835 |
+| `desofs check` (ms) | 962 | 1 925 | 307 | 337 |
+| short soak: file operations in 2 min | 6 378 | 6 124 | 28 773 | 27 984 |
+
+Verdict: no regression – only the two line editors changed. The TCG run's DeSoFS numbers are 2–3 times worse,
+and its SHA-256 time inside DeSoFS too (`sha_seal_us` 1 035 343 against 129 591 – the same code), the restart took
+52 s instead of 23 s, while KVM on the same build is normal and back in range (small-file create 8 452 ms, after
+10 072 last time): the host was busy during the TCG run.
+
+### Real hardware (Legion laptop, Realtek RTL8111/8168, wired network)
+
+| Command | TLS | Result |
+|---|---|---|
+| `netget https://kernel.org/` | TLS_CHACHA20_POLY1305_SHA256, ECDSA P-256, 4 certificates up to ISRG Root X2 | 200, 20 436 B in 1 006 ms |
+| `netget https://www.wikipedia.org/` | – | 200, 122 506 B in 3 622 ms |
+| `netget -o /big.bin http://speed.cloudflare.com/__down?bytes=10000000` | none | 200, 10 000 000 B in 907 ms (10 766 KiB/s) |
+| `netget -v -o /big.bin https://speed.cloudflare.com/__down?bytes=10000000` | TLS_AES_128_GCM_SHA256, ECDSA P-256, 3 certificates up to GTS Root R4 | 200, 10 000 000 B in 918 ms (10 637 KiB/s) |
+| `netget -o /cl.txt https://cdn.kernel.org/...` | refused by the server: alert protocol_version (70) | exit 5, nothing written |
+
+- 10 MB over HTTPS as fast as over plain HTTP: TLS costs almost nothing at this speed.
+- cdn.kernel.org refuses TLS 1.3 from OpenSSL too (`openssl s_client -tls1_3`: the same alert) – it offers
+  TLS 1.2 at most, which DeSoTLS does not speak by design.
+- One earlier run of the same HTTPS download ended "HTTP 200, 0 bytes in 73 ms" with exit 0: netget accepted the
+  answer as complete, so the server's own framing said empty (a shorter body against its Content-Length ends with
+  exit 3). Not repeated.
+- The console font has Latin-1, the Polish letters, € and box drawing: other characters of a page (Wikipedia's
+  language names – Cyrillic, Greek, Czech Č, CJK) show as `?`.
+- A command longer than the 80-column editing window stays shown scrolled after Enter (`tget -v ...` instead of
+  `netget -v ...`); the whole line runs.
+
+---
+
 ## v0.75.1 — 2026-11-10
 
 **Status: stable on QEMU (TCG and KVM); fix – netd tells a program that its TCP connection was reset (an empty
@@ -199,6 +300,23 @@ for a whole one (exit 3 now); after an answer complete by its Content-Length a r
 `[RESULT-TLS]`: 35 cases (was 33 – `/nocl-reset` exit 3 and `/cl-reset` exit 0 over https); TCG `/hello` 88 ms,
 1 MiB 4 432 KiB/s; KVM 48 ms, 7 160 KiB/s. NET TEST checks that `/reset` brings netd's empty message and `/short`
 (a FIN) does not, and the same two netget cases over http.
+
+### Real hardware (the test laptop, Realtek RTL8168h on a 100 Mb/s home network, v0.75.1)
+
+| Command | Result |
+|---|---|
+| `netconfig` | DHCP 192.168.1.60/24 from the router in 15.7 s |
+| `date` | 2026-11-10 18:33:28 UTC, plausible – the RTC keeps UTC (the hour matches) |
+| `netget https://example.com/` | TLS 1.3, TLS_AES_128_GCM_SHA256, x25519, ecdsa_secp256r1_sha256, 4 certificates up to SSL.com TLS ECC Root CA 2022; HTTP 200, 577 bytes in 62 ms |
+| `netget --cipher chacha https://www.google.com/` | TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, x25519, ecdsa_secp256r1_sha256, 3 certificates up to GTS Root R4; the whole page arrived (87 253 bytes), then "cut short – the connection ended without close_notify" (exit 3) |
+| `netget https://expired.badssl.com/`, `https://wrong.host.badssl.com/` | "server refused: alert handshake_failure" (exit 5) – badssl.com does not speak TLS 1.3, so the handshake ends before any certificate (the certificate refusals are covered by TLS TEST) |
+
+The first real-world TLS 1.3 connections of DeSoOS: two different public CAs, ECDSA server keys, both cipher suites,
+the CA store and the clock working on real hardware. Google answers HTTP/1.0 without a Content-Length and ends with a
+TCP close but no close_notify – by the rule "without a length only close_notify proves the end" netget reports it
+cut (OpenSSL 3 reports the same "unexpected eof"); asking with HTTP/1.1 (the server then frames the answer itself –
+chunked) would avoid it – in "Current limitations". Not yet measured on real hardware: a large download (the
+`-o /disk/...` attempt failed – the laptop's disks are not mounted, by design) and an RSA server.
 
 ### Performance against the previous release (v0.75.0 → v0.75.1, same machine)
 

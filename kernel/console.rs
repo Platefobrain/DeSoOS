@@ -22,6 +22,8 @@ use crate::serial_println;
 
 static mut FB: Option<FbConsole> = None;
 static FB_ADDRESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Columns of the screen console (0 = none).
+static FB_COLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 // The framebuffer console is in the middle of drawing (e.g. an exception mid-way) –
 // then we write to serial only.
 static FB_BUSY: AtomicBool = AtomicBool::new(false);
@@ -82,6 +84,7 @@ pub fn init(boot: &BootInfo) -> bool {
     };
     let (cols, rows) = (fb.cols, fb.rows);
     FB_ADDRESS.store(boot.framebuffer_addr, Ordering::Relaxed);
+    FB_COLS.store(cols, Ordering::Relaxed);
     without_interrupts(|| unsafe {
         *core::ptr::addr_of_mut!(FB) = Some(fb);
     });
@@ -103,6 +106,15 @@ pub fn init(boot: &BootInfo) -> bool {
 #[allow(dead_code)]
 pub fn fb_address() -> u64 {
     FB_ADDRESS.load(Ordering::Relaxed)
+}
+
+/// The width the line editors draw for: the screen console's columns, or 80 on serial only
+/// (a serial terminal does not report its size; the serial copy of a screen-wide line wraps).
+pub fn columns() -> usize {
+    match FB_COLS.load(Ordering::Relaxed) {
+        0 => 80,
+        c => c,
+    }
 }
 
 /// Size of the screen console in characters (if present).

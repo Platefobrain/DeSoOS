@@ -25,9 +25,10 @@ pub const VERSION: &str = match option_env!("DESOOS_VERSION") {
     None => "dev",
 };
 
-/// The line together with the prompt fits in 80 terminal columns.
-const TERMINAL_WIDTH: usize = 80;
+/// The shown part of the line is never narrower than this (a narrow screen, a long prompt).
 const MIN_LINE: usize = 24;
+/// The longest line (characters); longer than the screen – the line scrolls sideways.
+const LINE_MAX: usize = 4096;
 const HISTORY_MAX: usize = 32;
 
 // ------------------------------------------------------------
@@ -61,6 +62,11 @@ pub struct LineEditor {
     draft: Vec<char>,
     prompt: String,
     prompt_width: usize,
+    /// The first character shown (the line scrolls sideways when it is wider than the
+    /// screen).
+    scroll: usize,
+    /// The terminal's width in columns (console::columns()).
+    columns: usize,
 }
 
 impl LineEditor {
@@ -73,6 +79,8 @@ impl LineEditor {
             draft: Vec::new(),
             prompt: String::new(),
             prompt_width: 0,
+            scroll: 0,
+            columns: console::columns(),
         };
         ed.set_prompt("/");
         ed
@@ -84,9 +92,27 @@ impl LineEditor {
         self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
     }
 
-    /// Maximum line length (prompt + line < terminal width).
-    pub fn max_len(&self) -> usize {
-        TERMINAL_WIDTH.saturating_sub(self.prompt_width + 1).max(MIN_LINE)
+    /// The terminal's width (the screen console's columns; tests set their own).
+    #[allow(dead_code)]
+    pub fn set_columns(&mut self, columns: usize) {
+        self.columns = columns;
+        self.fix_scroll();
+    }
+
+    /// How many characters of the line fit after the prompt, one column left for the cursor.
+    pub fn view_width(&self) -> usize {
+        self.columns.saturating_sub(self.prompt_width + 1).max(MIN_LINE)
+    }
+
+    /// Keeps the cursor inside the shown part, and as much of the line shown as fits.
+    fn fix_scroll(&mut self) {
+        let w = self.view_width();
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor > self.scroll + w {
+            self.scroll = self.cursor - w;
+        }
+        self.scroll = self.scroll.min(self.buf.len().saturating_sub(w));
     }
 
     pub fn line(&self) -> String {
@@ -108,9 +134,20 @@ impl LineEditor {
     }
 
     pub fn handle(&mut self, key: Key) -> Edit {
+        let before = self.scroll;
+        let e = self.handle_key(key);
+        self.fix_scroll();
+        // A character at the end can only be echoed when the line did not scroll.
+        match e {
+            Edit::Echo(_) if self.scroll != before => Edit::Redraw,
+            e => e,
+        }
+    }
+
+    fn handle_key(&mut self, key: Key) -> Edit {
         match key {
             Key::Char(c) => {
-                if self.buf.len() >= self.max_len() {
+                if self.buf.len() >= LINE_MAX {
                     return Edit::Nothing;
                 }
                 self.buf.insert(self.cursor, c);
@@ -208,6 +245,7 @@ impl LineEditor {
     fn reset(&mut self) {
         self.buf.clear();
         self.cursor = 0;
+        self.scroll = 0;
         self.browsing = None;
         self.draft.clear();
     }
@@ -233,12 +271,22 @@ impl LineEditor {
     }
 
     /// Draws prompt + line and positions the cursor.
+    /// The prompt and the shown part of the line, the cursor in its place.
     pub fn render(&self, out: &mut dyn Write) {
-        let line = self.line();
-        let _ = write!(out, "\r{}{}\x1b[K", self.prompt, line);
-        let back = self.buf.len() - self.cursor;
+        let end = (self.scroll + self.view_width()).min(self.buf.len());
+        let shown: String = self.buf[self.scroll..end].iter().collect();
+        let _ = write!(out, "\r{}{}\x1b[K", self.prompt, shown);
+        let back = end - self.cursor;
         if back > 0 {
             let _ = write!(out, "\x1b[{}D", back);
+        }
+    }
+
+    /// After Enter: a line wider than the window was shown scrolled – it is printed again
+    /// whole (the terminal wraps it), so the screen keeps the command that ran.
+    pub fn render_submitted(&self, line: &str, out: &mut dyn Write) {
+        if line.chars().count() > self.view_width() {
+            let _ = write!(out, "\r{}{}\x1b[K", self.prompt, line);
         }
     }
 }
@@ -1888,8 +1936,9 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 
 /// Read-only commands for user space (sysinfo syscall) –
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
-/// (sector read / write, run – only in the kernel fallback shell).
-pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df"];
+/// (sector read / write, run – only in the kernel fallback shell).  `columns` is not a
+/// command: the terminal width the line editors draw for (console::columns()).
+pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "columns"];
 
 pub fn sysinfo(line: &str) -> Option<String> {
     let line = line.trim();
@@ -1905,6 +1954,9 @@ pub fn sysinfo(line: &str) -> Option<String> {
     };
     if !args_ok {
         return None;
+    }
+    if name == "columns" {
+        return Some(alloc::format!("{}\n", console::columns()));
     }
     Some(run_to_string(line))
 }
@@ -2199,6 +2251,7 @@ pub fn run() -> ! {
                     editor.render(&mut out);
                 }
                 Edit::Submit(line) => {
+                    editor.render_submitted(&line, &mut out);
                     let _ = writeln!(out);
                     let history = editor.history().to_vec();
                     execute(&line, &mut out, &mut Context { history: &history, cwd: &mut cwd });
@@ -2388,7 +2441,53 @@ pub fn self_test() {
     ed.handle(Key::Ctrl('c'));
     ed.handle(Key::Char('h'));
     check!(matches!(ed.handle(Key::Tab), Edit::Candidates(ref v) if v.contains(&"help") && v.contains(&"history")), "tab candidates");
-    serial_println!("[CON TEST] 8/10 line editor (insert, Home/Del, history, Tab) PASS");
+    // A line longer than the screen scrolls sideways: the end is shown while typing, the
+    // start after Home; nothing is lost; at most LINE_MAX characters.
+    ed.handle(Key::Ctrl('c'));
+    ed.set_columns(80);
+    let long: String = (0..200).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    let w = ed.view_width();
+    let mut echoed = 0;
+    for c in long.chars() {
+        if ed.handle(Key::Char(c)) == Edit::Echo(c) {
+            echoed += 1;
+        }
+    }
+    let mut r = String::new();
+    ed.render(&mut r);
+    check!(ed.line() == long && echoed == w && r.ends_with(&alloc::format!("{}\x1b[K", &long[200 - w..])), "long line: {} chars, {} echoed, {:?}", ed.line().len(), echoed, r);
+    ed.handle(Key::Home);
+    let mut r = String::new();
+    ed.render(&mut r);
+    check!(r.ends_with(&alloc::format!("{}\x1b[K\x1b[{}D", &long[..w], w)), "long line after Home: {:?}", r);
+    for _ in 0..w + 5 {
+        ed.handle(Key::Right);
+    }
+    let mut r = String::new();
+    ed.render(&mut r);
+    check!(ed.cursor() == w + 5 && r.contains(&long[5..w + 5]) && !r.contains(&long[..w]), "long line moved right: {:?}", r);
+    // After Enter the whole line is printed again; a short one is not.
+    let mut r = String::new();
+    ed.render_submitted(&long, &mut r);
+    check!(r.ends_with(&alloc::format!("> {}\x1b[K", long)), "long line after Enter: {:?}", r);
+    let mut r = String::new();
+    ed.render_submitted("ls", &mut r);
+    check!(r.is_empty(), "short line after Enter: {:?}", r);
+    // A wider screen shows more: the same 200 characters fit in 240 columns.
+    ed.set_columns(240);
+    check!(ed.view_width() == 240 - 11, "view width at 240 columns: {}", ed.view_width());
+    ed.handle(Key::Home);
+    let mut r = String::new();
+    ed.render(&mut r);
+    check!(r.ends_with(&alloc::format!("{}\x1b[K\x1b[200D", long)), "long line at 240 columns: {:?}", r);
+    ed.set_columns(80);
+    ed.handle(Key::End);
+    for _ in 0..5000 {
+        ed.handle(Key::Char('x'));
+    }
+    check!(ed.line().len() == LINE_MAX, "line limit: {}", ed.line().len());
+    check!(matches!(ed.handle(Key::Enter), Edit::Submit(ref l) if l.len() == LINE_MAX), "long line submitted");
+    serial_println!("[CON TEST] 8/10 line editor (insert, Home/Del, history, Tab, a line longer than the screen scrolls sideways and is shown whole after Enter, the screen's width, up to 4096 characters) PASS");
 
     // 9. Commands (output into a buffer).
     let mut cwd = String::from("/");
