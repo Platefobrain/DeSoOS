@@ -359,6 +359,12 @@ struct Nic {
     udp_foreign: u64,
     udp_toolong: u64,
     udp_fragmented: u64,
+    /// The address and prefix the sockets were opened with: when (ip, prefix) changes
+    /// (DHCP Changed / Lost, `set`, back to `dhcp`), UDP sockets are closed and TCP
+    /// connections aborted (counted here); a renewal with the same values changes nothing.
+    cfg_seen: ([u8; 4], u8),
+    udp_cfgclosed: u64,
+    tcp_cfgclosed: u64,
     /// ARP cache: (IP, MAC, uptime in ms when learned); IP 0 = empty.
     arp_cache: [([u8; 4], [u8; 6], u64); ARP_CACHE],
     ip_id: u16,
@@ -2126,6 +2132,74 @@ impl Nic {
         }
     }
 
+    /// After anything that may change the address: when (ip, prefix) differs from what the
+    /// sockets were opened with, every UDP socket and TCP connection on a non-loopback
+    /// address ends.  UDP: the port is freed and the program's channel closed (ERROR_CLOSED).
+    /// TCP: the state is dropped without a RST (the old address may already belong to
+    /// someone else); an open connection gets the empty message (like ECONNRESET), then the
+    /// channel closes; one still connecting gets an error line.  Listeners stay (they are
+    /// bound to a port, not an address); their not yet accepted connections are dropped.
+    fn sync_config(&mut self) {
+        let cfg = (self.ip, self.prefix);
+        if cfg == self.cfg_seen {
+            return;
+        }
+        let old = self.cfg_seen;
+        self.cfg_seen = cfg;
+        let (mut nu, mut nt) = (0u64, 0u64);
+        for slot in 0..UDP_SOCKS {
+            if !self.udp[slot].used || loopback(self.udp[slot].lip) {
+                continue;
+            }
+            if let Some(k) = (0..self.nconns).find(|&k| matches!(self.conns[k].op, Op::Udp { slot: q } if q == slot)) {
+                self.conns[k].dead = true;
+                self.conns[k].op = Op::Idle;
+            }
+            self.udp[slot] = UDP_FREE;
+            nu += 1;
+        }
+        for slot in 0..TCP_MAX {
+            if !self.tcp[slot].used || loopback(self.tcp[slot].lip) {
+                continue;
+            }
+            let owner = self.tcp[slot].owner;
+            if owner != NO_OWNER {
+                match self.conns[owner].op {
+                    Op::Tcp { slot: s, open } if s == slot => {
+                        if open {
+                            self.conns[owner].ending = true;
+                        } else {
+                            let m = self.tcp[slot];
+                            let mut t = Text::new();
+                            let _ = writeln!(t, "tcp: {}:{}: aborted - the local address changed", ip_text(m.rip), m.rport);
+                            self.tell(owner, &t);
+                        }
+                        self.conns[owner].op = Op::Idle;
+                    }
+                    _ => {}
+                }
+            }
+            self.tcp_dropped += tcbs()[slot].dropped as u64;
+            self.tcp_reordered += tcbs()[slot].reordered as u64;
+            self.tcp[slot] = TCP_FREE;
+            nt += 1;
+        }
+        self.udp_cfgclosed += nu;
+        self.tcp_cfgclosed += nt;
+        if nu + nt > 0 {
+            println!(
+                "{}: address {}/{} -> {}/{}: closed {} UDP socket(s), aborted {} TCP connection(s)",
+                self.name,
+                ip_text(old.0),
+                old.1,
+                ip_text(cfg.0),
+                cfg.1,
+                nu,
+                nt
+            );
+        }
+    }
+
     /// Connection `k` is going away: its TCP connection closes (FIN), or resets
     /// when received data was never read.
     fn tcp_detach(&mut self, k: usize, now: u64) {
@@ -2322,7 +2396,7 @@ impl Nic {
         let _ = writeln!(out, "  interrupts {}, frames found by polling {}", self.irqs, self.polled);
         let _ = writeln!(
             out,
-            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={} udp={} udpmade={} udpin={} udpout={} udp_dropped={} udp_foreign={} udp_toolong={} udp_fragmented={} udp_noport={}",
+            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={} udp={} udpmade={} udpin={} udpout={} udp_dropped={} udp_foreign={} udp_toolong={} udp_fragmented={} udp_noport={} udp_cfgclosed={} tcp_cfgclosed={}",
             Mac(self.mac),
             up as u8,
             ip_text(self.ip),
@@ -2365,7 +2439,9 @@ impl Nic {
             self.udp_foreign,
             self.udp_toolong,
             self.udp_fragmented,
-            self.udp_noport
+            self.udp_noport,
+            self.udp_cfgclosed,
+            self.tcp_cfgclosed
         );
     }
 }
@@ -2981,6 +3057,9 @@ fn main(args: Args) -> i32 {
         udp_foreign: 0,
         udp_toolong: 0,
         udp_fragmented: 0,
+        cfg_seen: ([0; 4], 0),
+        udp_cfgclosed: 0,
+        tcp_cfgclosed: 0,
         arp_cache: [([0; 4], [0; 6], 0); ARP_CACHE],
         ip_id: 0,
         conns: [NO_CONN; MAX_CONNS],
@@ -3097,6 +3176,7 @@ fn main(args: Args) -> i32 {
         }
         nic.irq_rearm();
         nic.dhcp_tick();
+        nic.sync_config();
         if listening && ready & 2 != 0 {
             let mut hs = [0u64; 1];
             let r = chan_recv_h(LISTEN, &mut msg, &mut hs, CHAN_NONBLOCK, &mut info);
@@ -3164,10 +3244,12 @@ fn main(args: Args) -> i32 {
             }
             nic.request(j, req, now);
         }
+        nic.sync_config();
         let now = uptime_ms();
         for j in 0..nic.nconns {
             nic.step(j, now);
         }
+        nic.sync_config();
         nic.run_loopback();
         nic.tcp_sweep(now);
         nic.run_loopback();

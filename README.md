@@ -1,4 +1,4 @@
-# DeSoOS v0.77.0
+# DeSoOS v0.77.1
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -364,7 +364,9 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused (`docs/desotls/HANDSHAKE.md`).
 - `udpsend [-t ms] host port text` - one UDP datagram, then every answer until the time runs out (default 2 s);
   exit 0 answer, 2 refused / usage, 3 no answer. Programs get UDP sockets from netd (`udp host port`: one message
-  = one datagram, ≤ 1472 bytes, only from that peer, a random local port) with the `udp` right.
+  = one datagram, ≤ 1472 bytes, only from that peer, a random local port) with the `udp` right. When the address
+  or mask changes (`netconfig set`, back to DHCP, a new DHCP lease), netd closes UDP sockets and aborts TCP
+  connections of the old address – programs open them again.
 - `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
   file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
   port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it

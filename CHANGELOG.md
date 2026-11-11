@@ -2,6 +2,28 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.77.1 — 2026-11-11
+
+### Fixed – sockets kept the old address after an address change
+- A UDP socket or TCP connection kept the local address it was opened with: after `set` (a new address or only a
+  new mask), going back to `dhcp`, or a DHCP lease that changed or was lost, netd went on sending from an address
+  it no longer had (possibly someone else's now), and answers to it never came back.
+- netd now remembers the address and mask the sockets were opened with and compares them after every DHCP step,
+  request and operation step. When they really change, every socket on a non-loopback address ends:
+  - **UDP** – the port is freed and the program's channel closed (the next receive or send: `ERROR_CLOSED`);
+  - **TCP** – the connection state is dropped **without a RST** (the old address may already belong to another
+    machine); an open connection gets the empty message (like `ECONNRESET`), then the channel closes; one still
+    connecting gets `tcp: host:port: aborted - the local address changed`; connections a listener has not accepted
+    yet are dropped, listeners stay (bound to a port, not an address).
+- A DHCP renewal with the same address and mask changes nothing. Loopback (127.0.0.0/8) sockets are never touched.
+- The console says `net0: address A/p -> B/q: closed N UDP socket(s), aborted M TCP connection(s)`; `status` gained
+  `udp_cfgclosed=` and `tcp_cfgclosed=`.
+- Tests: nettest – sockets survive a renewal (echo, still open, counters 0); `set` to a new address closes UDP
+  (`ERROR_CLOSED` on receive and send) and aborts TCP (empty message, closed); `set` with only a new mask does the
+  same; back to `dhcp` closes UDP; `udp=0` and the counters after each; a new socket from the new address works.
+  DHCP Changed / Lost go through the same comparison (QEMU's DHCP server cannot be made to change or refuse a
+  lease – not tested separately). nettest 118 → 132 checks.
+
 ## v0.77.0 — 2026-11-11
 
 ### Added – UDP sockets for programs

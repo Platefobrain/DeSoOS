@@ -114,6 +114,12 @@ timings move by ±15% from run to run on the same build).
 - UDP for programs: connected client sockets only (no server side, no broadcast / multicast, no fragments – 1472 B
   at most), at most 8 sockets per netd (each is one of its 14 client connections), a datagram that finds the
   program's channel (64 messages) full is dropped, ICMP errors are ignored – a closed port looks like silence
+- an address change (`set`, back to `dhcp`, DHCP Changed / Lost) ends every UDP socket and TCP connection on the old
+  address – programs must open them again (no keep-and-rebind like a roaming socket); DHCP Changed / Lost are not
+  tested in QEMU (its DHCP server always gives the same lease)
+- memory per UDP socket: a socket is a channel of up to 64 messages of 1472 B – when full 64 × (1472 + 64) B =
+  96 KiB of the kernel's 16 MiB message budget (it counts data + 64 B per message; allocator rounding is not
+  counted), 768 KiB for all 8
 - `netget`: HTTP/1.1, one request per connection (no keep-alive), GET only, no redirects, no HTTP/2, no content
   coding (an answer with `Content-Encoding: gzip` is refused – netget asks for identity), at most 8 TCP connections
   per netd; refused although curl accepts them: a duplicated Content-Length with the same value, Transfer-Encoding
@@ -185,6 +191,40 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.77.1 — 2026-11-11
+
+**Status: stable on QEMU (TCG and KVM); fix – UDP sockets and TCP connections end when the IPv4 address or mask
+changes (they kept the old address); 298 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 328 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 254 s (restart 12 s, soak 125 s) |
+
+nettest 118 → 132 checks: sockets survive a renewal; `set` to a new address, `set` with only a new mask and going
+back to `dhcp` end them (UDP: `ERROR_CLOSED`; TCP: the empty message, then closed); counters; a new socket from the
+new address works. The first run on the build host failed one check – nettest 50 expected 8 TCP connections made,
+the renewal test adds a ninth (the test's count, not netd). Soak: leaks 0, errors 0, longest recovery 976 ms (TCG)
+/ 890 ms (KVM).
+
+### Performance against the previous release (v0.77.0 → v0.77.1, same machine)
+
+| | TCG v0.77.0 | TCG v0.77.1 | KVM v0.77.0 | KVM v0.77.1 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 117 / 4 145 | 114 / 4 145 | 55 / 6 206 | 50 / 6 320 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 494 / 12 720 | 7 474 / 11 994 | 19 051 / 54 613 | 18 575 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 13 148 / 3 599 | 13 464 / 3 582 | 5 588 / 822 | 7 941 / 819 |
+| short soak: file operations in 2 min | 6 418 | 6 361 | 28 371 | 27 542 |
+| short soak: network MiB | 853 | 821 | 900 | 915 |
+
+Verdict: no regression – this release touches only netd's address handling. The KVM small-file create time
+(5 588 → 7 941 ms) varies from run to run on this host (v0.76.1: 8 867 ms, v0.75.1: 10 072 ms); the file system
+did not change.
 
 ---
 

@@ -1294,6 +1294,20 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   (64 messages) is dropped (`udp_dropped` – UDP promises nothing); ICMP errors are ignored (easy to forge – the
   program's timeout decides). At most 8 sockets: each is one of netd's 14 client connections (the kernel's wait
   list holds 16 handles). Closing the channel or the program dying frees the port. No server side yet.
+- **Address change** (v0.77.1): netd keeps the address and mask its sockets were opened with (`cfg_seen`) and
+  compares them after every DHCP step, request and operation step (`sync_config`). When (ip, prefix) really changes –
+  `set` (address or only mask), back to `dhcp`, DHCP Changed or Lost – every UDP socket and TCP connection on a
+  non-loopback address ends: UDP frees the port and closes the program's channel; TCP drops the state without a RST
+  (the old address may be someone else's by then) and gives an open connection the empty message, then closes the
+  channel. A renewal with the same values changes nothing; listeners stay. Counted in `udp_cfgclosed` /
+  `tcp_cfgclosed`.
+
+  | | On an address change |
+  |---|---|
+  | Linux | sockets stay; a TCP connection on a removed address times out (or gets a RST when the peer answers) – the program learns late |
+  | Windows | similar; apps are told by the network-change notification (NLM) and reconnect themselves |
+  | RedoxOS | no special handling (smoltcp sockets keep the address they were opened with) |
+  | **DeSoOS** | sockets on the old address end at once: UDP closed, TCP aborted without a RST – the program learns immediately |
 
   | | API | Connected socket filters the sender | Local port | Right |
   |---|---|---|---|---|

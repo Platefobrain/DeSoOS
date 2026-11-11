@@ -232,6 +232,76 @@ fn tcp_get(host: &str, port: &str, path: &str, leave_after: u32) -> Result<Got, 
     Ok(g)
 }
 
+/// A TCP connection through net0 left open and idle (the peer waits for a request);
+/// None when netd did not answer "connected".
+fn tcp_hold(host: &str, port: &str) -> Option<u64> {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let Ok(c) = svc_connect("net0") else { return None };
+    let mut req = [0u8; 64];
+    let mut n = 0;
+    for p in [b"tcp ".as_slice(), host.as_bytes(), b" ", port.as_bytes()] {
+        req[n..n + p.len()].copy_from_slice(p);
+        n += p.len();
+    }
+    let mut info = RecvInfo::default();
+    let r = if chan_send(c, &req[..n], 0) == 0 { chan_recv(c, buf, 0, &mut info) } else { -1 };
+    if r <= 0 || !buf.starts_with(b"connected ") {
+        close(c);
+        return None;
+    }
+    Some(c)
+}
+
+/// A UDP socket to the udp-stub (10.0.2.2:58090) that answered one echo; None otherwise.
+fn udp_hold() -> Option<u64> {
+    let mut reply = [0u8; 256];
+    let c = udp_open_via(SVC, "net0", "10.0.2.2", 58090, &mut reply).ok()?;
+    if udp_echoes(c) {
+        Some(c)
+    } else {
+        close(c);
+        None
+    }
+}
+
+/// One "ping" through a UDP socket comes back within 2 s.
+fn udp_echoes(c: u64) -> bool {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let mut info = RecvInfo::default();
+    if udp_send(c, b"cfg-ping") != 0 || wait_many(&[(c, W_READABLE)], 2000) != Ok(1) {
+        return false;
+    }
+    let r = chan_recv(c, buf, CHAN_NONBLOCK, &mut info);
+    r > 0 && &buf[..r as usize] == b"cfg-ping"
+}
+
+/// How a socket channel ended within 3 s: (empty "reset" message seen, channel closed).
+/// The socket stays the caller's to close.
+fn socket_end(c: u64) -> (bool, bool) {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let mut info = RecvInfo::default();
+    let t0 = uptime_ms();
+    let mut empty = false;
+    while uptime_ms() - t0 < 3000 {
+        let _ = wait_many(&[(c, W_READABLE)], 200);
+        let r = chan_recv(c, buf, CHAN_NONBLOCK, &mut info);
+        if r == ERROR_CLOSED {
+            return (empty, true);
+        }
+        if r == 0 {
+            empty = true;
+        }
+    }
+    (empty, false)
+}
+
+/// The socket is still open: nothing waiting, not closed.
+fn socket_open(c: u64) -> bool {
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let mut info = RecvInfo::default();
+    chan_recv(c, buf, CHAN_NONBLOCK, &mut info) == ERROR_WOULD_BLOCK
+}
+
 /// Runs /bin/netget with the arguments; its exit code.
 fn run_netget(args: &[&str]) -> u64 {
     let pid = spawn_ex("/bin/netget", args, &[(1, 1), (1, 2), (SVC, SVC)], 0);
@@ -418,10 +488,19 @@ fn main(args: Args) -> i32 {
     check!(n, num(st, "lease") == 86400, "DHCP lease: {:?} s", field(st, "lease"));
     check!(n, st.contains("from DHCP server 10.0.2.2, lease 24 h (renew in "), "netconfig text: {:?}", st.lines().nth(3));
     // Renewal (normally after 12 h): a REQUEST to the server, the same address back.
+    // Sockets stay: netd compares the address and mask, a renewal changes neither.
+    let u_renew = udp_hold();
+    let t_renew = tcp_hold("10.0.2.2", "58080");
+    check!(n, u_renew.is_some() && t_renew.is_some(), "UDP / TCP socket before the renewal: {:?} {:?}", u_renew, t_renew);
     let r = ask("renew");
     check!(n, r.starts_with("renewed 10.0.2.15 for 24 h from 10.0.2.2"), "DHCP renew: {:?}", r.trim());
     let st = ask("status");
     check!(n, field(st, "dhcp") == "bound" && num(st, "acks") == 2 && num(st, "naks") == 0 && field(st, "ip") == "10.0.2.15", "after renew: {:?}", st.lines().last());
+    let (u, t) = (u_renew.unwrap_or(0), t_renew.unwrap_or(0));
+    check!(n, num(st, "udp_cfgclosed") == 0 && num(st, "tcp_cfgclosed") == 0 && num(st, "udp") == 1, "a renewal closed sockets: {:?}", st.lines().last());
+    check!(n, udp_echoes(u) && socket_open(t), "UDP / TCP socket after the renewal (echo, still open)");
+    close(u);
+    close(t);
 
     let a = ask("arp 10.0.2.2");
     check!(n, a.contains("is-at 52:55:0a:00:02:02"), "ARP for the virtual router: {:?}", a.trim());
@@ -532,8 +611,9 @@ fn main(args: Args) -> i32 {
     while num(ask("status"), "tcp") != 0 && uptime_ms() - t < 3000 {
         sleep_ms(20);
     }
+    // (made: 8 downloads plus the connection held across the renewal)
     let st = ask("status");
-    check!(n, num(st, "tcp") == 0 && num(st, "tcpmade") == 8, "connections left after the downloads: {:?} (made {:?})", field(st, "tcp"), field(st, "tcpmade"));
+    check!(n, num(st, "tcp") == 0 && num(st, "tcpmade") == 9, "connections left after the downloads: {:?} (made {:?})", field(st, "tcp"), field(st, "tcpmade"));
     // The netget tool: a file, an error status, a page cut short.
     unlink("/netget.out");
     let code = run_netget(&["netget", "-o", "/netget.out", "http://router.desoos:58080/hello"]);
@@ -729,10 +809,24 @@ fn main(args: Args) -> i32 {
     check!(n, r.starts_with("set: bad address"), "set with a bad address: {:?}", r.trim());
     let r = ask("set 10.0.2.20/24 gw 10.0.3.1");
     check!(n, r.contains("same subnet"), "set with a gateway off the subnet: {:?}", r.trim());
+    // A new address ends the sockets of the old one: UDP closed (ERROR_CLOSED), TCP aborted
+    // without a RST (the empty message, then closed).
+    let u_set = udp_hold();
+    let t_set = tcp_hold("10.0.2.2", "58080");
+    check!(n, u_set.is_some() && t_set.is_some(), "UDP / TCP socket before set: {:?} {:?}", u_set, t_set);
+    let tcp_closed0 = num(ask("status"), "tcp_cfgclosed");
     let r = ask("set 10.0.2.20/24 gw 10.0.2.2 dns 10.0.2.3");
     check!(n, r.starts_with("address 10.0.2.20/24 set by hand, gateway 10.0.2.2, DNS 10.0.2.3"), "set 10.0.2.20: {:?}", r.trim());
+    let (u, t) = (u_set.unwrap_or(0), t_set.unwrap_or(0));
+    let ue = socket_end(u);
+    check!(n, ue == (false, true) && udp_send(u, b"x") == ERROR_CLOSED, "UDP socket after a new address: {:?}", ue);
+    let te = socket_end(t);
+    check!(n, te == (true, true), "TCP connection after a new address (empty message, closed): {:?}", te);
+    close(u);
+    close(t);
     let st = ask("status");
     check!(n, field(st, "ip") == "10.0.2.20" && field(st, "dhcp") == "off" && num(st, "byhand") == 1 && num(st, "released") == 1, "after set: {:?}", st.lines().last());
+    check!(n, num(st, "udp") == 0 && num(st, "udp_cfgclosed") == 1 && num(st, "tcp_cfgclosed") > tcp_closed0, "counters after set: {:?}", st.lines().last());
     check!(n, st.contains("IPv4 10.0.2.20/24 set by hand (DHCP off)"), "netconfig text after set");
     let p = ask_stream("ping 10.0.2.2 1");
     check!(n, p.contains("1 sent, 1 received"), "ping from the address set by hand: {:?}", p.trim());
@@ -740,8 +834,21 @@ fn main(args: Args) -> i32 {
     // set /16 – 10.0.255.255 refused, 10.0.2.255 an ordinary address (no ARP answer).
     let r = ask("udp 10.0.2.255 9");
     check!(n, r.contains("broadcast"), "udp to the /24 broadcast: {:?}", r.trim());
+    // Only the mask changes: the sockets end too (the broadcast address changed).
+    let u_mask = udp_hold();
+    let t_mask = tcp_hold("10.0.2.2", "58080");
+    check!(n, u_mask.is_some() && t_mask.is_some(), "UDP / TCP socket from 10.0.2.20/24: {:?} {:?}", u_mask, t_mask);
+    let tcp_closed1 = num(ask("status"), "tcp_cfgclosed");
     let r = ask("set 10.0.2.20/16 gw 10.0.2.2 dns 10.0.2.3");
     check!(n, r.starts_with("address 10.0.2.20/16 set by hand"), "set 10.0.2.20/16: {:?}", r.trim());
+    let (u, t) = (u_mask.unwrap_or(0), t_mask.unwrap_or(0));
+    let ue = socket_end(u);
+    let te = socket_end(t);
+    check!(n, ue == (false, true) && te == (true, true), "sockets after a new mask: UDP {:?}, TCP {:?}", ue, te);
+    close(u);
+    close(t);
+    let st = ask("status");
+    check!(n, num(st, "udp") == 0 && num(st, "udp_cfgclosed") == 2 && num(st, "tcp_cfgclosed") > tcp_closed1, "counters after a new mask: {:?}", st.lines().last());
     let r = ask("udp 10.0.255.255 9");
     check!(n, r.contains("broadcast"), "udp to the /16 broadcast: {:?}", r.trim());
     let r = ask("udp 10.0.2.255 9");
@@ -750,10 +857,21 @@ fn main(args: Args) -> i32 {
     let r = ask_via(narrowed, "set 10.0.2.21/24");
     close(narrowed);
     check!(n, r.contains("administrator request"), "set without admin: {:?}", r.trim());
+    let u_dhcp = udp_hold();
+    check!(n, u_dhcp.is_some(), "UDP socket from 10.0.2.20/16");
     let r = ask("dhcp");
     check!(n, r.starts_with("DHCP on"), "back to DHCP: {:?}", r.trim());
+    let u = u_dhcp.unwrap_or(0);
+    let ue = socket_end(u);
+    check!(n, ue == (false, true), "UDP socket after going back to DHCP: {:?}", ue);
+    close(u);
     let st = wait_bound();
     check!(n, field(st, "ip") == "10.0.2.15" && num(st, "byhand") == 0 && num(st, "declined") == 0 && num(st, "conflicts") == 0, "DHCP address again: {:?}", st.lines().last());
+    check!(n, num(st, "udp") == 0 && num(st, "udp_cfgclosed") == 3, "counters after DHCP again: {:?}", st.lines().last());
+    // A new socket from the new address works.
+    let u_new = udp_hold();
+    check!(n, u_new.is_some(), "UDP socket from the DHCP address again");
+    close(u_new.unwrap_or(0));
 
     // Kill the driver: init restarts it, the new instance works.
     check!(n, kill(pid1) == ERROR_ACCESS_DENIED, "a program killed a service it did not start (netd {})", pid1);
