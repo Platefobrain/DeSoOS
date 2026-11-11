@@ -185,6 +185,40 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.76.1 — 2026-11-11
+
+**Status: stable on QEMU (TCG and KVM); fix – Content-Encoding must be a list of plain tokens (RFC 9110 §8.4), also
+in 304.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS (second run) | 322 s (restart 24 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 249 s (restart 13 s, soak 126 s) |
+
+`/bin/httptest` 666 checks, `[RESULT-TLS]` 87 cases.
+
+The first TCG run failed one check: nettest 51 – `netget http://…/nocl-reset` (a page without a length, then a
+TCP reset after 0.5 s) ended with 0 instead of 3: netget saw the connection end with a FIN, not netd's reset
+message. Not touched by this release (the page has no Content-Encoding; the reset path is v0.75.1's and passed every
+run since); the second TCG run passed. Suspected: QEMU's user network (slirp) turns the host's reset into a FIN or a
+reset for the guest depending on what the host socket reports when it reads – a race under a busy TCG host. Watched:
+if it comes back, the check gets investigated before it is trusted again.
+
+### Performance against the previous release (v0.76.0 → v0.76.1, same machine)
+
+| | TCG v0.76.0 | TCG v0.76.1 | KVM v0.76.0 | KVM v0.76.1 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 92 / 4 413 | 77 / 4 213 | 49 / 5 988 | 50 / 5 019 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 824 / 12 355 | 7 427 / 11 821 | 15 340 / 53 542 | 17 282 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 13 277 / 4 036 | 13 144 / 3 526 | 7 288 / 828 | 8 867 / 861 |
+| short soak: file operations in 2 min | 6 323 | 6 487 | 27 527 | 26 490 |
+
+Verdict: no regression – one function of the parser changed; the differences are the usual spread.
+
+---
+
 ## v0.76.0 — 2026-11-11
 
 **Status: stable on QEMU (TCG and KVM); netget speaks HTTP/1.1 with chunked answers (`user/lib/http.rs`), waits at

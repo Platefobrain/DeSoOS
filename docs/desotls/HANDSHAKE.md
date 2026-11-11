@@ -199,6 +199,7 @@ The answer's framing (the same rules for http://; RFC 9110, RFC 9112 §6.3, in t
 | Content-Length twice – also with the same value | error (RFC 9110 §8.6 allows identical ones, as curl and Go do; netget refuses – a simple, strict client) |
 | neither | everything up to the end – for https only with the server's close_notify; a TCP end without it is "cut short" |
 | Content-Encoding other than identity, in an answer with content | error – netget decodes nothing (gzip is not supported) |
+| Content-Encoding with parameters (`identity;level=1`) – in any answer, also 304 | error – a content coding is a plain token (RFC 9110 §8.4); only transfer codings take parameters (RFC 9112 §7) |
 | any byte after the end of the answer – also in a later record, also after a 204 / 304 head | error (one request per connection: it is not a second answer) |
 | a malformed head: a status line other than "HTTP/1.x NNN", a header name that is not a token, a control character in a value, a line without ":", a folded line, more than 8 KiB, a Content-Length that is not a decimal number, a bad Connection list (not tokens, more than 32 names, an end-to-end field such as Content-Length or Host) | error |
 
@@ -237,9 +238,9 @@ close_notify) a FIN or a reset is "cut short" (3) – for http too: netd tells a
 
 ## Tests
 
-**`/bin/httptest`** (NET TEST 5): the HTTP parser `user/lib/http.rs` without a network – 63 answers (every
+**`/bin/httptest`** (NET TEST 5): the HTTP parser `user/lib/http.rs` without a network – 66 answers (every
 rule above, valid and refused, the end of the connection) and a chunked body of 40 000 bytes, each fed whole, byte
-by byte and in random pieces with the same result; 4600 mutations – never a panic, the body handed out always
+by byte and in random pieces with the same result; 4800 mutations – never a panic, the body handed out always
 equals the parser's count.
 
 **`common/desotls/tls_tests.rs`** (134 checks, run by `/bin/tlstest` in TLS TEST 1 and on the host):
@@ -267,13 +268,14 @@ equals the parser's count.
   client's context string, the transcript missing a message or in the wrong order, the wrong KeyUpdate direction,
   record numbers not counting, the nonce without the number, padding kept, limits removed, …) – all 32 caught.
 
-**TLS TEST 2** – `init test /bin/tlstest net` (84 cases): `/bin/netget https://` against `tests/tls-stub.py` on the host
+**TLS TEST 2** – `init test /bin/tlstest net` (87 cases): `/bin/netget https://` against `tests/tls-stub.py` on the host
 (Python `ssl` = OpenSSL; certificates in `tests/tls/`, made by `gen-test-certs.py`): both cipher suites, an RSA
 and an ECDSA server, 1 MiB with a pattern, `--key-update` (OpenSSL answers with its own KeyUpdate), the framing
 cases above – HTTP/1.1 from `tests/http_pages.py` (shared with NET TEST's `tests/http-stub.py`): chunked bodies
 (with trailers, extensions, quoted strings, 16 hex digits, 1 MiB in random chunk sizes), 100 Continue, 204 / 205 /
 304, a reset, a FIN without close_notify and a server that stays silent after a whole answer (0 with a warning,
-within 4 s), cut before the last chunk (3), 28 refused answers (4) –, resets (in the middle, without a length – 3;
+within 4 s), cut before the last chunk (3), 28 refused answers (4), Content-Encoding with parameters in 200 and
+304 (4, "bad Content-Encoding") –, resets (in the middle, without a length – 3;
 after a whole answer – 0), and the refusals – unknown CA (without `--anchor`), expired, not yet valid, another name, a
 broken signature, a man in the middle with a certificate from another CA, a TLS 1.2-only server, a server without
 X25519 – each exit 5 with tls-stub's counter showing that no request reached the server. A man in the middle that

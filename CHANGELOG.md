@@ -2,6 +2,18 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.76.1 — 2026-11-11
+
+### Fixed – Content-Encoding with parameters was accepted
+- `user/lib/http.rs` checked Content-Encoding with the transfer-coding rule, which allows parameters, so
+  `Content-Encoding: identity;level=1` passed – also in a 304, where only the syntax is checked. A content coding is
+  a plain token (RFC 9110 §8.4); only transfer codings take parameters (RFC 9112 §7). Now each Content-Encoding
+  element must be a token – "bad Content-Encoding field", exit 4.
+- Tests: `/bin/httptest` 636 → 666 checks (Content-Encoding with parameters in 200 and 304 refused, a 304 with
+  `Transfer-Encoding: gzip;q=1, chunked` still accepted – every split); TLS TEST 2 84 → 87 cases (`/ce-params`,
+  `/304-ce-params` – exit 4 with "bad Content-Encoding"; `/304-te-params` – "HTTP 304").
+- Docs: `docs/desotls/HANDSHAKE.md` (the framing table), ARCHITECTURE, README.
+
 ## v0.76.0 — 2026-11-11
 
 ### Added – netget speaks HTTP/1.1, with chunked answers

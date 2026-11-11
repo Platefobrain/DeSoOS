@@ -1243,7 +1243,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   summary to stderr; https through DeSoTLS (TLS 1.3 in the program – netd carries only ciphertext; section
   "DeSoTLS"). The answer goes through `user/lib/http.rs` – a parser without I/O and heap, fed in any pieces:
   Content-Length once or `Transfer-Encoding: chunked` (not both), 1xx skipped, 204 / 304 end with their head,
-  trailers apart and never framing, no content coding, nothing after the end; without a length https needs the
+  trailers apart and never framing, no content coding (Content-Encoding a list of plain tokens), nothing after the end; without a length https needs the
   server's close_notify; after a whole answer at most 2 s for the connection's end (a broken record then is still
   exit 5). The rules: `docs/desotls/HANDSHAKE.md`, "netget". Exit 0 complete, 1 usage, 2 no connection, 3 cut
   short, 4 HTTP error or malformed answer, 5 TLS refused.
@@ -1254,8 +1254,8 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   | Windows (WinHTTP) | 1.1 / 2 / 3 | yes | Transfer-Encoding wins |
   | RedoxOS (curl, reqwest) | 1.1 / 2 | yes | Transfer-Encoding wins |
   | DeSoOS (netget) | 1.1 | yes | refused (RFC 9112 §6.3) |
-- Tests: `/bin/httptest` (NET TEST 5/7) – the HTTP parser on 63 answers and a 40 000-byte chunked body, every split
-  of the stream giving the same result, 4600 mutations. `/bin/tcptest` (NET TEST 4/7) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
+- Tests: `/bin/httptest` (NET TEST 5/7) – the HTTP parser on 66 answers and a 40 000-byte chunked body, every split
+  of the stream giving the same result, 4800 mutations. `/bin/tcptest` (NET TEST 4/7) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
   windows, window scaling, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
   every closing path, wraparound at 2^32, hostile segments, 20 000 random segments. `tests/http-stub.py` (started
   by `tests/test.sh` on 127.0.0.1:58080, the guest connects to 10.0.2.2:58080 – QEMU's NAT): `/hello`, `/big`

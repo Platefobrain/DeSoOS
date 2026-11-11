@@ -54,6 +54,10 @@ PAGES = {
     # 304: accepted (its fields are metadata), but not 2xx – exit 4 with "HTTP 304".
     "/304-cl": ([b"HTTP/1.1 304 Not Modified\r\nContent-Length: 1234\r\n\r\n"], "close"),
     "/304-meta": ([b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"], "close"),
+    "/304-te-params": ([b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: gzip;q=1, chunked\r\n\r\n"], "close"),
+    # Content-Encoding is a list of plain tokens (RFC 9110 §8.4) – parameters refused, also in 304.
+    "/ce-params": ([H11 + b"Content-Encoding: identity;level=1\r\nContent-Length: 1\r\n\r\nx"], "close"),
+    "/304-ce-params": ([b"HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip;q=1\r\n\r\n"], "close"),
     # The end of the connection after a whole answer.
     "/chunked-rst-after": (CHUNKED_BODY, "reset"),
     "/chunked-fin-after": (CHUNKED_BODY, "fin"),

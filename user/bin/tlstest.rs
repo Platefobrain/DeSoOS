@@ -325,9 +325,17 @@ fn net() -> i32 {
     }
     // 304: accepted (its Content-Length / Transfer-Encoding / Content-Encoding describe the
     // 200 not sent), but not 2xx.
-    for path in ["/304-cl", "/304-meta"] {
+    for path in ["/304-cl", "/304-meta", "/304-te-params"] {
         let (code, err) = get_err(58443, path, &[]);
         if code != 4 || !err.contains("netget: HTTP 304") {
+            fail!("{}: exit {}, {:?}", path, code, err.trim());
+        }
+        cases += 1;
+    }
+    // Content-Encoding with parameters (RFC 9110 §8.4: plain tokens) – malformed, also in 304.
+    for path in ["/ce-params", "/304-ce-params"] {
+        let (code, err) = get_err(58443, path, &[]);
+        if code != 4 || !err.contains("bad Content-Encoding") {
             fail!("{}: exit {}, {:?}", path, code, err.trim());
         }
         cases += 1;

@@ -13,8 +13,8 @@
 //     Content-Encoding describe the 200 that was not sent – only their syntax is checked;
 //   - Transfer-Encoding: exactly "chunked", in one field, and not in an HTTP/1.0 answer;
 //     together with Content-Length – refused (RFC 9112 §6.3: a sign of request smuggling);
-//   - Content-Length once, decimal; Content-Encoding other than identity in an answer with
-//     content – refused (netget asks with "Accept-Encoding: identity" and decodes nothing);
+//   - Content-Length once, decimal; Content-Encoding a list of plain tokens (no parameters –
+//     RFC 9110 §8.4, also in 304); other than identity in an answer with content – refused (netget asks with "Accept-Encoding: identity" and decodes nothing);
 //   - chunked: 1-16 hex digits, extensions skipped but their syntax checked, CRLF exactly,
 //     trailers kept apart from the head (never merged, never framing) – fields needed before
 //     the content and fields named by Connection are refused there;
@@ -238,7 +238,7 @@ fn each_element(v: &[u8], f: &mut dyn FnMut(&[u8]) -> bool) -> bool {
     true
 }
 
-/// A coding list element: token with optional parameters.
+/// A transfer coding (RFC 9112 §7): a token with optional parameters.
 fn coding_ok(e: &[u8]) -> bool {
     let n = token_len(e);
     n > 0 && params_ok(&e[n..])
@@ -487,7 +487,8 @@ impl Parser {
                     if !eq_ci(el, "identity") {
                         ce_identity = false;
                     }
-                    coding_ok(el)
+                    // content-coding = token (RFC 9110 §8.4) – no parameters, unlike transfer codings.
+                    is_token(el)
                 });
             } else if eq_ci(k, "connection") {
                 let ok = each_element(v, &mut |el| {
