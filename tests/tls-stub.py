@@ -7,11 +7,12 @@
 #   58445  expired certificate      58446  not yet valid      58447  issued for other.desoos
 #   58448  certificate with a broken signature                58449  issued by another CA
 #   58450  TLS 1.2 only             58451  key exchange P-256 only (no X25519)
-#   58460-58466  a man in the middle in front of a 58443-like server (each its own):
+#   58460-58467  a man in the middle in front of a 58443-like server (each its own):
 #          60 changes the server's Finished, 61 its CertificateVerify signature, 62 one byte
 #          of the first record after the handshake, 63 sends that record twice, 64 hands the
 #          server's bytes over in 1-7 byte pieces, 65 several records at once, 66 inserts three
-#          KeyUpdates from the server (the first asking for one back)
+#          KeyUpdates from the server (the first asking for one back), 67 breaks the tag of the
+#          record carrying the server's close_notify (after a whole answer)
 #   58470  plain HTTP: /seen?port=N – how many HTTP requests the server behind port N got
 #          (a refused handshake must leave it at 0)
 #
@@ -20,9 +21,11 @@
 # connection's client random.  They implement ChaCha20-Poly1305 only – the guest is asked to
 # offer that suite (netget --cipher chacha).
 #
+# HTTP/1.1 pages (chunked, 1xx, 204 / 205 / 304, trailers, Connection, the end after a whole
+# answer): tests/http_pages.py, shared with tests/http-stub.py.
+#
 # Pages (any server): /hello, /big (1 MiB, byte i = (i*7 + i/251) mod 256), /cl0 (empty
-# body), /dupcl (two different Content-Length), /dupsame (the same one twice), /te
-# (Transfer-Encoding: chunked), /extra (Content-Length 5, then 3 more bytes in a later
+# body), /dupcl (two different Content-Length), /dupsame (the same one twice), /extra (Content-Length 5, then 3 more bytes in a later
 # record), /nocl-notify (no length, close_notify at the end), /nocl-fin (no length, TCP closed
 # without close_notify), /cut (Content-Length 100000, 5000 bytes, no close_notify),
 # /cl-fin (complete by Content-Length, then no close_notify), /reset (Content-Length 100000,
@@ -40,6 +43,8 @@ import tempfile
 import threading
 import time
 
+from http_pages import page11
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERTS = os.path.join(HERE, "tls")
 KEYLOG_DIR = tempfile.mkdtemp(prefix="desoos-tls-")
@@ -56,8 +61,12 @@ def pattern(n):
 # ---- the pages ----
 
 def page(path):
-    """(bytes to send in pieces, how to end: 'notify' | 'fin' | 'reset')."""
+    """(bytes to send in pieces, how to end: 'notify' | 'fin' | 'reset' | 'linger')."""
     global BIG_BODY
+    got = page11(path)
+    if got is not None:
+        parts, end = got
+        return parts, "notify" if end == "close" else end
     def ok(body, extra=""):
         return [("HTTP/1.0 200 OK\r\nServer: desoos-tls-test\r\n%sContent-Length: %d\r\n\r\n" % (extra, len(body))).encode() + body]
     if path == "/hello":
@@ -72,8 +81,6 @@ def page(path):
         return [b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nabcd"], "notify"
     if path == "/dupsame":
         return [b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nabcd"], "notify"
-    if path == "/te":
-        return [b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"], "notify"
     if path == "/extra":
         return [b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello", b"xyz"], "notify"
     if path == "/nocl-notify":
@@ -134,18 +141,23 @@ def serve_tls(port, ctx, force_end=None):
                         time.sleep(0.05)
                     s.sendall(p)
                 end = force_end or end
+                if end == "linger":
+                    # A whole answer, but the connection stays open.
+                    time.sleep(6)
+                    end = "notify"
                 if end == "notify":
                     try:
                         s.unwrap()
                     except (ssl.SSLError, OSError):
                         pass
                 elif end == "reset":
+                    # wrap_socket() detached `raw` – the socket is `s` now.
                     time.sleep(0.5)
-                    raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-                    raw.close()
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    s.close()
                 else:
                     # "fin": the TCP connection ends without close_notify.
-                    raw.shutdown(socket.SHUT_RDWR)
+                    s.shutdown(socket.SHUT_RDWR)
             except (ssl.SSLError, OSError, IndexError):
                 pass
 
@@ -414,6 +426,14 @@ def middle(port, backend, keylog, mode):
                 c.sendall(rec)
                 changed = True
                 continue
+            if mode == "tagend":
+                ty, _ = app.open(rec)
+                if ty == 21:
+                    r = bytearray(rec)
+                    r[-1] ^= 0x01
+                    rec = bytes(r)
+                c.sendall(rec)
+                continue
             if mode == "keyupdate":
                 ty, pt = app.open(rec)
                 while updates < 3:
@@ -478,7 +498,7 @@ def main():
     serve_tls(base + 6, context("mitm.pem", "mitm.key"))
     serve_tls(base + 7, context("rsa.pem", "rsa.key", max_version=ssl.TLSVersion.TLSv1_2))
     serve_tls(base + 8, context("rsa.pem", "rsa.key", groups="prime256v1"))
-    for i, mode in enumerate(["finished", "verify", "tag", "replay", "pieces", "merge", "keyupdate"]):
+    for i, mode in enumerate(["finished", "verify", "tag", "replay", "pieces", "merge", "keyupdate", "tagend"]):
         front = base + 17 + i      # 58460 + i
         back = base + 117 + i      # 58560 + i
         keylog = os.path.join(KEYLOG_DIR, "%d.keys" % back)

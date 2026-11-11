@@ -1239,15 +1239,29 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   received data still in netd when the reset arrives is dropped. The program closes its end → FIN, or a RST if
   received data was never read; data arriving for a program that is gone → RST.
 - **`netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path`:**
-  HTTP/1.0 GET, the body to the console or a file, a summary to stderr; https through DeSoTLS (TLS 1.3 in the
-  program – netd carries only ciphertext; section "DeSoTLS"). Strict framing for both: Content-Length once and at
-  most that many bytes, no Transfer-Encoding, without a length https needs the server's close_notify. Exit 0
-  complete, 1 usage, 2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused.
-- Tests: `/bin/tcptest` (NET TEST 4/6) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
+  HTTP/1.1 GET (one request per connection, `Accept-Encoding: identity`), the body to the console or a file, a
+  summary to stderr; https through DeSoTLS (TLS 1.3 in the program – netd carries only ciphertext; section
+  "DeSoTLS"). The answer goes through `user/lib/http.rs` – a parser without I/O and heap, fed in any pieces:
+  Content-Length once or `Transfer-Encoding: chunked` (not both), 1xx skipped, 204 / 304 end with their head,
+  trailers apart and never framing, no content coding, nothing after the end; without a length https needs the
+  server's close_notify; after a whole answer at most 2 s for the connection's end (a broken record then is still
+  exit 5). The rules: `docs/desotls/HANDSHAKE.md`, "netget". Exit 0 complete, 1 usage, 2 no connection, 3 cut
+  short, 4 HTTP error or malformed answer, 5 TLS refused.
+
+  | | HTTP | chunked | Transfer-Encoding + Content-Length |
+  |---|---|---|---|
+  | Linux (curl) | 1.1 / 2 / 3 | yes | Transfer-Encoding wins |
+  | Windows (WinHTTP) | 1.1 / 2 / 3 | yes | Transfer-Encoding wins |
+  | RedoxOS (curl, reqwest) | 1.1 / 2 | yes | Transfer-Encoding wins |
+  | DeSoOS (netget) | 1.1 | yes | refused (RFC 9112 §6.3) |
+- Tests: `/bin/httptest` (NET TEST 5/7) – the HTTP parser on 63 answers and a 40 000-byte chunked body, every split
+  of the stream giving the same result, 4600 mutations. `/bin/tcptest` (NET TEST 4/7) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
   windows, window scaling, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
   every closing path, wraparound at 2^32, hostile segments, 20 000 random segments. `tests/http-stub.py` (started
   by `tests/test.sh` on 127.0.0.1:58080, the guest connects to 10.0.2.2:58080 – QEMU's NAT): `/hello`, `/big`
-  (1 MiB with a pattern), `/slow`, `/short` (cut), `/reset` (RST), `/nolength`, 404 (nettest, see Testing).
+  (1 MiB with a pattern), `/slow`, `/short` (cut), `/reset` (RST), `/nolength`, 404, and the HTTP/1.1 pages of
+  `tests/http_pages.py` (chunked, 100 Continue, cut before the last chunk, a reset after a whole answer, a silent
+  server) – nettest, see Testing.
   QEMU's user network terminates TCP itself, so hostile TCP behaviour can only come from tcptest – the stub tests
   the whole path (DNS, ARP, TCP, netd, channel, program).
 - Not yet: SACK, a bigger send ring (uploads), urgent data, keepalive.
@@ -1372,8 +1386,8 @@ then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLO
 - `netconfig` – every card: link, address, lease, DNS, counters, the last TCP connection; `netconfig renew / dns /
   set / dhcp / rxrestart` – the only program with the admin right.
 - `ping <address or name> [count]`, `host <name>` (DNS), `netarp <a.b.c.d>` (one ARP request).
-- `netget [-o file] [-v] [--cipher …] [--anchor …] [--key-update] http[s]://host[:port]/path` – HTTP/1.0 download
-  with the speed; https with TLS 1.3 (DeSoTLS).
+- `netget [-o file] [-v] [--cipher …] [--anchor …] [--key-update] http[s]://host[:port]/path` – HTTP/1.1 download
+  (chunked answers) with the speed; https with TLS 1.3 (DeSoTLS).
 - `netweb [-n count] <port> < page` – a minimal web server; `nofiles --listen netweb 8080 < /index.html` runs it
   with no file access.
 

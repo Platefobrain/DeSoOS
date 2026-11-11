@@ -4,7 +4,7 @@
 //   1. /bin/tlstest: RFC 8448's handshake byte for byte, records, KeyUpdate, HelloRetryRequest,
 //      changed server messages (no network – common/desotls/tls_tests.rs)
 //   2. init test /bin/tlstest net: netget https:// against tests/tls-stub.py on the host –
-//      both cipher suites, RSA and ECDSA servers, 1 MiB, KeyUpdate both ways, HTTP framing,
+//      both cipher suites, RSA and ECDSA servers, 1 MiB, KeyUpdate both ways, HTTP/1.1 framing (chunked, 1xx, 204 / 205 / 304, trailers, the end after a whole answer),
 //      every refusal (certificates, TLS 1.2, no X25519, a man in the middle changing the
 //      Finished, the CertificateVerify, a record or replaying one) with no request reaching
 //      the server for the handshake refusals
@@ -70,7 +70,7 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && line.contains("cases OK"), "tlstest net: {:?} {:?}", kind, out.trim());
     let summary = out.lines().find(|l| l.starts_with("netget: TLS 1.3")).unwrap_or("").trim();
     let line2 = String::from(line);
-    serial_println!("[TLS TEST] 2/3 netget https:// against tests/tls-stub.py (OpenSSL): both cipher suites, RSA and ECDSA, 1 MiB, KeyUpdate both ways, HTTP framing, every refusal with nothing sent to the server: {}; {} PASS", summary, line);
+    serial_println!("[TLS TEST] 2/3 netget https:// against tests/tls-stub.py (OpenSSL): both cipher suites, RSA and ECDSA, 1 MiB, KeyUpdate both ways, HTTP/1.1 framing (chunked, 1xx, 204 / 205 / 304, trailers, the end after a whole answer), every refusal with nothing sent to the server: {}; {} PASS", summary, line);
 
     // 3. A clock that is not plausible: refused before anything is sent.
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);

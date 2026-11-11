@@ -550,6 +550,25 @@ fn main(args: Args) -> i32 {
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/nocl-reset"]) == 3, "netget of a page without a length ended by a reset must exit 3");
     check!(n, run_netget(&["netget", "http://10.0.2.2:58080/cl-reset"]) == 0, "netget of a whole page (Content-Length) then a reset must exit 0");
     check!(n, run_netget(&["netget", "--cipher", "none", "https://example.com/"]) == 1, "netget with a bad option must exit 1");
+    // HTTP/1.1 (tests/http_pages.py): chunked, 100 Continue, the end after a whole answer.
+    unlink("/netget.out");
+    let code = run_netget(&["netget", "-o", "/netget.out", "http://10.0.2.2:58080/chunked"]);
+    let fd = open("/netget.out", O_READ);
+    let k = if fd >= 0 { read(fd as u64, &mut fb) } else { -1 };
+    if fd >= 0 {
+        close(fd as u64);
+    }
+    unlink("/netget.out");
+    check!(n, code == 0 && k == 14 && &fb[..14] == b"chunked works\n", "netget of a chunked page: code {}, {} bytes", code, k);
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/continue"]) == 0, "netget after 100 Continue must exit 0");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/chunked-cut"]) == 3, "netget of a chunked page cut before its last chunk must exit 3");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/chunked-reset"]) == 3, "netget of a chunked page reset before its last chunk must exit 3");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/chunked-rst-after"]) == 0, "netget of a whole chunked page then a reset must exit 0");
+    check!(n, run_netget(&["netget", "http://10.0.2.2:58080/te-cl"]) == 4, "netget of an answer with Transfer-Encoding and Content-Length must exit 4");
+    let t0 = uptime_ms();
+    let code = run_netget(&["netget", "http://10.0.2.2:58080/linger"]);
+    let ms = uptime_ms() - t0;
+    check!(n, code == 0 && ms < 4000, "netget of a whole page on a connection the server keeps open: code {} after {} ms (expected 0 within 4 s)", code, ms);
 
     let r = ask("dns auto");
     check!(n, r.starts_with("DNS server 10.0.2.3 (from DHCP)"), "dns auto: {:?}", r.trim());

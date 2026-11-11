@@ -4,12 +4,15 @@
 # as 10.0.2.2:<port>.  Fixed pages exercise the guest's TCP: a short page, 1 MiB
 # with a known pattern, a page sent in slow pieces, a page cut short, a page
 # ended with a reset, a page without a length, an error status; /nocl-reset (no
-# length, then a reset) and /cl-reset (whole by its length, then a reset).
+# length, then a reset) and /cl-reset (whole by its length, then a reset).  HTTP/1.1 pages
+# (chunked and the rest): tests/http_pages.py, shared with tests/tls-stub.py.
 import socket
 import socketserver
 import struct
 import sys
 import time
+
+from http_pages import page11
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 58080
 BIG = 1024 * 1024
@@ -46,6 +49,19 @@ class Handler(socketserver.BaseRequestHandler):
         parts = line.split()
         path = parts[1] if len(parts) >= 2 else "/"
         try:
+            got = page11(path)
+            if got is not None:
+                parts, end = got
+                for i, p in enumerate(parts):
+                    if i:
+                        time.sleep(0.05)
+                    s.sendall(p)
+                if end == "reset":
+                    time.sleep(0.5)
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                elif end == "linger":
+                    time.sleep(6)
+                return
             if path == "/hello":
                 self.send_page(b"Hello from the host\n")
             elif path == "/big":

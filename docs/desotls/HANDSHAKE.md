@@ -178,34 +178,69 @@ alert from the server ends the connection with `Kind::PeerAlert`.
 2. The trusted CAs: `/etc/certs/roots` (sealed, Mozilla's) – or only the CA in `--anchor` (PEM or DER).
 3. TCP through netd, the handshake; a summary on stderr:
    `netget: TLS 1.3, TLS_AES_128_GCM_SHA256, x25519, rsa_pss_rsae_sha256, 2 certificates up to <CA>`.
-4. The request (HTTP/1.0) – only now, after the server's Finished.
-5. The answer, record by record, then our close_notify.
+4. The request – only now, after the server's Finished: `GET <path> HTTP/1.1`, `Host`, `User-Agent`,
+   `Accept-Encoding: identity`, `Connection: close` (one request per connection, no keep-alive).
+5. The answer, record by record (the parser `user/lib/http.rs`), then up to 2 s for the connection's end, then
+   our close_notify.
 
-The answer's framing (the same rules for http://):
+The answer's framing (the same rules for http://; RFC 9110, RFC 9112 §6.3, in this order):
 
-| Answer | Complete when |
+| Answer | Result |
 |---|---|
-| Content-Length: N | exactly N bytes (N = 0 – an empty body); more than N is an error even when the extra bytes come in a later record (netget reads on to the close_notify) |
-| no Content-Length | everything up to the end – for https only with the server's close_notify; a TCP end without it is "cut short" |
-| Transfer-Encoding (any) | error – not allowed in an answer to HTTP/1.0, and ambiguous next to Content-Length (request smuggling, RFC 9112 6.3) |
-| Content-Length twice – also with the same value | error (RFC 9110 8.6 allows identical ones, as curl and Go do; netget refuses – a simple, strict client) |
-| a malformed header block: a status line other than "HTTP/1.x NNN", a line without ":", space before ":", a folded line, more than 8 KiB, a Content-Length that is not a decimal number | error |
+| 1xx other than 101 (100 Continue, 103 Early Hints) | skipped, at most 4 – a fifth is an error; with Content-Length or Transfer-Encoding – error |
+| 101 Switching Protocols | error – no upgrade was asked for |
+| 204 | ends with its head; Content-Length or Transfer-Encoding – error (RFC 9110 §8.6, RFC 9112 §6.1) |
+| 304 | ends with its head; Content-Length, Transfer-Encoding and Content-Encoding describe the 200 that was not sent – only their syntax is checked |
+| 205 | no content: Content-Length 0, an empty chunked body or nothing; a byte of content – error |
+| Transfer-Encoding: chunked | complete with the last chunk (size 0) and the trailer section |
+| Transfer-Encoding: anything else, in two fields, or in an HTTP/1.0 answer | error |
+| Transfer-Encoding and Content-Length together | error (RFC 9112 §6.3: a sign of request smuggling; curl, WinHTTP and Redox let Transfer-Encoding win) |
+| Content-Length: N | exactly N bytes (N = 0 – an empty body) |
+| Content-Length twice – also with the same value | error (RFC 9110 §8.6 allows identical ones, as curl and Go do; netget refuses – a simple, strict client) |
+| neither | everything up to the end – for https only with the server's close_notify; a TCP end without it is "cut short" |
+| Content-Encoding other than identity, in an answer with content | error – netget decodes nothing (gzip is not supported) |
+| any byte after the end of the answer – also in a later record, also after a 204 / 304 head | error (one request per connection: it is not a second answer) |
+| a malformed head: a status line other than "HTTP/1.x NNN", a header name that is not a token, a control character in a value, a line without ":", a folded line, more than 8 KiB, a Content-Length that is not a decimal number, a bad Connection list (not tokens, more than 32 names, an end-to-end field such as Content-Length or Host) | error |
 
-A TCP end without close_notify – FIN or reset – after an answer already complete by its Content-Length is only a
-warning (as curl and Go; for https the length is inside the authenticated stream). Without a length, or before the
-length is reached, both are "cut short" (3) – for http too: netd tells a reset apart with an empty message, so an
-http answer without a length ended by a reset is no longer taken for a whole one.
+Chunked bodies: the size in 1–16 hex digits (17 – also with leading zeros – is an error, so is a total that
+overflows 64 bits); chunk extensions are skipped but must follow RFC 9112 §7.1.1 (`;name[=token|quoted-string]`,
+an unclosed quote or a backslash before nothing is an error); CRLF exactly (a bare LF is an error), also after
+every chunk's data; a chunk-size line of at most 4 KiB. Trailers are kept apart from the head – never merged,
+never framing; at most 8 KiB, the same syntax as headers; refused there (DeSoOS policy built from the categories of
+RFC 9110 §6.5.1 – fields needed before the content): Content-Length, Transfer-Encoding, Host, Content-Encoding,
+Content-Type, Content-Range, Trailer, Connection, Keep-Alive, TE, Upgrade, Cache-Control, Expires, Set-Cookie,
+Authorization, WWW-Authenticate – and every field the answer's Connection names. `-v` prints the heads (also the
+skipped 1xx) and the trailers. The parser takes the bytes in any pieces with the same result (`/bin/httptest`).
+
+After a whole answer (by its Content-Length, its last chunk or its 204 / 304 head) netget reads on to the end of the
+connection, at most 2 s:
+
+| What comes | Result |
+|---|---|
+| close_notify, FIN | 0 |
+| FIN or a reset without close_notify, no more data | 0 with a warning (as curl and Go; for https the framing is inside the authenticated stream) |
+| nothing for 2 s | 0 with a warning "the server did not close the connection", netget closes it |
+| more data | 4 |
+| a broken record, a server alert | 5 – never taken for a missing close_notify |
+
+Before the answer is whole (fewer bytes than Content-Length, before the last chunk, without a length and without
+close_notify) a FIN or a reset is "cut short" (3) – for http too: netd tells a reset apart with an empty message.
 
 | Exit | Meaning |
 |---|---|
 | 0 | a whole 2xx answer |
 | 1 | wrong usage, a file problem |
 | 2 | no connection (netd, DNS, TCP, the server closed during the handshake) |
-| 3 | cut short: fewer bytes than Content-Length, or https ended without close_notify before the answer was complete, or a reset before the answer was complete (also http without a length) |
-| 4 | an HTTP status other than 2xx, or a malformed answer (framing, headers) |
+| 3 | cut short: fewer bytes than Content-Length, before the last chunk, or https ended without close_notify before the answer was complete, or a reset before the answer was complete (also http without a length) |
+| 4 | an HTTP status other than 2xx, or a malformed answer (framing, headers, trailers, coding, data after the end) |
 | 5 | TLS refused: certificate, clock, handshake, record, a server alert |
 
 ## Tests
+
+**`/bin/httptest`** (NET TEST 5): the HTTP parser `user/lib/http.rs` without a network – 63 answers (every
+rule above, valid and refused, the end of the connection) and a chunked body of 40 000 bytes, each fed whole, byte
+by byte and in random pieces with the same result; 4600 mutations – never a panic, the body handed out always
+equals the parser's count.
 
 **`common/desotls/tls_tests.rs`** (134 checks, run by `/bin/tlstest` in TLS TEST 1 and on the host):
 
@@ -232,15 +267,20 @@ http answer without a length ended by a reset is no longer taken for a whole one
   client's context string, the transcript missing a message or in the wrong order, the wrong KeyUpdate direction,
   record numbers not counting, the nonce without the number, padding kept, limits removed, …) – all 32 caught.
 
-**TLS TEST 2** – `init test /bin/tlstest net` (35 cases): `/bin/netget https://` against `tests/tls-stub.py` on the host
+**TLS TEST 2** – `init test /bin/tlstest net` (84 cases): `/bin/netget https://` against `tests/tls-stub.py` on the host
 (Python `ssl` = OpenSSL; certificates in `tests/tls/`, made by `gen-test-certs.py`): both cipher suites, an RSA
 and an ECDSA server, 1 MiB with a pattern, `--key-update` (OpenSSL answers with its own KeyUpdate), the framing
-cases above, resets (in the middle, without a length – 3; after a whole answer – 0), and the refusals – unknown CA (without `--anchor`), expired, not yet valid, another name, a
+cases above – HTTP/1.1 from `tests/http_pages.py` (shared with NET TEST's `tests/http-stub.py`): chunked bodies
+(with trailers, extensions, quoted strings, 16 hex digits, 1 MiB in random chunk sizes), 100 Continue, 204 / 205 /
+304, a reset, a FIN without close_notify and a server that stays silent after a whole answer (0 with a warning,
+within 4 s), cut before the last chunk (3), 28 refused answers (4) –, resets (in the middle, without a length – 3;
+after a whole answer – 0), and the refusals – unknown CA (without `--anchor`), expired, not yet valid, another name, a
 broken signature, a man in the middle with a certificate from another CA, a TLS 1.2-only server, a server without
 X25519 – each exit 5 with tls-stub's counter showing that no request reached the server. A man in the middle that
 holds the server's keys (from its keylog) changes the Finished and the CertificateVerify (exit 5, no request),
 changes or replays a record after the handshake (exit 5), cuts the server's bytes into 1–7 byte pieces, sends
-several records at once, and inserts three KeyUpdates from the server (all exit 0). `[RESULT-TLS]`: checks, cases,
+several records at once, and inserts three KeyUpdates from the server (all exit 0 – also with a chunked answer);
+a sixth breaks the tag of the record with the server's close_notify after a whole answer (exit 5). `[RESULT-TLS]`: checks, cases,
 the time of a whole `/hello` and the speed of `/big`.
 
 **TLS TEST 3** – a clock made not plausible (a self-test switch in `rtc.rs`): netget refuses before connecting.

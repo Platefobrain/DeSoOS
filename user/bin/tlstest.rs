@@ -7,7 +7,9 @@
 //                 tests/tls-stub.py on the host (tls.desoos = 10.0.2.2, names from
 //                 tests/dns-stub.py): every case below must end with its exit code, the
 //                 pages must arrive whole, and a refused handshake must not let the request
-//                 reach the server (tls-stub's /seen counter): "tlstest net: N cases OK"
+//                 reach the server (tls-stub's /seen counter); HTTP/1.1 answers from
+//                 tests/http_pages.py (chunked, 1xx, 204 / 205 / 304, trailers, the end after
+//                 a whole answer): "tlstest net: N cases OK"
 //
 // A failure prints "tlstest: FAIL ..." and exits with 1.
 #![no_std]
@@ -31,9 +33,12 @@ entry!(main);
 const TEST_CA: &[u8] = include_bytes!("../../tests/tls/ca.pem");
 const CA_PATH: &str = "/tls-ca.pem";
 const OUT: &str = "/tls.out";
+/// netget's stderr, for the cases that check its words.
+const ERR: &str = "/tls.err";
 
 static mut FILE: [u8; 1 << 20 | 4096] = [0; 1 << 20 | 4096];
 static mut REPLY: [u8; 4096] = [0; 4096];
+static mut ERRBUF: [u8; 4096] = [0; 4096];
 
 macro_rules! fail {
     ($($a:tt)*) => {{
@@ -70,12 +75,17 @@ fn tcp_in_use() -> u32 {
 }
 
 fn netget(args: &[&str]) -> u64 {
+    netget_to(args, 1)
+}
+
+/// netget with its stderr on handle `err`.
+fn netget_to(args: &[&str], err: u64) -> u64 {
     // netd has 8 TCP connections; earlier ones may still be closing – wait for room.
     let t = uptime_ms();
-    while tcp_in_use() >= 6 && uptime_ms() - t < 5000 {
+    while tcp_in_use() >= 6 && uptime_ms() - t < 8000 {
         sleep_ms(50);
     }
-    let pid = spawn_ex("/bin/netget", args, &[(1, 1), (1, 2), (SVC, SVC)], 0);
+    let pid = spawn_ex("/bin/netget", args, &[(1, 1), (err, 2), (SVC, SVC)], 0);
     if pid <= 0 {
         return 999;
     }
@@ -147,6 +157,28 @@ fn url(port: u16, path: &str, out: &mut [u8; 96]) -> usize {
 
 /// netget https://tls.desoos:<port><path> with --anchor and the extra options; its code.
 fn get(port: u16, path: &str, extra: &[&str]) -> u64 {
+    get_to(port, path, extra, 1)
+}
+
+/// The same with netget's stderr captured: (code, what it wrote there).
+fn get_err(port: u16, path: &str, extra: &[&str]) -> (u64, &'static str) {
+    let fd = open(ERR, O_WRITE | O_CREATE | O_TRUNC);
+    if fd < 0 {
+        return (997, "");
+    }
+    let code = get_to(port, path, extra, fd as u64);
+    close(fd as u64);
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(ERRBUF) };
+    let fd = open(ERR, O_READ);
+    let n = if fd >= 0 { read(fd as u64, buf).max(0) as usize } else { 0 };
+    if fd >= 0 {
+        close(fd as u64);
+    }
+    unlink(ERR);
+    (code, core::str::from_utf8(&buf[..n]).unwrap_or(""))
+}
+
+fn get_to(port: u16, path: &str, extra: &[&str], err: u64) -> u64 {
     let mut u = [0u8; 96];
     let n = url(port, path, &mut u);
     let u = core::str::from_utf8(&u[..n]).unwrap_or("");
@@ -163,7 +195,7 @@ fn get(port: u16, path: &str, extra: &[&str]) -> u64 {
     args[k] = u;
     k += 1;
     unlink(OUT);
-    netget(&args[..k])
+    netget_to(&args[..k], err)
 }
 
 fn net() -> i32 {
@@ -232,7 +264,7 @@ fn net() -> i32 {
     let framing: [(&str, u64); 8] = [
         ("/dupcl", 4),
         ("/dupsame", 4),
-        ("/te", 4),
+        ("/te-http10", 4),
         ("/extra", 4),
         ("/badhdr", 4),
         ("/404", 4),
@@ -255,6 +287,114 @@ fn net() -> i32 {
         }
         cases += 1;
     }
+
+    // HTTP/1.1 (tests/http_pages.py): whole answers, chunked or not.
+    let whole: [(&str, &[u8]); 9] = [
+        ("/chunked", b"chunked works\n"),
+        ("/chunked-trailer", b"abc"),
+        ("/chunked-quoted", b"hi"),
+        ("/chunked-ext0", b"hi"),
+        ("/chunked-hex16", b"hi"),
+        ("/continue", b"after continue\n"),
+        ("/204-empty", b""),
+        ("/205-empty", b""),
+        ("/205-chunked0", b""),
+    ];
+    for (path, body) in whole {
+        let code = get(58443, path, &[]);
+        let got = read_out();
+        if code != 0 || got != body {
+            fail!("{}: exit {}, {} bytes (expected 0, {} bytes)", path, code, got.len(), body.len());
+        }
+        cases += 1;
+    }
+    let code = get(58443, "/chunked-big", &[]);
+    let got = read_out();
+    let good = got.len() == 1 << 20 && got.iter().enumerate().all(|(i, &b)| b == ((i * 7 + i / 251) & 0xff) as u8);
+    if code != 0 || !good {
+        fail!("/chunked-big: exit {}, {} bytes, pattern {}", code, got.len(), good);
+    }
+    cases += 1;
+    // Records cut, joined, KeyUpdates in between: the same chunked answer.
+    for port in [58464u16, 58465, 58466] {
+        let code = get(port, "/chunked", &["--cipher", "chacha"]);
+        if code != 0 || read_out() != b"chunked works\n" {
+            fail!("{} /chunked: exit {}", port, code);
+        }
+        cases += 1;
+    }
+    // 304: accepted (its Content-Length / Transfer-Encoding / Content-Encoding describe the
+    // 200 not sent), but not 2xx.
+    for path in ["/304-cl", "/304-meta"] {
+        let (code, err) = get_err(58443, path, &[]);
+        if code != 4 || !err.contains("netget: HTTP 304") {
+            fail!("{}: exit {}, {:?}", path, code, err.trim());
+        }
+        cases += 1;
+    }
+    // After a whole answer: a reset or FIN without close_notify – a warning; a server that
+    // keeps the connection open – a warning after 2 s, not a hang.
+    let after: [(&str, &str); 3] = [
+        ("/chunked-rst-after", "reset after the whole answer"),
+        ("/chunked-fin-after", "without close_notify"),
+        ("/linger", "did not close the connection"),
+    ];
+    for (path, words) in after {
+        let t0 = uptime_ms();
+        let (code, err) = get_err(58443, path, &[]);
+        let ms = uptime_ms() - t0;
+        if code != 0 || !err.contains(words) || read_out() != b"chunked works\n" || ms > 4000 {
+            fail!("{}: exit {} in {} ms, {:?}", path, code, ms, err.trim());
+        }
+        cases += 1;
+    }
+    // Cut short before the last chunk, and every refused answer.
+    let bad: [(&str, u64); 30] = [
+        ("/chunked-cut", 3),
+        ("/chunked-reset", 3),
+        ("/chunked-badsize", 4),
+        ("/chunked-overflow", 4),
+        ("/chunked-nocrlf", 4),
+        ("/chunked-lf", 4),
+        ("/chunked-extra", 4),
+        ("/chunked-hex17", 4),
+        ("/chunked-badext", 4),
+        ("/chunked-badquote", 4),
+        ("/chunked-badbackslash", 4),
+        ("/te-gzip", 4),
+        ("/te-cl", 4),
+        ("/te-twice", 4),
+        ("/ce-gzip", 4),
+        ("/ce-br", 4),
+        ("/ce-gzip-empty", 4),
+        ("/204-body", 4),
+        ("/204-te", 4),
+        ("/204-cl", 4),
+        ("/205-body", 4),
+        ("/100-cl", 4),
+        ("/early5", 4),
+        ("/switching", 4),
+        ("/trailer-cl", 4),
+        ("/trailer-te", 4),
+        ("/trailer-connection", 4),
+        ("/trailer-connection2", 4),
+        ("/connection-bad", 4),
+        ("/connection-cl", 4),
+    ];
+    for (path, want) in bad {
+        let code = get(58443, path, &[]);
+        if code != want {
+            fail!("{}: exit {} (expected {})", path, code, want);
+        }
+        cases += 1;
+    }
+    // A broken record after the whole answer (the one with close_notify): refused, never
+    // taken for a missing close_notify.
+    let code = get(58467, "/chunked", &["--cipher", "chacha"]);
+    if code != 5 {
+        fail!("58467 broken record after the answer: exit {} (expected 5)", code);
+    }
+    cases += 1;
 
     // Refusals: exit 5, and the request never reached the server.
     let before = seen(58443);

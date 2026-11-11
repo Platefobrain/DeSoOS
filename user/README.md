@@ -16,7 +16,7 @@ handles, errors).
 | `bin/*test.rs`, `ipcbench`, `svcbench`, `sysfuzz` | test and benchmark programs run by the kernel self-tests |
 | `bin/soak.rs` | the soak test (`tests/soak.sh`): a controller and its workers – files and snapshots, services, network, processes – with checkpoints |
 | `lib/desoos.rs` | the library every program includes: syscalls, handles, errors, output |
-| `lib/*.rs` | shared pure code: TCP, DHCP, DNS, packet parsing (`netproto.rs`), USB descriptors, file copying, the `edu` protocol |
+| `lib/*.rs` | shared pure code: TCP, DHCP, DNS, packet parsing (`netproto.rs`), HTTP/1.1 answers (`http.rs` – netget's parser, chunked, trailers), USB descriptors, file copying, the `edu` protocol |
 | `etc/services/*.svc` | service manifests: what each service is given (devices, grants, file access) |
 | `etc/certs/roots`, `etc/certs/gen-roots.py` | the trusted CA store (`/etc/certs/roots`, sealed at boot) and the script that makes it from Mozilla's root store (NSS `certdata.txt`, pinned tag and SHA-256) |
 | `user.ld` | the linker script for all programs |

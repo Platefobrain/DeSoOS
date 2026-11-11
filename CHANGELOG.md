@@ -2,6 +2,40 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.76.0 — 2026-11-11
+
+### Added – netget speaks HTTP/1.1, with chunked answers
+- On the test laptop Google sent its whole page and `netget` still ended with exit 3: an HTTP/1.0 answer without a
+  length, closed without close_notify. Now `netget` asks `GET … HTTP/1.1` (`Host`, `User-Agent`,
+  `Accept-Encoding: identity`, `Connection: close` – one request per connection) and most servers frame the answer
+  themselves – Content-Length or `Transfer-Encoding: chunked`.
+- `user/lib/http.rs` (new) – the answer parser, without I/O and heap, fed in any pieces with the same result
+  (RFC 9110, RFC 9112 §6.3): 1xx skipped (at most 4; 101 and 1xx with framing fields refused); 204 and 304 end with
+  their head (204 with Content-Length or Transfer-Encoding refused; in 304 those fields and Content-Encoding are
+  metadata of the 200 not sent – syntax only); 205 without content; `Transfer-Encoding` exactly `chunked`, one
+  field, not in HTTP/1.0, never together with Content-Length (refused – curl, WinHTTP and Redox let it win);
+  Content-Encoding other than identity in an answer with content refused; chunks of 1–16 hex digits, extensions
+  skipped but checked (RFC 9112 §7.1.1, quoted strings), CRLF exactly, totals with `checked_add`; trailers kept
+  apart and never framing – fields needed before the content and fields named by Connection refused there;
+  Connection a list of tokens (at most 32, no end-to-end fields); any byte after the end – an error.
+- After a whole answer `netget` waits at most 2 s for the connection's end (new – before, a server that kept the
+  connection open held it forever): close_notify / FIN – 0; FIN or reset without close_notify, or silence – 0
+  with a warning; more data – 4; a broken record or an alert – 5, never taken for a missing close_notify. The time
+  and speed in the summary stop at the whole answer. `-v` also prints skipped 1xx heads and the trailers.
+- Tests: NET TEST 5/7 – **`/bin/httptest`** (636 checks: 63 answers and a 40 000-byte chunked body, each fed whole,
+  byte by byte and in random pieces with the same result; 4600 mutations – never a panic, the body handed out equals
+  the parser's count); NET TEST 6/7 – nettest against the new HTTP/1.1 pages of `tests/http-stub.py` (chunked,
+  100 Continue, cut before the last chunk, reset before and after it, Transfer-Encoding with Content-Length, a
+  server that stays silent – 113 checks); TLS TEST 2 – 35 → **84 cases**: the same and every refused answer over
+  https, a chunked answer through the men in the middle that cut, join and re-key records, and a new one
+  (58467) that breaks the record with the server's close_notify after a whole answer (exit 5). The pages are in
+  `tests/http_pages.py`, shared by both servers. 297 → 298 tests.
+- Fixed in the test server: `tests/tls-stub.py` ended its "reset" pages with a FIN – `wrap_socket()` had detached the
+  socket it reset – so the https reset cases of v0.75.1 tested a FIN without close_notify; now they reset.
+- Docs: `docs/desotls/HANDSHAKE.md` (netget: the framing table, chunked, trailers, the end after an answer, the
+  tests), ARCHITECTURE (netget, comparison with Linux / Windows / Redox), RELEASE limitations, README, the folder
+  READMEs.
+
 ## v0.75.3 — 2026-11-10
 
 ### Fixed – a long command lost its start on the screen after Enter

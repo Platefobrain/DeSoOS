@@ -1,4 +1,4 @@
-// TCP connection test without a network (NET TEST 4/6).  The state machine
+// TCP connection test without a network (NET TEST 4/7).  The state machine
 // (user/lib/tcp.rs) talks to a simulated peer with a simulated clock: handshake,
 // refused / timed-out connections, sending within the peer's window and the
 // congestion window, retransmission and its timer, fast retransmit, zero-window

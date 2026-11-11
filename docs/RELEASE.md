@@ -111,10 +111,10 @@ timings move by ±15% from run to run on the same build).
 - cipher suites TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256 only (no AES-256-GCM)
 - no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), no ALPN,
   no OCSP stapling
-- `netget`: HTTP/1.0 only (no keep-alive, no chunked answers – refused), GET only, no redirects, at most 8 TCP
-  connections per netd; a duplicated Content-Length is refused even with the same value (curl and Go accept it);
-  servers that answer HTTP/1.0 without a length and close without close_notify (Google) end in exit 3 although
-  the page is whole – HTTP/1.1 with chunked answers would fix it
+- `netget`: HTTP/1.1, one request per connection (no keep-alive), GET only, no redirects, no HTTP/2, no content
+  coding (an answer with `Content-Encoding: gzip` is refused – netget asks for identity), at most 8 TCP connections
+  per netd; refused although curl accepts them: a duplicated Content-Length with the same value, Transfer-Encoding
+  together with Content-Length; a server that does not close after a whole answer costs 2 s
 - a `Client` is ~120 KiB and lives in a static, so `netget` and `tlstest` are ~330 KB files (the transcript's
   starting values keep it out of .bss)
 - tested against OpenSSL 3 (Python `ssl`) in QEMU; real servers on the internet only on real hardware
@@ -182,6 +182,55 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.76.0 — 2026-11-11
+
+**Status: stable on QEMU (TCG and KVM); netget speaks HTTP/1.1 with chunked answers (`user/lib/http.rs`), waits at
+most 2 s for the end after a whole answer; 298 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 324 s (restart 24 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 246 s (restart 12 s, soak 125 s) |
+
+New: NET TEST 5/7 `/bin/httptest` (636 checks – 63 answers and a 40 000-byte chunked body in every split, 4600
+mutations); nettest 113 checks with the HTTP/1.1 pages; `[RESULT-TLS]` 35 → 84 cases (chunked, 1xx, 204 / 205 / 304,
+trailers, Connection, 28 refused answers, the end after a whole answer, a broken close_notify record → exit 5).
+The runs are 11 s longer (TCG 313 → 324 s, KVM 235 → 246 s): 49 more https downloads and one 2-second wait for a
+silent server.
+
+### Performance against the previous release (v0.75.3 → v0.76.0, same machine)
+
+| | TCG v0.75.3 | TCG v0.76.0 | KVM v0.75.3 | KVM v0.76.0 |
+|---|---|---|---|---|
+| irq_user_ns | 9 156 | 12 454 | 65 125 | 65 897 |
+| fact_svc_ns | 183 992 | 189 035 | 106 157 | 98 328 |
+| USB read_kbs (usbd) / kernel | 69 423 / 58 577 | 80 313 / 75 981 | 105 025 / 111 964 | 110 702 / 96 471 |
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 89 / 4 031 | 92 / 4 413 | 51 / 5 720 | 49 / 5 988 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 236 / 12 226 | 7 824 / 12 355 | 16 718 / 52 178 | 15 340 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 13 065 / 3 653 | 13 277 / 4 036 | 7 462 / 811 | 7 288 / 828 |
+| `desofs check` (ms) | 951 | 989 | 290 | 272 |
+| short soak: file operations in 2 min | 6 297 | 6 323 | 28 303 | 27 527 |
+
+Verdict: no regression. Only netget, its parser and the tests changed; TLS `/hello` and 1 MiB are the same or a
+little faster (the speed now stops at the whole answer), the rest is within the usual spread (TCG irq_user_ns
+9–12 µs varies from run to run).
+
+### Real hardware (Legion laptop, Realtek RTL8111/8168, wired network)
+
+| Command | TLS | Result |
+|---|---|---|
+| `netget https://www.google.com/` | TLS_AES_128_GCM_SHA256, ECDSA P-256, 3 certificates up to GTS Root R4 | **200, 87 042 B in 2 968 ms, exit 0** (v0.75.1: the whole page, but exit 3) – chunked; the warning "ended TLS without close_notify (the answer is complete by its last chunk)" |
+| `netget https://www.wikipedia.org/` | – | 200, 122 506 B in 3 782 ms |
+| `netget https://www.kernel.org/` | TLS_AES_128_GCM_SHA256, RSA-PSS, 3 certificates up to GlobalSign Root R46 | 200, 20 436 B in 574 ms |
+| `netget -o /big.bin https://speed.cloudflare.com/__down?bytes=10000000` | TLS_AES_128_GCM_SHA256, ECDSA P-256, 3 certificates up to GTS Root R4 | 200, 10 000 000 B in 943 ms (10 355 KiB/s; v0.75.3: 10 637–10 707 – within the spread of a home connection) |
+
+The goal of the release is met: Google ends with exit 0 – it frames its answer with chunked and closes without
+close_notify, which after the last chunk is only a warning. No regression on the 10 MB download.
 
 ---
 

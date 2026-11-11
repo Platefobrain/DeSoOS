@@ -1,5 +1,5 @@
 // netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update]
-//        http[s]://host[:port]/path [netN] – downloads a page over HTTP/1.0 through netd's
+//        http[s]://host[:port]/path [netN] – downloads a page over HTTP/1.1 through netd's
 // TCP: "tcp host port", then (https) the TLS 1.3 handshake with DeSoTLS, then the request,
 // then the answer.  The body goes to the console (or to a file with -o); a summary
 // (status, bytes, time, speed – and for https the TLS parameters) to stderr.  -v also
@@ -11,14 +11,18 @@
 // ends the connection.  --cipher offers one cipher suite only (both by default);
 // --key-update sends a KeyUpdate asking the server to update too, before the request.
 //
-// The answer must be framed correctly (docs/desotls/HANDSHAKE.md, "netget"): Content-Length
-// once, at most that many bytes; no Transfer-Encoding (we ask with HTTP/1.0); without a
-// length, https needs the server's close_notify to know the answer is whole.
+// One request per connection ("Connection: close", "Accept-Encoding: identity").  The answer
+// must be framed correctly (user/lib/http.rs; docs/desotls/HANDSHAKE.md, "netget"):
+// Content-Length once, or "Transfer-Encoding: chunked" (not both), nothing after the end;
+// without either, https needs the server's close_notify to know the answer is whole.  After
+// a whole answer netget waits at most 2 s for the connection's end: close_notify or FIN –
+// fine, no close_notify or a reset – a warning, silence – a warning and netget closes;
+// more data – a malformed answer; a broken TLS record – refused, never "just no close_notify".
 //
 // Exit code: 0 = 2xx and complete, 1 = usage (or a file problem), 2 = connection failed,
-// 3 = cut short (fewer bytes than Content-Length, or https ended without close_notify
-// before the answer was complete), 4 = HTTP error status or a malformed answer,
-// 5 = TLS refused (certificate, clock, handshake, record, server alert).
+// 3 = cut short (fewer bytes than Content-Length, before the last chunk, or https ended
+// without close_notify before the answer was complete), 4 = HTTP error status or a malformed
+// answer, 5 = TLS refused (certificate, clock, handshake, record, server alert).
 #![no_std]
 #![no_main]
 
@@ -29,6 +33,8 @@ mod desoos;
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
 mod desotls;
+#[path = "../lib/http.rs"]
+mod http;
 
 use desoos::*;
 use desotls::client::{self, Client, Config, Random, TlsError, Transport};
@@ -38,13 +44,14 @@ use desotls::{pem, x509};
 
 entry!(main);
 
-const HEAD_MAX: usize = 8192;
+/// How long a whole answer waits for the connection's end.
+const LINGER_MS: u64 = 2000;
 const STORE_MAX: usize = 256 * 1024;
 const ANCHOR_MAX: usize = 16 * 1024;
 const ROOTS: &str = "/etc/certs/roots";
 
 static mut MSG: [u8; MSG_MAX] = [0; MSG_MAX];
-static mut HEAD: [u8; HEAD_MAX] = [0; HEAD_MAX];
+static mut PARSER: http::Parser = http::Parser::new();
 static mut BODY: [u8; MSG_MAX] = [0; MSG_MAX];
 /// What the TLS transport received from netd and has not handed over yet.
 static mut CHAN_BUF: [u8; MSG_MAX] = [0; MSG_MAX];
@@ -88,11 +95,28 @@ fn parse_url(u: &str) -> Result<Url<'_>, &'static str> {
     Ok(Url { tls, host, port, path })
 }
 
-/// netd's TCP connection as the TLS transport: messages of up to MSG_MAX bytes.
+/// netd's TCP connection as the TLS transport: messages of up to MSG_MAX bytes.  With a
+/// deadline (after a whole answer) a receive waits only until then.
 struct Chan {
     c: u64,
     pos: usize,
     len: usize,
+    deadline: Option<u64>,
+    timed_out: bool,
+}
+
+impl Chan {
+    /// Waits for the channel until the deadline; false = it passed.
+    fn ready(&mut self) -> bool {
+        let Some(d) = self.deadline else { return true };
+        let now = uptime_ms();
+        let left = d.saturating_sub(now);
+        if left > 0 && matches!(wait_many(&[(self.c, W_READABLE)], left), Ok(m) if m != 0) {
+            return true;
+        }
+        self.timed_out = true;
+        false
+    }
 }
 
 impl Transport for Chan {
@@ -107,6 +131,9 @@ impl Transport for Chan {
     fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
         let msg = unsafe { &mut *core::ptr::addr_of_mut!(CHAN_BUF) };
         if self.pos == self.len {
+            if !self.ready() {
+                return Err(());
+            }
             let mut info = RecvInfo::default();
             let r = chan_recv(self.c, msg, 0, &mut info);
             if r == 0 {
@@ -136,52 +163,31 @@ enum Got {
     Cut,
     /// The TCP connection was reset (or timed out) – netd's empty message.
     Reset,
+    /// After a whole answer the server did not end the connection in LINGER_MS.
+    Linger,
     Refused(TlsError),
 }
 
-/// The answer's headers and framing.
-struct Answer {
-    status: u32,
-    length: Option<u64>,
+/// The parser's output: the body to the file / console, heads and trailers with -v.
+struct Out {
+    fd: u64,
+    verbose: bool,
 }
 
-/// Parses the header block (without the final empty line).  Strict: a status line
-/// "HTTP/1.x NNN ...", "name: value" lines (no space before the colon, no folded lines),
-/// Content-Length once and a decimal number, no Transfer-Encoding.
-fn parse_head(h: &[u8]) -> Result<Answer, &'static str> {
-    let text = core::str::from_utf8(h).map_err(|_| "headers are not text")?;
-    let mut lines = text.split("\r\n");
-    let first = lines.next().unwrap_or("");
-    let b = first.as_bytes();
-    let ok = b.len() >= 12 && first.starts_with("HTTP/1.") && b[7].is_ascii_digit() && b[8] == b' ' && b[9..12].iter().all(|c| c.is_ascii_digit()) && (b.len() == 12 || b[12] == b' ');
-    if !ok {
-        return Err("not an HTTP answer (status line)");
-    }
-    let status = first[9..12].parse::<u32>().map_err(|_| "bad status")?;
-    let mut length: Option<u64> = None;
-    for l in lines {
-        if l.starts_with(' ') || l.starts_with('\t') {
-            return Err("folded header line");
-        }
-        let Some((k, v)) = l.split_once(':') else { return Err("header line without ':'") };
-        if k.is_empty() || k.bytes().any(|c| c <= b' ' || c >= 0x7f) {
-            return Err("bad header name");
-        }
-        if k.eq_ignore_ascii_case("transfer-encoding") {
-            return Err("Transfer-Encoding in an answer to HTTP/1.0");
-        }
-        if k.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
-                return Err("Content-Length more than once");
-            }
-            let v = v.trim_matches(|c| c == ' ' || c == '\t');
-            if v.is_empty() || v.len() > 18 || !v.bytes().all(|c| c.is_ascii_digit()) {
-                return Err("Content-Length is not a number");
-            }
-            length = Some(v.parse().map_err(|_| "Content-Length is not a number")?);
+impl http::Sink for Out {
+    fn head(&mut self, raw: &[u8], _interim: bool) {
+        if self.verbose {
+            eprintln!("{}", core::str::from_utf8(raw).unwrap_or("(headers not text)"));
         }
     }
-    Ok(Answer { status, length })
+    fn body(&mut self, data: &[u8]) -> Result<(), ()> {
+        if write(self.fd, data) < 0 { Err(()) } else { Ok(()) }
+    }
+    fn trailers(&mut self, raw: &[u8]) {
+        if self.verbose && !raw.is_empty() {
+            eprintln!("netget: trailers:\n{}", core::str::from_utf8(raw).unwrap_or("(not text)"));
+        }
+    }
 }
 
 fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, i64> {
@@ -385,7 +391,7 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
 
     // 2. TLS (https).
     let tls = unsafe { &mut *core::ptr::addr_of_mut!(TLS) };
-    let mut chan = Chan { c, pos: 0, len: 0 };
+    let mut chan = Chan { c, pos: 0, len: 0, deadline: None, timed_out: false };
     if u.tls {
         let mut random = Random { client_random: [0; 32], session_id: [0; 32], x25519_secret: [0; 32] };
         if getrandom(&mut random.client_random).is_err() || getrandom(&mut random.session_id).is_err() || getrandom(&mut random.x25519_secret).is_err() {
@@ -436,13 +442,13 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
     let mut n = 0;
     put(b"GET ", msg, &mut n);
     put(u.path.as_bytes(), msg, &mut n);
-    put(b" HTTP/1.0\r\nHost: ", msg, &mut n);
+    put(b" HTTP/1.1\r\nHost: ", msg, &mut n);
     put(u.host.as_bytes(), msg, &mut n);
     if u.port != if u.tls { 443 } else { 80 } {
         put(b":", msg, &mut n);
         put(port_s, msg, &mut n);
     }
-    put(b"\r\nUser-Agent: DeSoOS-netget\r\nConnection: close\r\n\r\n", msg, &mut n);
+    put(b"\r\nUser-Agent: DeSoOS-netget\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", msg, &mut n);
     let sent = if u.tls {
         let mut req = [0u8; 1400];
         req[..n].copy_from_slice(&msg[..n]);
@@ -465,21 +471,30 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
         }
     }
 
-    // 4. The answer: headers, then the body.
-    let head = unsafe { &mut *core::ptr::addr_of_mut!(HEAD) };
+    // 4. The answer (user/lib/http.rs), then the connection's end – at most LINGER_MS after a
+    // whole answer.
+    let p = unsafe { &mut *core::ptr::addr_of_mut!(PARSER) };
+    p.reset();
     let body_buf = unsafe { &mut *core::ptr::addr_of_mut!(BODY) };
-    let mut hlen = 0;
-    let mut answer: Option<Answer> = None;
-    let mut body = 0u64;
+    let mut out = Out { fd: out_fd, verbose };
+    // When the answer was whole (the time and speed do not count the wait for the end).
+    let mut done_at = 0;
     let end = loop {
+        if p.done() && chan.deadline.is_none() {
+            done_at = uptime_ms();
+            chan.deadline = Some(done_at + LINGER_MS);
+        }
         let got = if u.tls {
             match tls.read(&mut chan, body_buf) {
                 Ok(0) => Got::End,
                 Ok(k) => Got::Data(k),
                 Err(e) if e.is_security() => Got::Refused(e),
+                Err(_) if chan.timed_out => Got::Linger,
                 Err(TlsError { kind: client::Kind::Reset, .. }) => Got::Reset,
                 Err(_) => Got::Cut,
             }
+        } else if !chan.ready() {
+            Got::Linger
         } else {
             let r = chan_recv(c, body_buf, 0, &mut info);
             match r {
@@ -492,96 +507,69 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
             Got::Data(k) => k,
             other => break other,
         };
-        let mut data = &body_buf[..k];
-        if answer.is_none() {
-            let take = data.len().min(HEAD_MAX - hlen);
-            head[hlen..hlen + take].copy_from_slice(&data[..take]);
-            match find(&head[..hlen + take], b"\r\n\r\n") {
-                Some(e) => {
-                    let used = e + 4 - hlen;
-                    if verbose {
-                        eprintln!("{}", core::str::from_utf8(&head[..e]).unwrap_or("(headers not text)"));
-                    }
-                    match parse_head(&head[..e]) {
-                        Ok(a) => answer = Some(a),
-                        Err(why) => {
-                            eprintln!("netget: malformed answer: {}", why);
-                            finish(u.tls, tls, &mut chan, c);
-                            return EXIT_HTTP;
-                        }
-                    }
-                    data = &data[used..];
-                }
-                None => {
-                    hlen += take;
-                    if hlen == HEAD_MAX {
-                        eprintln!("netget: headers longer than {} bytes", HEAD_MAX);
-                        finish(u.tls, tls, &mut chan, c);
-                        return EXIT_HTTP;
-                    }
-                    continue;
-                }
+        match p.feed(&body_buf[..k], &mut out) {
+            Ok(()) => {}
+            Err(http::Error::Malformed(why)) => {
+                eprintln!("netget: malformed answer: {}", why);
+                finish(u.tls, tls, &mut chan, c);
+                return EXIT_HTTP;
             }
-        }
-        if !data.is_empty() {
-            if let Some(len) = answer.as_ref().and_then(|a| a.length) {
-                if body + data.len() as u64 > len {
-                    eprintln!("netget: malformed answer: more data than Content-Length ({} bytes)", len);
-                    finish(u.tls, tls, &mut chan, c);
-                    return EXIT_HTTP;
-                }
-            }
-            body += data.len() as u64;
-            if write(out_fd, data) < 0 {
+            Err(http::Error::Sink) => {
                 eprintln!("netget: write failed");
                 finish(u.tls, tls, &mut chan, c);
                 return EXIT_USAGE;
             }
         }
     };
-    let ms = (uptime_ms() - t0).max(1);
-    let Some(a) = answer else {
+    let ms = (if done_at > 0 { done_at } else { uptime_ms() } - t0).max(1);
+    if let Got::Refused(e) = end {
+        close(c);
+        return tls_failed(&e, true);
+    }
+    let clean = matches!(end, Got::End);
+    let outcome = p.finish(if clean { http::End::Clean } else { http::End::Unclean });
+    let body = p.body;
+    let Some(a) = p.answer else {
         finish(u.tls, tls, &mut chan, c);
-        return match end {
-            Got::Refused(e) => tls_failed(&e, true),
-            _ => {
-                eprintln!("netget: the server closed without an answer");
-                EXIT_CONNECT
-            }
-        };
+        eprintln!("netget: the server closed without an answer");
+        return EXIT_CONNECT;
     };
-    let complete = a.length.is_none_or(|len| body == len);
-    match end {
-        Got::Refused(e) => {
+    if outcome != http::Outcome::Complete {
+        let how = match end {
+            Got::Reset => "the connection was reset",
+            Got::Cut => "the connection ended without close_notify",
+            _ => "the connection ended",
+        };
+        match a.framing {
+            http::Framing::Length(len) => eprintln!("netget: cut short - {} of {} bytes, then {}", body, len, how),
+            http::Framing::Chunked => eprintln!("netget: cut short - {} bytes before the last chunk, then {}", body, how),
+            _ => eprintln!("netget: cut short - {} after {} bytes", how, body),
+        }
+        if matches!(end, Got::Reset | Got::Cut) {
             close(c);
-            return tls_failed(&e, true);
-        }
-        Got::Cut if complete && a.length.is_some() => {
-            eprintln!("netget: warning: the server ended TLS without close_notify (the answer is complete by its Content-Length)");
-        }
-        Got::Cut => {
-            eprintln!("netget: cut short - the connection ended without close_notify after {} bytes", body);
-            close(c);
-            return EXIT_CUT;
-        }
-        // A reset after the whole answer (complete by its Content-Length – for https a length
-        // inside the authenticated stream): a warning, as curl and Go do.
-        Got::Reset if complete && a.length.is_some() => {
-            eprintln!("netget: warning: the connection was reset after the whole answer (complete by its Content-Length)");
-        }
-        Got::Reset => {
-            eprintln!("netget: cut short - the connection was reset after {} bytes", body);
-            close(c);
-            return EXIT_CUT;
-        }
-        _ if !complete => {
-            eprintln!("netget: cut short - {} of {} bytes, then the connection ended", body, a.length.unwrap_or(0));
+        } else {
             finish(u.tls, tls, &mut chan, c);
-            return EXIT_CUT;
         }
+        return EXIT_CUT;
+    }
+    // A whole answer (by its Content-Length or last chunk – for https inside the authenticated
+    // stream): a missing close_notify or a reset after it is only a warning, as curl and Go.
+    let by = match a.framing {
+        http::Framing::Chunked => "its last chunk",
+        http::Framing::Nothing => "its status",
+        _ => "its Content-Length",
+    };
+    match end {
+        Got::Cut => eprintln!("netget: warning: the server ended TLS without close_notify (the answer is complete by {})", by),
+        Got::Reset => eprintln!("netget: warning: the connection was reset after the whole answer (complete by {})", by),
+        Got::Linger => eprintln!("netget: warning: the server did not close the connection {} s after the whole answer (complete by {})", LINGER_MS / 1000, by),
         _ => {}
     }
-    finish(u.tls, tls, &mut chan, c);
+    if matches!(end, Got::Reset | Got::Cut) {
+        close(c);
+    } else {
+        finish(u.tls, tls, &mut chan, c);
+    }
     let kbs = body * 1000 / ms / 1024;
     eprintln!("netget: HTTP {}, {} bytes in {} ms ({} KiB/s)", a.status, body, ms, kbs);
     if (200..300).contains(&a.status) { 0 } else { EXIT_HTTP }
@@ -607,10 +595,6 @@ fn tls_failed(e: &TlsError, after_request: bool) -> i32 {
         eprintln!("netget: connection failed: {}", e);
         EXIT_CONNECT
     }
-}
-
-fn find(h: &[u8], pat: &[u8]) -> Option<usize> {
-    h.windows(pat.len()).position(|w| w == pat)
 }
 
 fn num_text(mut v: u64, buf: &mut [u8; 6]) -> &[u8] {

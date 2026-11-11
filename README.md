@@ -1,4 +1,4 @@
-# DeSoOS v0.75.3
+# DeSoOS v0.76.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -42,7 +42,7 @@ More documentation:
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback;
-  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP), `netweb` (a small web server).
+  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP/1.1 with chunked answers), `netweb` (a small web server).
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
@@ -61,8 +61,8 @@ More documentation:
   whether it is plausible (syscall 59: RTC battery, readings, not before the build date); tool `certcheck`.
 - HTTPS: DeSoTLS speaks TLS 1.3 as a client (X25519, AES-128-GCM and ChaCha20-Poly1305, ECDSA and RSA-PSS
   server signatures, KeyUpdate, close_notify) – no TLS 1.2, no "insecure" mode: either the server is fully
-  authenticated or nothing is sent; `netget https://` downloads over it (strict HTTP framing, its own exit code for a
-  refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
+  authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
+  code for a refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
@@ -73,7 +73,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (36 suites, a restart phase and a short soak, 297 tests), stress tests and a long soak test
+- Built-in self-tests (36 suites, a restart phase and a short soak, 298 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -357,7 +357,8 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSoOS also answers pings
   to its own address. Several programs can use the network at the same time.
 - `netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path` -
-  download a page over HTTP or HTTPS (TLS 1.3 with DeSoTLS, TCP through netd); the body to the console or to a file,
+  download a page over HTTP/1.1 or HTTPS (TLS 1.3 with DeSoTLS, TCP through netd; chunked answers, one request
+  per connection, no content coding); the body to the console or to a file,
   a summary (speed; for https the cipher suite, signature and CA) to stderr. https checks the server's certificate
   against `/etc/certs/roots` (or only `--anchor`) and needs a plausible clock. Exit 0 whole 2xx answer, 1 usage,
   2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused (`docs/desotls/HANDSHAKE.md`).

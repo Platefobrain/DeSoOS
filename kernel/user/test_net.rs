@@ -59,7 +59,7 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("netparse:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "netparse: {:?} {:?}", kind, out.trim());
-    serial_println!("[NET TEST] 1/6 packet parsers on hostile frames (no hardware): {} PASS", line);
+    serial_println!("[NET TEST] 1/7 packet parsers on hostile frames (no hardware): {} PASS", line);
 
     // 2. DHCP client state machine with a simulated clock: a day of lease,
     // lost answers, renewal, rebinding, NAK, lease end.
@@ -68,7 +68,7 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("dhcptest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "dhcptest: {:?} {:?}", kind, out.trim());
-    serial_println!("[NET TEST] 2/6 DHCP client with a simulated clock (no network): {} PASS", line);
+    serial_println!("[NET TEST] 2/7 DHCP client with a simulated clock (no network): {} PASS", line);
 
     // 3. DNS answers without a network: names, malicious answers, cache, mutations.
     let r = run("/bin/dnstest", &["dnstest"], 60_000);
@@ -76,7 +76,7 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("dnstest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "dnstest: {:?} {:?}", kind, out.trim());
-    serial_println!("[NET TEST] 3/6 DNS resolver on hostile answers (no network): {} PASS", line);
+    serial_println!("[NET TEST] 3/7 DNS resolver on hostile answers (no network): {} PASS", line);
 
     // 4. TCP connection state machine against a simulated peer.
     let r = run("/bin/tcptest", &["tcptest"], 60_000);
@@ -84,9 +84,18 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("tcptest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "tcptest: {:?} {:?}", kind, out.trim());
-    serial_println!("[NET TEST] 4/6 TCP with a simulated peer and clock (no network): {} PASS", line);
+    serial_println!("[NET TEST] 4/7 TCP with a simulated peer and clock (no network): {} PASS", line);
 
-    // 5. init finds the card by class and starts net0; frames out and in (ARP to
+    // 5. HTTP answers without a network: netget's parser (user/lib/http.rs) – framing, chunked,
+    // trailers, the rules it refuses – every split of the stream, mutations.
+    let r = run("/bin/httptest", &["httptest"], 60_000);
+    check!(r.is_some(), "httptest did not finish");
+    let (kind, out) = r.unwrap();
+    let line = out.lines().find(|l| l.starts_with("httptest:")).unwrap_or("").trim();
+    check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "httptest: {:?} {:?}", kind, out.trim());
+    serial_println!("[NET TEST] 5/7 HTTP/1.1 answer parser (framing, chunked, trailers, refusals; every split, mutations; no network): {} PASS", line);
+
+    // 6. init finds the card by class and starts net0; frames out and in (ARP to
     // QEMU's router), counters, kill + restart by init.
     let vectors0 = crate::arch::x86_64::msi::free_count();
     let free0 = crate::selftest::settled_free_frames();
@@ -99,9 +108,9 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "nettest: {:?} {:?}", kind, out.trim());
     check!(out.contains("= network card") && out.contains("init: service net0 started"), "init did not start net0: {:?}", out.trim());
     check!(out.contains("net0: address 10.0.2.15/24 from DHCP server 10.0.2.2 in "), "netd did not report its DHCP address: {:?}", out.trim());
-    serial_println!("[NET TEST] 5/6 init finds the card by class and starts net0 (netd): reset, MAC, rx/tx rings, MSI; DHCP address and renewal, DNS against tests/dns-stub.py, TCP and netget against tests/http-stub.py, user and narrowed rights, listen + loopback, sandboxed netweb reached from the host, concurrent clients, ARP and ping to 10.0.2.2, unreachable address; killed netd restarted by init: {} PASS", line);
+    serial_println!("[NET TEST] 6/7 init finds the card by class and starts net0 (netd): reset, MAC, rx/tx rings, MSI; DHCP address and renewal, DNS against tests/dns-stub.py, TCP and netget against tests/http-stub.py, user and narrowed rights, listen + loopback, sandboxed netweb reached from the host, concurrent clients, ARP and ping to 10.0.2.2, unreachable address; killed netd restarted by init: {} PASS", line);
 
-    // 6. After init stopped the services: the card is free, bus mastering off,
+    // 7. After init stopped the services: the card is free, bus mastering off,
     // MSI vector and DMA frames returned.
     check!(pci::owner(nic) == pci::OWNER_FREE, "network card still claimed after netd ended");
     check!(dev.command() & pci::CMD_BUS_MASTER == 0, "network card bus mastering still on after netd ended");
@@ -115,7 +124,7 @@ pub fn self_test() {
     let free1 = crate::selftest::settled_free_frames();
     let heap = (crate::memory::heap::mapped_bytes() as u64).saturating_sub(heap0) / 4096;
     check!(free1 + heap >= free0, "frames leaked by netd ({} -> {}, heap +{} pages)", free0, free1, heap);
-    serial_println!("[NET TEST] 6/6 after netd: card free, bus mastering off, MSI vector and DMA buffers returned (frames {} -> {}, heap +{} pages) PASS", free0, free1, heap);
+    serial_println!("[NET TEST] 7/7 after netd: card free, bus mastering off, MSI vector and DMA buffers returned (frames {} -> {}, heap +{} pages) PASS", free0, free1, heap);
 
     serial_println!("[NET TEST] All network tests passed!");
     crate::selftest::pass();

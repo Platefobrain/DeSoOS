@@ -30,6 +30,7 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests, `--format` for a disk image |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
 | `dns-stub.py`, `http-stub.py` | small DNS and HTTP servers on the host for the network tests and the soak |
-| `tls-stub.py` | HTTPS servers on the host for TLS TEST (Python `ssl` = OpenSSL): good and bad certificates, TLS 1.2 only, no X25519, the framing pages, and men in the middle that change, replay, cut, join or re-key records with the server's keys |
+| `http_pages.py` | the HTTP/1.1 answers both `http-stub.py` and `tls-stub.py` serve: chunked bodies, 1xx, 204 / 205 / 304, trailers, Connection, refused answers, the end after a whole answer |
+| `tls-stub.py` | HTTPS servers on the host for TLS TEST (Python `ssl` = OpenSSL): good and bad certificates, TLS 1.2 only, no X25519, the framing pages, and men in the middle that change, replay, cut, join or re-key records with the server's keys or break the record with close_notify |
 | `tls/` | the test certificates and keys of `tls-stub.py` (`gen-test-certs.py` makes them; test keys only) |
 | `qemu-hotplug.py` | plugs and unplugs USB devices during the test (QEMU monitor) |
