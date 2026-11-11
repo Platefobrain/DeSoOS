@@ -570,6 +570,11 @@ fn main(args: Args) -> i32 {
     let ms = uptime_ms() - t0;
     check!(n, code == 0 && ms < 4000, "netget of a whole page on a connection the server keeps open: code {} after {} ms (expected 0 within 4 s)", code, ms);
 
+    // UDP sockets (/bin/udptest – names from the DNS stub, so before "dns auto").
+    let pid = spawn_ex("/bin/udptest", &["udptest"], &[(1, 1), (1, 2), (SVC, SVC)], 0);
+    let code = if pid > 0 { wait(pid as u64, 0).map(|(_, c)| c).unwrap_or(998) } else { 999 };
+    check!(n, code == 0, "udptest exit code {}", code);
+
     let r = ask("dns auto");
     check!(n, r.starts_with("DNS server 10.0.2.3 (from DHCP)"), "dns auto: {:?}", r.trim());
 
@@ -731,6 +736,16 @@ fn main(args: Args) -> i32 {
     check!(n, st.contains("IPv4 10.0.2.20/24 set by hand (DHCP off)"), "netconfig text after set");
     let p = ask_stream("ping 10.0.2.2 1");
     check!(n, p.contains("1 sent, 1 received"), "ping from the address set by hand: {:?}", p.trim());
+    // UDP broadcast from the current address and mask: /24 – 10.0.2.255 refused; after
+    // set /16 – 10.0.255.255 refused, 10.0.2.255 an ordinary address (no ARP answer).
+    let r = ask("udp 10.0.2.255 9");
+    check!(n, r.contains("broadcast"), "udp to the /24 broadcast: {:?}", r.trim());
+    let r = ask("set 10.0.2.20/16 gw 10.0.2.2 dns 10.0.2.3");
+    check!(n, r.starts_with("address 10.0.2.20/16 set by hand"), "set 10.0.2.20/16: {:?}", r.trim());
+    let r = ask("udp 10.0.255.255 9");
+    check!(n, r.contains("broadcast"), "udp to the /16 broadcast: {:?}", r.trim());
+    let r = ask("udp 10.0.2.255 9");
+    check!(n, r.contains("unreachable") && !r.contains("broadcast"), "udp to 10.0.2.255 under /16: {:?}", r.trim());
     let narrowed = svc_narrow("net").unwrap_or(0);
     let r = ask_via(narrowed, "set 10.0.2.21/24");
     close(narrowed);

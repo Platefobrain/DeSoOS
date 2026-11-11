@@ -59,6 +59,7 @@ class Handler(socketserver.BaseRequestHandler):
                 if end == "reset":
                     time.sleep(0.5)
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    s.close()  # a RST now – socketserver would send a FIN (shutdown) first
                 elif end == "linger":
                     time.sleep(6)
                 return
@@ -84,11 +85,13 @@ class Handler(socketserver.BaseRequestHandler):
                     s.sendall(b"HTTP/1.0 200 OK\r\n\r\npart of a page")
                 time.sleep(0.5)
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                s.close()  # a RST now – socketserver would send a FIN (shutdown) first
             elif path == "/reset":
                 s.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 100000\r\n\r\n" + b"r" * 3000)
                 time.sleep(0.2)
                 # Close with a RST instead of a FIN.
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                s.close()  # a RST now – socketserver would send a FIN (shutdown) first
             elif path.startswith("/connect?"):
                 # From the host into the guest: connect to 127.0.0.1:<port> (QEMU
                 # forwards it to a server in DeSoOS), GET <path>, return what came.

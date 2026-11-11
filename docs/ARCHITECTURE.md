@@ -1278,6 +1278,29 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   server program reads and writes it like a client socket, and passes it on with `TRANSFER` if it wants.
   Closing the listener resets the connections still in the handshake. A request that arrives together with the
   handshake (common – QEMU's port forwarding does it) is kept, not mistaken for data of a program that is gone.
+- **UDP sockets of programs** (`udp host port`, needs the udp right): a connected client socket – after
+  `udp a.b.c.d:port from a.b.c.d:lport` every message from the program is one datagram (≤ `UDP_MAX` = 1472 B:
+  MTU 1500 − 20 IPv4 without options − 8 UDP; netd enforces it itself – a longer message is not sent, only counted,
+  as a program can skip the library's check), every message from netd one datagram from **exactly** that address
+  and port (anything else – `udp_foreign`). The local port is uniform in 49152–65535 (14 random bits from netd's
+  ChaCha20 generator – no modulo bias, RFC 6056), checked against UDP sockets and DNS queries in one register and
+  reserved in the same loop step, and never one of the last 256 local ports handed out (TCP, UDP or DNS – a
+  connection that just ended may still live in the peer or a NAT; QEMU's slirp keeps it for seconds); it hinders blind spoofing but authenticates nothing (NTS will). Outgoing
+  datagrams always carry a checksum (0 is sent as 0xFFFF), have DF set and no IPv4 options; incoming fragments –
+  the first one too – are refused before UDP parsing (`NetError::Fragment(proto)` keeps the protocol from the
+  checked header: `udp_fragmented`), checksum 0 is accepted (RFC 768), a wrong one refused. Refused destinations:
+  255.255.255.255, this subnet's broadcast `(ip & mask) | !mask` from the current address (recomputed on every
+  open – no stored copy), 224.0.0.0 and up, 0.0.0.0, port 0. A datagram that finds the program's channel full
+  (64 messages) is dropped (`udp_dropped` – UDP promises nothing); ICMP errors are ignored (easy to forge – the
+  program's timeout decides). At most 8 sockets: each is one of netd's 14 client connections (the kernel's wait
+  list holds 16 handles). Closing the channel or the program dying frees the port. No server side yet.
+
+  | | API | Connected socket filters the sender | Local port | Right |
+  |---|---|---|---|---|
+  | Linux | BSD sockets (`connect`, `send`) | yes | random 32768–60999 | none (ports < 1024 aside) |
+  | Windows | Winsock | yes | random 49152–65535 | none (firewall) |
+  | RedoxOS | `udp:` scheme in smolnetd | yes (address in the path) | random | access to the scheme |
+  | DeSoOS | channel to netd = socket, message = datagram | yes (connected only) | uniform 49152–65535 | `udp` from DCP |
 - **Loopback:** frames to 127.0.0.1 or to our own address never reach the card – `send` puts them into a 32-frame
   queue that the event loop feeds back into the receive path (127.x is accepted only from that queue, never from
   the cable). Connections to 127.0.0.1 use 127.0.0.1 as their own address. Ping to ourselves is answered the
@@ -1287,6 +1310,15 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   file access at all.
 - **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 of DeSoOS (`HOSTFWD=port`,
   `HOSTFWD=0` – off); `tests/test.sh` forwards 127.0.0.1:58082 to port 8081.
+- Tests: `/bin/udptest` (started by nettest, against `tests/udp-stub.py` at 10.0.2.2:58090): echo of text, all
+  byte values and an empty datagram, by name; 1472 B both ways, 1473 B refused by the library and – sent straight
+  into the channel – by netd (the stub got nothing); 100 numbered datagrams each after the echo of the one before;
+  a burst of 200 (measured only); a full channel (64 arrive, the rest dropped); a datagram from another port of the
+  peer dropped; 8 sockets with distinct random ports, the 9th refused, all freed, a killed program's socket freed;
+  broadcast / multicast / 0.0.0.0 / port 0 / an unknown name refused; rights (a narrowed channel without udp
+  refused, with it allowed); `udpsend` exit codes. nettest: the subnet broadcast follows the mask (/24, then /16
+  set by hand). netparse: datagrams 0–1472 B round trip with DF, checksum 0 sent as 0xFFFF, UDP fragments. The
+  soak's network worker sends UDP echoes.
 - Tests: tcptest's server-side checks; nettest: narrowed rights (no listen, no DNS change, no
   other service, no widening), listening + loopback to 127.0.0.1 and to our address (200 KiB and 100 KiB both
   ways, the close seen by the server, a refused port), ping to ourselves, and a sandboxed `netweb` reached over
@@ -1305,20 +1337,21 @@ and it gets one only through init's service channel (`SVC`, slot 3). As built in
   its own (slot 3, everything) and the program channel (slot 5: every service, network connections and servers, but
   no network administration; the name is about programs, not user accounts, which DeSoOS does not have).
   `svc_connect("net0")` through the program channel reaches netd as `net0 client
-  listen`. Only **`netconfig`** gets the shell's own channel and reaches netd as `net0 admin listen`: the
+  listen udp`. Only **`netconfig`** gets the shell's own channel and reaches netd as `net0 admin listen udp`: the
   administrator requests (address, DNS server, DHCP on / renew, receive-ring restart). A shell started from the
   shell has only the program channel, so `netconfig` started from it is not an administrator either.
   The choice is made by the shell from the program's name; with a file system that has owners and write
   rights, a program could replace `/bin/netconfig` – today only the initrd provides it.
-- **A narrowed service channel** (`svc_narrow("net")` / `svc_narrow("net listen")`): init creates a new service
+- **A narrowed service channel** (`svc_narrow("net")`, plus `listen` and / or `udp` – e.g. `"net listen udp"`): init creates a new service
   channel that can only open network connections – `connect` to any other service is refused, there is no admin
   right, and it can only be narrowed further, never widened. init hands such connections to netd as
-  `net0 client` (+ `listen`). At most 12 narrowed channels; init forgets one when nobody holds it any more.
+  `net0 client` (+ `listen`, + `udp`). At most 12 narrowed channels; init forgets one when nobody holds it any more.
 - **`nofiles --net <program>`** – the file sandbox plus a narrowed channel (connections only);
-  **`nofiles --listen <program>`** – plus servers. A compromised server can neither read the disk, nor reach
+  **`nofiles --listen <program>`** – plus servers; **`--udp`** – plus UDP sockets (the flags combine). A compromised server can neither read the disk, nor reach
   another service, nor redirect DNS.
 - A program without `SVC` (plain `nofiles`, the `sysfuzz` children) has no way to send a single packet.
-- netd checks the rights per connection: `listen` needs listen, `dns`, `set`, `dhcp`, `renew` and `rxrestart`
+- netd checks the rights per connection: `listen` needs listen, `udp` needs udp (datagrams are easy to flood
+  with – sandboxes get it only when asked), `dns`, `set`, `dhcp`, `renew` and `rxrestart`
   need admin ("not allowed for this program"); a connection with no rights in init's text gets neither.
   Accepted sockets have no rights of their own – they only carry data.
 - Tests (nettest): the program channel reaches netd and echo, may listen, is refused a DNS change; through `sh -c`
@@ -1354,6 +1387,7 @@ access is a capability").
 | `ping host [count]` | one line per answer as they come, a summary, `ping-end` | – |
 | `resolve name` | the IPv4 addresses (DNS, cached) | – |
 | `tcp host port` | `connected a.b.c.d:port from …` – from then on the connection **is** the socket | – |
+| `udp host port` | `udp a.b.c.d:port from a.b.c.d:lport` – from then on the connection **is** a UDP socket: message = datagram (≤ 1472 B), only from that peer | udp |
 | `listen port` | the connection becomes a listener; each accepted connection arrives as `accepted a.b.c.d:port to port N` with a new channel (its socket) | listen |
 | `dns a.b.c.d[:port]` / `dns auto` | the DNS server by hand / back to DHCP's | admin |
 | `set a.b.c.d/nn [gw …] [dns …]`, `dhcp`, `renew` | an address by hand (checked with ARP first), back to DHCP, renew the lease now | admin |
@@ -1390,20 +1424,24 @@ then blocks (queue of 64 messages) or gets `ERROR_WOULD_BLOCK` with `CHAN_NONBLO
   (chunked answers) with the speed; https with TLS 1.3 (DeSoTLS).
 - `netweb [-n count] <port> < page` – a minimal web server; `nofiles --listen netweb 8080 < /index.html` runs it
   with no file access.
+- `udpsend [-t ms] host port text` – one UDP datagram, then the answers until the time runs out (default 2 s); exit
+  0 answer, 2 usage / no right / unknown name / refused destination / send error, 3 no answer (also a closed port –
+  ICMP is ignored).
 
 ### Testing
 
-NET TEST, 6 parts (QEMU q35 with `-device e1000e -netdev user,...`: gateway 10.0.2.2, DNS 10.0.2.3, no internet
+NET TEST, 7 parts (QEMU q35 with `-device e1000e -netdev user,...`: gateway 10.0.2.2, DNS 10.0.2.3, no internet
 needed):
 
 | Part | Program | What |
 |---|---|---|
-| 1/6 | `netparse` (59 checks) | 37 hostile frames and messages refused with the right error, 20 000 mutations – no panic, sizes consistent |
-| 2/6 | `dhcptest` (68) | the DHCP client with a simulated clock: every state, resends, ARP check, DECLINE, RELEASE, T1/T2, NAK |
-| 3/6 | `dnstest` (41) | 19 hostile answers, the cache, 20 000 mutations |
-| 4/6 | `tcptest` (77) | TCP against a simulated peer: windows, scaling, retransmission, out-of-order, closing, hostile segments, the server side, 20 000 random segments |
-| 5/6 | `nettest` (102) | the real path: init starts netd, DHCP, DNS against `tests/dns-stub.py`, TCP and netget against `tests/http-stub.py`, rights (program channel, narrowed channels), listen + loopback, a sandboxed `netweb` reached from the host, concurrent clients, ARP and ping, netd killed and restarted |
-| 6/6 | – | no frames, channels or memory left behind |
+| 1/7 | `netparse` (66 checks) | 37 hostile frames and messages refused with the right error, UDP datagrams and fragments, the broadcast from the mask, 20 000 mutations – no panic, sizes consistent |
+| 2/7 | `dhcptest` (68) | the DHCP client with a simulated clock: every state, resends, ARP check, DECLINE, RELEASE, T1/T2, NAK |
+| 3/7 | `dnstest` (41) | 19 hostile answers, the cache, 20 000 mutations |
+| 4/7 | `tcptest` (77) | TCP against a simulated peer: windows, scaling, retransmission, out-of-order, closing, hostile segments, the server side, 20 000 random segments |
+| 5/7 | `httptest` (666) | netget's HTTP/1.1 parser: framing, chunked, trailers, refusals – every split of the stream, mutations |
+| 6/7 | `nettest` (118) + `udptest` (46) | the real path: init starts netd, DHCP, DNS against `tests/dns-stub.py`, TCP and netget against `tests/http-stub.py`, UDP sockets against `tests/udp-stub.py`, rights (program channel, narrowed channels), listen + loopback, a sandboxed `netweb` reached from the host, concurrent clients, ARP and ping, netd killed and restarted |
+| 7/7 | – | no frames, channels or memory left behind |
 
 - Real hardware: the test laptop over a cable (DHCP from the home router, ping, netget from the internet).
 - netd never writes to disk; it only sends packets the user asked for (plus DHCP, ARP and TCP control packets).

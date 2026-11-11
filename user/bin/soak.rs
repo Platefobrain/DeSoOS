@@ -897,6 +897,8 @@ impl Work for Files {
 
 const HOST: &str = "10.0.2.2";
 const HTTP_PORT: &str = "58080";
+/// tests/udp-stub.py (echo).
+const UDP_PORT: u16 = 58090;
 const BIG: usize = 1024 * 1024;
 const USB_FILE: &str = "DATA.BIN";
 const USB_SIZE: u64 = 4 * 1024 * 1024;
@@ -933,6 +935,7 @@ struct SvcNet {
     net_bytes: u64,
     pings: u64,
     echoes: u64,
+    udp_echoes: u64,
     usb_reads: u64,
     ops: u64,
     buf: Vec<u8>,
@@ -970,6 +973,7 @@ impl SvcNet {
             net_bytes: 0,
             pings: 0,
             echoes: 0,
+            udp_echoes: 0,
             usb_reads: 0,
             ops: 0,
             buf: vec![0; MSG_MAX],
@@ -1188,6 +1192,41 @@ impl SvcNet {
         Ok(())
     }
 
+    /// A UDP datagram to tests/udp-stub.py and its echo (3 tries – UDP may lose one).
+    fn udp_echo(&mut self) -> Result<(), String> {
+        let card = self.net.clone().unwrap_or_default();
+        let mut reply = [0u8; 256];
+        let c = udp_open_via(SVC, &card, HOST, UDP_PORT, &mut reply).map_err(|n| format!("udp open: {}", core::str::from_utf8(&reply[..n]).unwrap_or("?").trim()))?;
+        let n = self.rng.range(1, UDP_MAX as u64) as usize;
+        let seed = self.rng.next();
+        let mut msg = vec![0u8; n];
+        fill(seed, 0, &mut msg);
+        let mut info = RecvInfo::default();
+        let mut ok = false;
+        'tries: for _ in 0..3 {
+            if udp_send(c, &msg) != 0 {
+                break;
+            }
+            let t = uptime_ms();
+            while uptime_ms() - t < 1000 {
+                if !matches!(wait_many(&[(c, W_READABLE)], 1000 - (uptime_ms() - t)), Ok(m) if m != 0) {
+                    break;
+                }
+                let got = chan_recv(c, &mut self.buf, CHAN_NONBLOCK, &mut info);
+                if got == n as i64 && self.buf[..n] == msg[..] {
+                    ok = true;
+                    break 'tries;
+                }
+            }
+        }
+        close(c);
+        if !ok {
+            return Err(format!("udp echo: no echo of {} bytes in 3 tries", n));
+        }
+        self.udp_echoes += 1;
+        Ok(())
+    }
+
     fn echo(&mut self) -> Result<(), String> {
         let c = svc_connect("echo").map_err(|e| format!("connect echo: {}", error_name(e)))?;
         let n = self.rng.range(1, 512) as usize;
@@ -1337,6 +1376,7 @@ impl Work for SvcNet {
         let (what, r) = match self.rng.below(100) {
             0..=29 if self.downloads => ("download", self.download()),
             0..=39 if self.net.is_some() => ("ping", self.ping()),
+            40..=49 if self.downloads => ("udp_echo", self.udp_echo()),
             80..=99 if self.usb.is_some() => ("usb_read", self.usb_read(false)),
             _ => ("echo", self.echo()),
         };
@@ -1351,7 +1391,7 @@ impl Work for SvcNet {
         let (min, max) = (self.rec.iter().min().copied().unwrap_or(0), self.rec.iter().max().copied().unwrap_or(0));
         let avg = if self.rec.is_empty() { 0 } else { self.rec.iter().sum::<u64>() / self.rec.len() as u64 };
         format!(
-            "kills={} recover_ms={}/{}/{} net_mib={} pings={} echoes={} usb_reads={}",
+            "kills={} recover_ms={}/{}/{} net_mib={} pings={} echoes={} udp_echoes={} usb_reads={}",
             self.kills,
             min,
             avg,
@@ -1359,6 +1399,7 @@ impl Work for SvcNet {
             self.net_bytes >> 20,
             self.pings,
             self.echoes,
+            self.udp_echoes,
             self.usb_reads
         )
     }

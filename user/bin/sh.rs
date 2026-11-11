@@ -686,7 +686,7 @@ impl Shell {
         // `nofiles prog args` – run prog in the file sandbox: it cannot open any
         // path, only use the handles the shell gives it (stdio and redirections).
         // `nofiles --net prog` – plus network connections, `--listen` – plus
-        // servers: the program gets a narrowed service channel from init that opens
+        // servers, `--udp` – plus UDP sockets (combinable): the program gets a narrowed service channel from init that opens
         // only network connections (no other services, no DNS / DHCP settings).
         // `nofiles --dir <dir> prog` – plus one directory (read and write),
         // `--dir-ro <dir>` – read only: a directory handle; relative paths of the
@@ -694,11 +694,13 @@ impl Shell {
         if cmd.args[0] == "nofiles" {
             cmd.args.remove(0);
             let mut net = None;
+            let (mut listen, mut udp) = (false, false);
             let mut dir: Option<(String, bool)> = None;
             loop {
                 match cmd.args.first().map(|a| a.as_str()) {
                     Some("--net") => net = Some("net"),
-                    Some("--listen") => net = Some("net listen"),
+                    Some("--listen") => listen = true,
+                    Some("--udp") => udp = true,
                     Some(o @ ("--dir" | "--dir-ro")) => {
                         let rw = o == "--dir";
                         if cmd.args.len() < 2 {
@@ -712,8 +714,20 @@ impl Shell {
                 }
                 cmd.args.remove(0);
             }
+            let tokens: Option<String> = if net.is_some() || listen || udp {
+                let mut t = String::from("net");
+                if listen {
+                    t.push_str(" listen");
+                }
+                if udp {
+                    t.push_str(" udp");
+                }
+                Some(t)
+            } else {
+                None
+            };
             let Some(name) = cmd.args.first().cloned() else {
-                eprintln!("usage: nofiles [--net | --listen] [--dir <dir> | --dir-ro <dir>] <program> [args]   (e.g. nofiles cat < file, nofiles --dir /notes cat todo.txt, nofiles --listen netweb 8080 < page.html)");
+                eprintln!("usage: nofiles [--net] [--listen] [--udp] [--dir <dir> | --dir-ro <dir>] <program> [args]   (e.g. nofiles cat < file, nofiles --dir /notes cat todo.txt, nofiles --listen netweb 8080 < page.html)");
                 return;
             };
             let dirh = match &dir {
@@ -727,11 +741,11 @@ impl Shell {
                     Some(r as u64)
                 }
             };
-            let svc = match net {
+            let svc = match tokens.as_deref() {
                 None => None,
                 Some(tokens) => {
                     if !SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
-                        eprintln!("sh: nofiles {}: no service manager (start the shell from init)", if tokens == "net" { "--net" } else { "--listen" });
+                        eprintln!("sh: nofiles ({}): no service manager (start the shell from init)", tokens);
                         return;
                     }
                     match desoos::svc_narrow(tokens) {
@@ -964,7 +978,7 @@ impl Shell {
                 let _ = writeln!(o, "System information (read-only, from the kernel):");
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
                 let _ = writeln!(o, "File sandbox: nofiles <program> [args] - no file access by path, only < > redirections");
-                let _ = writeln!(o, "  nofiles --net <program> - plus network connections; --listen - plus servers (no other services)");
+                let _ = writeln!(o, "  nofiles --net <program> - plus network connections; --listen - plus servers; --udp - plus UDP sockets (no other services)");
                 let _ = writeln!(o, "Only in the kernel emergency shell: disk read/write, run");
                 let _ = writeln!(o, "Syntax: cmd args  > file  >> file  < file  a | b  &   (\"quotes\" group words)");
             }

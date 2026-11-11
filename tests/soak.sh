@@ -117,11 +117,13 @@ QEMU=(qemu-system-x86_64
 
 echo "Soak in QEMU: ${SECS} s, SEED=$SEED ($ACCEL, $SMP CPU, $SOAK_DISK disk) - log: $LOG"
 START=$(date +%s)
-# Network servers on the host (as in tests/test.sh): DNS and HTTP (/big, 1 MiB).
+# Network servers on the host (as in tests/test.sh): DNS, HTTP (/big, 1 MiB), UDP echo.
 python3 "$T/dns-stub.py" 53530 &
 DNS_PID=$!
 python3 "$T/http-stub.py" 58080 &
 HTTP_PID=$!
+python3 "$T/udp-stub.py" 58090 &
+UDP_PID=$!
 
 "${QEMU[@]}" < /dev/null > "$LOG" 2>&1 &
 QPID=$!
@@ -186,8 +188,8 @@ else
   wait "$QPID"
   CODE=$?
 fi
-kill "$DNS_PID" "$HTTP_PID" 2>/dev/null
-wait "$DNS_PID" "$HTTP_PID" 2>/dev/null
+kill "$DNS_PID" "$HTTP_PID" "$UDP_PID" 2>/dev/null
+wait "$DNS_PID" "$HTTP_PID" "$UDP_PID" 2>/dev/null
 rm -f "$SOAK_IMG" "$SOAK_NVME" "$SOAK_USB" "$MON"
 TIME=$(( $(date +%s) - START ))
 

@@ -180,6 +180,43 @@ fn main(_args: Args) -> i32 {
     let bad_ips = ["", "1.2.3", "1.2.3.4.5", "256.1.1.1", "1..2.3", "1.2.3.", "a.b.c.d", "1.2.3.4 ", "-1.2.3.4", "0001.2.3.4"];
     check!(n, bad_ips.iter().all(|s| parse_ip(s).is_none()), "parse_ip must refuse {:?}", bad_ips.iter().find(|s| parse_ip(s).is_some()));
     check!(n, same_subnet(IP_A, IP_B, 24) && !same_subnet(IP_A, [10, 0, 3, 2], 24) && same_subnet(IP_A, [1, 2, 3, 4], 0) && !same_subnet(IP_A, IP_B, 32), "same_subnet");
+    check!(n, subnet_broadcast(IP_A, 24) == Some([10, 0, 2, 255]) && subnet_broadcast(IP_A, 16) == Some([10, 0, 255, 255]) && subnet_broadcast([192, 168, 1, 77], 26) == Some([192, 168, 1, 127]) && subnet_broadcast(IP_A, 0) == Some([255; 4]) && subnet_broadcast(IP_A, 31).is_none() && subnet_broadcast(IP_A, 32).is_none(), "subnet_broadcast from the mask");
+
+    // UDP datagrams as netd sends them: DF set, every length 0..=1472 parses back with the
+    // same ports and data; a checksum that comes out 0 is sent as 0xFFFF (0 = "none");
+    // 0 from the sender is accepted, a wrong one refused.
+    let mut f = [0u8; 1514];
+    let mut data = [0u8; 1472];
+    let mut rng = Rng(0x5eed);
+    let mut lens_ok = true;
+    for len in (0..=1472usize).step_by(7).chain([1471, 1472]) {
+        for b in data[..len].iter_mut() {
+            *b = rng.next() as u8;
+        }
+        let l = build_udp_frame(&mut f, MAC_B, MAC_A, IP_A, IP_B, 9, 50000, 123, &data[..len]);
+        let ip = parse_eth(&f[..l]).and_then(|e| parse_ipv4(e.payload));
+        let good = l == ETH_HDR + IP_HDR + 8 + len && f[ETH_HDR + 6] & 0x40 != 0 && matches!(&ip, Ok(ip) if matches!(parse_udp(ip.src, ip.dst, ip.payload), Ok(u) if u.src_port == 50000 && u.dst_port == 123 && u.data == &data[..len]));
+        lens_ok &= good;
+    }
+    check!(n, lens_ok, "UDP datagrams of 0..=1472 bytes round trip with DF set");
+    let mut zero_found = false;
+    for v in 0..=u16::MAX {
+        let l = build_udp_frame(&mut f, MAC_B, MAC_A, IP_A, IP_B, 9, 50000, 123, &v.to_be_bytes());
+        let u = ETH_HDR + IP_HDR;
+        if f[u + 6] == 0xFF && f[u + 7] == 0xFF {
+            // The sum came out 0: sent as 0xFFFF, and it still checks.
+            zero_found = parse_udp(IP_A, IP_B, &f[u..l]).is_ok();
+            break;
+        }
+    }
+    check!(n, zero_found, "a UDP checksum of 0 is sent as 0xFFFF and accepted");
+    let l = build_udp_frame(&mut f, MAC_B, MAC_A, IP_A, IP_B, 9, 50000, 123, b"time");
+    let u = ETH_HDR + IP_HDR;
+    f[u + 6] = 0;
+    f[u + 7] = 0;
+    check!(n, parse_udp(IP_A, IP_B, &f[u..l]).is_ok(), "UDP checksum 0 (none) accepted");
+    f[u + 7] = 1;
+    check!(n, matches!(parse_udp(IP_A, IP_B, &f[u..l]), Err(NetError::BadChecksum)), "a wrong UDP checksum refused");
 
     // 2. Valid frames.
     let mut f = [0u8; 1514];
@@ -214,7 +251,7 @@ fn main(_args: Args) -> i32 {
 
     // 3. Malicious frames: (description, frame change, expected error at the layer).
     type Change = fn(&mut [u8; 1514]) -> usize;
-    let ip_cases: [(&str, Change, NetError); 12] = [
+    let ip_cases: [(&str, Change, NetError); 14] = [
         ("IPv4 shorter than its header", |f| { echo_frame(f, 0); ETH_HDR + 19 }, NetError::Short),
         ("IP version 6 in an IPv4 frame", |f| { let l = echo_frame(f, 8); f[14] = 0x65; fix_ip(f); l }, NetError::Unsupported),
         ("header length 16 (< 20)", |f| { let l = echo_frame(f, 8); f[14] = 0x44; fix_ip(f); l }, NetError::BadHeader),
@@ -224,8 +261,10 @@ fn main(_args: Args) -> i32 {
         ("total length past the frame", |f| { let l = echo_frame(f, 8); f[16] = 0x05; f[17] = 0xDC; fix_ip(f); l }, NetError::Short),
         ("total length 65535", |f| { let l = echo_frame(f, 8); f[16] = 0xFF; f[17] = 0xFF; fix_ip(f); l }, NetError::Short),
         ("bad header checksum", |f| { let l = echo_frame(f, 8); f[24] ^= 0x55; l }, NetError::BadChecksum),
-        ("first fragment (more fragments)", |f| { let l = echo_frame(f, 8); f[20] = 0x20; fix_ip(f); l }, NetError::Fragment),
-        ("later fragment (offset)", |f| { let l = echo_frame(f, 8); f[20] = 0; f[21] = 0x10; fix_ip(f); l }, NetError::Fragment),
+        ("first fragment (more fragments)", |f| { let l = echo_frame(f, 8); f[20] = 0x20; fix_ip(f); l }, NetError::Fragment(PROTO_ICMP)),
+        ("later fragment (offset)", |f| { let l = echo_frame(f, 8); f[20] = 0; f[21] = 0x10; fix_ip(f); l }, NetError::Fragment(PROTO_ICMP)),
+        ("first UDP fragment (more fragments)", |f| { let l = echo_frame(f, 8); f[23] = PROTO_UDP; f[20] = 0x20; fix_ip(f); l }, NetError::Fragment(PROTO_UDP)),
+        ("later UDP fragment (offset)", |f| { let l = echo_frame(f, 8); f[23] = PROTO_UDP; f[20] = 0; f[21] = 0x10; fix_ip(f); l }, NetError::Fragment(PROTO_UDP)),
         ("header length 60 past the frame", |f| { echo_frame(f, 0); f[14] = 0x4F; ETH_HDR + 30 }, NetError::BadHeader),
     ];
     for (what, change, want) in ip_cases {

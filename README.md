@@ -1,4 +1,4 @@
-# DeSoOS v0.76.1
+# DeSoOS v0.77.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -41,8 +41,8 @@ More documentation:
 - USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, read-only mass storage
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
-  Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP client and server, loopback;
-  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP/1.1 with chunked answers), `netweb` (a small web server).
+  Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP (also for programs – connected client sockets), DHCP, DNS, TCP client and server, loopback;
+  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP/1.1 with chunked answers), `udpsend`, `netweb` (a small web server).
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
@@ -362,6 +362,9 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   a summary (speed; for https the cipher suite, signature and CA) to stderr. https checks the server's certificate
   against `/etc/certs/roots` (or only `--anchor`) and needs a plausible clock. Exit 0 whole 2xx answer, 1 usage,
   2 no connection, 3 cut short, 4 HTTP error or malformed answer, 5 TLS refused (`docs/desotls/HANDSHAKE.md`).
+- `udpsend [-t ms] host port text` - one UDP datagram, then every answer until the time runs out (default 2 s);
+  exit 0 answer, 2 refused / usage, 3 no answer. Programs get UDP sockets from netd (`udp host port`: one message
+  = one datagram, ≤ 1472 bytes, only from that peer, a random local port) with the `udp` right.
 - `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
   file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
   port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it
@@ -370,7 +373,8 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   another DNS server, `netconfig dns auto` the one from DHCP.
 - `nofiles <program> [args]` - run a program in the file sandbox: it cannot open any path, only
   use what the shell hands it (`nofiles cat < notes.txt` works, `nofiles cat notes.txt` is refused).
-  `nofiles --net <program>` - plus network connections; `nofiles --listen <program>` - plus servers. Such a
+  `nofiles --net <program>` - plus network connections; `nofiles --listen <program>` - plus servers;
+  `nofiles --udp <program>` - plus UDP sockets (the flags combine). Such a
   program reaches no other service and cannot change network settings (DNS server, DHCP).
   `nofiles --dir <dir> <program>` - plus one directory (read and write), `--dir-ro <dir>` - read only: the
   program's relative paths work inside it and nowhere else (`nofiles --dir-ro /notes cat todo.txt` works,

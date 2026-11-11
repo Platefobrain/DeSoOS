@@ -37,8 +37,8 @@ pub enum NetError {
     BadHeader,
     /// Header (IPv4) or message (ICMP) checksum wrong.
     BadChecksum,
-    /// An IPv4 fragment – not reassembled.
-    Fragment,
+    /// An IPv4 fragment – not reassembled; the protocol from its (checked) header.
+    Fragment(u8),
     /// A DNS answer cut short by the server (TC bit – would need TCP).
     Truncated,
 }
@@ -184,7 +184,7 @@ pub fn parse_ipv4(p: &[u8]) -> Result<Ipv4<'_>, NetError> {
     // More fragments, or an offset: a fragment.
     let frag = be16(p, 6);
     if frag & 0x2000 != 0 || frag & 0x1FFF != 0 {
-        return Err(NetError::Fragment);
+        return Err(NetError::Fragment(p[9]));
     }
     Ok(Ipv4 { src: arr(p, 12), dst: arr(p, 16), proto: p[9], ttl: p[8], id: be16(p, 4), payload: &p[ihl..total] })
 }
@@ -213,6 +213,15 @@ pub fn put_ipv4(buf: &mut [u8], src: [u8; 4], dst: [u8; 4], proto: u8, id: u16, 
 /// not multicast / reserved (224 and up).
 pub fn unicast(ip: [u8; 4]) -> bool {
     ip[0] != 0 && ip[0] != 127 && ip[0] < 224
+}
+
+/// The subnet's broadcast address: `(ip & mask) | !mask` (none for /31 and /32).
+pub fn subnet_broadcast(ip: [u8; 4], prefix: u8) -> Option<[u8; 4]> {
+    if prefix >= 31 {
+        return None;
+    }
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
+    Some(((u32::from_be_bytes(ip) & mask) | !mask).to_be_bytes())
 }
 
 /// Same subnet (prefix length `prefix`)?

@@ -111,6 +111,9 @@ timings move by ±15% from run to run on the same build).
 - cipher suites TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256 only (no AES-256-GCM)
 - no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), no ALPN,
   no OCSP stapling
+- UDP for programs: connected client sockets only (no server side, no broadcast / multicast, no fragments – 1472 B
+  at most), at most 8 sockets per netd (each is one of its 14 client connections), a datagram that finds the
+  program's channel (64 messages) full is dropped, ICMP errors are ignored – a closed port looks like silence
 - `netget`: HTTP/1.1, one request per connection (no keep-alive), GET only, no redirects, no HTTP/2, no content
   coding (an answer with `Content-Encoding: gzip` is refused – netget asks for identity), at most 8 TCP connections
   per netd; refused although curl accepts them: a duplicated Content-Length with the same value, Transfer-Encoding
@@ -185,6 +188,52 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.77.0 — 2026-11-11
+
+**Status: stable on QEMU (TCG and KVM); UDP sockets for programs (`udp host port` in netd, the `udp` right,
+`udpsend`); 298 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 325 s (restart 23 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 36/36 suites + restart 1/1 + short soak (RAM disk), 298 tests PASS | 251 s (restart 10 s, soak 125 s) |
+
+New: `/bin/udptest` (46 checks) inside NET TEST 6, netparse 59 → 66 checks, nettest 118 checks (the broadcast at
+/24 and /16), the soak's UDP echoes. The first run of this version failed twice – TCG: nettest 51 (the test
+server's FIN before its RST – found and fixed), KVM soak: "tcp: 10.0.2.2:58080: timed out" (likely a local port
+reused seconds after its last connection – netd now skips the last 256); both passed after the fixes. The KVM
+soak's longest service recovery was 3 902 ms (usually ~900 ms) – one slow netd restart, watched.
+
+### Performance against the previous release (v0.76.1 → v0.77.0, same machine)
+
+| | TCG v0.76.1 | TCG v0.77.0 | KVM v0.76.1 | KVM v0.77.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 77 / 4 213 | 117 / 4 145 | 50 / 5 019 | 55 / 6 206 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 427 / 11 821 | 7 494 / 12 720 | 17 282 / 54 251 | 19 051 / 54 613 |
+| DeSoFS 1000 small files create / read (ms) | 13 144 / 3 526 | 13 148 / 3 599 | 8 867 / 861 | 5 588 / 822 |
+| short soak: file operations in 2 min | 6 487 | 6 418 | 26 490 | 28 371 |
+| short soak: network MiB | 857 | 853 | 866 | 900 |
+
+Verdict: no regression – the TCG `/hello` time (77 → 117 ms) varies from run to run on this host (v0.76.0: 92 ms),
+1 MiB is the same.
+
+### Real hardware (Legion laptop, Realtek RTL8111/8168, home network 192.168.1.0/24)
+
+| Command | Result |
+|---|---|
+| `udpsend 255.255.255.255 9999 x` | "broadcast is not allowed" (exit 2) |
+| `udpsend 192.168.1.255 9999 x` | "broadcast is not allowed" – the subnet's broadcast from the DHCP address and mask (exit 2) |
+| `udpsend 224.0.0.1 9999 x` | "multicast / reserved addresses are not allowed" (exit 2) |
+| `udpsend -t 1000 192.168.1.1 9999 x` | "no answer in 1000 ms" (exit 3): the socket opened (ARP for the router), the datagram went out through the card, nobody answers on that port |
+| `udpsend -t 1000 192.168.1.1 9999` | the usage line (exit 2) |
+
+No second computer on the network (Linux Mint runs on the same laptop), so a real UDP conversation on hardware
+waits for v0.78 (a public NTP server).
+
+---
+
 ## v0.76.1 — 2026-11-11
 
 **Status: stable on QEMU (TCG and KVM); fix – Content-Encoding must be a list of plain tokens (RFC 9110 §8.4), also
@@ -201,10 +250,9 @@ in 304.**
 
 The first TCG run failed one check: nettest 51 – `netget http://…/nocl-reset` (a page without a length, then a
 TCP reset after 0.5 s) ended with 0 instead of 3: netget saw the connection end with a FIN, not netd's reset
-message. Not touched by this release (the page has no Content-Encoding; the reset path is v0.75.1's and passed every
-run since); the second TCG run passed. Suspected: QEMU's user network (slirp) turns the host's reset into a FIN or a
-reset for the guest depending on what the host socket reports when it reads – a race under a busy TCG host. Watched:
-if it comes back, the check gets investigated before it is trusted again.
+message. Not touched by this release; the second TCG run passed. It came back in v0.77.0 and was found then: the
+test server sent a FIN before the RST (socketserver's `shutdown(SHUT_WR)` before close) – fixed in v0.77.0, see
+its CHANGELOG entry (the slirp suspicion here was wrong).
 
 ### Performance against the previous release (v0.76.0 → v0.76.1, same machine)
 

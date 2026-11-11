@@ -106,9 +106,11 @@ pub fn self_test() {
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("nettest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "nettest: {:?} {:?}", kind, out.trim());
+    let udp = out.lines().find(|l| l.starts_with("udptest:") && l.contains("checks OK")).unwrap_or("").trim();
+    check!(!udp.is_empty(), "udptest did not report: {:?}", out.trim());
     check!(out.contains("= network card") && out.contains("init: service net0 started"), "init did not start net0: {:?}", out.trim());
     check!(out.contains("net0: address 10.0.2.15/24 from DHCP server 10.0.2.2 in "), "netd did not report its DHCP address: {:?}", out.trim());
-    serial_println!("[NET TEST] 6/7 init finds the card by class and starts net0 (netd): reset, MAC, rx/tx rings, MSI; DHCP address and renewal, DNS against tests/dns-stub.py, TCP and netget against tests/http-stub.py, user and narrowed rights, listen + loopback, sandboxed netweb reached from the host, concurrent clients, ARP and ping to 10.0.2.2, unreachable address; killed netd restarted by init: {} PASS", line);
+    serial_println!("[NET TEST] 6/7 init finds the card by class and starts net0 (netd): reset, MAC, rx/tx rings, MSI; DHCP address and renewal, DNS against tests/dns-stub.py, TCP and netget against tests/http-stub.py, UDP sockets against tests/udp-stub.py, user and narrowed rights, listen + loopback, sandboxed netweb reached from the host, concurrent clients, ARP and ping to 10.0.2.2, unreachable address; killed netd restarted by init: {}; {} PASS", line, udp);
 
     // 7. After init stopped the services: the card is free, bus mastering off,
     // MSI vector and DMA frames returned.

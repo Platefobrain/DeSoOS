@@ -505,7 +505,9 @@ const G_NETADMIN: u8 = 8;
 /// cannot kill services themselves – the kernel lets a process end only its own
 /// descendants, and services are init's children.
 const G_SVCADMIN: u8 = 16;
-const G_PROGRAMS: u8 = G_NET | G_LISTEN | G_OTHER;
+/// UDP sockets (datagrams are easy to flood with – sandboxes get them only when asked).
+const G_UDP: u8 = 32;
+const G_PROGRAMS: u8 = G_NET | G_LISTEN | G_OTHER | G_UDP;
 /// Narrowed channels at once.
 const NARROW_MAX: usize = 12;
 
@@ -522,7 +524,7 @@ impl Narrowed {
 
 /// The text init hands to a network service with a client connection: the
 /// service name and what this client may do ("admin" – DNS server, DHCP;
-/// "listen" – servers; "client" – connections only).
+/// "listen" – servers; "udp" – UDP sockets; "client" – TCP connections only).
 fn net_kind(name: &str, grants: u8, out: &mut [u8; 64]) -> usize {
     let mut n = 0;
     let mut put = |b: &[u8], out: &mut [u8; 64]| {
@@ -534,6 +536,9 @@ fn net_kind(name: &str, grants: u8, out: &mut [u8; 64]) -> usize {
     put(if grants & G_NETADMIN != 0 { b" admin" } else { b" client" }, out);
     if grants & G_LISTEN != 0 {
         put(b" listen", out);
+    }
+    if grants & G_UDP != 0 {
+        put(b" udp", out);
     }
     n
 }
@@ -593,6 +598,7 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
                 match t {
                     "net" => want |= G_NET,
                     "listen" => want |= G_NET | G_LISTEN,
+                    "udp" => want |= G_NET | G_UDP,
                     _ => {}
                 }
             }

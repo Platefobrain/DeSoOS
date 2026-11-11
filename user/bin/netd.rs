@@ -39,11 +39,20 @@
 //                  program sees the end as ERROR_CLOSED when the peer closes; when
 //                  the connection was reset or timed out, an empty message comes
 //                  first – data never arrives as an empty message).
-// Rights per connection come from init with the connection ("net0 admin listen"
-// for netconfig, "net0 client listen" for the shell's other programs, "net0
-// client [listen]" for sandboxed ones with a narrowed service channel): "dns",
+//   "udp host port" – a connected UDP socket (needs the "udp" right): after the reply
+//                  "udp a.b.c.d:port from a.b.c.d:lport" every message is one datagram to
+//                  send (at most UDP_MAX = 1472 bytes – a longer one is not sent, only
+//                  counted), every message from netd is one datagram from exactly that
+//                  address and port (others are dropped and counted); the local port is
+//                  random (49152-65535); a datagram that finds the program's channel full
+//                  is dropped (UDP promises nothing); broadcast, multicast, 0.0.0.0 and
+//                  port 0 are refused; ICMP errors are ignored; closing the channel frees
+//                  the port.
+// Rights per connection come from init with the connection ("net0 admin listen udp"
+// for netconfig, "net0 client listen udp" for the shell's other programs, "net0
+// client [listen] [udp]" for sandboxed ones with a narrowed service channel): "dns",
 // "renew", "set", "dhcp" and "rxrestart" need admin,
-// "listen" needs listen.  Addresses are checked before use (ARP probes, RFC 5227);
+// "listen" needs listen, "udp" needs udp.  Addresses are checked before use (ARP probes, RFC 5227);
 // another machine claiming our address later is reported.
 // Loopback: frames to 127.0.0.1 or to our own address never reach the card – they
 // go through a queue back into the receive path (client and server inside one
@@ -338,7 +347,18 @@ struct Nic {
     /// When we started asking (for the "address in N ms" message).
     dhcp_t0: u64,
     /// UDP packets for ports nobody listens on.
+    udp_noport: u64,
+    /// UDP sockets of programs and their counters: datagrams in / out, dropped because the
+    /// program's channel was full, from another address or port than the socket's peer,
+    /// too long to send (> UDP_MAX), UDP fragments refused.
+    udp: [UdpSock; UDP_SOCKS],
+    udp_made: u64,
+    udp_in: u64,
+    udp_out: u64,
     udp_dropped: u64,
+    udp_foreign: u64,
+    udp_toolong: u64,
+    udp_fragmented: u64,
     /// ARP cache: (IP, MAC, uptime in ms when learned); IP 0 = empty.
     arp_cache: [([u8; 4], [u8; 6], u64); ARP_CACHE],
     ip_id: u16,
@@ -353,10 +373,12 @@ struct Nic {
     dns_bad: u64,
     /// Random numbers (DNS ids and ports, ping ids, TCP ports and sequence
     /// numbers): ChaCha20 with fast key erasure, keyed from `getrandom` and reseeded
-    /// from it every minute; and the next local port.
+    /// from it every minute.
     rng: desocrypto::rng::KeyErasureRng,
     rng_reseed_ms: u64,
-    next_port: u16,
+    /// The last local ports handed out (not reused while they are here).
+    recent_ports: [u16; RECENT_PORTS],
+    recent_next: usize,
     /// TCP: addresses and owner of each block in TCBS, counters.
     tcp: [TcpMeta; TCP_MAX],
     tcp_made: u64,
@@ -392,6 +414,27 @@ struct Nic {
 
 /// TCP connections at once; their blocks (8 KiB send + 1 MiB receive buffers each) are static.
 const TCP_MAX: usize = 8;
+
+/// UDP sockets at once (each is a client connection, and netd has MAX_CONNS = 14 of
+/// those – the kernel's wait list holds 16 handles), the most a datagram may carry (MTU
+/// 1500 − 20 IPv4 without options − 8 UDP; no fragments either way).
+const UDP_SOCKS: usize = 8;
+/// Local ports remembered as recently used (see `new_port`).
+const RECENT_PORTS: usize = 256;
+const UDP_MAX: usize = 1472;
+
+/// A connected UDP socket: our address and port, the peer, its next hop.
+#[derive(Clone, Copy)]
+struct UdpSock {
+    used: bool,
+    lip: [u8; 4],
+    lport: u16,
+    rip: [u8; 4],
+    rport: u16,
+    mac: [u8; 6],
+}
+
+const UDP_FREE: UdpSock = UdpSock { used: false, lip: [0; 4], lport: 0, rip: [0; 4], rport: 0, mac: [0; 6] };
 // All-zero blocks are valid (unused) ones – the table lands in .bss, not in the file.
 static mut TCBS: [Tcb; TCP_MAX] = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
 
@@ -459,6 +502,7 @@ enum Then {
     Print,
     Ping(u16),
     Tcp(u16),
+    Udp(u16),
 }
 
 #[derive(Clone, Copy)]
@@ -508,6 +552,9 @@ enum Op {
     Tcp { slot: usize, open: bool },
     /// A TCP server on `port` (accepted connections go to this client).
     Listen { port: u16 },
+    /// UDP: finding the next hop, then the socket in `udp[slot]` (the channel is the socket).
+    UdpStart { ip: [u8; 4], port: u16, arp: ArpWait },
+    Udp { slot: usize },
     /// `set`: the address is being probed with ARP before it is used.
     SetStatic { ip: [u8; 4], prefix: u8, gw: [u8; 4], dns: [u8; 4], t0: u64 },
 }
@@ -530,8 +577,10 @@ const NO_CONN: Conn = Conn { chan: 0, op: Op::Idle, dead: true, ending: false, k
 const K_ADMIN: u8 = 1;
 /// TCP servers.
 const K_LISTEN: u8 = 2;
+/// UDP sockets.
+const K_UDP: u8 = 4;
 
-/// Rights from init's text: "net0 admin listen" / "net0 client [listen]".
+/// Rights from init's text: "net0 admin listen udp" / "net0 client [listen] [udp]".
 /// A bare name gets neither (connections only).
 fn kind_of(text: &str) -> u8 {
     let mut k = 0;
@@ -539,6 +588,7 @@ fn kind_of(text: &str) -> u8 {
         match t {
             "admin" => k |= K_ADMIN,
             "listen" => k |= K_LISTEN,
+            "udp" => k |= K_UDP,
             _ => {}
         }
     }
@@ -763,7 +813,12 @@ impl Nic {
                 self.rx_ipv4 += 1;
                 match parse_ipv4(eth.payload) {
                     Ok(ip) => self.on_ipv4(eth.src, &ip),
-                    Err(_) => self.rx_bad += 1,
+                    Err(e) => {
+                        self.rx_bad += 1;
+                        if e == NetError::Fragment(PROTO_UDP) {
+                            self.udp_fragmented += 1;
+                        }
+                    }
                 }
             }
             ETH_IPV6 => self.rx_ipv6 += 1,
@@ -848,8 +903,10 @@ impl Nic {
                     return;
                 };
                 if u.dst_port != PORT_DHCP_CLIENT || u.src_port != PORT_DHCP_SERVER {
-                    if !self.dns_packet(ip.src, &u) {
-                        self.udp_dropped += 1;
+                    if let Some(slot) = self.udp.iter().position(|s| s.used && s.lport == u.dst_port) {
+                        self.udp_deliver(slot, ip.src, &u);
+                    } else if !self.dns_packet(ip.src, &u) {
+                        self.udp_noport += 1;
                     }
                     return;
                 }
@@ -1027,12 +1084,24 @@ impl Nic {
         u16::from_le_bytes(b)
     }
 
-    /// A local port for a DNS query: random in 49152–65535, never the last one.
+    /// A local port: uniform in 49152–65535 (14 random bits – no modulo bias, RFC 6056),
+    /// never one of the last RECENT_PORTS handed out (a connection that just ended may
+    /// still live in the peer or in a NAT – QEMU's slirp keeps it for seconds – and a new
+    /// SYN from the same port goes unanswered), never one a UDP socket or a DNS query
+    /// holds (one register for TCP, UDP and DNS; netd is a single loop, so the check and
+    /// the use are one step).
     fn new_port(&mut self) -> u16 {
-        let step = 1 + (self.rand16() % 1000) as u32;
-        let p = 49152 + (self.next_port as u32 + step - 49152) % 16384;
-        self.next_port = p as u16;
-        p as u16
+        loop {
+            let p = 49152 + (self.rand16() & 0x3FFF);
+            let recent = self.recent_ports.contains(&p);
+            let udp = self.udp.iter().any(|s| s.used && s.lport == p);
+            let dns = self.conns[..self.nconns].iter().any(|c| matches!(c.op, Op::Resolve(r) if r.port == p));
+            if !recent && !udp && !dns {
+                self.recent_ports[self.recent_next] = p;
+                self.recent_next = (self.recent_next + 1) % RECENT_PORTS;
+                return p;
+            }
+        }
     }
 
     /// A message to client `k`.  Never blocks: a client that does not read loses
@@ -1131,8 +1200,8 @@ impl Nic {
                         r.next
                     }
                 }
-                Op::TcpStart { arp, .. } => arp.next,
-                Op::Tcp { .. } | Op::Listen { .. } => u64::MAX,
+                Op::TcpStart { arp, .. } | Op::UdpStart { arp, .. } => arp.next,
+                Op::Tcp { .. } | Op::Listen { .. } | Op::Udp { .. } => u64::MAX,
                 Op::SetStatic { t0, .. } => t0 + if self.static_probe_second { 2 * PROBE_WAIT_MS } else { PROBE_WAIT_MS },
                 Op::Ping(p) => {
                     if p.hop.is_none() {
@@ -1270,6 +1339,35 @@ impl Nic {
                     let _ = writeln!(out, "tcp: bad address or name {:?}", host);
                 }
             }
+        } else if let Some(rest) = req.strip_prefix("udp ") {
+            let mut w = rest.split_whitespace();
+            let host = w.next().unwrap_or("");
+            match w.next().and_then(|p| p.parse::<u16>().ok()).filter(|&p| p != 0) {
+                _ if self.conns[k].kind & K_UDP == 0 => {
+                    let _ = writeln!(out, "udp: not allowed for this program (it needs the udp right - nofiles --udp)");
+                }
+                None => {
+                    let _ = writeln!(out, "udp: expected a host and a port 1-65535");
+                }
+                Some(port) => {
+                    if let Some(ip) = parse_ip(host) {
+                        match self.udp_refused(ip) {
+                            Some(why) => {
+                                let _ = writeln!(out, "udp: {}: {}", ip_text(ip), why);
+                            }
+                            None => {
+                                self.conns[k].op = Op::UdpStart { ip, port, arp: ArpWait::default() };
+                                return;
+                            }
+                        }
+                    } else if let Some(name) = Name::parse(host) {
+                        self.start_resolve(k, name, Then::Udp(port), now);
+                        return;
+                    } else {
+                        let _ = writeln!(out, "udp: bad address or name {:?}", host);
+                    }
+                }
+            }
         } else if let Some(arg) = req.strip_prefix("resolve ") {
             let arg = arg.trim();
             if let Some(ip) = parse_ip(arg) {
@@ -1309,7 +1407,7 @@ impl Nic {
                 }
             }
         } else {
-            let _ = writeln!(out, "netd: unknown request {:?} (status, ping host [count], resolve name, tcp host port, listen port, arp a.b.c.d, dns server|auto, renew, set a.b.c.d/nn, dhcp)", req);
+            let _ = writeln!(out, "netd: unknown request {:?} (status, ping host [count], resolve name, tcp host port, udp host port, listen port, arp a.b.c.d, dns server|auto, renew, set a.b.c.d/nn, dhcp)", req);
         }
         self.tell(k, &out);
     }
@@ -1356,7 +1454,17 @@ impl Nic {
                 Ok(None) => Op::TcpStart { ip, port, arp, t0 },
                 Ok(Some(mac)) => self.tcp_open(k, ip, port, mac, t0, now),
             },
-            Op::Tcp { .. } | Op::Listen { .. } => return,
+            Op::UdpStart { ip, port, mut arp } => match self.hop(now, ip, &mut arp) {
+                Err(e) => {
+                    let mut t = Text::new();
+                    let _ = writeln!(t, "udp: {}: {}", ip_text(ip), e);
+                    self.tell(k, &t);
+                    Op::Idle
+                }
+                Ok(None) => Op::UdpStart { ip, port, arp },
+                Ok(Some(mac)) => self.udp_open(k, ip, port, mac),
+            },
+            Op::Tcp { .. } | Op::Listen { .. } | Op::Udp { .. } => return,
             Op::SetStatic { ip, prefix, gw, dns, t0 } => {
                 let mut t = Text::new();
                 if let Some(mac) = self.static_taken {
@@ -1629,11 +1737,23 @@ impl Nic {
             self.conns[k].op = Op::TcpStart { ip: addrs[0], port, arp: ArpWait::default(), t0: now };
             return;
         }
+        if let Then::Udp(port) = then {
+            match self.udp_refused(addrs[0]) {
+                Some(why) => {
+                    let mut t = Text::new();
+                    let _ = writeln!(t, "udp: {} ({}): {}", name, ip_text(addrs[0]), why);
+                    self.tell(k, &t);
+                    self.conns[k].op = Op::Idle;
+                }
+                None => self.conns[k].op = Op::UdpStart { ip: addrs[0], port, arp: ArpWait::default() },
+            }
+            return;
+        }
         let mut t = Text::new();
         let _ = write!(t, "{} is ", name);
         let list = match then {
             Then::Print => addrs,
-            Then::Ping(_) | Then::Tcp(_) => &addrs[..1],
+            Then::Ping(_) | Then::Tcp(_) | Then::Udp(_) => &addrs[..1],
         };
         for (i, a) in list.iter().enumerate() {
             let _ = write!(t, "{}{}", if i > 0 { ", " } else { "" }, ip_text(*a));
@@ -1650,7 +1770,7 @@ impl Nic {
         match then {
             Then::Print => self.conns[k].op = Op::Idle,
             Then::Ping(count) => self.start_ping(k, addrs[0], count, now),
-            Then::Tcp(_) => {}
+            Then::Tcp(_) | Then::Udp(_) => {}
         }
     }
 
@@ -1666,8 +1786,95 @@ impl Nic {
             Then::Tcp(_) => {
                 let _ = writeln!(t, "tcp: {}: {}", name, why);
             }
+            Then::Udp(_) => {
+                let _ = writeln!(t, "udp: {}: {}", name, why);
+            }
         }
         self.tell(k, &t);
+    }
+
+    // --- UDP ---
+
+    /// Why a UDP socket to `ip` is refused (None = allowed): broadcast – everywhere and
+    /// this subnet's, from the current address and mask, never a stored copy – multicast /
+    /// reserved, 0.0.0.0.
+    fn udp_refused(&self, ip: [u8; 4]) -> Option<&'static str> {
+        if ip == [0; 4] {
+            Some("0.0.0.0 is not a destination")
+        } else if ip == [255; 4] || (self.has_ip() && subnet_broadcast(self.ip, self.prefix) == Some(ip)) {
+            Some("broadcast is not allowed")
+        } else if ip[0] >= 224 {
+            Some("multicast / reserved addresses are not allowed")
+        } else {
+            None
+        }
+    }
+
+    /// The next hop is known: a socket and its random port, then the "udp" reply.
+    fn udp_open(&mut self, k: usize, ip: [u8; 4], port: u16, mac: [u8; 6]) -> Op {
+        let mut t = Text::new();
+        // The address may have changed while ARP ran.
+        if let Some(why) = self.udp_refused(ip) {
+            let _ = writeln!(t, "udp: {}: {}", ip_text(ip), why);
+            self.tell(k, &t);
+            return Op::Idle;
+        }
+        let Some(slot) = self.udp.iter().position(|s| !s.used) else {
+            let _ = writeln!(t, "udp: too many sockets (at most {})", UDP_SOCKS);
+            self.tell(k, &t);
+            return Op::Idle;
+        };
+        let lport = self.new_port();
+        let lip = self.src_for(ip);
+        self.udp[slot] = UdpSock { used: true, lip, lport, rip: ip, rport: port, mac };
+        self.udp_made += 1;
+        let _ = writeln!(t, "udp {}:{} from {}:{}", ip_text(ip), port, ip_text(lip), lport);
+        self.tell(k, &t);
+        if self.conns[k].dead {
+            // Gone before the reply: the reservation goes with it.
+            self.udp[slot] = UDP_FREE;
+            return Op::Idle;
+        }
+        Op::Udp { slot }
+    }
+
+    /// One datagram from the program on socket `slot`.
+    fn udp_send(&mut self, slot: usize, data: &[u8]) {
+        if data.len() > UDP_MAX {
+            // Programs can skip the library's check – the limit is ours.
+            self.udp_toolong += 1;
+            return;
+        }
+        let s = self.udp[slot];
+        let mut f = [0u8; 1600];
+        self.ip_id = self.ip_id.wrapping_add(1);
+        let n = build_udp_frame(&mut f, s.mac, self.mac, s.lip, s.rip, self.ip_id, s.lport, s.rport, data);
+        if self.send(&f[..n]).is_ok() {
+            self.udp_out += 1;
+        } else {
+            self.udp_dropped += 1;
+        }
+    }
+
+    /// A datagram for socket `slot`: only from its peer, into the owner's channel if it fits.
+    fn udp_deliver(&mut self, slot: usize, src: [u8; 4], u: &Udp) {
+        let s = self.udp[slot];
+        if src != s.rip || u.src_port != s.rport {
+            self.udp_foreign += 1;
+            return;
+        }
+        let Some(k) = (0..self.nconns).find(|&k| matches!(self.conns[k].op, Op::Udp { slot: q } if q == slot)) else {
+            self.udp_noport += 1;
+            return;
+        };
+        if self.conns[k].dead {
+            return;
+        }
+        match chan_send(self.conns[k].chan, u.data, CHAN_NONBLOCK) {
+            0 => self.udp_in += 1,
+            ERROR_CLOSED => self.conns[k].dead = true,
+            _ => self.udp_dropped += 1,
+        }
     }
 
     // --- TCP ---
@@ -1922,6 +2129,9 @@ impl Nic {
     /// Connection `k` is going away: its TCP connection closes (FIN), or resets
     /// when received data was never read.
     fn tcp_detach(&mut self, k: usize, now: u64) {
+        if let Op::Udp { slot } = self.conns[k].op {
+            self.udp[slot] = UDP_FREE;
+        }
         if let Op::Tcp { slot, .. } = self.conns[k].op {
             if self.tcp[slot].used && self.tcp[slot].owner == k {
                 if tcbs()[slot].readable() > 0 {
@@ -2112,7 +2322,7 @@ impl Nic {
         let _ = writeln!(out, "  interrupts {}, frames found by polling {}", self.irqs, self.polled);
         let _ = writeln!(
             out,
-            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={}",
+            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={} udp={} udpmade={} udpin={} udpout={} udp_dropped={} udp_foreign={} udp_toolong={} udp_fragmented={} udp_noport={}",
             Mac(self.mac),
             up as u8,
             ip_text(self.ip),
@@ -2146,7 +2356,16 @@ impl Nic {
             self.irqs,
             self.rx_errors,
             self.rx_bad,
-            self.echo_answered
+            self.echo_answered,
+            self.udp.iter().filter(|s| s.used).count(),
+            self.udp_made,
+            self.udp_in,
+            self.udp_out,
+            self.udp_dropped,
+            self.udp_foreign,
+            self.udp_toolong,
+            self.udp_fragmented,
+            self.udp_noport
         );
     }
 }
@@ -2753,7 +2972,15 @@ fn main(args: Args) -> i32 {
         dhcp: Client::new([0; 6], 0),
         dhcp_mac: [0; 6],
         dhcp_t0: 0,
+        udp_noport: 0,
+        udp: [UDP_FREE; UDP_SOCKS],
+        udp_made: 0,
+        udp_in: 0,
+        udp_out: 0,
         udp_dropped: 0,
+        udp_foreign: 0,
+        udp_toolong: 0,
+        udp_fragmented: 0,
         arp_cache: [([0; 4], [0; 6], 0); ARP_CACHE],
         ip_id: 0,
         conns: [NO_CONN; MAX_CONNS],
@@ -2765,7 +2992,8 @@ fn main(args: Args) -> i32 {
         dns_bad: 0,
         rng: desocrypto::rng::KeyErasureRng::new(&seed),
         rng_reseed_ms: uptime_ms(),
-        next_port: 0,
+        recent_ports: [0; RECENT_PORTS],
+        recent_next: 0,
         tcp: [TCP_FREE; TCP_MAX],
         tcp_made: 0,
         tcp_in: 0,
@@ -2805,7 +3033,6 @@ fn main(args: Args) -> i32 {
     let mut x = [0u8; 8];
     let _ = getrandom(&mut x);
     nic.dhcp = Client::new(nic.mac, u64::from_le_bytes(x));
-    nic.next_port = 49152 + nic.rand16() % 16384;
     nic.dhcp_t0 = uptime_ms();
     nic.dhcp_tick();
 
@@ -2894,6 +3121,16 @@ fn main(args: Args) -> i32 {
             }
             let j = map[e];
             if nic.conns[j].dead || nic.conns[j].ending {
+                continue;
+            }
+            if let Op::Udp { slot } = nic.conns[j].op {
+                // One datagram from the program.
+                let r = chan_recv(nic.conns[j].chan, &mut msg, CHAN_NONBLOCK, &mut info);
+                if r == ERROR_CLOSED {
+                    nic.conns[j].dead = true;
+                } else if r >= 0 {
+                    nic.udp_send(slot, &msg[..r as usize]);
+                }
                 continue;
             }
             if let Op::Tcp { slot, open: true } = nic.conns[j].op {

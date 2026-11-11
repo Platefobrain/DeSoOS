@@ -147,6 +147,9 @@ DNS_PID=$!
 # HTTP server for NET TEST (TCP; the guest connects to 10.0.2.2:58080).
 python3 "$T/http-stub.py" 58080 &
 HTTP_PID=$!
+# UDP echo server for NET TEST (the guest sends to 10.0.2.2:58090).
+python3 "$T/udp-stub.py" 58090 &
+UDP_PID=$!
 # HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).
 python3 "$T/tls-stub.py" 58443 &
 TLS_PID=$!
@@ -158,8 +161,8 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$TLS_PID" 2>/dev/null
-wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$TLS_PID" 2>/dev/null
+kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$TLS_PID" 2>/dev/null
+wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$TLS_PID" 2>/dev/null
 
 # Second start on the same test disk (only after a passing first one, not in loop mode).
 LOG2="$ROOT/logs/test-restart.log"

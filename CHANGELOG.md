@@ -2,6 +2,47 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.77.0 — 2026-11-11
+
+### Added – UDP sockets for programs
+- netd spoke UDP only for itself (DHCP, DNS). Now a program asks `udp host port` (needs the new **`udp`** right) and
+  its channel becomes a connected UDP socket: `udp a.b.c.d:port from a.b.c.d:lport`, then one message = one
+  datagram, both ways; only datagrams from exactly that address and port reach it (`udp_foreign` counts the rest).
+  For NTP (v0.78) and NTS (v0.79); UDP stays in netd – no new syscall, no sockets in the kernel.
+- Limits and rules: at most `UDP_MAX` = 1472 B (MTU 1500 − 20 − 8; DF set, no IPv4 options) – the library refuses
+  more and netd enforces it itself (`udp_toolong`); the local port uniform in 49152–65535 (14 random bits, no
+  modulo bias, RFC 6056), checked and reserved in one step in a register shared with the DNS resolver (whose port
+  choice had a modulo bias – now the same rule); outgoing checksum always (0 sent as 0xFFFF), incoming 0 accepted
+  and a wrong one refused; fragments refused before UDP parsing and counted (`udp_fragmented`; `NetError::Fragment`
+  now carries the protocol of its checked header); 255.255.255.255, the subnet's broadcast from the current address
+  and mask, multicast / reserved, 0.0.0.0 and port 0 refused; ICMP errors ignored; a datagram that finds the
+  program's channel full is dropped (`udp_dropped`); closing the channel or the program dying frees the port.
+  `status`: `udp= udpmade= udpin= udpout= udp_dropped= udp_foreign= udp_toolong= udp_fragmented= udp_noport=`.
+- Two numbers differ from the accepted plan, both forced by existing limits: **8 sockets** (not 16) – each socket
+  is one of netd's 14 client connections (the kernel's wait list holds 16 handles); the receive queue is the
+  channel's **64 messages** (not 16) – netd cannot see how many unread messages a channel holds.
+- Rights: init hands programs of the shell and `netconfig` `udp` with their network connections; a narrowed channel
+  only when asked – `svc_narrow("net udp")`, `nofiles --udp` (combines with `--listen`).
+- `udpsend [-t ms] host port text` (new tool): one datagram, the answers until the time runs out; exit 0 answer,
+  2 refused / usage, 3 silence. Library: `UDP_MAX`, `udp_open_via`, `udp_send`.
+- Tests: **`/bin/udptest`** (46 checks, started by nettest – NET TEST 6) against the new `tests/udp-stub.py`:
+  echo (text, 256 byte values, empty, by name), 1472 / 1473 B (library and straight into the channel), 100
+  numbered datagrams each after the echo of the one before, a burst of 200 (measured), a full channel (64 arrive),
+  a foreign port dropped, 8 sockets with distinct random ports and the 9th refused, freeing (also after a kill),
+  7 refused destinations, rights, `udpsend` codes; nettest: the subnet broadcast follows the mask (/24, /16 by
+  hand); netparse 59 → 66 checks (datagrams 0–1472 B with DF, checksum 0 → 0xFFFF, checksum 0 / wrong, UDP
+  fragments, the broadcast from the mask); the soak's network worker sends UDP echoes (`udp_echoes=`).
+- Local ports (TCP too) are never one of the last 256 handed out. With the uniform choice a new connection could
+  take a port used seconds before, which QEMU's slirp still remembered – its SYN went unanswered: the KVM soak
+  failed once with "tcp: 10.0.2.2:58080: timed out (no answer)" (the old choice walked forward and reused a port
+  only after a full round). The cause is likely, not proven – the seeded soak passes now, and is watched.
+- Fixed in the test server: `tests/http-stub.py` ended its reset pages (`/reset`, `/cl-reset`, `/nocl-reset`,
+  `/chunked-reset`, `/chunked-rst-after`) with a FIN and then a RST – socketserver shuts the socket down
+  (`SHUT_WR`) before closing it. When netd handled the FIN before the RST arrived, netget saw a clean end: nettest
+  51 (`/nocl-reset` must exit 3) failed twice on a busy TCG host. The pages now close with the RST themselves.
+- Docs: ARCHITECTURE (UDP sockets, rights, requests, tools, tests, comparison with Linux / Windows / Redox),
+  README, RELEASE limitations, `tests/README.md`, `user/README.md`.
+
 ## v0.76.1 — 2026-11-11
 
 ### Fixed – Content-Encoding with parameters was accepted
