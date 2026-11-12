@@ -120,6 +120,14 @@ timings move by ±15% from run to run on the same build).
 - memory per UDP socket: a socket is a channel of up to 64 messages of 1472 B – when full 64 × (1472 + 64) B =
   96 KiB of the kernel's 16 MiB message budget (it counts data + 64 B per message; allocator rounding is not
   counted), 768 KiB for all 8
+- `nettime` (NTP) reads only: no clock is set, no daemon, no periodic synchronisation; plain NTP is not
+  authenticated, so its answer is information, not trusted time (NTS comes next); IPv4 only, no server side
+- `nettime`'s difference is an estimate: the clock counts whole seconds, the path asymmetry adds up to delay / 2, the
+  server's own error is unknown; with several servers only a median and a 2 s limit – not RFC 5905's selection;
+  the acceptance limit `root_distance_proxy` ≤ 1.5 s is a simplification of the full root distance
+- NTP era: right only within ±68 years of the build date (beyond that the same 32 bits mean a date 136 years away)
+- the clock is the RTC read once at boot plus uptime: it drifts with uptime's timer (under QEMU TCG it was 2–3 s
+  behind the host after about 3 minutes) and nothing corrects it yet
 - `netget`: HTTP/1.1, one request per connection (no keep-alive), GET only, no redirects, no HTTP/2, no content
   coding (an answer with `Content-Encoding: gzip` is refused – netget asks for identity), at most 8 TCP connections
   per netd; refused although curl accepts them: a duplicated Content-Length with the same value, Transfer-Encoding
@@ -134,8 +142,8 @@ timings move by ±15% from run to run on the same build).
 - the clock: "plausible" (syscall 59) is a heuristic – it refuses a lost RTC battery, a broken reading and dates
   before the build date − 24 h or after 2099, but anyone with access to the firmware can set a date in that range
   (an expired certificate becomes "valid"); an RTC kept in local time (Windows next to it) cannot be detected – a few
-  hours off can make a just-issued certificate "not yet valid"; no NTP and no saved last known time yet (the floor
-  moves only with a new image); the build date is the build time unless `SOURCE_DATE_EPOCH` is set
+  hours off can make a just-issued certificate "not yet valid"; `nettime` (NTP) only shows the difference – nothing
+  sets the clock and there is no saved last known time yet (the floor moves only with a new image); the build date is the build time unless `SOURCE_DATE_EPOCH` is set
 - fail closed where real certificates may differ: name constraints with any type other than DNS names refuse the CA
   (339 of the 5341 x509-limbo server cases are refused for that while the suite expects success); a CA certificate as
   the server's own is refused; more than 256 names in a certificate (web-platform.test has 260), more than 8
@@ -191,6 +199,63 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.78.0 — 2026-11-12
+
+**Status: stable on QEMU (TCG and KVM); NTP – `nettime` compares the clock with network time and changes nothing;
+37 suites, 300 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 336 s (restart 25 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 263 s (restart 12 s, soak 126 s) |
+
+New: NTP TEST (suite 37) – `/bin/ntptest` 91 checks, `ntptest net` 73 cases against `tests/ntp-stub.py` (7 s on the
+build host); `[RESULT-NTP]`. On the way to the first pass: the test compared the clock with the host's time to 2 s
+and failed at −3 s – not a fault of `nettime` but the clock's drift under TCG (see limitations); the test now allows
+20 s there and the kernel side checks that the hardware RTC minus the clock is the same before and after.
+
+Mutations (each built and run in QEMU, all 9 caught): no Origin check (check 22), era always 0 (73), Kiss-o'-Death
+ignored by `nettime` (case 16), KoD checked after the timestamps (26), KoD accepted before the Origin check (31),
+the delay's sign (63), LI 3 accepted (40), negative root delay accepted (52), "do not agree" with two answers (88).
+
+### Performance against the previous release (v0.77.1 → v0.78.0, same machine)
+
+| | TCG v0.77.1 | TCG v0.78.0 | KVM v0.77.1 | KVM v0.78.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 114 / 4 145 | 92 / 4 899 | 50 / 6 320 | 51 / 6 400 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 474 / 11 994 | 6 692 / 11 719 | 18 575 / 54 251 | 18 745 / 53 194 |
+| DeSoFS 1000 small files create / read (ms) | 13 464 / 3 582 | 14 133 / 3 776 | 7 941 / 819 | 7 625 / 833 |
+| short soak: file operations in 2 min | 6 361 | 6 119 | 27 542 | 27 854 |
+| short soak: network MiB | 821 | 828 | 915 | 874 |
+
+Verdict: no regression – the release adds a tool and a test suite (about 9 s more test time) and touches neither
+the kernel's paths nor netd. The TCG file numbers are a few percent lower and the TLS numbers higher – this host's
+run-to-run spread; KVM is the same. Soak: leaks 0, errors 0, longest recovery 942 ms (TCG) / 884 ms (KVM).
+
+### Real hardware (Legion laptop, Realtek RTL8111/8168, home network 192.168.1.0/24)
+
+The first real UDP conversation of DeSoOS on hardware (v0.77 only had refusals and silence to show there):
+
+| Command | Result |
+|---|---|
+| `nettime` | time.cloudflare.com (162.159.200.1): stratum 3, delay 12 ms – the clock about 1 s behind (path asymmetry bound ±6 ms), exit 0 |
+| `nettime pool.ntp.org` | 51.38.131.245: stratum 2, delay 15 ms – about 1 s behind (±8 ms) |
+| `nettime time.cloudflare.com pool.ntp.org time.google.com` | stratum 3 / 2 / 1 (time.google.com 216.239.35.12), delay 11 / 11 / 35 ms, all three +0 s – "agrees to the second with the median of 3 servers" (±6 ms) |
+| `date` right after | 2026-11-12 20:26:20 UTC, clock plausible |
+
+The −1 s and then +0 s a minute later are the clock's whole seconds: the RTC is read once at boot and the clock
+counts whole seconds from there, so a difference just under half a second rounds either way. All three servers
+agree within milliseconds – the hardware RTC (kept in UTC) is right to within the second. Nothing was changed,
+as designed.
+
+Cross-check from Linux Mint on the same laptop a minute later (`timedatectl`): system clock synchronized by NTP,
+universal time 20:27:52, **RTC time 20:27:51**, RTC in UTC (not local time) – the RTC is about 1 s behind, the same
+as `nettime`'s first two answers.
 
 ---
 

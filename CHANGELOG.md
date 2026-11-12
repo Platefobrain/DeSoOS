@@ -2,6 +2,58 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.78.0 — 2026-11-12
+
+### Added – NTP: the time from the network, read only
+- **`nettime [-t ms] [server[:port] ...] [net0]`** (new tool) asks one to four NTP servers (default
+  `time.cloudflare.com`) and tells how far this machine's clock is from the answer. It is the first real user of the
+  UDP sockets of v0.77 – no new syscall, no new service, no daemon; it needs the `udp` right.
+- **It changes nothing.** Plain NTP is not authenticated, so `nettime` does not set the RTC or the clock, does not
+  change whether the clock counts as plausible and raises no lower bound (LKG). Exit code 0 means "a well-formed
+  answer came", not "the time is trusted". NTS (authenticated, v0.79) will be the first source that may change
+  something.
+- **`user/lib/ntp.rs`** – the protocol without any I/O (RFC 5905 / the client side of RFC 4330), to be reused by
+  NTS: the query, the checks on an answer, the arithmetic.
+  - Query: 48 bytes – version 4, mode 3, poll 0, precision 0x20, everything else zero except the Transmit field,
+    which is 64 random bits from `getrandom` (IETF "NTP client data minimization": nothing about this machine or its
+    clock leaves it, and the value is the query's one-time identifier). No random numbers – nothing is sent (exit 2),
+    no weaker stand-in.
+  - Checks, in this order: (1) length ≥ 48, mode 4, version 3 or 4, **Origin = our Transmit** (a forged or late
+    answer fails here); (2) stratum 0 = Kiss-o'-Death in its own branch – its Receive / Transmit fields are undefined
+    and not read: DENY, RSTR, RATE end the questions to that server, other codes are refused, and a KoD with a wrong
+    Origin is just a forgery (RFC 8633); (3) an ordinary answer: LI ≠ 3, stratum 1–15, Receive and Transmit ≠ 0,
+    Transmit not before Receive, root delay (signed 16.16) ≥ 0 and < 16 s, root dispersion < 16 s, and
+    `root_distance_proxy` = root delay / 2 + root dispersion ≤ 1.5 s (DeSoOS's own limit – RFC 5905's MAXDIST of 1 s
+    is for the full root distance, which one query cannot compute). Extension fields after the 48 bytes are not read.
+  - Arithmetic: delay = (T4 − T1) − (T3 − T2) with T1 / T4 from uptime (refused when negative or above 10 s); the
+    server's time when the answer arrived ≈ T3 + delay / 2 – an estimate that assumes a symmetric path (the error from
+    asymmetry is at most delay / 2; the server's own error is unknown). The clock counts whole seconds, so the
+    difference is "about N s".
+  - NTP era: the 32-bit seconds wrap on 2036-02-07; the era is the one nearest to the build date. Right within
+    ±68 years (2^31 s) of the build date only – beyond that the same bits mean a date 136 years away.
+- Several servers are asked **at once**, each on its own socket: the whole run takes at most 2 × `-t` (one query,
+  one retry with a **new** Transmit value – an answer to the first query is then no longer taken) however many
+  servers; at most 2 packets per server. A wrong answer is skipped and counted, the wait goes on. With 2–4 answers:
+  the median, and who is more than 2 s from it ("disagrees"); with ≥ 3 answers and fewer than half within 2 s of the
+  median – exit 4, no verdict. Two answers that differ are both shown without a verdict.
+- `-t` 100–10000 ms (default 2000), digits only. Exit codes: 0 answer, 2 usage / no `udp` right / unknown name / no
+  random numbers, 3 no usable answer, 4 the servers do not agree.
+- Default server: `time.cloudflare.com` (it also speaks NTS – the same server in v0.79). Not `pool.ntp.org`: the
+  NTP Pool asks systems that ship a default to get their own vendor zone.
+- **Found by the new tool:** the clock DeSoOS shows is the RTC read once at boot plus uptime, and under QEMU TCG
+  uptime runs slow – the clock was 2–3 s behind the host after about 3 minutes. Nothing corrects it yet (see
+  RELEASE, limitations).
+- Tests: **NTP TEST** (suite 37; 300 tests): `/bin/ntptest` – 91 checks of the library (every refusal, the order
+  of the checks, the delay, the era at 1970 / 2036 / the edges of ±68 years, the median) and `ntptest net` – 73 cases
+  of `nettime` against the new `tests/ntp-stub.py` (31 servers on the host: correct, +1 h / +10 s / +20 s, silent,
+  Kiss-o'-Death, forged, late, 13 malformed, a server in 2040; it also checks every query byte for byte and counts
+  packets and repeated Transmit values); from the kernel's side: the hardware RTC minus the clock is the same before
+  and after, and so is the clock's verdict. `[RESULT-NTP]` line. 9 mutations of the library and the tool (no Origin
+  check, wrong era, Kiss-o'-Death ignored / checked late / without Origin, the delay's sign, LI 3, negative root
+  delay, a verdict from two answers) are all caught.
+- `tests/test.sh` starts `ntp-stub.py` (ports 58123–58153); `tests/dns-stub.py` answers `ntp.desoos`; the kernel
+  shell's `date` help points to `nettime`.
+
 ## v0.77.1 — 2026-11-11
 
 ### Fixed – sockets kept the old address after an address change

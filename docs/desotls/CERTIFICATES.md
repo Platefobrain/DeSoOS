@@ -16,7 +16,7 @@ no "insecure" switch, no fallback, nothing that turns a check off.
 | TLS | a library in the program (OpenSSL, GnuTLS, rustls); kTLS for records | Schannel in LSASS | rustls in the program | `common/desotls` in the program; the kernel has no TLS |
 | CA store | shared files `/etc/ssl/certs` (Mozilla), root-only | system store + Windows Update | webpki-roots compiled into each program | one shared file `/etc/certs/roots` (Mozilla), sealed in ramfs |
 | Mozilla trust | ca-certificates: serverAuth, distrust-after varies | Microsoft's own programme | serverAuth, no distrust-after | serverAuth + distrust-after from `certdata.txt` |
-| clock | `CLOCK_REALTIME` (NTP); systemd: the build time as a floor | system time (NTP) | `clock_gettime` | syscall 59: the RTC + "plausible" (a heuristic), the build date − 24 h as a floor |
+| clock | `CLOCK_REALTIME` (NTP); systemd: the build time as a floor | system time (NTP) | `clock_gettime` | syscall 59: the RTC + "plausible" (a heuristic), the build date − 24 h as a floor; `nettime` (NTP, v0.78) only shows the difference and sets nothing |
 
 ## The profile
 

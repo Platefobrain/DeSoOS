@@ -150,6 +150,9 @@ HTTP_PID=$!
 # UDP echo server for NET TEST (the guest sends to 10.0.2.2:58090).
 python3 "$T/udp-stub.py" 58090 &
 UDP_PID=$!
+# NTP servers for NTP TEST (ntp.desoos = 10.0.2.2, ports 58123-58153).
+python3 "$T/ntp-stub.py" 58123 &
+NTP_PID=$!
 # HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).
 python3 "$T/tls-stub.py" 58443 &
 TLS_PID=$!
@@ -161,7 +164,7 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$TLS_PID" 2>/dev/null
+kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$NTP_PID" "$TLS_PID" 2>/dev/null
 wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$TLS_PID" 2>/dev/null
 
 # Second start on the same test disk (only after a passing first one, not in loop mode).
@@ -218,6 +221,8 @@ grep -a "^\[RESULT-RNG\]" "$LOG" | tail -n1 || true
 # DeSoTLS – the [RESULT-CERTS] line from CERT TEST, [RESULT-TLS] from TLS TEST.
 grep -a "^\[RESULT-CERTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-TLS\]" "$LOG" | tail -n1 || true
+# NTP – the [RESULT-NTP] line from NTP TEST.
+grep -a "^\[RESULT-NTP\]" "$LOG" | tail -n1 || true
 # DeSoFS on /disk after the restart – the [RESULT-FS] line, with the QEMU configuration.
 grep -a "^\[RESULT-FS\]" "$LOG2" | tail -n1 | tr -d '\r' | sed "s/\$/ accel=$ACCEL cpus=$SMP mem=512M restart_s=$TIME2/" || true
 # Where the DeSoFS time goes per benchmark phase (I/O, SHA-256, writes, both flushes, commits).

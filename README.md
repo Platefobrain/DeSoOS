@@ -1,4 +1,4 @@
-# DeSoOS v0.77.1
+# DeSoOS v0.78.0
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -42,7 +42,7 @@ More documentation:
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP (also for programs – connected client sockets), DHCP, DNS, TCP client and server, loopback;
-  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP/1.1 with chunked answers), `udpsend`, `netweb` (a small web server).
+  tools `netconfig`, `ping`, `host`, `netarp`, `netget` (HTTP/1.1 with chunked answers), `udpsend`, `nettime` (NTP: compares the clock with the network's time, changes nothing), `netweb` (a small web server).
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
@@ -73,7 +73,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (36 suites, a restart phase and a short soak, 298 tests), stress tests and a long soak test
+- Built-in self-tests (37 suites, a restart phase and a short soak, 300 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -367,6 +367,10 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   = one datagram, ≤ 1472 bytes, only from that peer, a random local port) with the `udp` right. When the address
   or mask changes (`netconfig set`, back to DHCP, a new DHCP lease), netd closes UDP sockets and aborts TCP
   connections of the old address – programs open them again.
+- `nettime [-t ms] [server[:port] ...]` - asks 1-4 NTP servers (default `time.cloudflare.com`) at once and tells
+  how far the clock is from their time ("about N s ahead / behind", the median with several servers). Read only:
+  plain NTP is not authenticated, so nothing is set. Exit 0 answer, 2 usage / refused, 3 no usable answer, 4 the
+  servers do not agree.
 - `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
   file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
   port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it

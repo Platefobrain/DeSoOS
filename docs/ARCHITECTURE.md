@@ -1342,6 +1342,49 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 - The test laptop also has an **AMD IOMMU** (00:00.2) – a future way to confine the DMA of usbd and netd to their own
   buffers (Future).
 
+### Time from the network: NTP (v0.78.0)
+
+`/bin/nettime` asks NTP servers what time it is and compares the answer with the clock. **It only reads.** Plain NTP
+is not authenticated – anyone on the path can answer – so its result sets nothing: not the RTC, not the clock, not the
+verdict "plausible", not a lower bound (LKG). The kernel has no syscall that takes a time, so this is a property of
+the design, not of the tool's good manners. NTS (v0.79) will be the first source allowed to change anything.
+
+- **Where:** a program, not a service – `user/lib/ntp.rs` (no I/O: query, checks, arithmetic; NTS will reuse it and
+  add the extension fields) and `user/bin/nettime.rs` over the UDP sockets of netd (the `udp` right).
+- **The clock** it compares with is what syscall 59 and `date` give: the RTC read once at boot plus uptime, whole
+  seconds. (So it also shows uptime's drift – under QEMU TCG seconds within minutes.)
+- **Query:** 48 bytes, version 4, mode 3, poll 0, precision 0x20, the rest zero except Transmit = 64 random bits
+  (`getrandom`; no random numbers – nothing is sent). The server copies Transmit into Origin, so the value is both
+  privacy (our clock is not sent) and the query's one-time identifier.
+- **Checks on an answer, in order:** (1) from the socket's peer (netd), ≥ 48 bytes, mode 4, version 3 / 4, Origin =
+  our Transmit; (2) stratum 0 – Kiss-o'-Death, its own branch before any timestamp check (a KoD's Receive / Transmit
+  are undefined): DENY / RSTR / RATE end the questions to that server, anything else is refused; because step 1 came
+  first, a KoD with a wrong Origin is a forgery like any other and stops nothing; (3) LI ≠ 3, stratum 1–15, Receive
+  and Transmit ≠ 0, Transmit ≥ Receive, root delay ≥ 0 and < 16 s, root dispersion < 16 s,
+  `root_distance_proxy` = root delay / 2 + root dispersion ≤ 1.5 s (own limit; a simplification of RFC 5905's root
+  distance).
+- **Arithmetic:** delay = (T4 − T1) − (T3 − T2), T1 / T4 from uptime (ms); server time at arrival ≈ T3 + delay / 2
+  (assumes a symmetric path – the error from asymmetry is at most delay / 2). **Era:** NTP's 32-bit seconds wrap in
+  2036; the era nearest to the build date is taken, right within ±68 years of it.
+- **Run:** all servers (1–4) at once, each on its own socket and deadline; one retry after `-t` ms of no usable
+  answer, with a new Transmit value; at most 2 packets per server and 2 × `-t` in all. A wrong answer is skipped
+  (counted) and the wait goes on. Several answers: the median, "disagrees" beyond 2 s from it, exit 4 when ≥ 3
+  answered and fewer than half are near the median. This is a simplification, not RFC 5905's selection – that comes
+  with NTS, when the result starts to matter.
+
+| | Client | Sets the clock? | Authenticated | Default server |
+|---|---|---|---|---|
+| Linux (systemd-timesyncd) | SNTP | yes | no | the distribution's NTP Pool vendor zone |
+| Linux (chrony) | full NTP | yes | NTS optional | vendor zone |
+| Windows (w32time) | NTP / SNTP | yes | no (MS-SNTP inside a domain) | `time.windows.com` |
+| RedoxOS | none found in the base system | – | – | – |
+| **DeSoOS** | SNTP, one shot (`nettime`) | **no** – information only | no, hence read only; NTS in v0.79 | `time.cloudflare.com` |
+
+NTP TEST (suite 37): `/bin/ntptest` (91 checks of the library) and `ntptest net` (73 cases of `nettime` against
+`tests/ntp-stub.py` – 31 servers on the host, one behaviour per port; the stub also checks every query byte for byte
+and counts packets and repeated Transmit values). The kernel side compares the hardware RTC minus the clock before
+and after.
+
 ### Network access is a capability
 
 There is no "every program may use the network". A program can reach the network only through a channel to netd,

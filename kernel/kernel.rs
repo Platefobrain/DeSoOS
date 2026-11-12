@@ -311,6 +311,11 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::tls_self_test();
     }
+    // NTP – user/lib/ntp.rs and /bin/nettime against tests/ntp-stub.py.
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::ntp_self_test();
+    }
     #[cfg(selftest)]
     if !selftest::looping() {
         user::stress_self_test();

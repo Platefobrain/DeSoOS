@@ -78,6 +78,9 @@ mod test_certs;
 // HTTPS: the DeSoTLS handshake and records, netget https:// (tests/tls-stub.py).
 #[cfg(selftest)]
 mod test_tls;
+// NTP: user/lib/ntp.rs and /bin/nettime (tests/ntp-stub.py).
+#[cfg(selftest)]
+mod test_ntp;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -781,6 +784,8 @@ pub use test_usb::self_test as usb_self_test;
 pub use test_net::self_test as net_self_test;
 #[cfg(selftest)]
 pub use test_tls::self_test as tls_self_test;
+#[cfg(selftest)]
+pub use test_ntp::self_test as ntp_self_test;
 #[cfg(selftest)]
 pub use test_soak::run as soak_run;
 #[cfg(selftest)]
