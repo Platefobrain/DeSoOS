@@ -309,18 +309,8 @@ fn main(args: Args) -> i32 {
     // The server at the median: the clock's reading and its delay for the summary.
     let Some(m) = servers.iter().find(|s| s.offset_ms() == Some(center)) else { return 0 };
     let State::Good { delay, rtc, .. } = m.state else { return 0 };
-    let secs = whole_secs(center);
-    print!("nettime: the clock ({} UTC) ", format_utc(rtc, &mut date));
-    if secs == 0 {
-        print!("agrees to the second with ");
-    } else {
-        print!("is about {} s {} ", secs.abs(), if secs > 0 { "ahead of" } else { "behind" });
-    }
-    if good == 1 {
-        print!("{}", m.name);
-    } else {
-        print!("the median of {} servers", good);
-    }
+    let against = if good == 1 { ntp::Against::Server(m.name) } else { ntp::Against::Median(good) };
+    print!("nettime: the clock ({} UTC) {}", format_utc(rtc, &mut date), ntp::OffsetText { ms: center, against });
     println!(" (the clock counts whole seconds; path asymmetry bound +-{} ms) - not changed: plain NTP is not authenticated", (delay + 1) / 2);
     if clock.status != 0 {
         println!("nettime: the clock counts as not plausible ({}) - this answer does not change that", clock_reason(clock.status));

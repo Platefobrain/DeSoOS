@@ -235,6 +235,41 @@ pub fn round_secs(ms: i64) -> i64 {
     if ms < 0 { -(s as i64) } else { s as i64 }
 }
 
+/// What the clock is compared with in the summary.
+#[derive(Clone, Copy)]
+pub enum Against<'a> {
+    /// One server, by the name it was asked as.
+    Server(&'a str),
+    /// The median of this many servers.
+    Median(usize),
+}
+
+/// The summary's verdict for a difference "clock minus network time" given in
+/// milliseconds (not rounded before): `round_secs` decides – |ms| < 500 is
+/// "agrees to the second with ...", exactly 500 ms and more is "is about N s ahead of
+/// ..." / "is about N s behind ...".  /bin/nettime prints this and nothing else for it.
+pub struct OffsetText<'a> {
+    pub ms: i64,
+    pub against: Against<'a>,
+}
+
+impl core::fmt::Display for OffsetText<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let secs = round_secs(self.ms);
+        if secs == 0 {
+            f.write_str("agrees to the second with ")?;
+        } else if secs > 0 {
+            write!(f, "is about {} s ahead of ", secs)?;
+        } else {
+            write!(f, "is about {} s behind ", -secs)?;
+        }
+        match self.against {
+            Against::Server(name) => f.write_str(name),
+            Against::Median(n) => write!(f, "the median of {} servers", n),
+        }
+    }
+}
+
 /// The median of `v` (sorted in place; the lower middle for an even count; 0 for none).
 pub fn median(v: &mut [i64]) -> i64 {
     if v.is_empty() {

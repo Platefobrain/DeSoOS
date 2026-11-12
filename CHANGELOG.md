@@ -2,6 +2,19 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.78.2 — 2026-11-12
+
+### Changed – the summary's words are tested exactly (review of v0.78.1)
+- The verdict in `nettime`'s summary ("agrees to the second with …" / "is about N s ahead of …" / "is about N s
+  behind …") is now built by one library function, `ntp::OffsetText { ms, against }`, from the difference in
+  **milliseconds** (not a value rounded before); `nettime` prints it and has no formatting of its own for it. The
+  boundary is `round_secs`: |ms| < 500 – "agrees to the second", exactly 500 ms and more – "about 1 s".
+- Why not through the real clock: the clock counts whole seconds and a test cannot know where within its second
+  it is (and under TCG it drifts), so a server 1.5 s off gives −2 or −1 s depending on the moment – a test of that
+  would be random and could not tell the old rounding from the new. The function is tested instead: −1500 / +1500 /
+  −500 / +500 / −499 / +499 / 0 / −3 600 400 ms against one server, and against the median of 3. `ntptest` 106 → 115
+  checks; the earlier `round_secs` checks and the 75 `ntptest net` cases stay. Output unchanged.
+
 ## v0.78.1 — 2026-11-12
 
 ### Fixed – how `nettime` shows its results (review of v0.78.0)

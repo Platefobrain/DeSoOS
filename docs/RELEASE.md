@@ -204,6 +204,38 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.78.2 — 2026-11-12
+
+**Status: stable on QEMU (TCG and KVM); the summary's words of `nettime` come from one tested library function;
+37 suites, 300 tests. The last NTP fix before NTS + LKG.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 337 s (restart 23 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 264 s (restart 13 s, soak 125 s) |
+
+`[RESULT-NTP]` checks 106 → 115 (the summary's words at ±1500, ±500, ±499, 0 ms and against a median), cases 75.
+The exact half-second boundary is tested on the function, not through the clock – a whole-second clock with an
+unknown phase cannot give a repeatable ±1.5 s (see CHANGELOG).
+
+### Performance against the previous release (v0.78.1 → v0.78.2, same machine)
+
+| | TCG v0.78.1 | TCG v0.78.2 | KVM v0.78.1 | KVM v0.78.2 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 115 / 4 413 | 102 / 4 376 | 46 / 5 720 | 49 / 5 565 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 779 / 12 245 | 7 211 / 12 468 | 19 320 / 53 542 | 16 000 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 12 894 / 3 557 | 12 817 / 3 646 | 7 467 / 819 | 7 938 / 829 |
+| short soak: file operations in 2 min | 5 944 | 6 285 | 27 883 | 28 492 |
+| short soak: network MiB | 865 | 851 | 928 | 924 |
+
+Verdict: no regression – only `nettime`'s formatting moved into the library; the KVM 8 MiB write (19 320 → 16 000
+KiB/s) is one slower run of a benchmark this release does not touch (v0.77.1: 18 575). Soak: leaks 0, errors 0,
+longest recovery 935 ms (TCG) / 885 ms (KVM).
+
+---
+
 ## v0.78.1 — 2026-11-12
 
 **Status: stable on QEMU (TCG and KVM); fix – `nettime` shows dates before 1970 and rounds negative differences

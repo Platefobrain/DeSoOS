@@ -181,6 +181,41 @@ fn library() -> i32 {
         check!(n, ntp::round_secs(ms) == want, "round_secs({}) = {}, not {}", ms, ntp::round_secs(ms), want);
     }
 
+    // The summary's words, from the difference in ms (the very text nettime prints).
+    struct Line {
+        b: [u8; 96],
+        n: usize,
+    }
+    impl core::fmt::Write for Line {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let k = s.len().min(self.b.len() - self.n);
+            self.b[self.n..self.n + k].copy_from_slice(&s.as_bytes()[..k]);
+            self.n += k;
+            Ok(())
+        }
+    }
+    let words = |ms: i64, against: ntp::Against| {
+        let mut l = Line { b: [0; 96], n: 0 };
+        let _ = core::fmt::Write::write_fmt(&mut l, format_args!("{}", ntp::OffsetText { ms, against }));
+        l
+    };
+    for (ms, want) in [
+        (-1500i64, "is about 2 s behind X"),
+        (1500, "is about 2 s ahead of X"),
+        (-499, "agrees to the second with X"),
+        (499, "agrees to the second with X"),
+        (-500, "is about 1 s behind X"),
+        (500, "is about 1 s ahead of X"),
+        (0, "agrees to the second with X"),
+        (-3_600_400, "is about 3600 s behind X"),
+    ] {
+        let l = words(ms, ntp::Against::Server("X"));
+        let got = core::str::from_utf8(&l.b[..l.n]).unwrap_or("?");
+        check!(n, got == want, "summary for {} ms: {:?}, not {:?}", ms, got, want);
+    }
+    let l = words(-1500, ntp::Against::Median(3));
+    check!(n, &l.b[..l.n] == b"is about 2 s behind the median of 3 servers", "summary against the median: {:?}", core::str::from_utf8(&l.b[..l.n]));
+
     // The median and the agreement.
     check!(n, ntp::median(&mut []) == 0 && ntp::median(&mut [5]) == 5, "median of none and of one");
     check!(n, ntp::median(&mut [3_600_000, 0, 0]) == 0 && ntp::median(&mut [3_600_000, 0, 3_600_000]) == 3_600_000, "median of three");
@@ -199,7 +234,7 @@ fn library() -> i32 {
     check!(n, verdict(&mut [0, 10_000, 20_000, 30_000]) == (1, true) && verdict(&mut [0, 0, 10_000, 20_000]) == (2, false), "four answers");
     check!(n, verdict(&mut [7]) == (1, false), "one answer");
 
-    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, dates before 1970, rounding, median)", n, pivot);
+    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, dates before 1970, rounding, the summary's words, median)", n, pivot);
     0
 }
 

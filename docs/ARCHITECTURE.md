@@ -1369,7 +1369,8 @@ the design, not of the tool's good manners. NTS (v0.79) will be the first source
 - **Run:** all servers (1–4) at once, each on its own socket and deadline; one retry after `-t` ms of no usable
   answer, with a new Transmit value; at most 2 packets per server and 2 × `-t` in all. A wrong answer is skipped
   (counted) and the wait goes on. Several answers: the median, "disagrees" beyond 2 s from it, exit 4 when ≥ 3
-  answered and fewer than half are near the median. This is a simplification, not RFC 5905's selection – that comes
+  answered and fewer than half are near the median. The summary's words ("agrees to the second" / "about N s ahead
+  of / behind") come from `ntp::OffsetText`, from the difference in ms – tested exactly in `ntptest`. This is a simplification, not RFC 5905's selection – that comes
   with NTS, when the result starts to matter.
 
 | | Client | Sets the clock? | Authenticated | Default server |
