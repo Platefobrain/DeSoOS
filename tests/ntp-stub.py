@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # NTP servers for NTP TEST (tests/test.sh starts it).  One process listens on
-# 127.0.0.1:<base>..<base+30> (default base 58123); in QEMU's user network the guest
+# 127.0.0.1:<base>..<base+31> (default base 58123); in QEMU's user network the guest
 # reaches them as 10.0.2.2:<port>.  Every port is one server with its own behaviour
 # (base + n):
 #    0  a correct answer (stratum 2, the host's time)
@@ -22,6 +22,8 @@
 #   24  root delay 0.2 s + dispersion 1.3 s (accepted)
 #   25  root delay negative                      26  transmit before receive
 #   27  transmit 0        28  receive 0          29  version 5
+#   31  correct, but the server's clock says 1960-01-01 00:00:00 UTC (before the Unix
+#       epoch, within 68 years of the build date)
 #   30  not NTP: "reset" zeroes the query counter (bad and dup count for the whole run), anything answers
 #       "queries=N bad=N dup=N" - queries seen on ports 0-29, queries that are not the
 #       minimal client packet (48 bytes: 0x23, 0, 0, 0x20, zeros, a Transmit value),
@@ -120,12 +122,14 @@ def answers(n, query, origin, first, state, peer):
         return [packet(origin, now, receive=zero)]
     if n == 29:
         return [packet(origin, now, vn=5)]
+    if n == 31:
+        return [packet(origin, -315619200.0)]  # 1960-01-01 00:00:00 UTC
     return []
 
 
 def main():
     socks = {}
-    for n in range(STATS + 1):
+    for n in range(STATS + 2):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.bind(("127.0.0.1", BASE + n))

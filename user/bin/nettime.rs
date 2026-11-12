@@ -102,9 +102,9 @@ fn ask(s: &mut Server, wait_ms: u64) -> Result<(), i64> {
     Ok(())
 }
 
-/// "+3 s" / "-1 s" / "0 s" of a difference in ms, rounded to the second.
+/// A difference in ms as whole seconds (half a second away from zero, both signs).
 fn whole_secs(ms: i64) -> i64 {
-    (ms + 500).div_euclid(1000)
+    ntp::round_secs(ms)
 }
 
 fn main(args: Args) -> i32 {
@@ -281,7 +281,7 @@ fn main(args: Args) -> i32 {
                     s.addr(),
                     stratum,
                     delay,
-                    format_utc(server_ms.div_euclid(1000).max(0) as u64, &mut date),
+                    format_utc_signed(server_ms.div_euclid(1000), &mut date),
                     server_ms.rem_euclid(1000),
                     whole_secs(o),
                     off

@@ -150,7 +150,7 @@ HTTP_PID=$!
 # UDP echo server for NET TEST (the guest sends to 10.0.2.2:58090).
 python3 "$T/udp-stub.py" 58090 &
 UDP_PID=$!
-# NTP servers for NTP TEST (ntp.desoos = 10.0.2.2, ports 58123-58153).
+# NTP servers for NTP TEST (ntp.desoos = 10.0.2.2, ports 58123-58154).
 python3 "$T/ntp-stub.py" 58123 &
 NTP_PID=$!
 # HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).

@@ -228,6 +228,13 @@ pub fn server_time_ms(r: &Reply, delay_ms: u64, pivot_unix: u64) -> i64 {
     unix_ms(r.transmit, pivot_unix) + (delay_ms / 2) as i64
 }
 
+/// Milliseconds as whole seconds, half a second rounded away from zero – the same for
+/// both signs (+1500 ms -> +2 s, -1500 ms -> -2 s).
+pub fn round_secs(ms: i64) -> i64 {
+    let s = (ms.unsigned_abs() + 500) / 1000;
+    if ms < 0 { -(s as i64) } else { s as i64 }
+}
+
 /// The median of `v` (sorted in place; the lower middle for an even count; 0 for none).
 pub fn median(v: &mut [i64]) -> i64 {
     if v.is_empty() {

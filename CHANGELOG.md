@@ -2,6 +2,21 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.78.1 — 2026-11-12
+
+### Fixed – how `nettime` shows its results (review of v0.78.0)
+- **Dates before 1970** were shown as 1970-01-01: `nettime` cut a negative Unix time to 0 before formatting it,
+  although the era rule is right for ±68 years around the build date (back to ~1958). New library function
+  `format_utc_signed` (signed seconds; `format_utc` now uses it); `nettime` shows a server in 1960 as 1960.
+- **Rounding of a difference to whole seconds** was not symmetric: +1500 ms gave +2 s but −1500 ms gave −1 s.
+  Now `ntp::round_secs` rounds half a second away from zero for both signs. Only the shown seconds changed – the
+  median, "disagrees" and exit code 4 always worked on milliseconds.
+- Tests: `ntptest` 91 → 106 checks (dates 1958 / 1960 / one second before 1970 / 2040, rounding ±1500 / ±500 /
+  ±499 ms), `ntptest net` 73 → 75 cases (a server in 1960 – `ntp-stub.py` port 31, now 32 servers on
+  58123–58154; four answers with exactly half near the median – exit 0, two "disagrees"). A failing `getrandom`
+  (exit 2, nothing sent) is not tested: the kernel's generator never fails once it runs, and a selftest-only
+  switch for it was decided against – the path is checked in the code only.
+
 ## v0.78.0 — 2026-11-12
 
 ### Added – NTP: the time from the network, read only

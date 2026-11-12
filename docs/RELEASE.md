@@ -126,6 +126,8 @@ timings move by ±15% from run to run on the same build).
   server's own error is unknown; with several servers only a median and a 2 s limit – not RFC 5905's selection;
   the acceptance limit `root_distance_proxy` ≤ 1.5 s is a simplification of the full root distance
 - NTP era: right only within ±68 years of the build date (beyond that the same 32 bits mean a date 136 years away)
+- `nettime` with no random numbers ends with exit 2 and sends nothing – checked in the code, not tested (the
+  kernel's generator does not fail once it runs; no test switch for it)
 - the clock is the RTC read once at boot plus uptime: it drifts with uptime's timer (under QEMU TCG it was 2–3 s
   behind the host after about 3 minutes) and nothing corrects it yet
 - `netget`: HTTP/1.1, one request per connection (no keep-alive), GET only, no redirects, no HTTP/2, no content
@@ -199,6 +201,37 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.78.1 — 2026-11-12
+
+**Status: stable on QEMU (TCG and KVM); fix – `nettime` shows dates before 1970 and rounds negative differences
+like positive ones; 37 suites, 300 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 335 s (restart 24 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 37/37 suites + restart 1/1 + short soak (RAM disk), 300 tests PASS | 262 s (restart 12 s, soak 125 s) |
+
+`[RESULT-NTP]` checks 91 → 106, cases 73 → 75. The new checks read exactly what the old code got wrong (the 1960
+server's date, ±1500 ms), so they fail on v0.78.0's code.
+
+### Performance against the previous release (v0.78.0 → v0.78.1, same machine)
+
+| | TCG v0.78.0 | TCG v0.78.1 | KVM v0.78.0 | KVM v0.78.1 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 92 / 4 899 | 115 / 4 413 | 51 / 6 400 | 46 / 5 720 |
+| DeSoFS 8 MiB write / read (KiB/s) | 6 692 / 11 719 | 7 779 / 12 245 | 18 745 / 53 194 | 19 320 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 14 133 / 3 776 | 12 894 / 3 557 | 7 625 / 833 | 7 467 / 819 |
+| short soak: file operations in 2 min | 6 119 | 5 944 | 27 854 | 27 883 |
+| short soak: network MiB | 828 | 865 | 874 | 928 |
+
+Verdict: no regression – only `nettime`'s output and the tests changed; the differences are this host's
+run-to-run spread (TLS 1 MiB on KVM moved 6 400 → 5 720 KiB/s, v0.77.0 had 6 206). Soak: leaks 0, errors 0,
+longest recovery 943 ms (TCG) / 874 ms (KVM).
 
 ---
 

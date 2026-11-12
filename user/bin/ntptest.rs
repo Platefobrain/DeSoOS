@@ -170,6 +170,17 @@ fn library() -> i32 {
     let t2040 = ntp::Reply { stratum: 2, receive: ts(2_222_164_800), transmit: ts(2_222_164_800), root_delay: 0, root_dispersion: 0 };
     check!(n, ntp::server_time_ms(&t2040, 31, pivot) == 2_222_164_800_015, "T3 + delay / 2");
 
+    // Showing the results: dates before 1970 (the +-68 years reach back to ~1958), the
+    // rounding of a difference to whole seconds (symmetric).
+    let mut b = [0u8; 19];
+    check!(n, format_utc_signed(-378_691_200, &mut b) == "1958-01-01 00:00:00", "1958-01-01: {:?}", format_utc_signed(-378_691_200, &mut b));
+    check!(n, format_utc_signed(-1, &mut b) == "1969-12-31 23:59:59", "one second before 1970: {:?}", format_utc_signed(-1, &mut b));
+    check!(n, format_utc_signed(-315_619_200 + 3661, &mut b) == "1960-01-01 01:01:01", "1960-01-01 01:01:01");
+    check!(n, format_utc_signed(0, &mut b) == "1970-01-01 00:00:00" && format_utc_signed(2_222_164_800, &mut b) == "2040-06-01 12:00:00", "1970 and 2040");
+    for (ms, want) in [(1500i64, 2i64), (-1500, -2), (1499, 1), (-1499, -1), (500, 1), (-500, -1), (499, 0), (-499, 0), (0, 0), (-3_600_400, -3600), (3_600_400, 3600)] {
+        check!(n, ntp::round_secs(ms) == want, "round_secs({}) = {}, not {}", ms, ntp::round_secs(ms), want);
+    }
+
     // The median and the agreement.
     check!(n, ntp::median(&mut []) == 0 && ntp::median(&mut [5]) == 5, "median of none and of one");
     check!(n, ntp::median(&mut [3_600_000, 0, 0]) == 0 && ntp::median(&mut [3_600_000, 0, 3_600_000]) == 3_600_000, "median of three");
@@ -188,7 +199,7 @@ fn library() -> i32 {
     check!(n, verdict(&mut [0, 10_000, 20_000, 30_000]) == (1, true) && verdict(&mut [0, 0, 10_000, 20_000]) == (2, false), "four answers");
     check!(n, verdict(&mut [7]) == (1, false), "one answer");
 
-    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, median)", n, pivot);
+    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, dates before 1970, rounding, median)", n, pivot);
     0
 }
 
@@ -411,6 +422,10 @@ fn net() -> i32 {
     let r = run(&[server(0, 14)]);
     case!(n, r.code == 0 && r.out.contains("server time 2040-06-01 12:00:0") && matches!(rtc_offset(r.out), Some(o) if o < -300_000_000), "a server in 2040 (era 1): {} {:?}", r.code, r.out);
 
+    // A server in 1960: before the Unix epoch, within 68 years of the build date.
+    let r = run(&[server(0, 31)]);
+    case!(n, r.code == 0 && r.out.contains("server time 1960-01-01 00:00:0") && matches!(rtc_offset(r.out), Some(o) if o > 2_000_000_000), "a server in 1960: {} {:?}", r.code, r.out);
+
     // Several servers, all asked at once.
     let r = run(&[server(0, 0), server(1, 0), server(2, 1)]);
     case!(n, r.code == 0 && r.out.matches("disagrees with the median").count() == 1 && r.out.contains("the median of 3 servers") && matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "0, 0, +1 h: {} {:?}", r.code, r.out);
@@ -422,6 +437,8 @@ fn net() -> i32 {
     case!(n, r.code == 0 && r.out.contains("two cannot settle which is right") && rtc_offset(r.out).is_none(), "two servers an hour apart: {} {:?}", r.code, r.out);
     let r = run(&[server(0, 0), server(1, 0)]);
     case!(n, r.code == 0 && r.out.contains("the median of 2 servers") && matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "two servers that agree: {} {:?}", r.code, r.out);
+    let r = run(&[server(0, 0), server(1, 0), server(2, 1), server(3, 1)]);
+    case!(n, r.code == 0 && r.out.matches("disagrees with the median").count() == 2 && r.out.contains("the median of 4 servers"), "four answers, exactly half near the median: {} {:?}", r.code, r.out);
     stats(true);
     let r = run(&["-t", "400", server(0, 0), server(1, 4), server(2, 0), server(3, 5)]);
     case!(n, r.code == 0 && r.out.contains("the median of 2 servers") && r.out.contains("no answer (2 queries of 400 ms)") && r.out.contains("RATE"), "four servers: two answer, one silent, one KoD: {} {:?}", r.code, r.out);
@@ -483,7 +500,7 @@ fn net() -> i32 {
     let r = run(&[server(0, 0)]);
     case!(n, matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "the clock against the host's time at the end: {:?}", r.out);
 
-    println!("ntptest net: {} cases OK (nettime against tests/ntp-stub.py: answers, forged and late ones, Kiss-o'-Death, silence, 13 malformed answers, a server in 2040, 2-4 servers at once, arguments, the udp right; the clock and its verdict unchanged after {} s)", n, ran);
+    println!("ntptest net: {} cases OK (nettime against tests/ntp-stub.py: answers, forged and late ones, Kiss-o'-Death, silence, 13 malformed answers, servers in 1960 and 2040, 2-4 servers at once, arguments, the udp right; the clock and its verdict unchanged after {} s)", n, ran);
     0
 }
 

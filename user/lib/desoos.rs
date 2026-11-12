@@ -365,8 +365,14 @@ pub fn clock_reason(status: u64) -> &'static str {
 
 /// "YYYY-MM-DD HH:MM:SS" of Unix seconds into `buf`.
 pub fn format_utc(secs: u64, buf: &mut [u8; 19]) -> &str {
-    let days = (secs / 86400) as i64;
-    let rem = secs % 86400;
+    format_utc_signed(secs.min(i64::MAX as u64) as i64, buf)
+}
+
+/// The same for signed Unix seconds – dates before 1970 too (years 0000-9999; outside
+/// that the year is clamped).
+pub fn format_utc_signed(secs: i64, buf: &mut [u8; 19]) -> &str {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400) as u64;
     // civil_from_days (H. Hinnant)
     let z = days + 719468;
     let era = z.div_euclid(146097);
@@ -385,7 +391,7 @@ pub fn format_utc(secs: u64, buf: &mut [u8; 19]) -> &str {
         }
     };
     *buf = *b"0000-00-00 00:00:00";
-    put(buf, 0, y.max(0) as u64, 4);
+    put(buf, 0, y.clamp(0, 9999) as u64, 4);
     put(buf, 5, m as u64, 2);
     put(buf, 8, d as u64, 2);
     put(buf, 11, rem / 3600, 2);
