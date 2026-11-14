@@ -1072,6 +1072,32 @@ impl Client {
         }
     }
 
+    /// Forgets the connection: every secret, the record keys, and the bytes of all buffers
+    /// (received records, decrypted application data, handshake messages, records to send) –
+    /// zeroed, the client back to the state of `new`.  Call it when the connection is done
+    /// (after `close`); `connect` does the same before a new one.  A client in a `static`
+    /// otherwise keeps the last session's secrets until then.
+    pub fn wipe(&mut self) {
+        self.reset();
+        wipe(&mut self.io.rbuf);
+        wipe(&mut self.io.wbuf);
+        wipe(&mut self.hs.buf);
+        wipe(&mut self.app.buf);
+    }
+
+    /// Nothing of a connection left: no secret, no record keys, all buffers zero (tests).
+    pub fn wiped(&self) -> bool {
+        let s = &self.st;
+        let zero = |b: &[u8]| b.iter().all(|&x| x == 0);
+        s.read.is_none()
+            && s.write.is_none()
+            && [&s.handshake_secret, &s.c_hs, &s.s_hs, &s.c_ap, &s.s_ap, &s.exp].iter().all(|k| zero(&k.0))
+            && zero(&self.io.rbuf)
+            && zero(&self.io.wbuf)
+            && zero(&self.hs.buf)
+            && zero(&self.app.buf)
+    }
+
     /// The record numbers of the current keys (send, receive) and how many KeyUpdates moved
     /// them – for the tests.
     /// Keying material from this connection (TLS 1.3 exporter, RFC 9846 §7.5):

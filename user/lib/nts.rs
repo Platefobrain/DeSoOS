@@ -16,6 +16,9 @@
 //   Warning → refused (§4.1.4: unknown warning codes are errors, none are defined); a
 //   repeated one-time record, a missing mandatory one, an unknown critical record → refused;
 //   an unknown non-critical record → skipped; a body shorter than its type needs → refused;
+//   the Critical Bit as §4.1 demands – set on End of Message, Next Protocol, Error and
+//   Warning, not set on New Cookie (AEAD and the negotiations may have it either way) –
+//   else refused; End of Message with a body, Error / Warning not exactly 2 bytes → refused;
 //   no End of Message, a cut record, anything after End of Message, a message longer than
 //   65 536 bytes (decrypted TLS application data, §4) → refused.
 //
@@ -41,8 +44,9 @@
 //        something – `Answer::Nak` (a control message, never a time: send the next query,
 //        a new NTS-KE when that fails too); any other stratum-0 answer – ignored (`Reject::
 //        UnauthenticatedKod` – not authenticated, RFC 8915 §5.7);
-//     3. our Unique Identifier (exactly one), the Authenticator exactly once and valid
-//        (S2C, everything before it as associated data); fields after it are ignored – they
+//     3. our Unique Identifier (exactly one), the Authenticator exactly once, its padding
+//        (after the nonce, after the ciphertext, the additional padding) all zeros (§5.6),
+//        and valid (S2C, everything before it as associated data); fields after it are ignored – they
 //        are not authenticated (§5.7) and nothing in them is used; new cookies come only
 //        from the encrypted part;
 //     4. then every check of ntp.rs on the header (LI, stratum, timestamps, root delay /
@@ -51,7 +55,8 @@
 // Cookies are used once (each query takes a new one, also when its answer never comes – a
 // cookie never goes out twice) – that keeps queries unlinkable (§5.7).  They and the keys
 // stay in memory only; nothing is written to a file or a log (RFC 8915 recommends keeping
-// one across restarts – DeSoOS does not yet: after a restart, always a new NTS-KE).
+// one across restarts – DeSoOS does not yet: after a restart, always a new NTS-KE).  The
+// decrypted part of an answer is zeroed on every way out of `check_response` (`Wiped`).
 #![allow(dead_code)]
 
 use super::desocrypto::aes_siv::{self, AesSiv};
@@ -118,6 +123,11 @@ pub enum KeError {
     BadPort,
     UnknownCritical(u16),
     Short(u16),
+    /// A record whose Critical Bit must be set (End of Message, Next Protocol, Error, Warning)
+    /// and is not, or must not be set (New Cookie) and is – RFC 8915 §4.1.
+    CriticalBit(u16),
+    /// End of Message with a body, Error / Warning not exactly 2 bytes.
+    BadLength(u16),
 }
 
 impl KeError {
@@ -139,6 +149,8 @@ impl KeError {
             KeError::BadPort => "bad NTPv4 Port Negotiation record",
             KeError::UnknownCritical(_) => "unknown critical NTS-KE record",
             KeError::Short(_) => "NTS-KE record body too short",
+            KeError::CriticalBit(_) => "NTS-KE record with a wrong Critical Bit",
+            KeError::BadLength(_) => "NTS-KE record with a wrong length",
         }
     }
 }
@@ -290,6 +302,12 @@ pub fn parse_ke(data: &[u8], pool: &mut Pool) -> Result<Negotiated, KeError> {
         p += 4 + len;
         match ty {
             KE_END => {
+                if !critical {
+                    return Err(KeError::CriticalBit(ty));
+                }
+                if !body.is_empty() {
+                    return Err(KeError::BadLength(ty));
+                }
                 if p != data.len() {
                     return Err(KeError::AfterEnd);
                 }
@@ -300,6 +318,9 @@ pub fn parse_ke(data: &[u8], pool: &mut Pool) -> Result<Negotiated, KeError> {
                     return Err(KeError::Repeated(ty));
                 }
                 next = true;
+                if !critical {
+                    return Err(KeError::CriticalBit(ty));
+                }
                 if body.is_empty() {
                     return Err(KeError::Short(ty));
                 }
@@ -307,8 +328,16 @@ pub fn parse_ke(data: &[u8], pool: &mut Pool) -> Result<Negotiated, KeError> {
                     return Err(KeError::BadNextProtocol);
                 }
             }
-            KE_ERROR => return Err(KeError::Error(if body.len() >= 2 { be16(body) } else { 0xFFFF })),
-            KE_WARNING => return Err(KeError::Warning(if body.len() >= 2 { be16(body) } else { 0xFFFF })),
+            // Error and Warning end the exchange either way; a malformed one says so.
+            KE_ERROR | KE_WARNING => {
+                if !critical {
+                    return Err(KeError::CriticalBit(ty));
+                }
+                if body.len() != 2 {
+                    return Err(KeError::BadLength(ty));
+                }
+                return Err(if ty == KE_ERROR { KeError::Error(be16(body)) } else { KeError::Warning(be16(body)) });
+            }
             KE_AEAD => {
                 if aead {
                     return Err(KeError::Repeated(ty));
@@ -322,6 +351,9 @@ pub fn parse_ke(data: &[u8], pool: &mut Pool) -> Result<Negotiated, KeError> {
                 }
             }
             KE_COOKIE => {
+                if critical {
+                    return Err(KeError::CriticalBit(ty));
+                }
                 pool.add(body);
             }
             KE_SERVER => {
@@ -460,6 +492,8 @@ pub enum Reject {
     NoAuthenticator,
     TwoAuthenticators,
     BadAuthenticator,
+    /// Padding inside the Authenticator that is not zeros (RFC 8915 §5.6).
+    AuthenticatorPadding,
     /// The Authenticator does not verify (wrong key, changed packet).
     AuthFailed,
 }
@@ -475,6 +509,7 @@ impl Reject {
             Reject::NoAuthenticator => "no NTS Authenticator (plain NTP answer)",
             Reject::TwoAuthenticators => "two NTS Authenticators",
             Reject::BadAuthenticator => "malformed NTS Authenticator",
+            Reject::AuthenticatorPadding => "NTS Authenticator padding is not zeros",
             Reject::AuthFailed => "NTS Authenticator does not verify",
         }
     }
@@ -490,6 +525,15 @@ pub enum Answer {
 
 /// The extension fields after the header: (type, body, offset of the field).  Err when a
 /// field is malformed (length not a multiple of 4, below 16, past the end).
+/// A buffer zeroed when this goes out of scope – on every return, early ones included.
+pub struct Wiped<'a>(pub &'a mut [u8]);
+
+impl Drop for Wiped<'_> {
+    fn drop(&mut self) {
+        super::desocrypto::wipe(self.0);
+    }
+}
+
 fn fields(data: &[u8], mut f: impl FnMut(u16, &[u8], usize) -> bool) -> Result<(), Reject> {
     let mut p = ntp::PACKET;
     while p < data.len() {
@@ -580,14 +624,20 @@ pub fn check_response(data: &[u8], xmit: u64, uid: &[u8; UID_LEN], s2c: &[u8; 32
     if nlen == 0 || clen < aes_siv::TAG_LEN || 4 + npad + cpad > blen || clen - aes_siv::TAG_LEN > RESPONSE_MAX {
         return Err(Reject::BadAuthenticator);
     }
+    // Padding after the nonce, after the ciphertext, and up to the end of the field: zeros.
+    let pad_ok = data[b + 4 + nlen..b + 4 + npad].iter().all(|&x| x == 0) && data[b + 4 + npad + clen..b + blen].iter().all(|&x| x == 0);
+    if !pad_ok {
+        return Err(Reject::AuthenticatorPadding);
+    }
     let nonce = &data[b + 4..b + 4 + nlen];
     let ct = &data[b + 4 + npad..b + 4 + npad + clen];
     let mut siv = [0u8; aes_siv::TAG_LEN];
     siv.copy_from_slice(&ct[..aes_siv::TAG_LEN]);
-    let mut plain = [0u8; RESPONSE_MAX];
+    let mut plain_buf = [0u8; RESPONSE_MAX];
+    let plain = Wiped(&mut plain_buf);
     let plen = clen - aes_siv::TAG_LEN;
-    plain[..plen].copy_from_slice(&ct[aes_siv::TAG_LEN..]);
-    if AesSiv::new(s2c).open(&[&data[..at], nonce], &mut plain[..plen], &siv).is_err() {
+    plain.0[..plen].copy_from_slice(&ct[aes_siv::TAG_LEN..]);
+    if AesSiv::new(s2c).open(&[&data[..at], nonce], &mut plain.0[..plen], &siv).is_err() {
         return Err(Reject::AuthFailed);
     }
     // 4. The header's time checks (ntp.rs) – only for an authenticated answer.
@@ -597,12 +647,13 @@ pub fn check_response(data: &[u8], xmit: u64, uid: &[u8; UID_LEN], s2c: &[u8; 32
         Err(e) => return Err(Reject::Ntp(e)),
     };
     // New cookies from the encrypted fields (a malformed inner list: none taken).
-    let mut inner = [0u8; RESPONSE_MAX + ntp::PACKET];
-    inner[ntp::PACKET..ntp::PACKET + plen].copy_from_slice(&plain[..plen]);
+    let mut inner_buf = [0u8; RESPONSE_MAX + ntp::PACKET];
+    let inner = Wiped(&mut inner_buf);
+    inner.0[ntp::PACKET..ntp::PACKET + plen].copy_from_slice(&plain.0[..plen]);
     let mut got = 0;
     let mut cand = [(0usize, 0usize); POOL * 2];
     let mut nc = 0;
-    let ok = fields(&inner[..ntp::PACKET + plen], |ty, body, at| {
+    let ok = fields(&inner.0[..ntp::PACKET + plen], |ty, body, at| {
         if ty == EF_COOKIE && nc < cand.len() {
             cand[nc] = (at + 4, body.len());
             nc += 1;
@@ -611,12 +662,11 @@ pub fn check_response(data: &[u8], xmit: u64, uid: &[u8; UID_LEN], s2c: &[u8; 32
     });
     if ok.is_ok() {
         for &(s, l) in cand[..nc].iter() {
-            if pool.add(&inner[s..s + l]) {
+            if pool.add(&inner.0[s..s + l]) {
                 got += 1;
             }
         }
     }
-    super::desocrypto::wipe(&mut plain);
-    super::desocrypto::wipe(&mut inner);
+    // `plain` and `inner` are zeroed here as on every early return (Wiped).
     Ok(Answer::Time { reply, cookies: got })
 }

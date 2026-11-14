@@ -530,6 +530,18 @@ fn exporter_checks(c: &mut Checks) -> Result<(), Failure> {
     // The exporter does not depend on what was sent after the handshake.
     let (cl, mut s) = connected(c)?;
     c.check(cl.write(&mut s, b"data").is_ok() && cl.export(label, &[0, 0, 0, 15, 0], &mut out).is_ok() && out == h32(EXP_NTS_C2S))?;
+    // wipe: a client with a session and decrypted data not yet read (8 of "hello world" wait
+    // in its application buffer, the record was decrypted in its receive buffer); after wipe
+    // nothing of the session is left (secrets, record keys, every buffer zero) and the
+    // exporter refuses.
+    let (cl, mut s) = connected(c)?;
+    let (_, mut sp) = server_app();
+    s.push_sealed(&mut sp, record::APPLICATION_DATA, b"hello world");
+    let mut three = [0u8; 3];
+    c.check(cl.read(&mut s, &mut three) == Ok(3) && &three == b"hel" && !cl.wiped())?;
+    cl.close(&mut s);
+    cl.wipe();
+    c.check(cl.wiped() && cl.export(label, &[0, 0, 0, 15, 0], &mut out).is_err())?;
     Ok(())
 }
 

@@ -23,15 +23,17 @@ known good time and correcting the clock come with the time service (stage D).
 
 | Record | Rule |
 |---|---|
-| Next Protocol (1) | exactly once, exactly {0}; an empty body – refused |
-| AEAD (4) | exactly once, exactly {15} |
-| New Cookie (5) | 16–1024 bytes **and a length divisible by 4** (an NTP extension field is a multiple of 4 and the server needs its exact bytes back – a cookie is never padded); others skipped; at most 8 kept; none usable – refused |
+| Next Protocol (1) | exactly once, exactly {0}, Critical Bit set; an empty body – refused |
+| AEAD (4) | exactly once, exactly {15} (Critical Bit either way) |
+| New Cookie (5) | Critical Bit not set; 16–1024 bytes **and a length divisible by 4** (an NTP extension field is a multiple of 4 and the server needs its exact bytes back – a cookie is never padded); others skipped; at most 8 kept; none usable – refused |
 | Server Negotiation (6) | at most once, 1–253 bytes of host name (letters, digits, `.`, `-`) or IPv4 address – used for NTP |
 | Port Negotiation (7) | at most once, not 0 – used for NTP |
-| Error (2) | refused, with its code |
-| Warning (3) | refused (RFC 8915 §4.1.4: unknown warning codes are errors; none are defined) |
+| Error (2) | refused, with its code (Critical Bit not set or not exactly 2 bytes – refused as malformed) |
+| Warning (3) | refused (RFC 8915 §4.1.4: unknown warning codes are errors; none are defined); malformed as for Error |
 | unknown | critical bit – refused; otherwise skipped |
-| End of Message (0) | must come; nothing after it; the whole message ≤ 65 536 bytes (decrypted TLS data) |
+| End of Message (0) | must come, Critical Bit set, empty body; nothing after it; the whole message ≤ 65 536 bytes (decrypted TLS data) |
+
+Server and Port Negotiation may carry the Critical Bit or not (§4.1.7–4.1.8).
 
 ## NTP with NTS – the request
 
@@ -52,8 +54,9 @@ bytes longer than the request, 1472 is netd's limit).
 2. **stratum 0**: only an NTS NAK (Kiss code `NTSN`) with our Unique Identifier counts – a control message, never a
    time: the next query (new cookie) goes out at once; when that fails too, a new NTS-KE is needed. Any other
    stratum-0 answer – ignored (not authenticated);
-3. our Unique Identifier (exactly one, before the Authenticator); the Authenticator **exactly once** and valid
-   (AES-SIV with S2C, everything before it as associated data); fields after it are not authenticated and not used;
+3. our Unique Identifier (exactly one, before the Authenticator); the Authenticator **exactly once**, its padding
+   (after the nonce, after the ciphertext, the additional padding) all zeros (§5.6 – these bytes are not covered by
+   the Authenticator itself), and valid (AES-SIV with S2C, everything before it as associated data); fields after it are not authenticated and not used;
    new cookies come only from its encrypted part;
 4. then every check of `ntp.rs` on the header (LI, stratum 1–15, timestamps, root delay / dispersion, distance).
 
@@ -68,7 +71,8 @@ bytes longer than the request, 1472 is netd's limit).
 
 ## Tests
 
-- **NTP TEST 1/3** (`ntptest`, no network): every NTS-KE refusal and acceptance (25 responses), the cookie pool, the
+- **NTP TEST 1/3** (`ntptest`, no network): every NTS-KE refusal and acceptance (37 responses, the Critical Bit and
+  exact lengths among them), the Authenticator's three paddings, the zeroing guard, the cookie pool, the
   placeholder count (8 cases), the request byte for byte with its Authenticator checked by AES-SIV, every kind of
   answer (authenticated, fields after the Authenticator, wrong / missing Unique Identifier, bad / wrong-key
   Authenticator, Origin, stratum 16 inside, DENY / NTSN without our Unique Identifier, NTS NAK, plain NTP, two

@@ -291,6 +291,19 @@ fn ke_from(parts: &[&str]) -> &'static [u8] {
             "Sbad" => rec(b, &mut n, 6, b"bad host!"),
             "P" => rec(b, &mut n, 7, &[0xE4, 0xD8]),
             "P0" => rec(b, &mut n, 7, &[0, 0]),
+            // The Critical Bit and exact lengths (RFC 8915 §4.1).
+            "Enc" => rec(b, &mut n, 0x0000, &[]),
+            "Ebody" => rec(b, &mut n, 0x8000, &[0, 0]),
+            "Nnc" => rec(b, &mut n, 0x0001, &[0, 0]),
+            "Anc" => rec(b, &mut n, 0x0004, &[0, 15]),
+            "ErrNc" => rec(b, &mut n, 0x0002, &[0, 1]),
+            "Err1" => rec(b, &mut n, 0x8002, &[0]),
+            "Err3" => rec(b, &mut n, 0x8002, &[0, 1, 2]),
+            "WarnNc" => rec(b, &mut n, 0x0003, &[0, 0]),
+            "Warn3" => rec(b, &mut n, 0x8003, &[0, 0, 0]),
+            "Ccrit" => rec(b, &mut n, 0x8005, &[0xC0; 96]),
+            "Scrit" => rec(b, &mut n, 0x8006, b"ntp.desoos"),
+            "Pcrit" => rec(b, &mut n, 0x8007, &[0xE4, 0xD8]),
             "cut" => n -= 3,
             _ => {}
         }
@@ -312,7 +325,7 @@ fn nts_checks(n: &mut usize) -> i32 {
     // The request records.
     check!(k, nts::KE_REQUEST == [0x80, 1, 0, 2, 0, 0, 0x80, 4, 0, 2, 0, 15, 0x80, 0, 0, 0], "NTS-KE request bytes");
     // Responses.
-    let cases: [(&[&str], Result<usize, E>); 25] = [
+    let cases: [(&[&str], Result<usize, E>); 37] = [
         (&["N", "A", "C", "E"], Ok(1)),
         (&["N", "A", "C", "C", "C", "C", "C", "C", "C", "C", "C", "E"], Ok(8)),
         (&["N", "A", "U", "C", "E"], Ok(1)),
@@ -338,6 +351,20 @@ fn nts_checks(n: &mut usize) -> i32 {
         (&["N", "A", "C", "S", "S", "E"], Err(E::Repeated(6))),
         (&["N", "A", "C", "P0", "E"], Err(E::BadPort)),
         (&["N", "A", "C", "P", "P", "E"], Err(E::Repeated(7))),
+        // Critical Bit: must be set on End of Message, Next Protocol, Error, Warning; must not
+        // be on New Cookie; AEAD and the negotiations either way.  Exact lengths.
+        (&["N", "A", "C", "Enc"], Err(E::CriticalBit(0))),
+        (&["N", "A", "C", "Ebody"], Err(E::BadLength(0))),
+        (&["Nnc", "A", "C", "E"], Err(E::CriticalBit(1))),
+        (&["N", "Anc", "C", "E"], Ok(1)),
+        (&["N", "A", "C", "Scrit", "Pcrit", "E"], Ok(1)),
+        (&["ErrNc", "E"], Err(E::CriticalBit(2))),
+        (&["Err1", "E"], Err(E::BadLength(2))),
+        (&["Err3", "E"], Err(E::BadLength(2))),
+        (&["N", "A", "C", "WarnNc", "E"], Err(E::CriticalBit(3))),
+        (&["N", "A", "C", "Warn3", "E"], Err(E::BadLength(3))),
+        (&["N", "A", "Ccrit", "E"], Err(E::CriticalBit(5))),
+        (&["N", "A", "C", "Ccrit", "E"], Err(E::CriticalBit(5))),
     ];
     for (parts, want) in cases.iter() {
         let got = nts::parse_ke(ke_from(parts), pool).map(|_| pool.n);
@@ -500,6 +527,59 @@ fn nts_checks(n: &mut usize) -> i32 {
     // A field length that is not a multiple of 4 before the Authenticator.
     ans[51] = 35;
     check!(k, nts::check_response(&ans[..l], xmit, &uid, &s2c, pool) == Err(R::BadField), "a malformed field");
+    // Authenticator padding (RFC 8915 §5.6): a 13-byte nonce (3 bytes of padding), a 6-byte
+    // plaintext (22-byte ciphertext, 2 bytes of padding), 4 bytes of additional padding – all
+    // zeros: taken; one byte that is not zero in any of them: refused (none of these bytes is
+    // covered by the Authenticator itself, so only this check sees them).
+    let padded = |out: &mut [u8; 600], flip: usize| -> usize {
+        out[..48].copy_from_slice(&reply(xmit, now32));
+        out[48..52].copy_from_slice(&[0x01, 0x04, 0, 36]);
+        out[52..84].copy_from_slice(&uid);
+        let m = 84;
+        let nn = [0x66u8; 13];
+        let mut pt = [0x77u8; 6];
+        let v = AesSiv::new(&s2c).seal(&[&out[..m], &nn], &mut pt).unwrap_or([0; 16]);
+        let flen = 4 + 4 + 16 + 24 + 4;
+        for x in out[m..m + flen].iter_mut() {
+            *x = 0;
+        }
+        out[m..m + 4].copy_from_slice(&[0x04, 0x04, 0, flen as u8]);
+        out[m + 4..m + 8].copy_from_slice(&[0, 13, 0, 22]);
+        out[m + 8..m + 21].copy_from_slice(&nn);
+        out[m + 24..m + 40].copy_from_slice(&v);
+        out[m + 40..m + 46].copy_from_slice(&pt);
+        match flip {
+            1 => out[m + 22] = 1, // nonce padding
+            2 => out[m + 47] = 1, // ciphertext padding
+            3 => out[m + 50] = 1, // additional padding
+            _ => {}
+        }
+        m + flen
+    };
+    let l = padded(&mut ans, 0);
+    let r = nts::check_response(&ans[..l], xmit, &uid, &s2c, pool);
+    check!(k, matches!(r, Ok(nts::Answer::Time { cookies: 0, .. })), "Authenticator with zero padding (13-byte nonce, 22-byte ciphertext, additional padding): {:?}", r);
+    for (flip, what) in [(1usize, "nonce"), (2, "ciphertext"), (3, "additional")] {
+        let l = padded(&mut ans, flip);
+        let r = nts::check_response(&ans[..l], xmit, &uid, &s2c, pool);
+        check!(k, r == Err(R::AuthenticatorPadding), "{} padding not zero: {:?}", what, r);
+    }
+    // Wiped: the buffer is zeroed when the guard goes out of scope – also on an early return.
+    let mut buf = [0xAAu8; 32];
+    {
+        let w = nts::Wiped(&mut buf);
+        w.0[0] = 0xBB;
+    }
+    check!(k, buf.iter().all(|&x| x == 0), "Wiped zeroes its buffer at the end of the scope");
+    let mut buf = [0xAAu8; 32];
+    let early = |b: &mut [u8]| -> Result<(), ()> {
+        let w = nts::Wiped(b);
+        if w.0[0] == 0xAA {
+            return Err(());
+        }
+        Ok(())
+    };
+    check!(k, early(&mut buf).is_err() && buf.iter().all(|&x| x == 0), "Wiped zeroes its buffer on an early return");
     *n = k;
     0
 }

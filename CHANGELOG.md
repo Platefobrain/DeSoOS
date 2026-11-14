@@ -2,7 +2,7 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.79.0 — in progress (stage A of A–D: NTS + LKG)
+## v0.79.0 — in progress (stages A and B of A–D done: NTS + LKG)
 
 Not released yet: the version stays 0.78.2 until stage D passes. Plan: NTS (RFC 8915) and the last known good time;
 stage A = the cryptography and TLS parts NTS needs, checked against vectors and an independent TLS before anything
@@ -49,6 +49,32 @@ uses them.
   server), a third part: an implausible clock refuses NTS before connecting; 301 tests. `tests/test.sh`'s QEMU limit
   240 → 300 s (the main run takes ~195 s on the build host).
 - New folder **`docs/time/`**: `README.md` (the clocks, plausibility, sources and trust), `NTS.md`.
+
+### Stage B fix 3 – strict NTS-KE records, Authenticator padding, wiping (code review)
+- `user/lib/nts.rs`, NTS-KE: the Critical Bit as RFC 8915 §4.1 demands – set on End of Message, Next Protocol, Error
+  and Warning, not set on New Cookie (AEAD and the negotiations either way); End of Message must be empty, Error and
+  Warning exactly 2 bytes. Before, End of Message with a body or without the bit, Next Protocol without the bit, a
+  critical cookie and Error / Warning of other lengths passed (Error and Warning were refused anyway – now with the
+  reason "wrong length / Critical Bit").
+- NTP answers: the Authenticator's padding (after the nonce, after the ciphertext, the additional padding) must be
+  zeros (§5.6) – none of these bytes is covered by the Authenticator itself.
+- The decrypted part of an answer is zeroed on every way out of `check_response` (`nts::Wiped`, a guard that wipes in
+  `Drop`) – before, the two returns after a successful decryption (the header checks of ntp.rs failing, a KoD) left
+  it on the stack.
+- DeSoTLS: `Client::wipe()` – every secret, the record keys and the bytes of all buffers zeroed; `nettime` calls it
+  after each NTS-KE (its client is a `static`, which kept the last session until the next `connect`), and zeroes its
+  NTS-KE response buffer. netget is unchanged: it ends right after the connection, and the kernel zeroes every page
+  before another program gets it.
+- Tests: `ntptest` 182 → 200 checks (12 NTS-KE responses with a wrong Critical Bit or length – and AEAD, Server and
+  Port Negotiation with the bit, accepted; zero padding with a 13-byte nonce and a 22-byte ciphertext accepted, a
+  non-zero byte in each of the three paddings refused; `Wiped` at the end of a scope and on an early return), TLS
+  TEST 159 → 162 (a session with decrypted data not yet read: `wipe` leaves nothing, the exporter refuses after it).
+  7 mutations, all caught – the first version of the TLS test missed one (the application buffer not wiped: it held
+  no data yet), so it now reads part of a record before `wipe`.
+- The Legion run of fix 2 (real servers): Cloudflare (stratum 3, ~12 ms), Netnod (stratum 1, 45 ms) and PTB
+  (stratum 1, ~43 ms) – all authenticated with NTS, the median of the three agreeing to the second; a server that does
+  not answer on 4460 given up after 6000 ms while the others gave the time; "no address yet (waiting for DHCP)" before
+  the lease.
 
 ### Stage B fix 2 – a dead NTS-KE server, messages (from the Legion run)
 - On the Legion (real hardware, real servers) Netnod and PTB answered with NTS, authenticated, stratum 1, ~50 ms – but a

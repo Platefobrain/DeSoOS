@@ -190,6 +190,12 @@ own kind – `Kind::Truncated` after the peer's FIN, `Kind::Reset` after a reset
 netd's empty message) – the data may be cut. `close` sends our close_notify once. A fatal
 alert from the server ends the connection with `Kind::PeerAlert`.
 
+`wipe` forgets the connection: every secret (handshake, traffic, exporter), the record keys and the bytes of all
+buffers (received records, decrypted application data, handshake messages, records to send) are zeroed and the
+client is back to the state of `new` (the exporter refuses from then on). `connect` does the same before a new
+connection; a long-lived client (nettime's is a `static`, used for several NTS-KE servers in turn) calls `wipe`
+right after `close` so a finished session's secrets do not stay in memory until the next one.
+
 ## netget https://
 
 `netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] https://host[:port]/path`

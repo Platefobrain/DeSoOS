@@ -361,6 +361,10 @@ fn key_exchange(s: &mut Server, pool: &mut nts::Pool, card: &str, anchors: &dyn 
         Ok(neg)
     })();
     cl.close(&mut t);
+    // The session is done: its secrets, keys and buffers go (the client is a static), and so
+    // does the decrypted NTS-KE response (the cookies live on only in the pool).
+    cl.wipe();
+    desocrypto::wipe(unsafe { &mut *core::ptr::addr_of_mut!(KE_BUF) });
     close(c);
     result
 }
