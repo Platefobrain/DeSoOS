@@ -2,6 +2,80 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.79.0 — in progress (stage A of A–D: NTS + LKG)
+
+Not released yet: the version stays 0.78.2 until stage D passes. Plan: NTS (RFC 8915) and the last known good time;
+stage A = the cryptography and TLS parts NTS needs, checked against vectors and an independent TLS before anything
+uses them.
+
+### Stage A – AES-SIV, ALPN, TLS exporter
+- **DeSoCrypto 0.7.0 – AES-CMAC (RFC 4493) and AES-SIV (RFC 5297)**, `common/desocrypto/aes_siv.rs`:
+  AEAD_AES_SIV_CMAC_256, the AEAD every NTS server must support. 32-byte key = K1 (S2V / CMAC) + K2 (CTR), up to 126
+  associated-data components, `aead_seal / aead_open` with components [aad, nonce] as NTS uses them; `open` puts the
+  ciphertext back on a wrong IV (no plaintext of a forged message stays). AES-NI in programs, the bitsliced circuit
+  otherwise and in the kernel. CRYPTO TEST 4204 → 4719 checks: RFC 4493 / RFC 5297 vectors, 0–3 components × lengths
+  0–1000 against a Python reference and `cryptography`'s AESSIV, the 126-component limit, every kind of tampering;
+  8 mutations all caught.
+- **DeSoTLS 0.3.0 – ALPN and the exporter** (for NTS-KE): `Config::alpn` offers one protocol the server must confirm
+  (exactly one name, ours – otherwise illegal_parameter / decode_error / no_application_protocol); `Client::export`
+  – the TLS 1.3 exporter (RFC 9846 §7.5, from exporter_secret; RFC 8446 called it exporter master secret). netget
+  unchanged (no ALPN). TLS TEST: tlstest 134 → 159 checks (the RFC 8448 session: exporter_secret = the RFC's
+  "exp master", NTS keys = values computed in Python from the RFC's messages, limits; seven ALPN answers), tlstest net
+  87 → 91 cases – **against rustls**: the keys DeSoTLS exports equal the ones rustls exported on the same connection
+  (NTS label and context, and label "test" / context "abc"), a server without ALPN refused, no ALPN offered → keys
+  still equal.
+- **`tests/nts-server/`** (new, host only): a small Rust program on rustls (an independent TLS 1.3) – `tests/test.sh`
+  builds it with cargo (its own `Cargo.lock`; the first build downloads its crates from crates.io) and starts it on
+  ports 58500–58502. Stage B adds NTS-KE and NTP with NTS to it.
+
+### Stage B – NTS-KE and NTP with NTS (read only)
+- **`user/lib/nts.rs`** (new, no I/O): NTS-KE records (request; the response checked record by record – Next Protocol
+  and AEAD exactly once and exactly {0} / {15}, cookies 16–1024 bytes with a length divisible by 4, at most 8,
+  Server / Port Negotiation used, Error and Warning refused, unknown critical refused, nothing after End of Message,
+  at most 65 536 bytes); the NTS extension fields (Unique Identifier, cookie, placeholders, Authenticator with
+  AES-SIV under C2S); the placeholder count (min(7, 7 − r), fewer above 1200 bytes, never above 1469); the cookie pool
+  (each cookie leaves it for good when sent); the answer checked in the order Origin → stratum 0 (only an NTS NAK with
+  our Unique Identifier counts) → Unique Identifier and Authenticator (exactly once, S2C; fields after it ignored)
+  → the header checks of ntp.rs.
+- **`nettime --nts [--anchor ca.pem] [server[:port] ...]`**: NTS-KE over DeSoTLS (port 4460, ALPN, certificate against
+  the CA store, the server's close_notify required), then NTP with NTS to the negotiated server; an NTS NAK uses the
+  retry with the next cookie. "authenticated (NTS)" – and still nothing set (only the time service may, stage D). A
+  clock that is not plausible: refused before anything is sent (exit 2). nettime now includes DeSoTLS (~350 KB, like
+  netget).
+- `tests/nts-server` grew NTS-KE (27 responses: correct, every refusal, 65 536 / 65 537 bytes, Server Negotiation
+  through a name, no ALPN) and NTP with NTS (15 kinds of answers) on RustCrypto aes-siv, with counters (requests,
+  cookies seen twice, Authenticators that failed at the server, longest request, placeholders).
+- NTP TEST: `ntptest` 115 → 182 checks (NTS library), `ntptest net` 75 → 138 cases (nettime --nts against the rustls
+  server), a third part: an implausible clock refuses NTS before connecting; 301 tests. `tests/test.sh`'s QEMU limit
+  240 → 300 s (the main run takes ~195 s on the build host).
+- New folder **`docs/time/`**: `README.md` (the clocks, plausibility, sources and trust), `NTS.md`.
+
+### Stage B fix 2 – a dead NTS-KE server, messages (from the Legion run)
+- On the Legion (real hardware, real servers) Netnod and PTB answered with NTS, authenticated, stratum 1, ~50 ms – but a
+  mistyped name (`time.cludflare.com`, a real domain whose server does not answer on 4460) held the whole run for
+  ~16 s: the TCP connection had no limit in `nettime` (netd waits 1 + 2 + 4 + 8 = 15 s for a SYN-ACK), and NTS-KE runs
+  one server after the other. Now the name lookup and the connection get 3 × `-t` (6 s by default) – closing the
+  channel ends the attempt in netd.
+- `nettime`'s failure line: no "()" when no address is known yet, no "(0 queries of N ms)" when nothing was sent.
+- netd: a name lookup before DHCP has answered says "no address yet (waiting for DHCP)", an address set by hand without
+  a DNS server says so – both said "no DNS server (DHCP gave none)" (the first `nettime --nts` on the Legion ran while
+  DHCP was still working).
+- `tests/tls-stub.py`: port 58471 never answers a SYN (its accept queue is kept full). `ntptest net` 138 → 140 cases
+  (the dead server alone: given up within 3 × `-t`, the right lines; before a good server: the time still comes),
+  nettest 132 → 135 checks (lookup with no DNS set by hand; right after going back to DHCP never "no DNS server").
+  3 mutations, all caught (no connection limit – 15 014 ms; old netd message; "()" back).
+
+### Stage B fix – host test servers and busy ports
+- A KVM run right after a TCG run failed NTP TEST with "the stub's counters after a reset: None": `ntp-stub.py` could
+  not bind port 58124 (Address already in use) and the run still went on into QEMU. The test ports (53530,
+  58080–58590) lie inside Linux's default range for outgoing ports (32768–60999), so any program on the host can hold
+  one for a moment as the source port of its own connection.
+- New `tests/stubnet.py`: the Python servers retry a busy port for 5 s (`tests/nts-server` the same) and report
+  when all their ports are bound. `tests/test.sh` (and `tests/soak.sh` for its three) starts QEMU only when all of them are listening; otherwise it
+  stops at once with exit code 3, naming the servers and the sockets on the test ports (`ss`).
+- `tests/test.sh` now waits for every host server it stopped (ntp-stub and nts-server were missing from the `wait`)
+  and clears `logs/test-soak.out` each run, so a run without the soak no longer shows the previous `[RESULT-SOAK]`.
+
 ## v0.78.2 — 2026-11-12
 
 ### Changed – the summary's words are tested exactly (review of v0.78.1)

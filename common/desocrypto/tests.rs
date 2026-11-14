@@ -27,6 +27,14 @@
 //            Python big integers; cswap for 0 and 1
 //   AES      FIPS-197 C.1 and A.1, the circuit S-box for all 256 inputs, 1-5 blocks
 //   GHASH    products and hashes against SP 800-38D written on Python integers
+//   AES-CMAC RFC 4493 examples 1-4 (0, 16, 40, 64 bytes)
+//   AES-SIV  RFC 5297 A.1 (deterministic) and A.2 (nonce-based, two ad components); 0-3
+//            associated-data components x lengths 0-1000 (the S2V branches at 16 bytes,
+//            CTR across blocks) from a Python reference (S2V / CTR written out on
+//            `cryptography`'s AES and CMAC), every non-empty case also equal to
+//            `cryptography`'s AESSIV; 126 components (the limit) and 127 refused; a wrong
+//            IV / component / ciphertext byte / missing or extra component: Mismatch and
+//            the buffer back to the ciphertext (no plaintext out)
 //   AES-GCM  NIST (McGrew-Viega) Test Cases 1-4; lengths 0-95 and 1000 (in the middle of a
 //            larger array with guard bytes), aad of 1 / 15 / 16 / 17 bytes; a wrong tag
 //            leaves the buffer untouched.  Every check runs with each combination of
@@ -55,6 +63,7 @@ use super::desocrypto::chacha20;
 use super::desocrypto::aead;
 use super::desocrypto::aes::{self, Aes128, Features};
 use super::desocrypto::aes_gcm::AesGcm;
+use super::desocrypto::aes_siv::{self, AesSiv};
 use super::desocrypto::ghash::{self, Ghash};
 use super::desocrypto::poly1305::{self, Poly1305};
 use super::desocrypto::rng::KeyErasureRng;
@@ -173,6 +182,8 @@ pub fn run() -> Result<usize, Failure> {
     ghash_checks(&mut c)?;
     gcm_vectors(&mut c)?;
     gcm_tamper(&mut c)?;
+    siv_checks(&mut c)?;
+    siv_tamper(&mut c)?;
     misc(&mut c)?;
     sha512_all(&mut c)?;
     hmac_hkdf_generic(&mut c)?;
@@ -1527,6 +1538,244 @@ const GCM_TC3_CT: &str = "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e
 const GCM_TC3_TAG: &str = "4d5c2af327cd64a62cf35abd2ba6fab4";
 const GCM_TC4_TAG: &str = "5bc94fbc3221a5db94fae95ae7121a47";
 
+
+/// The associated-data components of the SIV length table: component j has 7*j bytes
+/// (the first one empty), byte i = (j + 1) * 5 + i.
+fn siv_ads(n: usize, store: &mut [[u8; 21]; 3]) -> usize {
+    for j in 0..n {
+        for i in 0..7 * j {
+            store[j][i] = ((j + 1) * 5 + i) as u8;
+        }
+    }
+    n
+}
+
+fn siv_key() -> [u8; 32] {
+    let mut k = [0u8; 32];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = (i * 13 + 1) as u8;
+    }
+    k
+}
+
+/// AES-CMAC (RFC 4493) and AES-SIV (RFC 5297): official vectors, the length table.
+fn siv_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("aes-cmac / aes-siv vectors");
+    let mut m = [0u8; 64];
+    unhex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710", &mut m);
+    for f in [COMBOS[0], COMBOS[3]] {
+        let a = Aes128::new(&key16("2b7e151628aed2a6abf7158809cf4f3c"), f);
+        for (len, want) in [(0usize, "bb1d6929e95937287fa37d129b756746"), (16, "070a16b46b4d4144f79bdd9dd04a287c"), (40, "dfa66747de9ae63030ca32611497c827"), (64, "51f0bebf7e3b9d92fc49741779363cfe")] {
+            c.check(same(&aes_siv::cmac(&a, &m[..len]), want))?;
+        }
+        // dbl: the top bit set and not (RFC 5297 §2.3).
+        c.check(aes_siv::dbl_for_test(&[0x80; 16]) == { let mut x = [0x01u8; 16]; x[15] = 0x87; x })?;
+        c.check(aes_siv::dbl_for_test(&[0x40; 16]) == [0x80; 16])?;
+        // RFC 5297 A.1 – deterministic, one component.
+        let mut k = [0u8; 32];
+        unhex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &mut k);
+        let mut ad = [0u8; 24];
+        unhex("101112131415161718191a1b1c1d1e1f2021222324252627", &mut ad);
+        let mut p = [0u8; 14];
+        unhex("112233445566778899aabbccddee", &mut p);
+        let s = AesSiv::with_features(&k, f);
+        let mut b = p;
+        let v = s.seal(&[&ad], &mut b);
+        c.check(matches!(v, Ok(v) if same(&v, "85632d07c6e8f37f950acd320a2ecc93")) && same(&b, "40c02b9690c4dc04daef7f6afe5c"))?;
+        let v = v.unwrap_or([0; 16]);
+        c.check(s.open(&[&ad], &mut b, &v).is_ok() && b == p)?;
+        // RFC 5297 A.2 – nonce-based: [AD1, AD2, nonce].
+        unhex("7f7e7d7c7b7a79787776757473727170404142434445464748494a4b4c4d4e4f", &mut k);
+        let mut ad1 = [0u8; 40];
+        unhex("00112233445566778899aabbccddeeffdeaddadadeaddadaffeeddccbbaa99887766554433221100", &mut ad1);
+        let mut ad2 = [0u8; 10];
+        unhex("102030405060708090a0", &mut ad2);
+        let mut n = [0u8; 16];
+        unhex("09f911029d74e35bd84156c5635688c0", &mut n);
+        let mut p = [0u8; 47];
+        unhex("7468697320697320736f6d6520706c61696e7465787420746f20656e6372797074207573696e67205349562d414553", &mut p);
+        let s = AesSiv::with_features(&k, f);
+        let mut b = p;
+        let v = s.seal(&[&ad1, &ad2, &n], &mut b);
+        c.check(matches!(v, Ok(v) if same(&v, "7bdb6e3b432667eb06f4d14bff2fbd0f")) && same(&b, "cb900f2fddbe404326601965c889bf17dba77ceb094fa663b7a3f748ba8af829ea64ad544a272e9c485b62a3fd5c0d"))?;
+        let v = v.unwrap_or([0; 16]);
+        c.check(s.open(&[&ad1, &ad2, &n], &mut b, &v).is_ok() && b == p)?;
+        // 0-3 components x lengths 0-1000, in the middle of a larger array (guards 0xEE).
+        let s = AesSiv::with_features(&siv_key(), f);
+        for (nad, len, want_v, ct_sha) in SIV_LENS.iter() {
+            let mut store = [[0u8; 21]; 3];
+            siv_ads(*nad, &mut store);
+            let comps: [&[u8]; 3] = [&store[0][..0], &store[1][..7], &store[2][..14]];
+            let ads = &comps[..*nad];
+            let mut arr = [0xEEu8; 1100];
+            let (st, en) = (41, 41 + len);
+            pattern(&mut arr[st..en]);
+            let v = s.seal(ads, &mut arr[st..en]);
+            c.check(matches!(v, Ok(v) if same(&v, want_v)) && same(&sha256(&arr[st..en]), ct_sha) && arr[..st].iter().all(|&x| x == 0xEE) && arr[en..].iter().all(|&x| x == 0xEE))?;
+            let v = v.unwrap_or([0; 16]);
+            let mut back = [0u8; 1000];
+            pattern(&mut back[..*len]);
+            c.check(s.open(ads, &mut arr[st..en], &v).is_ok() && arr[st..en] == back[..*len])?;
+        }
+        // The AEAD interface ([aad, nonce]) as NTS uses it: 100 bytes of aad, a 16-byte
+        // nonce, nothing to encrypt – the IV alone authenticates.
+        let mut aad = [0u8; 100];
+        pattern(&mut aad);
+        let mut nonce = [0u8; 16];
+        range(0, &mut nonce);
+        let v = AesSiv::with_features(&siv_key(), f).seal(&[&aad, &nonce], &mut []);
+        c.check(matches!(v, Ok(v) if same(&v, "5dc6a3e30ee50640b8b39a10263d56e5")))?;
+        // 126 components (the limit) work, 127 are refused.
+        let mut one = [[0u8; 1]; 127];
+        for (j, x) in one.iter_mut().enumerate() {
+            x[0] = j as u8;
+        }
+        let mut comps: [&[u8]; 127] = [&[]; 127];
+        for j in 0..127 {
+            comps[j] = &one[j];
+        }
+        let mut b = [0u8; 20];
+        pattern(&mut b);
+        let v = s.seal(&comps[..126], &mut b);
+        c.check(matches!(v, Ok(v) if same(&v, "8a4e3567028ec7048885c3ca75b30fcb")) && same(&b, "607d46333ca5458561619816a7e98affaf51a1c8"))?;
+        let before = b;
+        c.check(s.seal(&comps, &mut b) == Err(Error::InvalidLength) && b == before)?;
+        c.check(s.open(&comps, &mut b, &[0; 16]) == Err(Error::InvalidLength) && b == before)?;
+    }
+    c.check(aes_siv::MAX_AD == 126)?;
+    Ok(())
+}
+
+/// A wrong IV / component / nonce / key / ciphertext byte, a missing or an extra
+/// component: Mismatch and the buffer back to exactly the ciphertext (no plaintext out).
+fn siv_tamper(c: &mut Checks) -> Result<(), Failure> {
+    c.group("aes-siv tamper");
+    let k = siv_key();
+    let mut bad_k = k;
+    bad_k[31] ^= 1;
+    let mut bad_k1 = k;
+    bad_k1[0] ^= 1;
+    let aad = b"ntp header and fields";
+    let nonce = [7u8; 16];
+    for f in [COMBOS[0], COMBOS[3]] {
+        let s = AesSiv::with_features(&k, f);
+        for len in [0usize, 1, 15, 16, 17, 63, 64, 65, 1000] {
+            let mut arr = [0xEEu8; 1100];
+            let (st, en) = (50, 50 + len);
+            pattern(&mut arr[st..en]);
+            let v = match s.seal(&[aad, &nonce], &mut arr[st..en]) {
+                Ok(v) => v,
+                Err(_) => return c.check(false),
+            };
+            let sealed = arr;
+            let mut bad_v = v;
+            bad_v[15] ^= 0x01;
+            let mut bad_v8 = v;
+            bad_v8[8] ^= 0x80; // a bit CTR ignores (cleared in Q) – the IV check still catches it
+            let mut bad_n = nonce;
+            bad_n[0] ^= 0x80;
+            let sb = AesSiv::with_features(&bad_k, f);
+            let sb1 = AesSiv::with_features(&bad_k1, f);
+            let cases: [(&AesSiv, &[&[u8]], &[u8; 16]); 8] = [
+                (&s, &[aad, &nonce], &bad_v),
+                (&s, &[aad, &nonce], &bad_v8),
+                (&s, &[b"ntp header and fieldz", &nonce], &v),
+                (&s, &[aad, &bad_n], &v),
+                (&s, &[aad], &v),
+                (&s, &[aad, &nonce, b""], &v),
+                (&sb, &[aad, &nonce], &v),
+                (&sb1, &[aad, &nonce], &v),
+            ];
+            for (i, (ss, ads, vv)) in cases.iter().enumerate() {
+                // A wrong K2 (the CTR key) changes nothing when there is nothing to
+                // decrypt: the IV depends on K1 only (RFC 5297) – that case needs data.
+                if i == 6 && len == 0 {
+                    continue;
+                }
+                let r = ss.open(ads, &mut arr[st..en], vv);
+                c.check(r == Err(Error::Mismatch) && arr == sealed)?;
+            }
+            if len > 0 {
+                for pos in [st, st + len / 2, en - 1] {
+                    arr[pos] ^= 0x01;
+                    let flipped = arr;
+                    let r = s.open(&[aad, &nonce], &mut arr[st..en], &v);
+                    c.check(r == Err(Error::Mismatch) && arr == flipped)?;
+                    arr[pos] ^= 0x01;
+                }
+            }
+            // The one-shot AEAD functions give the same as the object.
+            let mut again = [0u8; 1000];
+            pattern(&mut again[..len]);
+            c.check(matches!(aes_siv::aead_seal(&k, &nonce, aad, &mut again[..len]), Ok(v2) if v2 == v) && again[..len] == arr[st..en])?;
+            c.check(aes_siv::aead_open(&k, &nonce, aad, &mut again[..len], &v).is_ok())?;
+            c.check(s.open(&[aad, &nonce], &mut arr[st..en], &v).is_ok())?;
+            let mut want = [0u8; 1000];
+            pattern(&mut want[..len]);
+            c.check(arr[st..en] == want[..len] && again[..len] == want[..len] && arr[..st].iter().all(|&b| b == 0xEE) && arr[en..].iter().all(|&b| b == 0xEE))?;
+        }
+    }
+    Ok(())
+}
+
+const SIV_LENS: &[(usize, usize, &str, &str)] = &[
+    (0, 0, "14086e9619bd54020099fddb1cce799b", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (0, 1, "723dd99a06a1c6ca99bd68959130a255", "a83dd0ccbffe39d071cc317ddf6e97f5c6b1c87af91919271f9fa140b0508c6c"),
+    (0, 15, "f1a4fff33a81a847b8fa13196b3c6c42", "8369fa629cad35573f316a0bfeb54f646859d60ef47b42c73859b25a67b4d90c"),
+    (0, 16, "17bcae5f705addb1826cd28eda4be7b7", "9fb4548e7eb35b72bdda2a129e0b2ca74f405972c39e562acb47f9d4389771c3"),
+    (0, 17, "46ca0856621251462049c502f229b8d7", "89fda67ad517133bda8d3bd7885223dad925d933df91fd587bd49ad2e38559ae"),
+    (0, 31, "49f83a431420f3d9f7abf6d686ee9537", "8a2084d4d3c3e1394f8ff9cc3cce413e0a9e2d377068ae2a5c2d3e7864a8431c"),
+    (0, 32, "43cbcdc405bcf28fe41a9f8fb5f4b003", "789028d9981025ff935fe9912229bc5849539c66ddeee51e725d25a27a845f43"),
+    (0, 33, "0c50fe92a74c0b39c7b4418b7182fc0f", "69115a6b650d951a3f06a0f82fcad1e5ce12392aa9e87e7f23e3c80910dbf7d1"),
+    (0, 47, "4f7e73d3990fcec89d09b28ba7ecdc3a", "c1fa3e7085fd5d8d88fbcb12bf22f0b8a51d5bd99c300976a1de71c60f8b25e0"),
+    (0, 48, "4446d2fc95eebc25c6869256ea86e7d4", "a7d81495c26bc27aa8eb1cc2cdaa7df6685e08d073462227193170a813544f87"),
+    (0, 64, "141004e879d17593265a65ded7b0c661", "9358d5b5c84680e25d08597ce23065a9db22fcb9982d034d572664f52697378e"),
+    (0, 65, "1db5bb042cc6ca95782b7a0abaa66502", "0bc25bd8bef5818b1ac1233db91b9db71e75a52ba05cc20983c45e1b633ab129"),
+    (0, 100, "04f24d44f4dc82f6c5d00aef334f16d8", "08d30239c4f6345a1f0f46ca22ae199b6516780788bb59d391578d26030f2282"),
+    (0, 1000, "ae33cd5fbfd7c471d49f0f0d09a534d6", "f038ade488561dc74886de29fd35aa0626cda6b3e1fef33ce6dbaa97c5f2957f"),
+    (1, 0, "b7ccbc4ed31091ffc23dfafce163af37", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (1, 1, "e6d585b0e0105399874eed235b8edf84", "956062137518b270d730d4753000896de17c100a42f9e24f5acee2faa75d5fdd"),
+    (1, 15, "130aab0a6f288a52840d249e285024b8", "065fed6a04860b607ac0b327546259942263e0cb099c3d6f1b1cbe9ff50821fb"),
+    (1, 16, "0fbb44c6dd3cedcc88349e9505eed7e4", "68dada0fb268ed1b249f46f802714a39283ba5ac0bb26c0a8fca4981354e2f93"),
+    (1, 17, "24b3ac12c6b423d64ac6d00d298aa636", "208853fb086d74a2117d5302bea4db72106915a23fa30014dbfed22e44e23117"),
+    (1, 31, "17e048a78064252e7576d4bd1e0c6220", "eb00d82345f83c62212a66360415a07356c0bd85cc7835c78c38ecd367d01cb4"),
+    (1, 32, "46976290933151b9dfcbf44439e66bff", "d7e806123369d02c462d12cf220a45aa5a12d0865f44af8c40655b83999a3cf2"),
+    (1, 33, "fbad93955cdd00b482ca96eed6aa2a83", "30de8487199e440ccb20d9c99cc2429eb95c779f0177005235487954851594dd"),
+    (1, 47, "9f79f71f6d26faf97c55194fcc8a3c47", "3f271ae157723b052ee78f88706e55e3940076f2388ab0815596eb5ff6295e78"),
+    (1, 48, "66d029dcdc8460a229b0f54cf316e45c", "b439d29a6ed4179086cd029dbcfbb4bb4af53bcd0a2dfe8a4978c83995d9c65a"),
+    (1, 64, "3e1491277add52a1f06a1c5a5e4e5fb0", "8735036aed94858ba9242e8847daa17bb7c9032e8de2f17131a41d634e226243"),
+    (1, 65, "973bee4b242f6ad08615738a0b7dc78a", "f618c6f160c879ecb60a89064114611b109cb836f33f2cafbc3e7857bdd00514"),
+    (1, 100, "1fb0ac791654be8b4f5ffc57015e42a5", "d2ad8a145ca9b555df1d3884f865854a3bede5b81607ff9c67fd2f78914edabf"),
+    (1, 1000, "cad3ae22bed9a72e42d57e1862dec96c", "f781fc6763f1946cccea112a707d84879c1872289cf2232f523befbbea775fc5"),
+    (2, 0, "5a2f12f4d2968c0ffab21f69f489717e", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (2, 1, "170fda25cd5e32dad574db0cd276a3a2", "aa7225e7d5b0a2552bbb58880b3ec00c286995b801a7aeb69281e76a8b4908de"),
+    (2, 15, "c72f052736f9f48c3188caea7ef16bbb", "7066e3634b6158546009ef1987b1bd67436907031eb0c37280eb9e380ae6afa7"),
+    (2, 16, "c640e49684243a0306b65dd2d8be14a6", "90c4f4b2089a61cf091c8036140a6d8c6538743599151c7ff3c5b69e1b36060e"),
+    (2, 17, "57b21dd7a61511714c2929646cef63b6", "2431a0d0e4b24be621cd2b5a9e01766a22a568bfc9b11afafd704d2a84d4e512"),
+    (2, 31, "2f6cb2b86dec6ad1f8ee019f8d7dcbcf", "569b6c08e2138d100976d05f59a374395f41ae92ab03d96bf9d77450df961cfd"),
+    (2, 32, "77384734ef0184ea134ac4bf7c8c83a0", "c134fc168fae4541d6f4ba0112901f7c3c42c6b6e274dd48ac2ad100970fce85"),
+    (2, 33, "2ee89f0ac42e1b82bff563c5d0e1f4de", "98767782af321c1a232c137cff48f2bd09bd2d729cb778e411f02b9c5e370717"),
+    (2, 47, "d08cd32f1d7df9b7e7d177e72f114ecf", "16b615629abfff7d7de5b32cf15b385c80312afef90256b0abf5bc1f2fd65ee5"),
+    (2, 48, "61f63a7827f49bc0bca87bfeebaab5be", "06bfc9b2b4f1553f4a5f59fecca736f0fb7d743f99ab940de40a43e723446a4d"),
+    (2, 64, "5d08383fa88d6e49a6ed4568fceb64e5", "f12cbfea1bd969d3e512204f47e2c8d93a7561d53ea1c8c49e75cdd9dfad9d6d"),
+    (2, 65, "f407ed48640f6faec3f16437f1623bc4", "41d9c8d93eb54f4b58be693308a347842a83ba31e02a6753a3eeed1d248180f3"),
+    (2, 100, "b9279323f3b8b70795e2aac4e80a3e2d", "86958b444952b0c367aa7d0c4b080ceac68e7e475ed0530669829beca8ad3958"),
+    (2, 1000, "94719a1c27a0893f83ff03b313e13eba", "bf27422ec4dec29f9a1ae697b5007c54b6d5968056e6c4c0b335fa6e8f01cdac"),
+    (3, 0, "5c2344f9af72f587ce61c1c09ac5ba1c", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (3, 1, "27b35ff7c6ea5dc537d309a343be6efa", "5c62e091b8c0565f1bafad0dad5934276143ae2ccef7a5381e8ada5b1a8d26d2"),
+    (3, 15, "a5efa14f21043d4bd8c998e5a8909e43", "f3d067f146ac17d93bc227b005ca4d3159179ba1fb0f0cb074d4f7c2634e8759"),
+    (3, 16, "dcd61f10a111cb2fb846df9636cf1a7b", "ee98986c0022acc8f07b3d3c10030419d9f69993fe52a24f772863de23a3f433"),
+    (3, 17, "a26c196de9ca6191dd19dc82ecafdd50", "3df06bb87ea200a5c818f71cefce34d57cd40ccd924d30a8e2425213d23d2d42"),
+    (3, 31, "3b684ffb7e04e29def4991d3b3cd0d85", "afcf9d7bbd9fd169345b02d473a0beefd21755d86e79f2455d941f51b17cc088"),
+    (3, 32, "5ce42b0f4a9351c6da677a37625660ca", "22a1befa9fcc7dfe27909661a1023aa7340dee16ae0a29a27cd6d9f3f20c2e11"),
+    (3, 33, "06c61fefb211f4ea67ed79785e2b1079", "31ccdf8ac618ac7b2d4cb945fe55cfc80ad763ef9521bfc406cfcd1425754ae5"),
+    (3, 47, "b5ad8f7eabd7fb79f56fc839e9512a70", "f0231f0c533500773cf049fce8bbed38fa173f3d1c1a25e8cba518509de603a9"),
+    (3, 48, "6462d0c59279c0973e358307eae037ae", "e13d4d8d9d17a0a5c5c550108650b9a75c8fa8de96a554683d7beacad4b89074"),
+    (3, 64, "180dee0727fbe970aabcbc9d362e51aa", "45577974e5f945b92810059139c16f19734fe926f73f7c109575d28b0ad464be"),
+    (3, 65, "ddec889cafef4e33dea07c3ff754358b", "91ee81fecd15e8cd482b9644ffb24cb6df3a86d7865974c3b99e7f1ffcb43c59"),
+    (3, 100, "95c58bb54d0331904d328c694808803d", "5b6858d4cb83926e85aa732da27cc16969e7914d0af27579b7f897e5d25ca424"),
+    (3, 1000, "cf64ca65a227349f65467ba535c7f8d5", "6ea12c20dae6912708197aca20ed1309f316f00a443eff8d173da44f16c7c920"),
+];
 
 fn misc(c: &mut Checks) -> Result<(), Failure> {
     c.group("helpers");

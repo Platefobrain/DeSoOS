@@ -1,6 +1,6 @@
 # DeSoTLS – the TLS 1.3 connection
 
-How DeSoTLS 0.2 (`common/desotls/`) connects to a server: the handshake, the records, KeyUpdate, the end of a
+How DeSoTLS 0.3 (`common/desotls/`) connects to a server: the handshake, the records, KeyUpdate, the end of a
 connection, every refusal, and how `netget https://` uses it. Certificates – what is checked in the server's
 chain – are in `CERTIFICATES.md`; what the library is, in `README.md`.
 
@@ -19,7 +19,9 @@ after the server's Finished verified and ours was sent; every error sends an ale
 | key exchange X25519 | P-256 / P-384 ECDHE, ML-KEM hybrids; **HelloRetryRequest is never accepted** (table below) |
 | TLS_AES_128_GCM_SHA256 (0x1301), TLS_CHACHA20_POLY1305_SHA256 (0x1303) | other cipher suites |
 | CertificateVerify: ECDSA P-256 / SHA-256, ECDSA P-384 / SHA-384, RSA-PSS (rsae) with SHA-256/384/512 | PKCS#1 v1.5 in CertificateVerify (allowed only in certificates), Ed25519, SHA-1 |
-| alerts, close_notify, KeyUpdate in both directions | resumption (NewSessionTicket read and ignored), 0-RTT, client certificates (refused), ALPN, OCSP stapling |
+| alerts, close_notify, KeyUpdate in both directions | resumption (NewSessionTicket read and ignored), 0-RTT, client certificates (refused), OCSP stapling |
+| ALPN – one protocol, which the server must confirm (0.3, for NTS-KE) | a list of protocols; netget sends none |
+| the exporter of keying material (RFC 9846 §7.5, 0.3) | the early exporter (no 0-RTT) |
 
 | | Linux (OpenSSL / rustls) | Windows (Schannel) | RedoxOS (rustls) | DeSoOS (DeSoTLS) |
 |---|---|---|---|---|
@@ -29,13 +31,32 @@ after the server's Finished verified and ours was sent; every error sends an ale
 | HelloRetryRequest | yes | yes | yes | refused |
 | keys of a connection | in the program (kTLS: records in the kernel) | in LSASS | in the program | only in the program – netd sees ciphertext |
 
+## ALPN and the exporter (0.3, for NTS-KE)
+
+- **ALPN** (RFC 7301): `Config::alpn = Some(b"ntske/1")` offers that one protocol (1–32 bytes) in the ClientHello.
+  EncryptedExtensions must carry the ALPN extension with **exactly one** name, equal to ours; another name or an empty
+  one → `illegal_parameter`, two names or a broken length → `decode_error`, no ALPN answer → the handshake fails with
+  `no_application_protocol` (the protocol on top needs it – RFC 8915 requires ALPN for NTS-KE). An ALPN answer when we
+  offered none is an extension we did not offer (`unsupported_extension`). `Info::alpn` says it was confirmed.
+  `alpn: None` – no extension (netget).
+- **Exporter**: `Client::export(label, context, out)` = HKDF-Expand-Label(Derive-Secret(exporter_secret, label,
+  ""), "exporter", Hash(context), out.len()); exporter_secret = Derive-Secret(Master Secret, "exp master", transcript
+  up to the server's Finished) – RFC 9846's name (RFC 8446: exporter master secret); the early exporter does not
+  exist here. Only on a connected client; label 1–32 bytes, output 1–255 bytes. NTS uses label
+  `EXPORTER-network-time-security`, context 00 00 | AEAD id (00 0f) | 00 (C2S) / 01 (S2C), 32 bytes each.
+- **Tests**: on the RFC 8448 session the exporter_secret is the RFC's "exp master" (fe22f881…) and the NTS keys equal
+  values computed from the RFC's messages in Python (swapped AEAD bytes, 4- / 6-byte contexts, another label – other
+  keys; limits refused); ALPN answers in a changed flight (confirmed, another name, missing, two names, empty, bad
+  length, not offered); and in QEMU against **rustls** (`tests/nts-server`, an independent TLS 1.3): the keys DeSoTLS
+  exports equal the ones rustls exported on the same connection, a server without ALPN is refused.
+
 ## The files
 
 | File | What |
 |---|---|
 | `client.rs` | `Client`: the handshake state machine, application data, KeyUpdate, close; `Transport` (whatever carries the bytes – netd's TCP for netget, a script in the tests); `TlsError` |
 | `record.rs` | records: header, `Protection` (one direction's AEAD key, iv and record number), TLSInnerPlaintext |
-| `schedule.rs` | the key schedule (HKDF-Expand-Label, Derive-Secret, the handshake / master / traffic secrets, Finished, KeyUpdate) |
+| `schedule.rs` | the key schedule (HKDF-Expand-Label, Derive-Secret, the handshake / master / traffic secrets, Finished, KeyUpdate, the exporter) |
 | `tls_tests.rs` | the tests (RFC 8448, scripted servers) – only in `/bin/tlstest` and the host checks |
 
 `Client` is about 120 KiB (a 64 KiB handshake-message buffer for the Certificate, a 24 KiB receive buffer, a

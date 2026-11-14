@@ -13,6 +13,7 @@ import sys
 import time
 
 from http_pages import page11
+import stubnet
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 58080
 BIG = 1024 * 1024
@@ -123,11 +124,8 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 def main():
-    try:
-        srv = Server(("127.0.0.1", PORT), Handler)
-    except OSError as e:
-        print("http-stub: cannot listen on 127.0.0.1:%d: %s" % (PORT, e), file=sys.stderr)
-        return 1
+    srv = stubnet.tcp_server(Server, PORT, Handler, "http-stub")
+    stubnet.ready("http")
     srv.serve_forever()
 
 

@@ -15,6 +15,8 @@
 #          record carrying the server's close_notify (after a whole answer)
 #   58470  plain HTTP: /seen?port=N – how many HTTP requests the server behind port N got
 #          (a refused handshake must leave it at 0)
+#   58471  never answers a SYN (its accept queue is kept full): a connection attempt hangs,
+#          as to a dead server – for nettime's NTS-KE connection limit
 #
 # The changing middles (60-63, 66) decrypt and encrypt TLS records with the server's keys:
 # the backend writes them to a keylog (as SSLKEYLOGFILE), the middle reads the line for the
@@ -44,6 +46,7 @@ import threading
 import time
 
 from http_pages import page11
+import stubnet
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERTS = os.path.join(HERE, "tls")
@@ -165,7 +168,7 @@ def serve_tls(port, ctx, force_end=None):
         allow_reuse_address = True
         daemon_threads = True
 
-    srv = S(("127.0.0.1", port), H)
+    srv = stubnet.tcp_server(S, port, H, "tls-stub")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -452,7 +455,7 @@ def middle(port, backend, keylog, mode):
         allow_reuse_address = True
         daemon_threads = True
 
-    srv = S(("127.0.0.1", port), H)
+    srv = stubnet.tcp_server(S, port, H, "tls-stub")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
@@ -483,8 +486,30 @@ def control(port):
         allow_reuse_address = True
         daemon_threads = True
 
-    srv = S(("127.0.0.1", port), H)
+    srv = stubnet.tcp_server(S, port, H, "tls-stub")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def blackhole(port):
+    """A port whose SYNs go unanswered: listen(0) and two connections of our own that are
+    never accepted fill the accept queue, and Linux then drops new SYNs (QEMU's network
+    passes the guest's connection on as its own connect(), which hangs the same way)."""
+    l = socket.socket()
+    l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    stubnet.bind(l, port, "tls-stub")
+    l.listen(0)
+    fill = [socket.create_connection(("127.0.0.1", port), timeout=2)]
+    f2 = socket.socket()
+    f2.setblocking(False)
+    try:
+        f2.connect(("127.0.0.1", port))
+    except BlockingIOError:
+        pass
+    fill.append(f2)
+    BLACKHOLE.extend([l] + fill)   # kept open for the whole run
+
+
+BLACKHOLE = []
 
 
 def main():
@@ -507,6 +532,8 @@ def main():
         # /seen reports a middle's requests under its front port.
         SEEN_ALIAS[front] = back
     control(base + 27)            # 58470
+    blackhole(base + 28)          # 58471
+    stubnet.ready("tls")
     while True:
         time.sleep(3600)
 

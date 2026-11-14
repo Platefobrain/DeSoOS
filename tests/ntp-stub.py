@@ -36,6 +36,8 @@ import struct
 import sys
 import time
 
+import stubnet
+
 BASE = int(sys.argv[1]) if len(sys.argv) > 1 else 58123
 NTP_UNIX = 2208988800
 STATS = 30
@@ -131,12 +133,9 @@ def main():
     socks = {}
     for n in range(STATS + 2):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.bind(("127.0.0.1", BASE + n))
-        except OSError as e:
-            print("ntp-stub: cannot listen on 127.0.0.1:%d: %s" % (BASE + n, e), file=sys.stderr)
-            return 1
+        stubnet.bind(s, BASE + n, "ntp-stub")
         socks[s] = n
+    stubnet.ready("ntp")
     count = {"queries": 0, "bad": 0, "dup": 0}
     seen = set()
     senders = set()

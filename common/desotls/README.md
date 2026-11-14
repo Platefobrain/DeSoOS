@@ -1,4 +1,4 @@
-# DeSoTLS v0.2.1
+# DeSoTLS v0.3.0
 
 DeSoOS's own TLS library, used only inside DeSoOS: a TLS 1.3 client and the check of a server's X.509 certificate
 chain. Plain Rust over DeSoCrypto, like it: `core` only, no heap, no syscalls. Client only; there is no switch that
@@ -7,9 +7,9 @@ turns a check off.
 | File | What |
 |---|---|
 | `mod.rs` | the entry point: `Error` (why a chain was refused, `as_str` for messages), version |
-| `client.rs` | `Client`: the TLS 1.3 handshake, application data, KeyUpdate, close; `Transport` (what carries the bytes), `TlsError` |
+| `client.rs` | `Client`: the TLS 1.3 handshake, application data, KeyUpdate, close, ALPN (one protocol), the exporter (`export`); `Transport` (what carries the bytes), `TlsError` |
 | `record.rs` | records: header, `Protection` (one direction's AEAD key, iv, record number), TLSInnerPlaintext, limits |
-| `schedule.rs` | the TLS 1.3 key schedule: HKDF-Expand-Label, Derive-Secret, traffic secrets, Finished, KeyUpdate |
+| `schedule.rs` | the TLS 1.3 key schedule: HKDF-Expand-Label, Derive-Secret, traffic secrets, Finished, KeyUpdate, the exporter |
 | `der.rs` | strict DER reading: minimal lengths, no indefinite form, BOOLEAN 00/FF, minimal INTEGER, depth limit 16 |
 | `x509.rs` | one certificate: version, names, validity, keys (RSA, EC P-256/P-384), signature algorithms (PKCS#1, PSS with explicit parameters, ECDSA with its curve's hash), extensions |
 | `name.rs` | host names, subjectAltName matching (one-label wildcards), DNS name constraints |

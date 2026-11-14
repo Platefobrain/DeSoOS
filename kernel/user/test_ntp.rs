@@ -6,7 +6,9 @@
 //      Origin), the delay, the NTP era around the build date, the median
 //   2. init test /bin/ntptest net: nettime against tests/ntp-stub.py on the host – correct,
 //      forged, late and malformed answers, Kiss-o'-Death, silence, 2-4 servers at once,
-//      the arguments, the udp right; the clock's verdict unchanged
+//      the arguments, the udp right; nettime --nts against tests/nts-server (rustls): NTS-KE
+//      records, NTS answers, placeholders, cookies never reused; the clock's verdict unchanged
+//   3. the clock not plausible: nettime --nts refuses before it asks netd for anything
 //
 // Around both: the hardware RTC minus the clock (RTC at boot + uptime) before and after –
 // neither was set (a step of the clock or a write to the RTC would show).
@@ -55,11 +57,11 @@ pub fn self_test() {
     let line = out.lines().find(|l| l.starts_with("ntptest:")).unwrap_or("").trim();
     check!(kind == ExitKind::Exit(0) && line.contains("checks OK"), "ntptest: {:?} {:?}", kind, out.trim());
     let checks = line.split_whitespace().nth(1).unwrap_or("?").to_string();
-    serial_println!("[NTP TEST] 1/2 the library without a network: {} PASS", line);
+    serial_println!("[NTP TEST] 1/3 the library without a network (NTP and NTS): {} PASS", line);
 
     // 2. nettime against the servers on the host.
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, hw_root: true, sysctl: true, input: true, blk: true, ..SpawnOptions::default() };
-    let r = exec("/bin/init", &["init", "test", "/bin/ntptest", "net"], "/", &opts).ok().and_then(|id| wait_exit(id, 180_000));
+    let r = exec("/bin/init", &["init", "test", "/bin/ntptest", "net"], "/", &opts).ok().and_then(|id| wait_exit(id, 300_000));
     check!(r.is_some(), "init test /bin/ntptest net did not finish");
     let (kind, out) = r.unwrap();
     let line = out.lines().find(|l| l.starts_with("ntptest net:")).unwrap_or("").trim();
@@ -68,7 +70,18 @@ pub fn self_test() {
     check!(crate::drivers::rtc::time_status().1.is_ok() == verdict0, "the clock's verdict changed during the NTP tests");
     let gap1 = gap();
     check!((gap1 - gap0).abs() <= 5, "hardware RTC minus the clock: {} s before, {} s after - something set one of them", gap0, gap1);
-    serial_println!("[NTP TEST] 2/2 {}; hardware RTC minus the clock {} s before, {} s after PASS", line, gap0, gap1);
+    serial_println!("[NTP TEST] 2/3 {}; hardware RTC minus the clock {} s before, {} s after PASS", line, gap0, gap1);
+
+    // 3. A clock that is not plausible: NTS-KE cannot check a certificate – refused before
+    //    anything is sent (the way out is the time service, v0.79 stage D).
+    crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);
+    let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
+    let r = exec("/bin/nettime", &["nettime", "--nts", "tls.desoos:58510"], "/", &opts).ok().and_then(|id| wait_exit(id, 30_000));
+    crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(false, core::sync::atomic::Ordering::Release);
+    check!(r.is_some(), "nettime --nts did not finish");
+    let (kind, out) = r.unwrap();
+    check!(kind == ExitKind::Exit(2) && out.contains("NTS refused: clock not plausible") && out.contains("nothing sent"), "nettime --nts with an implausible clock: {:?} {:?}", kind, out.trim());
+    serial_println!("[NTP TEST] 3/3 clock not plausible: nettime --nts refuses before connecting (exit 2) PASS");
 
     serial_println!("[RESULT-NTP] ver={} checks={} cases={}", crate::shell::VERSION, checks, cases);
     serial_println!("[NTP TEST] All NTP tests passed!");

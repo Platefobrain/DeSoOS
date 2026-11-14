@@ -8,6 +8,8 @@ import socket
 import struct
 import sys
 
+import stubnet
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 53530
 
 
@@ -67,11 +69,8 @@ def answer(qid, question, name):
 
 def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.bind(("127.0.0.1", PORT))
-    except OSError as e:
-        print("dns-stub: cannot listen on 127.0.0.1:%d: %s" % (PORT, e), file=sys.stderr)
-        return 1
+    stubnet.bind(s, PORT, "dns-stub")
+    stubnet.ready("dns")
     while True:
         data, peer = s.recvfrom(2048)
         try:

@@ -15,7 +15,8 @@
 # itself keeps working ([RESULT-SOAK], log logs/test-soak.log).  Not in loop mode.
 #
 # Exit codes: 0 = PASS, 1 = FAIL, 2 = timeout (hang),
-#             3 = QEMU exited otherwise (e.g. triple fault / reboot).
+#             3 = QEMU exited otherwise (e.g. triple fault / reboot), or a host test
+#                 server could not get its ports.
 # The logs stay in logs/test.log and logs/test-restart.log.
 set -uo pipefail
 
@@ -28,7 +29,7 @@ BUILD=1
 VERBOSE=0
 LOOP="${LOOP:-}"
 # Loop mode takes longer – a larger default timeout (set TIMEOUT to change it).
-if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-240}"; fi
+if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-300}"; fi
 # Number of QEMU cores.  More virtual CPUs than host threads =
 # long stalls (the host suspends the virtual CPU whose turn it is to take
 # the Big Kernel Lock; the watchdog reports it) – on a weak host: SMP=2 ./test.sh
@@ -101,7 +102,6 @@ LOG="$ROOT/logs/test.log"
 # sends it the "[HOTPLUG] …" lines from the log (a hub with a mouse and the test USB stick).
 MON="${TMPDIR:-/tmp}/desoos-monitor-$$.sock"
 rm -f "$MON"
-echo "Running self-tests in QEMU ($ACCEL, $SMP CPU, timeout ${TIMEOUT} s${LOOP:+, loop $LOOP})..."
 START=$(date +%s)
 
 # -cpu max / host: NX, SMEP, RDTSCP etc. as on a modern processor (needed by the tests).
@@ -139,6 +139,10 @@ if [ -n "$LOOP" ]; then
 fi
 
 : > "$LOG"
+# Each host server creates $STUB_READY/<name> once all its ports are bound (tests/stubnet.py);
+# QEMU starts only after all of them have.
+STUB_READY=$(mktemp -d)
+export STUB_READY
 python3 "$T/qemu-hotplug.py" "$LOG" "$MON" &
 HOTPLUG_PID=$!
 # DNS server for NET TEST (names under .desoos; the guest asks 10.0.2.2:53530).
@@ -156,7 +160,52 @@ NTP_PID=$!
 # HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).
 python3 "$T/tls-stub.py" 58443 &
 TLS_PID=$!
+# rustls test server for TLS TEST (exporter and ALPN against an independent TLS 1.3;
+# ports 58500-58502).  Built here on the host (tests/nts-server, its own Cargo.lock; the
+# first build downloads its crates from crates.io).
+if ! cargo build --release --quiet --manifest-path "$T/nts-server/Cargo.toml"; then
+  echo "ERROR: tests/nts-server did not build (needs cargo and, the first time, crates.io)."
+  kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$NTP_PID" "$TLS_PID" 2>/dev/null
+  rm -rf "$STUB_READY"
+  exit 1
+fi
+"$T/nts-server/target/release/nts-server" "$T/tls" 58500 &
+RUSTLS_PID=$!
+SERVER_PIDS=("$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$NTP_PID" "$TLS_PID" "$RUSTLS_PID")
 
+# Wait (at most 10 s; a busy port is retried 5 s) until every server is listening.  One
+# that cannot get its ports ends the run here, with who holds them, instead of tests
+# failing in QEMU minutes later.
+STUB_NAMES=(dns http udp ntp tls nts)
+STUB_PIDS=("$DNS_PID" "$HTTP_PID" "$UDP_PID" "$NTP_PID" "$TLS_PID" "$RUSTLS_PID")
+MISSING=""
+for _ in $(seq 100); do
+  MISSING=""
+  DEAD=""
+  for i in "${!STUB_NAMES[@]}"; do
+    if [ ! -e "$STUB_READY/${STUB_NAMES[$i]}" ]; then
+      MISSING="$MISSING ${STUB_NAMES[$i]}"
+      kill -0 "${STUB_PIDS[$i]}" 2>/dev/null || DEAD=1
+    fi
+  done
+  # Done, or a server already gave up (it will never become ready).
+  [ -z "$MISSING" ] || [ -n "$DEAD" ] && break
+  sleep 0.1
+done
+if [ -n "$MISSING" ]; then
+  echo "ERROR: host test servers not listening:$MISSING (a port is held by another program)."
+  echo "Sockets on the test ports (53530, 58080, 58090, 58123-58154, 58443-58590):"
+  command -v ss > /dev/null || echo "(ss not found - install iproute2 to see them)"
+  ss -tuanp 2>/dev/null | grep -E '127\.0\.0\.1:(53530|58080|58090|581[2-5][0-9]|58[45][0-9][0-9])[[:space:]]' || true
+  kill "${SERVER_PIDS[@]}" 2>/dev/null
+  wait "${SERVER_PIDS[@]}" 2>/dev/null
+  rm -rf "$STUB_READY" "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
+  exit 3
+fi
+rm -rf "$STUB_READY"
+unset STUB_READY   # tests/soak.sh (the short soak below) makes its own
+
+echo "Running self-tests in QEMU ($ACCEL, $SMP CPU, timeout ${TIMEOUT} s${LOOP:+, loop $LOOP})..."
 if [ "$VERBOSE" = 1 ]; then
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG"
   CODE=${PIPESTATUS[0]}
@@ -164,8 +213,8 @@ else
   timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null > "$LOG" 2>&1
   CODE=$?
 fi
-kill "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$NTP_PID" "$TLS_PID" 2>/dev/null
-wait "$HOTPLUG_PID" "$DNS_PID" "$HTTP_PID" "$UDP_PID" "$TLS_PID" 2>/dev/null
+kill "${SERVER_PIDS[@]}" 2>/dev/null
+wait "${SERVER_PIDS[@]}" 2>/dev/null
 
 # Second start on the same test disk (only after a passing first one, not in loop mode).
 LOG2="$ROOT/logs/test-restart.log"
@@ -190,6 +239,8 @@ rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
 # Short soak (only after two passing starts, not in loop mode).
 LOG3="$ROOT/logs/test-soak.log"
 : > "$LOG3"
+# Also the soak's summary: a run without the soak must not show the previous run's [RESULT-SOAK].
+: > "$ROOT/logs/test-soak.out"
 CODE3=0
 TIME3=0
 SOAK_OK=""

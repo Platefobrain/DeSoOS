@@ -12,6 +12,9 @@
 // iv = HKDF-Expand-Label(secret, "iv", "", 12), finished key = HKDF-Expand-Label(secret,
 // "finished", "", 32), and after a KeyUpdate the next secret = HKDF-Expand-Label(secret,
 // "traffic upd", "", 32) (§7.2).  No PSK, no 0-RTT: the early secret always comes from zeros.
+// The exporter (`export`, §7.5) starts from exporter_secret = Derive-Secret(Master Secret,
+// "exp master", transcript CH..server Finished) – RFC 9846's name; RFC 8446 called it the
+// exporter master secret.  The early exporter (0-RTT) does not exist here.
 //
 // Every secret lives in a `Secret`, wiped when dropped.
 
@@ -97,6 +100,14 @@ pub fn finished_ok(traffic: &Secret, transcript: &[u8; HASH_LEN], got: &[u8]) ->
     let ok = equal_ct(&want, got);
     wipe(&mut want);
     ok
+}
+
+/// The TLS 1.3 exporter (RFC 9846 §7.5): HKDF-Expand-Label(Derive-Secret(exporter_secret,
+/// label, Hash("")), "exporter", Hash(context), out.len()).
+pub fn export(exporter_secret: &Secret, label: &[u8], context: &[u8], out: &mut [u8]) {
+    let per_label = derive_secret(&exporter_secret.0, label, &empty_hash());
+    let ctx = sha256::sha256(context);
+    expand_label(&per_label.0, b"exporter", &ctx, out);
 }
 
 /// The secret after a KeyUpdate.

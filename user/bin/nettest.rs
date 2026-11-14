@@ -853,6 +853,11 @@ fn main(args: Args) -> i32 {
     check!(n, r.contains("broadcast"), "udp to the /16 broadcast: {:?}", r.trim());
     let r = ask("udp 10.0.2.255 9");
     check!(n, r.contains("unreachable") && !r.contains("broadcast"), "udp to 10.0.2.255 under /16: {:?}", r.trim());
+    // An address by hand without a DNS server: a name lookup says so (not "DHCP gave none").
+    let r = ask("set 10.0.2.20/16 gw 10.0.2.2");
+    check!(n, r.starts_with("address 10.0.2.20/16 set by hand"), "set without DNS: {:?}", r.trim());
+    let r = ask("resolve nodns.desoos");
+    check!(n, r.contains("no DNS server (the address was set by hand without one)"), "resolve with no DNS server set by hand: {:?}", r.trim());
     let narrowed = svc_narrow("net").unwrap_or(0);
     let r = ask_via(narrowed, "set 10.0.2.21/24");
     close(narrowed);
@@ -861,6 +866,12 @@ fn main(args: Args) -> i32 {
     check!(n, u_dhcp.is_some(), "UDP socket from 10.0.2.20/16");
     let r = ask("dhcp");
     check!(n, r.starts_with("DHCP on"), "back to DHCP: {:?}", r.trim());
+    // Right after "dhcp" the address is gone until QEMU's server answers: a lookup in that
+    // window must say "no address yet (waiting for DHCP)", never "no DNS server (DHCP gave
+    // none)".  The window is short – when the lease is already back, the lookup goes to
+    // QEMU's DNS (10.0.2.3) and any answer of it counts, only "no DNS server" never does.
+    let r = ask("resolve nodns.desoos");
+    check!(n, !r.is_empty() && !r.contains("no DNS server"), "resolve right after going back to DHCP: {:?}", r.trim());
     let u = u_dhcp.unwrap_or(0);
     let ue = socket_end(u);
     check!(n, ue == (false, true), "UDP socket after going back to DHCP: {:?}", ue);

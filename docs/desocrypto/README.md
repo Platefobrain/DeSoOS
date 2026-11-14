@@ -1,6 +1,6 @@
 # DeSoCrypto
 
-DeSoOS's own cryptographic library (`common/desocrypto/`, v0.6.1): hashes, MACs, key derivation, two AEADs, X25519,
+DeSoOS's own cryptographic library (`common/desocrypto/`, v0.7.0): hashes, MACs, key derivation, three AEADs (incl. AES-SIV), X25519,
 signature verification and the random number generator's core. Written for DeSoOS only – no Cargo crate, no outside
 code. It is a library, not a service: whoever needs it includes the files (`#[path]`) and calls them directly – the
 kernel and programs alike. `core` only: no heap, no syscalls.
@@ -34,7 +34,7 @@ Where things are:
 | `common/desocrypto/` | the code (file map in its `README.md`) |
 | `common/desocrypto/tests.rs` | 4204 checks – only in `/bin/cryptotest` and the kernel's selftest build |
 | `common/desocrypto/vectors/` | Wycheproof signature vectors and the script that builds them from a pinned commit |
-| `ALGORITHMS.md` | modules, rules of the code, AES-GCM and the CPU, tests, speed |
+| `ALGORITHMS.md` | modules, rules of the code, AES-SIV, AES-GCM and the CPU, tests, speed |
 
 Tests: CRYPTO TEST (all checks in the kernel and in user space, XMM state across task switches, `sha256sum` against
 the kernel, `[RESULT-CRYPTO]` speed figures), RNG TEST for the generator.

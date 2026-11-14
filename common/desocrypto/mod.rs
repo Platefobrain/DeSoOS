@@ -17,7 +17,7 @@
 //   bignum  big numbers for signature checks – public data only, not constant time
 //   rsa     RSA signature verification: PKCS#1 v1.5 and PSS (explicit parameters)
 //   ecdsa   ECDSA signature verification on P-256 (SHA-256) and P-384 (SHA-384)
-//   (plus poly1305, aead, x25519, aes, ghash, aes_gcm – see their headers)
+//   (plus poly1305, aead, x25519, aes, ghash, aes_gcm, aes_siv – see their headers)
 //
 // Not included on purpose: tests.rs (official vectors, edge cases) – only
 // /bin/cryptotest and the kernel CRYPTO TEST include it, next to this module.
@@ -32,6 +32,7 @@
 pub mod aead;
 pub mod aes;
 pub mod aes_gcm;
+pub mod aes_siv;
 pub mod bignum;
 pub mod chacha20;
 pub mod ecdsa;
@@ -46,7 +47,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod x25519;
 
-pub const VERSION: &str = "0.6.1";
+pub const VERSION: &str = "0.7.0";
 
 /// Zeroes secret bytes with volatile writes the compiler keeps (keys, key streams).
 pub fn wipe(buf: &mut [u8]) {

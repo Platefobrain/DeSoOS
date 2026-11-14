@@ -13,7 +13,8 @@
 #
 # Exit codes: 0 = PASS, 1 = FAIL (the soak reported an error), 2 = HANG (no heartbeat for
 # 5 minutes, QEMU still running – stopped, monitor dump in the log), 3 = QEMU ended by
-# itself (emulator crash / triple fault), 4 = the whole run took too long.
+# itself (emulator crash / triple fault) or a host test server could not get its port,
+# 4 = the whole run took too long.
 # The full log: logs/soak.log (SOAK_LOG=… elsewhere); the last 50 lines are shown at the end.
 set -uo pipefail
 
@@ -118,12 +119,35 @@ QEMU=(qemu-system-x86_64
 echo "Soak in QEMU: ${SECS} s, SEED=$SEED ($ACCEL, $SMP CPU, $SOAK_DISK disk) - log: $LOG"
 START=$(date +%s)
 # Network servers on the host (as in tests/test.sh): DNS, HTTP (/big, 1 MiB), UDP echo.
+# Each creates $STUB_READY/<name> once its port is bound (tests/stubnet.py); QEMU starts
+# only after all three have.
+STUB_READY=$(mktemp -d)
+export STUB_READY
 python3 "$T/dns-stub.py" 53530 &
 DNS_PID=$!
 python3 "$T/http-stub.py" 58080 &
 HTTP_PID=$!
 python3 "$T/udp-stub.py" 58090 &
 UDP_PID=$!
+MISSING=""
+for _ in $(seq 100); do
+  MISSING=""
+  for n in dns http udp; do
+    [ -e "$STUB_READY/$n" ] || MISSING="$MISSING $n"
+  done
+  [ -z "$MISSING" ] && break
+  sleep 0.1
+done
+rm -rf "$STUB_READY"
+unset STUB_READY
+if [ -n "$MISSING" ]; then
+  echo "ERROR: host test servers not listening:$MISSING (a port is held by another program)."
+  command -v ss > /dev/null && ss -tuanp 2>/dev/null | grep -E '127\.0\.0\.1:(53530|58080|58090)[[:space:]]'
+  kill "$DNS_PID" "$HTTP_PID" "$UDP_PID" 2>/dev/null
+  wait "$DNS_PID" "$HTTP_PID" "$UDP_PID" 2>/dev/null
+  rm -f "$SOAK_IMG" "$SOAK_NVME" "$SOAK_USB" "$MON"
+  exit 3
+fi
 
 "${QEMU[@]}" < /dev/null > "$LOG" 2>&1 &
 QPID=$!

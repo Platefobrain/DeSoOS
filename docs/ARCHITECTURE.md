@@ -1381,6 +1381,11 @@ the design, not of the tool's good manners. NTS (v0.79) will be the first source
 | RedoxOS | none found in the base system | – | – | – |
 | **DeSoOS** | SNTP, one shot (`nettime`) | **no** – information only | no, hence read only; NTS in v0.79 | `time.cloudflare.com` |
 
+**NTS** (v0.79 stage B, `nettime --nts`, `user/lib/nts.rs`): NTS-KE over TLS 1.3 (ALPN `ntske/1`, keys from the TLS
+exporter), then NTP with the NTS fields (Unique Identifier, single-use cookies, Authenticator with AES-SIV); an answer
+counts only when authenticated. NTS-KE goes one server after the other, each with a limit of 3 × `-t` for the
+lookup and connection and 3 × `-t` for TLS (a dead server cannot hold the run for netd's 15 s of SYN retries). Still read only – details in `time/NTS.md`, the model of time in `time/README.md`.
+
 NTP TEST (suite 37): `/bin/ntptest` (91 checks of the library) and `ntptest net` (73 cases of `nettime` against
 `tests/ntp-stub.py` – 31 servers on the host, one behaviour per port; the stub also checks every query byte for byte
 and counts packets and repeated Transmit values). The kernel side compares the hardware RTC minus the clock before

@@ -13,15 +13,26 @@
 // right, how many packets went out and what was in them – and at the end the clock's
 // verdict is what it was (the kernel side of the test compares the hardware RTC with the
 // clock before and after).  "ntptest net: N cases OK".
+//
+// NTS (user/lib/nts.rs, v0.79 stage B): `ntptest` also checks the NTS-KE records (every
+// refusal), the cookie pool, the placeholder count, the request's fields and Authenticator,
+// and every answer an NTS client can get (built here with AES-SIV); `ntptest net` runs
+// `nettime --nts` against tests/nts-server (rustls + RustCrypto aes-siv – independent of
+// DeSoTLS / DeSoCrypto): 27 NTS-KE responses and 15 kinds of NTP answers.
 #![no_std]
 #![no_main]
 
 #[path = "../lib/desoos.rs"]
 #[macro_use]
 mod desoos;
+#[path = "../../common/desocrypto/mod.rs"]
+mod desocrypto;
 #[path = "../lib/ntp.rs"]
 mod ntp;
+#[path = "../lib/nts.rs"]
+mod nts;
 
+use desocrypto::aes_siv::AesSiv;
 use desoos::*;
 use ntp::{Answer, Kod, Reject};
 
@@ -234,7 +245,262 @@ fn library() -> i32 {
     check!(n, verdict(&mut [0, 10_000, 20_000, 30_000]) == (1, true) && verdict(&mut [0, 0, 10_000, 20_000]) == (2, false), "four answers");
     check!(n, verdict(&mut [7]) == (1, false), "one answer");
 
-    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, dates before 1970, rounding, the summary's words, median)", n, pivot);
+    if nts_library(&mut n) != 0 {
+        return 1;
+    }
+    println!("ntptest: {} checks OK (query bytes, the order of the checks with Kiss-o'-Death before the timestamps, delay, NTP era around the build date {}, dates before 1970, rounding, the summary's words, median; NTS: KE records, cookies, placeholders, request, every answer)", n, pivot);
+    0
+}
+
+// ---- NTS without a network ----
+
+/// A KE record.
+fn rec(out: &mut [u8], n: &mut usize, ty: u16, body: &[u8]) {
+    out[*n..*n + 2].copy_from_slice(&ty.to_be_bytes());
+    out[*n + 2..*n + 4].copy_from_slice(&(body.len() as u16).to_be_bytes());
+    out[*n + 4..*n + 4 + body.len()].copy_from_slice(body);
+    *n += 4 + body.len();
+}
+
+static mut KE: [u8; 70_000] = [0; 70_000];
+static mut POOL: nts::Pool = nts::Pool::new();
+
+/// An NTS-KE response from parts: "N" Next Protocol {0}, "A" AEAD {15}, "C" a 96-byte cookie,
+/// "E" End of Message, and the special ones below.
+fn ke_from(parts: &[&str]) -> &'static [u8] {
+    let b = unsafe { &mut *core::ptr::addr_of_mut!(KE) };
+    let mut n = 0;
+    for p in parts {
+        match *p {
+            "N" => rec(b, &mut n, 0x8001, &[0, 0]),
+            "N1" => rec(b, &mut n, 0x8001, &[0, 1]),
+            "N0len" => rec(b, &mut n, 0x8001, &[]),
+            "A" => rec(b, &mut n, 0x8004, &[0, 15]),
+            "A17" => rec(b, &mut n, 0x8004, &[0, 17]),
+            "C" => rec(b, &mut n, 5, &[0xC0; 96]),
+            "C98" => rec(b, &mut n, 5, &[0xC9; 98]),
+            "C12" => rec(b, &mut n, 5, &[0xC1; 12]),
+            "C1024" => rec(b, &mut n, 5, &[0xCA; 1024]),
+            "C1028" => rec(b, &mut n, 5, &[0xCB; 1028]),
+            "E" => rec(b, &mut n, 0x8000, &[]),
+            "Err" => rec(b, &mut n, 0x8002, &[0, 1]),
+            "Warn" => rec(b, &mut n, 0x8003, &[0, 0]),
+            "U" => rec(b, &mut n, 50, &[1, 2, 3, 4]),
+            "Ucrit" => rec(b, &mut n, 0x8000 | 50, &[1, 2, 3, 4]),
+            "S" => rec(b, &mut n, 6, b"ntp.desoos"),
+            "Sbad" => rec(b, &mut n, 6, b"bad host!"),
+            "P" => rec(b, &mut n, 7, &[0xE4, 0xD8]),
+            "P0" => rec(b, &mut n, 7, &[0, 0]),
+            "cut" => n -= 3,
+            _ => {}
+        }
+    }
+    &b[..n]
+}
+
+fn nts_library(n: &mut usize) -> i32 {
+    let mut n2 = *n;
+    let r = nts_checks(&mut n2);
+    *n = n2;
+    r
+}
+
+fn nts_checks(n: &mut usize) -> i32 {
+    let mut k = *n;
+    let pool = unsafe { &mut *core::ptr::addr_of_mut!(POOL) };
+    use nts::KeError as E;
+    // The request records.
+    check!(k, nts::KE_REQUEST == [0x80, 1, 0, 2, 0, 0, 0x80, 4, 0, 2, 0, 15, 0x80, 0, 0, 0], "NTS-KE request bytes");
+    // Responses.
+    let cases: [(&[&str], Result<usize, E>); 25] = [
+        (&["N", "A", "C", "E"], Ok(1)),
+        (&["N", "A", "C", "C", "C", "C", "C", "C", "C", "C", "C", "E"], Ok(8)),
+        (&["N", "A", "U", "C", "E"], Ok(1)),
+        (&["N", "A", "C98", "C", "C12", "E"], Ok(1)),
+        (&["N", "A", "C1024", "E"], Ok(1)),
+        (&["N", "A", "C", "S", "P", "E"], Ok(1)),
+        (&["N", "A", "C"], Err(E::NoEnd)),
+        (&["N", "A", "C", "E", "U"], Err(E::AfterEnd)),
+        (&["N", "A", "C", "E", "cut"], Err(E::Cut)),
+        (&["N", "N", "A", "C", "E"], Err(E::Repeated(1))),
+        (&["N", "A", "A", "C", "E"], Err(E::Repeated(4))),
+        (&["A", "C", "E"], Err(E::MissingNextProtocol)),
+        (&["N", "C", "E"], Err(E::MissingAead)),
+        (&["N1", "A", "C", "E"], Err(E::BadNextProtocol)),
+        (&["N0len", "A", "C", "E"], Err(E::Short(1))),
+        (&["N", "A17", "C", "E"], Err(E::BadAead)),
+        (&["Err", "E"], Err(E::Error(1))),
+        (&["N", "A", "C", "Warn", "E"], Err(E::Warning(0))),
+        (&["N", "A", "C", "Ucrit", "E"], Err(E::UnknownCritical(50))),
+        (&["N", "A", "E"], Err(E::NoCookies)),
+        (&["N", "A", "C98", "C12", "C1028", "E"], Err(E::NoCookies)),
+        (&["N", "A", "C", "Sbad", "E"], Err(E::BadServer)),
+        (&["N", "A", "C", "S", "S", "E"], Err(E::Repeated(6))),
+        (&["N", "A", "C", "P0", "E"], Err(E::BadPort)),
+        (&["N", "A", "C", "P", "P", "E"], Err(E::Repeated(7))),
+    ];
+    for (parts, want) in cases.iter() {
+        let got = nts::parse_ke(ke_from(parts), pool).map(|_| pool.n);
+        check!(k, got == *want, "NTS-KE {:?}: {:?}, expected {:?}", parts, got, want);
+    }
+    let neg = nts::parse_ke(ke_from(&["N", "A", "C", "S", "P", "E"]), pool);
+    check!(k, matches!(&neg, Ok(g) if g.server() == Some("ntp.desoos") && g.port == 0xE4D8), "negotiated server and port");
+    let neg = nts::parse_ke(ke_from(&["N", "A", "C", "E"]), pool);
+    check!(k, matches!(&neg, Ok(g) if g.server().is_none() && g.port == 123), "no negotiation: the KE server and port 123");
+    let _ = nts::parse_ke(ke_from(&["N", "A", "C98", "C", "C", "C", "C", "C", "C", "C", "C", "C", "E"]), pool);
+    check!(k, pool.n == 8 && pool.skipped == 1 && pool.overflow == 1, "pool: 8 kept, 1 skipped, 1 over ({} {} {})", pool.n, pool.skipped, pool.overflow);
+    // ke_complete: not yet / done / too long.
+    let whole = ke_from(&["N", "A", "C", "E"]);
+    let wl = whole.len();
+    check!(k, nts::ke_complete(&whole[..wl - 1]) == Ok(0) && nts::ke_complete(&whole[..3]) == Ok(0) && nts::ke_complete(whole) == Ok(wl), "ke_complete");
+    // A message of exactly 65 536 bytes is taken, 65 537 not.
+    for (total, ok) in [(65_536usize, true), (65_537, false)] {
+        let b = unsafe { &mut *core::ptr::addr_of_mut!(KE) };
+        let mut m = 0;
+        rec(b, &mut m, 0x8001, &[0, 0]);
+        rec(b, &mut m, 0x8004, &[0, 15]);
+        rec(b, &mut m, 5, &[0xC0; 96]);
+        let mut left = total - m - 4;
+        while left > 0 {
+            let body = (left - 4).min(60_000);
+            let mut z = m;
+            b[z..z + 2].copy_from_slice(&50u16.to_be_bytes());
+            b[z + 2..z + 4].copy_from_slice(&(body as u16).to_be_bytes());
+            z += 4;
+            for x in b[z..z + body].iter_mut() {
+                *x = 0;
+            }
+            m = z + body;
+            left -= 4 + body;
+        }
+        rec(b, &mut m, 0x8000, &[]);
+        let r = nts::parse_ke(&b[..m], pool);
+        check!(k, m == total && (r.is_ok() == ok) && (ok || r.err() == Some(E::TooLong)), "a response of {} bytes", total);
+    }
+    // Placeholders: min(7, 7 - r), fewer above the limit, never above 1469 bytes.
+    for (r, len, limit, want) in [(7usize, 96usize, 1200usize, Some(0usize)), (0, 96, 1200, Some(7)), (3, 96, 1200, Some(4)), (0, 300, 1200, Some(2)), (0, 300, 1469, Some(3)), (0, 1024, 1200, Some(0)), (9, 96, 1200, Some(0)), (0, 96, 5000, Some(7))] {
+        let got = nts::placeholders(r, len, limit);
+        check!(k, got == want, "placeholders({}, {}, {}) = {:?}, expected {:?}", r, len, limit, got, want);
+    }
+    check!(k, nts::request_len(96, 7) == 48 + 36 + 100 * 8 + 40 && nts::request_len(1024, 0) <= nts::REQUEST_MAX, "request lengths");
+    // Pool: one cookie never comes out twice; take empties it.
+    pool.clear();
+    for i in 0..3u8 {
+        let mut c = [0u8; 96];
+        c[0] = i;
+        pool.add(&c);
+    }
+    let a = pool.take();
+    let b2 = pool.take();
+    check!(k, matches!((&a, &b2), (Some(x), Some(y)) if x.data[0] == 0 && y.data[0] == 1) && pool.n == 1, "the pool hands out each cookie once, oldest first");
+    // The request.
+    let c2s = [0x11u8; 32];
+    let s2c = [0x22u8; 32];
+    let uid = [0x33u8; 32];
+    let nonce = [0x44u8; 16];
+    let xmit = 0x0123_4567_89AB_CDEFu64;
+    let mut cookie = nts::Cookie::EMPTY;
+    cookie.len = 96;
+    cookie.data[..96].copy_from_slice(&[0xC0; 96]);
+    let mut pkt = [0u8; nts::REQUEST_MAX];
+    let len = nts::build_request(&mut pkt, xmit, &uid, &cookie, 2, &nonce, &c2s);
+    check!(k, len == Ok(nts::request_len(96, 2)), "request length {:?}", len);
+    let len = len.unwrap_or(0);
+    let p = &pkt[..len];
+    check!(k, p[0] == 0x23 && p[3] == 0x20 && p[40..48] == xmit.to_be_bytes(), "request header (Precision 0x20)");
+    check!(k, p[48..52] == [0x01, 0x04, 0, 36] && p[52..84] == uid, "Unique Identifier field");
+    check!(k, p[84..88] == [0x02, 0x04, 0, 100] && p[88..184] == [0xC0; 96], "cookie field");
+    check!(k, p[184..188] == [0x03, 0x04, 0, 100] && p[188..284].iter().all(|&x| x == 0) && p[284..288] == [0x03, 0x04, 0, 100], "two placeholders, zeros, as long as the cookie");
+    let at = 384;
+    check!(k, p[at..at + 8] == [0x04, 0x04, 0, 40, 0, 16, 0, 16] && p[at + 8..at + 24] == nonce, "Authenticator header and nonce");
+    let mut siv = [0u8; 16];
+    siv.copy_from_slice(&p[at + 24..at + 40]);
+    check!(k, AesSiv::new(&c2s).open(&[&p[..at], &nonce], &mut [], &siv).is_ok(), "the Authenticator verifies with C2S over everything before it");
+    check!(k, AesSiv::new(&s2c).open(&[&p[..at], &nonce], &mut [], &siv).is_err(), "... and not with S2C");
+    let mut short = cookie;
+    short.len = 98;
+    check!(k, nts::build_request(&mut pkt, xmit, &uid, &short, 0, &nonce, &c2s).is_err(), "a cookie not divisible by 4 is never sent");
+    // Answers (built here: header, Unique Identifier, Authenticator with S2C, two cookies).
+    let mut ans = [0u8; 600];
+    let now32 = 3_970_000_000u32;
+    let make = |out: &mut [u8; 600], stratum: u8, refid: &[u8; 4], uid_in: Option<&[u8; 32]>, key: &[u8; 32], corrupt: bool, after: usize, origin: u64| -> usize {
+        let mut h = reply(origin, now32);
+        h[1] = stratum;
+        h[12..16].copy_from_slice(refid);
+        out[..48].copy_from_slice(&h);
+        let mut m = 48;
+        if let Some(u) = uid_in {
+            out[m..m + 4].copy_from_slice(&[0x01, 0x04, 0, 36]);
+            out[m + 4..m + 36].copy_from_slice(u);
+            m += 36;
+        }
+        // Plaintext: two cookie fields of 96 bytes.
+        let mut plain = [0u8; 200];
+        for c in 0..2 {
+            plain[c * 100..c * 100 + 4].copy_from_slice(&[0x02, 0x04, 0, 100]);
+            for x in plain[c * 100 + 4..c * 100 + 100].iter_mut() {
+                *x = 0xD0 + c as u8;
+            }
+        }
+        let nn = [0x55u8; 16];
+        let v = AesSiv::new(key).seal(&[&out[..m], &nn], &mut plain).unwrap_or([0; 16]);
+        out[m..m + 4].copy_from_slice(&[0x04, 0x04, 0, 4 + 4 + 16 + 16 + 200]);
+        out[m + 4..m + 8].copy_from_slice(&[0, 16, 0, 216]);
+        out[m + 8..m + 24].copy_from_slice(&nn);
+        out[m + 24..m + 40].copy_from_slice(&v);
+        out[m + 40..m + 240].copy_from_slice(&plain);
+        if corrupt {
+            out[m + 30] ^= 1;
+        }
+        m += 240;
+        for _ in 0..after {
+            out[m..m + 4].copy_from_slice(&[0x0F, 0x04, 0, 16]);
+            m += 16;
+        }
+        m
+    };
+    use nts::Reject as R;
+    pool.clear();
+    let l = make(&mut ans, 2, b"TEST", Some(&uid), &s2c, false, 0, xmit);
+    let r = nts::check_response(&ans[..l], xmit, &uid, &s2c, pool);
+    check!(k, matches!(r, Ok(nts::Answer::Time { reply, cookies: 2 }) if reply.stratum == 2) && pool.n == 2 && pool.cookies[1].data[0] == 0xD1, "an authenticated answer, two new cookies: {:?}", r);
+    let l = make(&mut ans, 2, b"TEST", Some(&uid), &s2c, false, 2, xmit);
+    check!(k, matches!(nts::check_response(&ans[..l], xmit, &uid, &s2c, pool), Ok(nts::Answer::Time { .. })), "fields after the Authenticator are ignored");
+    let other = [0x34u8; 32];
+    let refusals: [(u8, &[u8; 4], Option<&[u8; 32]>, &[u8; 32], bool, u64, R); 9] = [
+        (2, b"TEST", Some(&other), &s2c, false, xmit, R::WrongUid),
+        (2, b"TEST", None, &s2c, false, xmit, R::NoUid),
+        (2, b"TEST", Some(&uid), &s2c, true, xmit, R::AuthFailed),
+        (2, b"TEST", Some(&uid), &c2s, false, xmit, R::AuthFailed),
+        (2, b"TEST", Some(&uid), &s2c, false, xmit + 1, R::Ntp(ntp::Reject::Origin)),
+        (16, b"TEST", Some(&uid), &s2c, false, xmit, R::Ntp(ntp::Reject::Stratum)),
+        (0, b"DENY", Some(&uid), &s2c, false, xmit, R::UnauthenticatedKod),
+        (0, b"NTSN", Some(&other), &s2c, false, xmit, R::UnauthenticatedKod),
+        (0, b"NTSN", None, &s2c, false, xmit, R::UnauthenticatedKod),
+    ];
+    for (st, refid, u, key, corrupt, origin, want) in refusals.iter() {
+        let l = make(&mut ans, *st, refid, *u, key, *corrupt, 0, *origin);
+        let r = nts::check_response(&ans[..l], xmit, &uid, &s2c, pool);
+        check!(k, r == Err(*want), "answer (stratum {}, {:?}): {:?}, expected {:?}", st, core::str::from_utf8(*refid), r, want);
+    }
+    // NTS NAK with our Unique Identifier – even with garbage after it.
+    let l = make(&mut ans, 0, b"NTSN", Some(&uid), &s2c, true, 0, xmit);
+    check!(k, nts::check_response(&ans[..l], xmit, &uid, &s2c, pool) == Ok(nts::Answer::Nak), "NTS NAK with our Unique Identifier");
+    // A plain NTP answer (48 bytes): no Unique Identifier.
+    let plain = reply(xmit, now32);
+    check!(k, nts::check_response(&plain, xmit, &uid, &s2c, pool) == Err(R::NoUid), "a plain NTP answer is refused");
+    // No Authenticator: header + Unique Identifier only.
+    let l = make(&mut ans, 2, b"TEST", Some(&uid), &s2c, false, 0, xmit);
+    check!(k, nts::check_response(&ans[..84], xmit, &uid, &s2c, pool) == Err(R::NoAuthenticator) && l > 84, "no Authenticator");
+    // Two Authenticators (the second copied after the first).
+    let mut two = [0u8; 900];
+    two[..l].copy_from_slice(&ans[..l]);
+    two[l..l + 240].copy_from_slice(&ans[84..324]);
+    check!(k, nts::check_response(&two[..l + 240], xmit, &uid, &s2c, pool) == Err(R::TwoAuthenticators), "two Authenticators");
+    // A field length that is not a multiple of 4 before the Authenticator.
+    ans[51] = 35;
+    check!(k, nts::check_response(&ans[..l], xmit, &uid, &s2c, pool) == Err(R::BadField), "a malformed field");
+    *n = k;
     0
 }
 
@@ -523,6 +789,11 @@ fn net() -> i32 {
     close(with_udp);
     case!(n, r.code == 0, "a narrowed channel with udp: {} {:?}", r.code, r.out);
 
+    // NTS against tests/nts-server.
+    if nts_net(&mut n) != 0 {
+        return 1;
+    }
+
     // After everything – also the forged answers, the 2040 server and the Kiss-o'-Deaths –
     // the clock still runs with uptime (no step) and its verdict is the same.
     let r = ask("dns auto");
@@ -535,7 +806,188 @@ fn net() -> i32 {
     let r = run(&[server(0, 0)]);
     case!(n, matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "the clock against the host's time at the end: {:?}", r.out);
 
-    println!("ntptest net: {} cases OK (nettime against tests/ntp-stub.py: answers, forged and late ones, Kiss-o'-Death, silence, 13 malformed answers, servers in 1960 and 2040, 2-4 servers at once, arguments, the udp right; the clock and its verdict unchanged after {} s)", n, ran);
+    println!("ntptest net: {} cases OK (nettime against tests/ntp-stub.py: answers, forged and late ones, Kiss-o'-Death, silence, 13 malformed answers, servers in 1960 and 2040, 2-4 servers at once, arguments, the udp right; nettime --nts against tests/nts-server (rustls): 27 NTS-KE responses, 15 kinds of NTP answers, placeholders, cookies never reused; the clock and its verdict unchanged after {} s)", n, ran);
+    0
+}
+
+// ---- NTS against tests/nts-server (rustls, RustCrypto aes-siv) ----
+
+/// tests/nts-server: NTS-KE at +10 + k, NTS-KE leading to NTP behaviour m at +70 + m, the
+/// counters at +39 (UDP).
+const NTS_BASE: u16 = 58500;
+const NTS_CA: &[u8] = include_bytes!("../../tests/tls/ca.pem");
+const NTS_CA_PATH: &str = "/nts-ca.pem";
+
+/// "tls.desoos:<port>" (the certificate's name; the DNS stub gives 10.0.2.2), static.
+fn ke_server(port: u16) -> &'static str {
+    static mut NAME: [u8; 24] = [0; 24];
+    let b = unsafe { &mut *core::ptr::addr_of_mut!(NAME) };
+    b[..11].copy_from_slice(b"tls.desoos:");
+    for i in 0..5 {
+        b[11 + i] = b'0' + (port / 10u16.pow(4 - i as u32) % 10) as u8;
+    }
+    core::str::from_utf8(&b[..16]).unwrap_or("")
+}
+
+/// The server's counters (requests, dup, bad, maxlen, placeholders); `reset` zeroes them.
+fn nts_stats(reset: bool) -> Option<(u64, u64, u64, u64, u64)> {
+    let mut reply = [0u8; 256];
+    let c = udp_open_via(SVC, "net0", "10.0.2.2", NTS_BASE + 39, &mut reply).ok()?;
+    let mut got = None;
+    let mut info = RecvInfo::default();
+    for _ in 0..3 {
+        if udp_send(c, if reset { b"reset" } else { b"stats" }) != 0 {
+            break;
+        }
+        if wait_many(&[(c, W_READABLE)], 1000) == Ok(1) {
+            let r = chan_recv(c, &mut reply, CHAN_NONBLOCK, &mut info);
+            if r > 0 {
+                let t = core::str::from_utf8(&reply[..r as usize]).unwrap_or("");
+                let f = |k: &str| t.split(' ').find_map(|w| w.strip_prefix(k)).and_then(|v| v.parse::<u64>().ok());
+                got = Some((f("requests=")?, f("dup=")?, f("bad=")?, f("maxlen=")?, f("placeholders=")?));
+                break;
+            }
+        }
+    }
+    close(c);
+    got
+}
+
+/// netd has 8 TCP connections and a closed one waits in TIME_WAIT for 2 s: before each
+/// NTS-KE wait until there is room (as tlstest does).
+fn tcp_room() {
+    let t = uptime_ms();
+    loop {
+        let st = ask("status");
+        let line = st.lines().find(|l| l.starts_with("netd-status")).unwrap_or("");
+        let used = line.split_whitespace().find_map(|w| w.strip_prefix("tcp=")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        if used < 6 || uptime_ms() - t > 8000 {
+            return;
+        }
+        sleep_ms(50);
+    }
+}
+
+fn nts_run(t: &str, port: u16) -> Run {
+    tcp_room();
+    run(&["-t", t, "--nts", "--anchor", NTS_CA_PATH, ke_server(port)])
+}
+
+fn nts_net(n: &mut usize) -> i32 {
+    let mut k = *n;
+    let fd = open(NTS_CA_PATH, O_WRITE | O_CREATE | O_TRUNC);
+    case!(k, fd >= 0 && write(fd as u64, NTS_CA) == NTS_CA.len() as i64, "write the test CA");
+    close(fd as u64);
+    let ke = |x: u16| NTS_BASE + 10 + x;
+    let via = |m: u16| NTS_BASE + 70 + m;
+
+    // A correct exchange: authenticated, still nothing changed; 8 cookies -> no placeholders.
+    nts_stats(true);
+    let r = nts_run("2000", ke(0));
+    case!(k, r.code == 0 && r.out.contains(", authenticated (NTS)") && r.out.contains("authenticated (NTS), but not changed") && matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "nettime --nts: {} {:?}", r.code, r.out);
+    let st = nts_stats(false);
+    case!(k, matches!(st, Some((1, 0, 0, len, 0)) if len <= 1200), "one NTS request, Authenticator valid at the server, no placeholders (8 cookies): {:?}", st);
+
+    // NTS-KE responses that must be refused – with what nettime says.
+    let refused: [(u16, &str); 16] = [
+        (1, "without End of Message"),
+        (2, "data after End of Message"),
+        (3, "no close_notify"),
+        (4, "a one-time NTS-KE record came twice"),
+        (5, "a one-time NTS-KE record came twice"),
+        (6, "no AEAD record"),
+        (7, "AEAD is not AEAD_AES_SIV_CMAC_256"),
+        (8, "Next Protocol is not exactly NTPv4"),
+        (9, "NTS-KE Error record"),
+        (10, "Warning record (treated as an error)"),
+        (11, "unknown critical NTS-KE record"),
+        (13, "NTS-KE record body too short"),
+        (15, "longer than 65536 bytes"),
+        (16, "no usable cookie"),
+        (19, "NTS-KE record cut short"),
+        (20, "no usable cookie"),
+    ];
+    for (x, why) in refused {
+        nts_stats(true);
+        let r = nts_run("500", ke(x));
+        case!(k, r.code == 3 && r.out.contains(why) && nts_stats(false).map(|s| s.0) == Some(0), "NTS-KE {} must be refused ({}), nothing sent to NTP: {} {:?}", x, why, r.code, r.out);
+    }
+    for (x, why) in [(22u16, "did not confirm the ALPN protocol"), (24, "bad NTPv4 Port Negotiation"), (25, "bad NTPv4 Server Negotiation")] {
+        let r = nts_run("500", ke(x));
+        case!(k, r.code == 3 && r.out.contains(why), "NTS-KE {} must be refused ({}): {} {:?}", x, why, r.code, r.out);
+    }
+    // Accepted responses.
+    for x in [12u16, 14, 17, 18, 23] {
+        let r = nts_run("2000", ke(x));
+        case!(k, r.code == 0 && r.out.contains(", authenticated (NTS)"), "NTS-KE {} must be accepted: {} {:?}", x, r.code, r.out);
+    }
+    // A KE server that never answers the SYN (tests/tls-stub.py, port 58471 – like a dead
+    // server): the lookup and the connection get 3 × wait, not netd's 15 s of SYN retries;
+    // the failure line has no "()" (no address known) and no "(0 queries ...)".
+    let dead = "tls.desoos:58471";
+    tcp_room();
+    let r = run(&["-t", "300", "--nts", "--anchor", NTS_CA_PATH, dead]);
+    case!(k, r.code == 3 && r.out.contains("nettime: tls.desoos: NTS-KE: no connection within 900 ms") && r.out.contains("nettime: tls.desoos: NTS-KE connection failed\n") && !r.out.contains("()") && !r.out.contains("queries") && r.ms < 3000, "dead NTS-KE server: given up after 3 x wait: {} {} ms {:?}", r.code, r.ms, r.out);
+    // The dead server before a good one: the good one still gives the time, well before the
+    // 15 s netd alone would have waited.
+    tcp_room();
+    let r = run(&["-t", "1000", "--nts", "--anchor", NTS_CA_PATH, dead, ke_server(ke(0))]);
+    case!(k, r.code == 0 && r.out.contains("no connection within 3000 ms") && r.out.contains(", authenticated (NTS)") && r.ms < 12000, "dead NTS-KE server, then a good one: {} {} ms {:?}", r.code, r.ms, r.out);
+    // Placeholders: one cookie of 96 bytes -> 7; one of 300 bytes -> 2 (the request stays
+    // within 1200 bytes).
+    nts_stats(true);
+    let r = nts_run("2000", ke(26));
+    let st = nts_stats(false);
+    case!(k, r.code == 0 && matches!(st, Some((1, 0, 0, len, 7)) if len <= 1200), "one cookie: 7 placeholders: {:?} {:?}", st, r.out);
+    nts_stats(true);
+    let r = nts_run("2000", ke(21));
+    let st = nts_stats(false);
+    case!(k, r.code == 0 && matches!(st, Some((1, 0, 0, len, 2)) if len <= 1200 && len > 900), "a 300-byte cookie: 2 placeholders, within 1200 bytes: {:?} {:?}", st, r.out);
+
+    // NTP answers.
+    let answers: [(u16, u64, &str); 15] = [
+        (0, 0, ", authenticated (NTS)"),
+        (1, 3, "NTS Authenticator does not verify"),
+        (2, 3, "no NTS Authenticator"),
+        (3, 3, "Unique Identifier does not match"),
+        (4, 0, "1 answer(s) ignored (the last: Unique Identifier does not match the query)"),
+        (5, 0, ", authenticated (NTS)"),
+        (6, 0, ", authenticated (NTS)"),
+        (7, 0, "1 NTS NAK(s)"),
+        (8, 0, "1 answer(s) ignored (the last: unauthenticated kiss-o'-death (ignored))"),
+        (9, 0, "1 answer(s) ignored (the last: unauthenticated kiss-o'-death (ignored))"),
+        (10, 3, "no Unique Identifier"),
+        (11, 3, "stratum out of 1-15"),
+        (12, 3, "NTS Authenticator does not verify"),
+        (13, 3, "two NTS Authenticators"),
+        (14, 3, "NTS NAK - the server did not take the cookie"),
+    ];
+    for (m, code, what) in answers {
+        nts_stats(true);
+        let r = nts_run("500", via(m));
+        let st = nts_stats(false);
+        case!(k, r.code == code && r.out.contains(what), "NTP answer {}: expected {} and {:?}: {} {:?}", m, code, what, r.code, r.out);
+        // Every query carried a new cookie and a valid Authenticator; never more than 2.
+        case!(k, matches!(st, Some((q, 0, 0, _, _)) if (1..=2).contains(&q)), "NTP answer {}: cookies never reused, Authenticators valid: {:?}", m, st);
+    }
+
+    // Without --anchor the system store does not know the test CA; --anchor without --nts.
+    tcp_room();
+    let r = run(&["-t", "500", "--nts", ke_server(ke(0))]);
+    case!(k, r.code == 3 && r.out.contains("TLS refused") && r.out.contains("certificate refused"), "the test CA is not in the system store: {} {:?}", r.code, r.out);
+    let r = run(&["--anchor", NTS_CA_PATH, ke_server(ke(0))]);
+    case!(k, r.code == 2 && r.out.contains("usage: nettime"), "--anchor without --nts: {} {:?}", r.code, r.out);
+    let r = run(&["--nts", "--anchor"]);
+    case!(k, r.code == 2 && r.out.contains("usage: nettime"), "--anchor without a file: {} {:?}", r.code, r.out);
+    // Without the net right (a channel narrowed to udp only? not possible – "net" is the
+    // base of every narrowed channel); the udp right is needed for NTP after NTS-KE.
+    tcp_room();
+    let net_only = svc_narrow("net").unwrap_or(0);
+    let r = run_via(net_only, &["-t", "500", "--nts", "--anchor", NTS_CA_PATH, ke_server(ke(0))]);
+    close(net_only);
+    case!(k, r.code == 3 && r.out.contains("needs the udp right"), "--nts without the udp right: NTS-KE works, NTP cannot: {} {:?}", r.code, r.out);
+    unlink(NTS_CA_PATH);
+    *n = k;
     0
 }
 

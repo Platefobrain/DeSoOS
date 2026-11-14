@@ -1,4 +1,4 @@
-# DeSoCrypto v0.6.1
+# DeSoCrypto v0.7.0
 
 DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
@@ -18,6 +18,7 @@ DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel an
 | `aes.rs` | AES-128 encryption (FIPS-197): AES-NI in programs, bitsliced without tables everywhere |
 | `ghash.rs` | GHASH (SP 800-38D): PCLMULQDQ in programs, bit by bit with masks everywhere |
 | `aes_gcm.rs` | AES-128-GCM – `seal` / `open` in place; **never reuse a nonce with the same key** |
+| `aes_siv.rs` | AES-CMAC (RFC 4493) and AES-SIV (RFC 5297, AEAD_AES_SIV_CMAC_256 – the AEAD of NTS) – `seal` / `open` in place, a forged message leaves no plaintext |
 | `bignum.rs` | big numbers (up to 4096 bits, Montgomery) for signature checks – **public data only, not constant time** |
 | `rsa.rs` | RSA signature **verification**: PKCS#1 v1.5 and PSS with explicit parameters; n 2048–4096 bits |
 | `ecdsa.rs` | ECDSA signature **verification**: P-256 with SHA-256, P-384 with SHA-384; strict DER, every range check; `check_public_key` for a key alone |

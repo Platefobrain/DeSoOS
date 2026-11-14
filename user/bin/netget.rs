@@ -399,7 +399,7 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
             close(c);
             return EXIT_CONNECT;
         }
-        let cfg = Config { host: u.host, anchors, now, suites };
+        let cfg = Config { host: u.host, anchors, now, suites, alpn: None };
         match tls.connect(&mut chan, &cfg, &random) {
             Ok(i) => {
                 let mut ca = [0u8; 64];

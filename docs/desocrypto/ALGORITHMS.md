@@ -1,6 +1,6 @@
 # DeSoCrypto – algorithms and rules
 
-The detailed description of DeSoCrypto 0.6.1 (`common/desocrypto/`): every module, the rules the code keeps, the CPU
+The detailed description of DeSoCrypto 0.7.0 (`common/desocrypto/`): every module, the rules the code keeps, the CPU
 paths and the tests. What it is and where it is used: `README.md` in this folder; how it fits into the system:
 `../ARCHITECTURE.md`, section "Cryptography – DeSoCrypto".
 
@@ -21,6 +21,7 @@ paths and the tests. What it is and where it is used: `README.md` in this folder
 | `aes` | `Aes128::new(key, features)`, `encrypt_blocks` – AES-NI or bitsliced (4 blocks in 8 planes, Boyar–Peralta S-box circuit); `Features::detect / limit` | FIPS-197 |
 | `ghash` | `Ghash::new(h, features)`, `update / pad / finish` – PCLMULQDQ or bit by bit with masks | SP 800-38D §6.4 |
 | `aes_gcm` | `AesGcm::new / with_features`, `seal / open` in place; 12-byte nonce, 16-byte tag | SP 800-38D |
+| `aes_siv` | `cmac(&aes, msg)`; `AesSiv::new / with_features(32-byte key)`, `seal(components, buf) -> IV`, `open(components, buf, IV)` in place – up to 126 associated-data components; `aead_seal / aead_open(key, nonce, aad, buf)` = components [aad, nonce] (AEAD_AES_SIV_CMAC_256, the AEAD of NTS) | RFC 4493 (CMAC), RFC 5297 (SIV) |
 | `bignum` | `Modulus<N>` (odd, Montgomery CIOS): `pow`, `mul / add / sub / to_mont / from_mont / pow_mont`; up to 4096 bits – **public data only, not constant time** | – |
 | `rsa` | `PublicKey::new(n, e)`, `verify_pkcs1(hash, msg, sig)`, `verify_pss(&PssParams, msg, sig)`; `PssParams::tls(h)` | RFC 8017 |
 | `ecdsa` | `verify(Curve::P256 / P384, public_key, msg, der_sig)` – each curve with its one hash; `check_public_key(curve, key)` – the key alone | FIPS 186-5, SEC 1 |
@@ -71,6 +72,17 @@ paths and the tests. What it is and where it is used: `README.md` in this folder
   `--cfg selftest` (the kernel's test build) or `--cfg desocrypto_test` (`build.sh` gives it to `cryptotest` only);
   ordinary programs and the normal kernel do not have it.
 
+## AES-SIV (0.7.0)
+
+AEAD_AES_SIV_CMAC_256 (RFC 5297) for NTS (RFC 8915 makes it mandatory for every NTS server). The 32-byte key is two
+AES-128 keys: K1 for S2V (CMAC over each component, doubled and xored together; the plaintext last – `xorend` when it
+has 16 bytes or more, padded otherwise), K2 for CTR starting at the IV with bits 63 and 31 cleared. `open` decrypts,
+recomputes the IV and compares it in constant time; on a mismatch it encrypts the buffer back, so the caller never
+holds plaintext of a forged message. SIV is deterministic – the same key, components and plaintext give the same
+output (misuse reveals only equality); NTS still sends a fresh random nonce. With an empty plaintext the IV depends on
+K1 only – K2 is not involved (by the construction). AES comes from `aes`: AES-NI in programs, the bitsliced circuit
+(no tables) otherwise and always in the kernel.
+
 ## AES-GCM and the CPU
 
 AES-NI (CPUID 1 ECX bit 25) and PCLMULQDQ (bit 1) are detected separately and chosen
@@ -98,7 +110,13 @@ the curve or with x + p; Wycheproof (`vectors/wycheproof.bin`, built by `vectors
 commit – ECDSA P-256 and P-384, RSA PKCS#1 2048/SHA-256, PSS 2048/SHA-256 and the PSS "misc" sets: every "valid" case
 verifies, every "invalid" and "acceptable" case is refused; the RSA 3072 / 4096 sets were checked on the host, not
 shipped); 36 hand-made mutations of the new code were run on the host – 33 caught, 3 equivalent (a check that a later
-check repeats); AES-GCM: FIPS-197 C.1 / A.1, the circuit S-box for all 256 inputs,
+check repeats); AES-CMAC / AES-SIV (0.7.0): RFC 4493 examples 1–4, RFC 5297 A.1 and A.2, 0–3 components ×
+lengths 0–1000 (both S2V branches, CTR across blocks) inside guard bytes from a Python reference written on
+`cryptography`'s AES and CMAC – every non-empty case also equal to `cryptography`'s AESSIV –, 126 components and 127
+refused, a wrong IV (also a bit CTR ignores) / component / nonce / K1 / K2 / ciphertext byte / missing or extra
+component giving Mismatch with the buffer back to exactly the ciphertext (no plaintext out); 8 hand-made mutations
+(Q bits not cleared, the dbl constant, no xorend, the pad bit, plaintext left after a mismatch, K1 / K2 swapped, the
+126 limit, CMAC subkeys swapped) run on the host – all caught; AES-GCM: FIPS-197 C.1 / A.1, the circuit S-box for all 256 inputs,
 1–5 blocks, GF(2^128) products and GHASH against SP 800-38D written on Python integers, NIST Test Cases 1–4, every
 length 0–95 and 1000 inside guard bytes, aad of 1 / 15 / 16 / 17 bytes, a wrong tag leaving the buffer untouched –
 each with every AES-NI / PCLMULQDQ combination the CPU allows; before that: FIPS 180-4 / NIST, RFC 4231, RFC 5869, RFC 8439, RFC 7748 vectors;

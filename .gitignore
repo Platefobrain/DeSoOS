@@ -1,20 +1,26 @@
-# Wyniki budowania
+# Build output (never in the repository: everything here is made by build.sh / cargo)
 /build/
-/target/
+target/
 
-# Obrazy dysków QEMU (tworzone przy pierwszym uruchomieniu)
+# Compiled Python (made when the test servers import each other)
+__pycache__/
+*.pyc
+
+# QEMU disk images (made on the first run)
 *.img
 
-# Logi testów
+# Test logs
 *.log
 
-# Pliki edytorów / systemu
+# Editor / system files
 *~
 *.swp
 .vscode/
 .idea/
 .DS_Store
 
-# Prywatne skrypty/pomiary A/B
+# Private scripts and A/B measurements
 /ab/
 ab-usb.sh
+.build-local.sh
+.run-local.sh

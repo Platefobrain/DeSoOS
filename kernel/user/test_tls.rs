@@ -70,7 +70,7 @@ pub fn self_test() {
     check!(kind == ExitKind::Exit(0) && line.contains("cases OK"), "tlstest net: {:?} {:?}", kind, out.trim());
     let summary = out.lines().find(|l| l.starts_with("netget: TLS 1.3")).unwrap_or("").trim();
     let line2 = String::from(line);
-    serial_println!("[TLS TEST] 2/3 netget https:// against tests/tls-stub.py (OpenSSL): both cipher suites, RSA and ECDSA, 1 MiB, KeyUpdate both ways, HTTP/1.1 framing (chunked, 1xx, 204 / 205 / 304, trailers, the end after a whole answer), every refusal with nothing sent to the server: {}; {} PASS", summary, line);
+    serial_println!("[TLS TEST] 2/3 netget https:// against tests/tls-stub.py (OpenSSL): both cipher suites, RSA and ECDSA, 1 MiB, KeyUpdate both ways, HTTP/1.1 framing (chunked, 1xx, 204 / 205 / 304, trailers, the end after a whole answer), every refusal with nothing sent to the server; the TLS exporter and ALPN against rustls (tests/nts-server): {}; {} PASS", summary, line);
 
     // 3. A clock that is not plausible: refused before anything is sent.
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);

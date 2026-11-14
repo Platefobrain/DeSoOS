@@ -144,6 +144,12 @@ fn hex(s: &str, out: &mut [u8]) -> usize {
     n
 }
 
+fn same(got: &[u8], want_hex: &str) -> bool {
+    let mut b = [0u8; 64];
+    let n = hex(want_hex, &mut b);
+    got.len() == n && got == &b[..n]
+}
+
 fn h32(s: &str) -> [u8; 32] {
     let mut b = [0u8; 32];
     hex(s, &mut b);
@@ -244,7 +250,7 @@ const NO_ANCHORS: AnchorList<'static> = AnchorList(&[]);
 const AES: [Suite; 1] = [Suite::Aes128Gcm];
 
 fn cfg() -> Config<'static> {
-    Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES }
+    Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: None }
 }
 
 fn rfc_random() -> Random {
@@ -266,6 +272,9 @@ enum Change {
     CertificateChanged,
     /// An extra extension (ALPN) in EncryptedExtensions.
     ExtraExtension,
+    /// An ALPN extension with this body (ProtocolNameList with its length) in
+    /// EncryptedExtensions.
+    Alpn(&'static [u8]),
     /// A non-empty certificate_request_context.
     CertificateContext,
     /// A CertificateRequest before the Certificate.
@@ -310,6 +319,14 @@ fn push_flight(s: &mut Script, change: Change) {
         en += 9;
         ee[3] += 9;
         ee[5] += 9;
+    }
+    if let Change::Alpn(body) = change {
+        let k = body.len();
+        ee[en..en + 4].copy_from_slice(&[0x00, 0x10, 0, k as u8]);
+        ee[en + 4..en + 4 + k].copy_from_slice(body);
+        en += 4 + k;
+        ee[3] += 4 + k as u8;
+        ee[5] += 4 + k as u8;
     }
     flight[f..f + en].copy_from_slice(&ee[..en]);
     f += en;
@@ -377,7 +394,7 @@ fn push_flight(s: &mut Script, change: Change) {
 }
 
 fn hooks(ch: &[u8]) -> TestHooks<'_> {
-    TestHooks { client_hello: Some(ch), skip_chain_check: true }
+    TestHooks { client_hello: Some(ch), skip_chain_check: true, alpn_offered: None }
 }
 
 fn rfc_connect(c: &mut Client, s: &mut Script) -> Result<client::Info, TlsError> {
@@ -471,6 +488,98 @@ impl ToArr for [u8] {
         a[..k].copy_from_slice(&self[..k]);
         (a, self.len())
     }
+}
+
+/// The TLS 1.3 exporter on the RFC 8448 session.  exporter_secret must be RFC 8448's
+/// "exp master" (fe22f881…, listed in the RFC); the NTS keys below were computed from the
+/// RFC's messages with Python's hashlib / hmac (HKDF written out), not with this code.
+const EXP_NTS_C2S: &str = "a13e39b71e9fc6b9fb9dce07c875729db3e7cedb16e78803e1787e892214860a";
+const EXP_NTS_S2C: &str = "94f74cb9d67a64aaca9e9d69ab1d53cb2ef555b47893f2fd8386af52b9a5fa81";
+/// The AEAD id with its bytes swapped (00 00 0f 00 00) – must give other keys.
+const EXP_NTS_SWAPPED: &str = "c7534b24dda15028c15348a9b46c195191a5b9964c5c3a5cee7abdec3d733f82";
+const EXP_TEST_20: &str = "475ce5e95e30315f900a1db9bc7668abcb7e507a";
+/// SHA-256 of 255 exported bytes (label "test", context "abc").
+const EXP_TEST_255_SHA: &str = "adfc7cdc8ac958e7ddba73ca44342d07184a205d3894e481b93f9fe04befeedb";
+
+fn exporter_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("exporter (RFC 8448 session)");
+    let label = b"EXPORTER-network-time-security";
+    // A connection that failed (nothing came back): refused.
+    let (cl, mut s) = fresh();
+    let _ = cl.connect(&mut s, &cfg(), &rfc_random());
+    let mut out = [0u8; 32];
+    c.check(cl.export(label, &[0, 0, 0, 15, 0], &mut out).is_err())?;
+    let (cl, _s) = connected(c)?;
+    c.check(cl.export(label, &[0, 0, 0, 15, 0], &mut out).is_ok() && out == h32(EXP_NTS_C2S))?;
+    c.check(cl.export(label, &[0, 0, 0, 15, 1], &mut out).is_ok() && out == h32(EXP_NTS_S2C))?;
+    c.check(cl.export(label, &[0, 0, 15, 0, 0], &mut out).is_ok() && out == h32(EXP_NTS_SWAPPED) && out != h32(EXP_NTS_C2S))?;
+    // A 4- and 6-byte context, another label: other keys.
+    for ctx in [&[0u8, 0, 0, 15][..], &[0, 0, 0, 15, 0, 0]] {
+        c.check(cl.export(label, ctx, &mut out).is_ok() && out != h32(EXP_NTS_C2S) && out != h32(EXP_NTS_S2C))?;
+    }
+    c.check(cl.export(b"EXPORTER-network-time-securitz", &[0, 0, 0, 15, 0], &mut out).is_ok() && out != h32(EXP_NTS_C2S))?;
+    let mut o20 = [0u8; 20];
+    c.check(cl.export(b"test", b"", &mut o20).is_ok() && same(&o20, EXP_TEST_20))?;
+    let mut o255 = [0u8; 255];
+    c.check(cl.export(b"test", b"abc", &mut o255).is_ok() && same(&super::desocrypto::sha256::sha256(&o255), EXP_TEST_255_SHA))?;
+    // Out of range: empty label, a 33-byte label, 0 or 256 bytes of output.
+    let mut o256 = [0u8; 256];
+    c.check(cl.export(b"", b"", &mut out).is_err() && cl.export(&[b'x'; 33], b"", &mut out).is_err())?;
+    c.check(cl.export(b"test", b"", &mut []).is_err() && cl.export(b"test", b"", &mut o256).is_err())?;
+    c.check(cl.export(&[b'x'; 32], b"", &mut out).is_ok())?;
+    // The exporter does not depend on what was sent after the handshake.
+    let (cl, mut s) = connected(c)?;
+    c.check(cl.write(&mut s, b"data").is_ok() && cl.export(label, &[0, 0, 0, 15, 0], &mut out).is_ok() && out == h32(EXP_NTS_C2S))?;
+    Ok(())
+}
+
+/// ALPN (RFC 7301): what the server answers in EncryptedExtensions.  The RFC 8448 flight
+/// is reused with the ALPN treated as offered (TestHooks) – a changed EncryptedExtensions
+/// breaks the transcript, so an accepted ALPN shows as the next failure (the
+/// CertificateVerify signature), a refused one as the ALPN error.
+fn alpn_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("alpn");
+    let mut ch = [0u8; 256];
+    let n = hex(CLIENT_HELLO, &mut ch);
+    let cases: [(Option<&'static [u8]>, Change, u8, &str); 7] = [
+        // Offered "h2", confirmed: past EncryptedExtensions (fails later on the transcript).
+        (Some(b"h2"), Change::Alpn(&[0, 3, 2, b'h', b'2']), client::ALERT_DECRYPT_ERROR, "server CertificateVerify signature does not verify"),
+        // Offered "ntske/1", the server chose "h2".
+        (Some(b"ntske/1"), Change::Alpn(&[0, 3, 2, b'h', b'2']), client::ALERT_ILLEGAL_PARAMETER, "the server chose an ALPN protocol we did not offer"),
+        // Offered, no ALPN in the answer.
+        (Some(b"ntske/1"), Change::None, client::ALERT_NO_APPLICATION_PROTOCOL, "the server did not confirm the ALPN protocol"),
+        // Two names in the answer (must be exactly one).
+        (Some(b"h2"), Change::Alpn(&[0, 6, 2, b'h', b'2', 2, b'h', b'2']), client::ALERT_DECODE_ERROR, "malformed handshake message"),
+        // An empty name.
+        (Some(b"h2"), Change::Alpn(&[0, 1, 0]), client::ALERT_ILLEGAL_PARAMETER, "the server chose an ALPN protocol we did not offer"),
+        // A list length that does not fit.
+        (Some(b"h2"), Change::Alpn(&[0, 9, 2, b'h', b'2']), client::ALERT_DECODE_ERROR, "malformed handshake message"),
+        // Not offered at all: an ALPN answer is an extension we did not offer.
+        (None, Change::Alpn(&[0, 3, 2, b'h', b'2']), client::ALERT_UNSUPPORTED_EXTENSION, "EncryptedExtensions with an extension we did not offer"),
+    ];
+    for (offered, change, alert, what) in cases {
+        let (cl, mut s) = fresh();
+        push_flight(&mut s, change);
+        let h = TestHooks { client_hello: Some(&ch[..n]), skip_chain_check: true, alpn_offered: offered };
+        let r = cl.connect_for_test(&mut s, &cfg(), &rfc_random(), &h);
+        c.check(is_local_what(&r, alert, what))?;
+    }
+    // Our own ClientHello carries the extension: 00 10, length, list length, one name.
+    let (cl, mut s) = fresh();
+    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(b"ntske/1") };
+    let _ = cl.connect(&mut s, &conf, &rfc_random());
+    let want = [0x00, 0x10, 0x00, 0x0a, 0x00, 0x08, 0x07, b'n', b't', b's', b'k', b'e', b'/', b'1'];
+    c.check(matches!(s.next_sent(), Some(r) if r.windows(want.len()).any(|w| w == want)))?;
+    // No ALPN in the config: no extension 16 in the ClientHello.
+    let (cl, mut s) = fresh();
+    let _ = cl.connect(&mut s, &cfg(), &rfc_random());
+    c.check(matches!(s.next_sent(), Some(r) if !r.windows(4).any(|w| w == [0x00, 0x10, 0x00, 0x0a])))?;
+    // A name longer than 32 bytes is not offered.
+    let (cl, mut s) = fresh();
+    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(&[b'a'; 33]) };
+    let _ = cl.connect(&mut s, &conf, &rfc_random());
+    c.check(matches!(s.next_sent(), Some(r) if !r.windows(7).any(|w| w == [0x00, 0x10, 0x00, 0x24, 0x00, 0x22, 0x21])))?;
+    Ok(())
 }
 
 fn flight_checks(c: &mut Checks) -> Result<(), Failure> {
@@ -891,7 +1000,9 @@ fn key_update_checks(c: &mut Checks) -> Result<(), Failure> {
 pub fn run() -> Result<usize, Failure> {
     let mut c = Checks { group: "", case: 0, passed: 0 };
     rfc_checks(&mut c)?;
+    exporter_checks(&mut c)?;
     flight_checks(&mut c)?;
+    alpn_checks(&mut c)?;
     hello_checks(&mut c)?;
     record_checks(&mut c)?;
     key_update_checks(&mut c)?;

@@ -9,7 +9,9 @@
 //                 pages must arrive whole, and a refused handshake must not let the request
 //                 reach the server (tls-stub's /seen counter); HTTP/1.1 answers from
 //                 tests/http_pages.py (chunked, 1xx, 204 / 205 / 304, trailers, the end after
-//                 a whole answer): "tlstest net: N cases OK"
+//                 a whole answer): "tlstest net: N cases OK"; the TLS exporter and ALPN
+//                 against tests/nts-server (rustls – an independent TLS 1.3): the keys
+//                 DeSoTLS exports must equal the ones rustls exported on the same connection
 //
 // A failure prints "tlstest: FAIL ..." and exits with 1.
 #![no_std]
@@ -26,6 +28,9 @@ mod desotls;
 mod tls_tests;
 
 use desoos::*;
+use desotls::client::{self, Client, Config, Random, Transport};
+use desotls::record::Suite;
+use desotls::roots::AnchorList;
 
 entry!(main);
 
@@ -38,6 +43,12 @@ const ERR: &str = "/tls.err";
 
 static mut FILE: [u8; 1 << 20 | 4096] = [0; 1 << 20 | 4096];
 static mut REPLY: [u8; 4096] = [0; 4096];
+/// The DeSoTLS client of the exporter cases (~120 KiB, so a static).
+static mut XCLIENT: Client = Client::new();
+static mut XBUF: [u8; MSG_MAX] = [0; MSG_MAX];
+/// tests/nts-server's first port (rustls): +0 ALPN "ntske/1" and the NTS keys, +1 no ALPN,
+/// +2 ALPN and 32 bytes exported with label "test", context "abc".
+const RUSTLS_BASE: u16 = 58500;
 static mut ERRBUF: [u8; 4096] = [0; 4096];
 
 macro_rules! fail {
@@ -55,6 +66,124 @@ fn offline() -> i32 {
         }
         Err(f) => fail!("{} case {}", f.group, f.case),
     }
+}
+
+/// A netd TCP connection as a DeSoTLS transport (as in netget, without its time-outs).
+struct Chan {
+    c: u64,
+    pos: usize,
+    len: usize,
+}
+
+impl Transport for Chan {
+    fn send(&mut self, data: &[u8]) -> Result<(), ()> {
+        for part in data.chunks(MSG_MAX) {
+            if chan_send(self.c, part, 0) != 0 {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+    fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        let msg = unsafe { &mut *core::ptr::addr_of_mut!(XBUF) };
+        if self.pos == self.len {
+            if !matches!(wait_many(&[(self.c, W_READABLE)], 10_000), Ok(m) if m != 0) {
+                return Err(());
+            }
+            let mut info = RecvInfo::default();
+            let r = chan_recv(self.c, msg, 0, &mut info);
+            if r == 0 {
+                return Err(());
+            }
+            if r < 0 {
+                return Ok(0);
+            }
+            self.pos = 0;
+            self.len = r as usize;
+        }
+        let k = (self.len - self.pos).min(buf.len());
+        buf[..k].copy_from_slice(&msg[self.pos..self.pos + k]);
+        self.pos += k;
+        Ok(k)
+    }
+}
+
+/// What one exporter case gave: the handshake error, or (ALPN agreed, bytes the server
+/// sent, they equal what DeSoTLS exports).
+enum Exported {
+    Refused(client::TlsError),
+    NoConnection,
+    Done { alpn: bool, got: usize, equal: bool },
+}
+
+/// One TLS connection to tests/nts-server: handshake (ALPN optional), read what rustls
+/// exported, export the same here, compare.
+fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
+    let Ok(c) = svc_connect("net0") else { return Exported::NoConnection };
+    let mut req = [0u8; 32];
+    let head = b"tcp 10.0.2.2 ";
+    req[..head.len()].copy_from_slice(head);
+    let mut n = head.len();
+    let mut d = [0u8; 5];
+    let mut v = port;
+    for i in (0..5).rev() {
+        d[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    req[n..n + 5].copy_from_slice(&d);
+    n += 5;
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(REPLY) };
+    let mut info = RecvInfo::default();
+    let r = if chan_send(c, &req[..n], 0) == 0 { chan_recv(c, buf, 0, &mut info) } else { -1 };
+    if r <= 0 || !buf.starts_with(b"connected ") {
+        close(c);
+        return Exported::NoConnection;
+    }
+    let mut der = [0u8; 2048];
+    let mut spans = [(0usize, 0usize); 1];
+    if !matches!(desotls::pem::certificates(TEST_CA, &mut der, &mut spans), Ok(1)) {
+        close(c);
+        return Exported::NoConnection;
+    }
+    let one: [&[u8]; 1] = [&der[spans[0].0..spans[0].0 + spans[0].1]];
+    let anchors = AnchorList(&one);
+    let now = time_unix().map(|t| t.secs as i64).unwrap_or(0);
+    let mut rnd = [0u8; 96];
+    if getrandom(&mut rnd).is_err() {
+        close(c);
+        return Exported::NoConnection;
+    }
+    let mut random = Random { client_random: [0; 32], session_id: [0; 32], x25519_secret: [0; 32] };
+    random.client_random.copy_from_slice(&rnd[..32]);
+    random.session_id.copy_from_slice(&rnd[32..64]);
+    random.x25519_secret.copy_from_slice(&rnd[64..]);
+    let cfg = Config { host: "tls.desoos", anchors: &anchors, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn };
+    let cl = unsafe { &mut *core::ptr::addr_of_mut!(XCLIENT) };
+    let mut t = Chan { c, pos: 0, len: 0 };
+    let info = match cl.connect(&mut t, &cfg, &random) {
+        Ok(i) => i,
+        Err(e) => {
+            close(c);
+            return Exported::Refused(e);
+        }
+    };
+    let mut got = [0u8; 64];
+    let mut k = 0;
+    while k < got.len() {
+        match cl.read(&mut t, &mut got[k..]) {
+            Ok(0) | Err(_) => break,
+            Ok(m) => k += m,
+        }
+    }
+    let mut mine = [0u8; 64];
+    let ok = if port == RUSTLS_BASE + 2 {
+        cl.export(b"test", b"abc", &mut mine[..32]).is_ok()
+    } else {
+        cl.export(b"EXPORTER-network-time-security", &[0, 0, 0, 15, 0], &mut mine[..32]).is_ok() && cl.export(b"EXPORTER-network-time-security", &[0, 0, 0, 15, 1], &mut mine[32..]).is_ok()
+    };
+    cl.close(&mut t);
+    close(c);
+    Exported::Done { alpn: info.alpn, got: k, equal: ok && k > 0 && got[..k] == mine[..k] }
 }
 
 /// netd's admin request (as nettest does).
@@ -445,6 +574,32 @@ fn net() -> i32 {
         }
         cases += 1;
     }
+
+    // The TLS exporter and ALPN against rustls (tests/nts-server).
+    let ntske: &[u8] = b"ntske/1";
+    match exporter_case(RUSTLS_BASE, Some(ntske)) {
+        Exported::Done { alpn: true, got: 64, equal: true } => {}
+        Exported::Done { alpn, got, equal } => fail!("exporter vs rustls: alpn {} got {} equal {}", alpn, got, equal),
+        Exported::Refused(e) => fail!("exporter vs rustls: refused: {}", e),
+        Exported::NoConnection => fail!("exporter vs rustls: no connection to 10.0.2.2:{}", RUSTLS_BASE),
+    }
+    cases += 1;
+    match exporter_case(RUSTLS_BASE + 2, Some(ntske)) {
+        Exported::Done { alpn: true, got: 32, equal: true } => {}
+        _ => fail!("exporter vs rustls (label test, context abc): not equal"),
+    }
+    cases += 1;
+    match exporter_case(RUSTLS_BASE + 1, Some(ntske)) {
+        Exported::Refused(e) if e.kind == client::Kind::Local(client::ALERT_NO_APPLICATION_PROTOCOL) => {}
+        Exported::Refused(e) => fail!("server without ALPN: refused with the wrong error: {}", e),
+        _ => fail!("server without ALPN: the handshake must fail (no_application_protocol)"),
+    }
+    cases += 1;
+    match exporter_case(RUSTLS_BASE, None) {
+        Exported::Done { alpn: false, got: 64, equal: true } => {}
+        _ => fail!("exporter without ALPN offered: not equal or ALPN reported"),
+    }
+    cases += 1;
 
     let r = ask("dns auto");
     if !r.starts_with("DNS server 10.0.2.3") {

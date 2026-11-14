@@ -73,7 +73,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (37 suites, a restart phase and a short soak, 300 tests), stress tests and a long soak test
+- Built-in self-tests (37 suites, a restart phase and a short soak, 301 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -367,6 +367,8 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   = one datagram, ≤ 1472 bytes, only from that peer, a random local port) with the `udp` right. When the address
   or mask changes (`netconfig set`, back to DHCP, a new DHCP lease), netd closes UDP sockets and aborts TCP
   connections of the old address – programs open them again.
+- `nettime --nts [--anchor ca.pem] [server[:port] ...]` - the same with NTS (RFC 8915): NTS-KE over TLS 1.3 to port
+  4460, then authenticated NTP; the result says "authenticated (NTS)" and still changes nothing (`docs/time/NTS.md`).
 - `nettime [-t ms] [server[:port] ...]` - asks 1-4 NTP servers (default `time.cloudflare.com`) at once and tells
   how far the clock is from their time ("about N s ahead / behind", the median with several servers). Read only:
   plain NTP is not authenticated, so nothing is set. Exit 0 answer, 2 usage / refused, 3 no usable answer, 4 the

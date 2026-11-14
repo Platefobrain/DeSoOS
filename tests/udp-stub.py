@@ -13,18 +13,17 @@ import socket
 import sys
 import time
 
+import stubnet
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 58090
 
 
 def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.bind(("127.0.0.1", PORT))
-    except OSError as e:
-        print("udp-stub: cannot listen on 127.0.0.1:%d: %s" % (PORT, e), file=sys.stderr)
-        return 1
+    stubnet.bind(s, PORT, "udp-stub")
     other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     other.bind(("127.0.0.1", 0))
+    stubnet.ready("udp")
     seen = {}
     while True:
         try:

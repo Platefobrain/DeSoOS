@@ -1404,7 +1404,7 @@ impl Nic {
                             let _ = writeln!(out, "DNS server {}{}", Server(d), if s.is_some() { " (set by hand)" } else { " (from DHCP)" });
                         }
                         None => {
-                            let _ = writeln!(out, "DNS server: none yet (DHCP gave none)");
+                            let _ = writeln!(out, "DNS server: none yet ({})", if !self.has_ip() { "waiting for DHCP" } else if self.by_hand { "set by hand without one" } else { "DHCP gave none" });
                         }
                     }
                 }
@@ -1651,7 +1651,16 @@ impl Nic {
             return;
         }
         let Some((server, sport)) = self.dns_server() else {
-            self.resolve_fail(k, &name, then, "no DNS server (DHCP gave none)");
+            // Why there is none: no address yet (DHCP has not answered – not "it gave no DNS
+            // server"), an address set by hand without one, or DHCP really gave none.
+            let why = if !self.has_ip() {
+                "no address yet (waiting for DHCP)"
+            } else if self.by_hand {
+                "no DNS server (the address was set by hand without one)"
+            } else {
+                "no DNS server (DHCP gave none)"
+            };
+            self.resolve_fail(k, &name, then, why);
             return;
         };
         let id = self.rand16();

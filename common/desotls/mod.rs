@@ -7,7 +7,8 @@
 //   #[path = ".../common/desocrypto/mod.rs"] mod desocrypto;
 //   #[path = ".../common/desotls/mod.rs"]    mod desotls;
 //
-//   client  the TLS 1.3 client: handshake, application data, KeyUpdate, close
+//   client  the TLS 1.3 client: handshake, application data, KeyUpdate, close; ALPN
+//           (one protocol, RFC 7301) and the exporter (RFC 9846 §7.5) for NTS-KE
 //   record  records: protection with the two AEADs, TLSInnerPlaintext, limits
 //   schedule  the TLS 1.3 key schedule (HKDF-Expand-Label, traffic secrets, Finished)
 //   der     strict DER reading
@@ -34,7 +35,7 @@ pub mod schedule;
 pub mod verify;
 pub mod x509;
 
-pub const VERSION: &str = "0.2.1";
+pub const VERSION: &str = "0.3.0";
 
 /// Why a certificate or chain was refused.  `as_str` gives the text `certcheck` prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

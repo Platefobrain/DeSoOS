@@ -13,4 +13,6 @@ The documentation of the whole system. Change history is in `../CHANGELOG.md`; e
 | `desocrypto/ALGORITHMS.md` | Every DeSoCrypto module and its API, the rules of the code (limits, key wiping, timing, signatures on public data only), AES-NI / PCLMULQDQ and the kernel, the tests, speed |
 | `desotls/README.md` | DeSoTLS – DeSoOS's own TLS library: what it does, where things are |
 | `desotls/HANDSHAKE.md` | The TLS 1.3 connection: the handshake, every refusal (HelloRetryRequest table, alerts), the key schedule, records and their limits, KeyUpdate, the end of a connection, `netget https://` (HTTP/1.1 framing, chunked, trailers, the end after an answer, exit codes), the tests (RFC 8448, OpenSSL, a man in the middle) |
+| `time/README.md` | Time in DeSoOS: the RTC, the wall clock, plausibility, the sources and how far each is trusted, the tools |
+| `time/NTS.md` | NTS (RFC 8915): NTS-KE over TLS 1.3, the records accepted, keys from the exporter, NTP with NTS (fields, placeholders, the order of the checks), limits, the tests against rustls |
 | `desotls/CERTIFICATES.md` | How a server's certificate chain is checked: the X.509 profile, the order of the checks, path building, every refusal, the CA store file format, the wall clock, the tests (x509-limbo) |

@@ -109,7 +109,8 @@ timings move by ±15% from run to run on the same build).
 - key exchange X25519 only: a server without X25519 is refused (P-256 / P-384 ECDHE and ML-KEM hybrids not offered);
   HelloRetryRequest never accepted
 - cipher suites TLS_AES_128_GCM_SHA256 and TLS_CHACHA20_POLY1305_SHA256 only (no AES-256-GCM)
-- no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), no ALPN,
+- no resumption (tickets read and ignored), no 0-RTT, no client certificates (a server that asks is refused), ALPN only
+  as one protocol the server must confirm (for NTS-KE; netget sends none),
   no OCSP stapling
 - UDP for programs: connected client sockets only (no server side, no broadcast / multicast, no fragments – 1472 B
   at most), at most 8 sockets per netd (each is one of its 14 client connections), a datagram that finds the
@@ -121,7 +122,11 @@ timings move by ±15% from run to run on the same build).
   96 KiB of the kernel's 16 MiB message budget (it counts data + 64 B per message; allocator rounding is not
   counted), 768 KiB for all 8
 - `nettime` (NTP) reads only: no clock is set, no daemon, no periodic synchronisation; plain NTP is not
-  authenticated, so its answer is information, not trusted time (NTS comes next); IPv4 only, no server side
+  authenticated, so its answer is information, not trusted time; IPv4 only, no server side
+- `nettime --nts` (v0.79 stage B) is authenticated but also reads only until the time service (stage D); it needs a
+  plausible clock for the NTS-KE certificate; NTS-KE runs one server after the other (a dead server costs the next ones
+  up to 3 × `-t`, 6 s by default); cookies and keys stay in memory
+  (after a restart always a new NTS-KE); only AEAD_AES_SIV_CMAC_256; request limit 1200 bytes without PMTU discovery
 - `nettime`'s difference is an estimate: the clock counts whole seconds, the path asymmetry adds up to delay / 2, the
   server's own error is unknown; with several servers only a median and a 2 s limit – not RFC 5905's selection;
   the acceptance limit `root_distance_proxy` ≤ 1.5 s is a simplification of the full root distance

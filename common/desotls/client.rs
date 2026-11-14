@@ -16,6 +16,12 @@
 // it can), and the connection is dead from then on: every later call returns the same
 // error.  `Transport` is whatever carries the bytes (netd's TCP for netget, a script in the
 // tests); the library makes no syscalls.
+//
+// For protocols on top of TLS (NTS-KE, RFC 8915): `Config::alpn` offers one ALPN protocol
+// (RFC 7301) – the server must confirm exactly that one, otherwise the handshake fails
+// (no_application_protocol); `Client::export` gives keying material from the connection
+// (RFC 9846 / RFC 8446 §7.5 – the exporter of TLS 1.3, from `exporter_secret`, never the
+// early one).
 
 use core::fmt;
 
@@ -54,6 +60,7 @@ const KEY_UPDATE: u8 = 24;
 
 // Extensions.
 const EXT_SERVER_NAME: u16 = 0;
+const EXT_ALPN: u16 = 16;
 const EXT_SUPPORTED_GROUPS: u16 = 10;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 13;
 const EXT_RECORD_SIZE_LIMIT: u16 = 28;
@@ -92,6 +99,7 @@ pub const ALERT_PROTOCOL_VERSION: u8 = 70;
 pub const ALERT_INTERNAL_ERROR: u8 = 80;
 pub const ALERT_MISSING_EXTENSION: u8 = 109;
 pub const ALERT_UNSUPPORTED_EXTENSION: u8 = 110;
+pub const ALERT_NO_APPLICATION_PROTOCOL: u8 = 120;
 
 pub fn alert_name(a: u8) -> &'static str {
     match a {
@@ -226,7 +234,15 @@ pub struct Config<'a> {
     pub now: i64,
     /// Cipher suites to offer, in order of preference (one or both).
     pub suites: &'a [Suite],
+    /// One ALPN protocol to offer (1-32 bytes, e.g. b"ntske/1"); the server must confirm it.
+    /// None: no ALPN extension (netget).
+    pub alpn: Option<&'a [u8]>,
 }
+
+/// The longest ALPN protocol name `Config::alpn` takes.
+pub const ALPN_MAX: usize = 32;
+/// The longest exporter label (it goes into HkdfLabel with the "tls13 " prefix).
+pub const EXPORT_LABEL_MAX: usize = 32;
 
 /// The fresh randomness one connection needs (from getrandom): the client random, the
 /// legacy session id (compatibility mode – RFC 8446 D.4) and the X25519 secret.
@@ -251,6 +267,8 @@ pub struct Info {
     pub signature: u16,
     /// verify.rs's answer: certificates in the path, which anchor.
     pub path: verify::Verified,
+    /// The server confirmed the offered ALPN protocol (false when none was offered).
+    pub alpn: bool,
 }
 
 pub fn signature_name(s: u16) -> &'static str {
@@ -304,6 +322,9 @@ pub struct TestHooks<'a> {
     /// Skip verify.rs and take the server's key from the first certificate (RFC 8448's
     /// certificate is self-signed with a 1024-bit key); also allows RSA keys from 1024 bits.
     pub skip_chain_check: bool,
+    /// Treat this ALPN protocol as offered (with `client_hello`, whose bytes cannot change
+    /// without breaking RFC 8448's transcript) – for the ALPN answers of a changed flight.
+    pub alpn_offered: Option<&'a [u8]>,
 }
 
 struct Io {
@@ -335,7 +356,13 @@ struct Engine {
     s_hs: Secret,
     c_ap: Secret,
     s_ap: Secret,
+    /// exporter_secret (RFC 9846 §7.1; "exporter master secret" in RFC 8446).
+    exp: Secret,
     leaf: LeafKey,
+    /// The ALPN protocol we offered (alpn_len 0 = none) and whether the server confirmed it.
+    alpn: [u8; ALPN_MAX],
+    alpn_len: usize,
+    alpn_agreed: bool,
     session_id: [u8; 32],
     session_id_len: usize,
     /// Extensions we sent (bit = extension number, for those under 64).
@@ -550,7 +577,11 @@ impl Client {
                 s_hs: Secret::zero(),
                 c_ap: Secret::zero(),
                 s_ap: Secret::zero(),
+                exp: Secret::zero(),
                 leaf: LeafKey::None,
+                alpn: [0; ALPN_MAX],
+                alpn_len: 0,
+                alpn_agreed: false,
                 session_id: [0; 32],
                 session_id_len: 0,
                 offered: 0,
@@ -586,7 +617,10 @@ impl Client {
         s.s_hs = Secret::zero();
         s.c_ap = Secret::zero();
         s.s_ap = Secret::zero();
+        s.exp = Secret::zero();
         s.leaf = LeafKey::None;
+        s.alpn_len = 0;
+        s.alpn_agreed = false;
         s.offered = 0;
         s.offered_suites = [None, None];
         s.key_updates = 0;
@@ -611,6 +645,10 @@ impl Client {
     pub fn connect_for_test<T: Transport>(&mut self, t: &mut T, cfg: &Config<'_>, random: &Random, hooks: &TestHooks<'_>) -> Result<Info, TlsError> {
         self.reset();
         self.st.skip_chain_check = hooks.skip_chain_check;
+        if let Some(p) = hooks.alpn_offered.filter(|p| p.len() <= ALPN_MAX) {
+            self.st.alpn[..p.len()].copy_from_slice(p);
+            self.st.alpn_len = p.len();
+        }
         let r = self.handshake(t, cfg, random, hooks.client_hello);
         self.fail_on(t, r)
     }
@@ -710,7 +748,7 @@ impl Client {
                 _ => return Err(TlsError::local(ALERT_UNEXPECTED_MESSAGE, "application data before the handshake ended")),
             }
         }
-        Ok(Info { suite: self.st.suite, group: self.st.group, signature: self.st.signature, path: self.st.path })
+        Ok(Info { suite: self.st.suite, group: self.st.group, signature: self.st.signature, path: self.st.path, alpn: self.st.alpn_agreed })
     }
 
     /// An alert record: close_notify or the server's error.
@@ -802,6 +840,18 @@ impl Client {
         n += 1;
         put16(b, &mut n, host.len() as u16);
         put(b, &mut n, host);
+        // application_layer_protocol_negotiation: one protocol (RFC 7301)
+        st.alpn_len = 0;
+        if let Some(p) = cfg.alpn.filter(|p| !p.is_empty() && p.len() <= ALPN_MAX) {
+            put16(b, &mut n, EXT_ALPN);
+            put16(b, &mut n, (p.len() + 3) as u16);
+            put16(b, &mut n, (p.len() + 1) as u16);
+            b[n] = p.len() as u8;
+            n += 1;
+            put(b, &mut n, p);
+            st.alpn[..p.len()].copy_from_slice(p);
+            st.alpn_len = p.len();
+        }
         // supported_groups: x25519 only
         put16(b, &mut n, EXT_SUPPORTED_GROUPS);
         put(b, &mut n, &[0, 4, 0, 2]);
@@ -832,6 +882,9 @@ impl Client {
         let body = n - 4;
         b[1..4].copy_from_slice(&[(body >> 16) as u8, (body >> 8) as u8, body as u8]);
         st.offered = 1 << EXT_SERVER_NAME | 1 << EXT_SUPPORTED_GROUPS | 1 << EXT_SIGNATURE_ALGORITHMS | 1 << EXT_SIGNATURE_ALGORITHMS_CERT | 1 << EXT_SUPPORTED_VERSIONS | 1 << EXT_KEY_SHARE;
+        if st.alpn_len > 0 {
+            st.offered |= 1 << EXT_ALPN;
+        }
         st.x25519_secret_store(&random.x25519_secret);
         n
     }
@@ -1021,6 +1074,20 @@ impl Client {
 
     /// The record numbers of the current keys (send, receive) and how many KeyUpdates moved
     /// them – for the tests.
+    /// Keying material from this connection (TLS 1.3 exporter, RFC 9846 §7.5):
+    /// HKDF-Expand-Label(Derive-Secret(exporter_secret, label, ""), "exporter",
+    /// Hash(context), out.len()).  Only on a connected, not failed client; label 1-32
+    /// bytes, output 1-255 bytes (NTS: label "EXPORTER-network-time-security", a 5-byte
+    /// context, 32 bytes).
+    pub fn export(&self, label: &[u8], context: &[u8], out: &mut [u8]) -> Result<(), TlsError> {
+        self.usable()?;
+        if label.is_empty() || label.len() > EXPORT_LABEL_MAX || out.is_empty() || out.len() > 255 {
+            return Err(TlsError::local(ALERT_INTERNAL_ERROR, "exporter: label or length out of range"));
+        }
+        schedule::export(&self.st.exp, label, context, out);
+        Ok(())
+    }
+
     pub fn sequences(&self) -> (u64, u64) {
         (self.st.write.as_ref().map_or(0, |p| p.sequence()), self.st.read.as_ref().map_or(0, |p| p.sequence()))
     }
@@ -1068,6 +1135,9 @@ impl Engine {
             Ok(())
         })?;
         self.offered = offered;
+        if self.alpn_len > 0 {
+            self.offered |= 1 << EXT_ALPN;
+        }
         Ok(())
     }
 
@@ -1123,6 +1193,7 @@ impl Engine {
                 let master = schedule::master_secret(&self.handshake_secret);
                 self.c_ap = schedule::derive_secret(&master.0, b"c ap traffic", &th);
                 self.s_ap = schedule::derive_secret(&master.0, b"s ap traffic", &th);
+                self.exp = schedule::derive_secret(&master.0, b"exp master", &th);
                 self.read = Some(Protection::new(self.suite, &self.s_ap));
                 self.ccs_allowed = false;
                 self.state = State::Connected;
@@ -1217,6 +1288,8 @@ impl Engine {
         let exts = c.vec16()?;
         c.end()?;
         let offered = self.offered;
+        let (ours, ours_len) = (self.alpn, self.alpn_len);
+        let mut agreed = false;
         for_each_ext(exts, |ty, d| {
             let ok = match ty {
                 // The server used our name: an empty extension.
@@ -1224,13 +1297,32 @@ impl Engine {
                 // Its own preference – allowed, not used.
                 EXT_SUPPORTED_GROUPS => true,
                 EXT_RECORD_SIZE_LIMIT => offered & (1 << EXT_RECORD_SIZE_LIMIT) != 0 && d.len() == 2,
+                EXT_ALPN if offered & (1 << EXT_ALPN) != 0 => {
+                    // ProtocolNameList with exactly one name, and it must be ours (RFC 7301 §3.1).
+                    let mut c = Cur::new(d);
+                    let list = c.vec16()?;
+                    c.end()?;
+                    let mut l = Cur::new(list);
+                    let name = l.vec8()?;
+                    l.end()?;
+                    if name.is_empty() || name != &ours[..ours_len] {
+                        return Err(TlsError::local(ALERT_ILLEGAL_PARAMETER, "the server chose an ALPN protocol we did not offer"));
+                    }
+                    agreed = true;
+                    true
+                }
                 _ => false,
             };
             if !ok {
                 return Err(TlsError::local(ALERT_UNSUPPORTED_EXTENSION, "EncryptedExtensions with an extension we did not offer"));
             }
             Ok(())
-        })
+        })?;
+        if ours_len > 0 && !agreed {
+            return Err(TlsError::local(ALERT_NO_APPLICATION_PROTOCOL, "the server did not confirm the ALPN protocol"));
+        }
+        self.alpn_agreed = agreed;
+        Ok(())
     }
 
     fn certificate(&mut self, body: &[u8], cfg: &Config<'_>) -> Result<(), TlsError> {
