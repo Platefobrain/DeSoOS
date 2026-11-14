@@ -71,6 +71,8 @@ uses them.
   TEST 159 → 162 (a session with decrypted data not yet read: `wipe` leaves nothing, the exporter refuses after it).
   7 mutations, all caught – the first version of the TLS test missed one (the application buffer not wiped: it held
   no data yet), so it now reads part of a record before `wipe`.
+- `docs/time/NTS.md`: the NTS-KE table gives the Critical Bit rule of every record in its own column (must be set /
+  must not be set / either) – the Error row could be read as the opposite of the code (review of fix 3).
 - The Legion run of fix 2 (real servers): Cloudflare (stratum 3, ~12 ms), Netnod (stratum 1, 45 ms) and PTB
   (stratum 1, ~43 ms) – all authenticated with NTS, the median of the three agreeing to the second; a server that does
   not answer on 4460 given up after 6000 ms while the others gave the time; "no address yet (waiting for DHCP)" before

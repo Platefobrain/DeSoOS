@@ -21,19 +21,19 @@ known good time and correcting the clock come with the time service (stage D).
 
 ## NTS-KE response – what is accepted
 
-| Record | Rule |
-|---|---|
-| Next Protocol (1) | exactly once, exactly {0}, Critical Bit set; an empty body – refused |
-| AEAD (4) | exactly once, exactly {15} (Critical Bit either way) |
-| New Cookie (5) | Critical Bit not set; 16–1024 bytes **and a length divisible by 4** (an NTP extension field is a multiple of 4 and the server needs its exact bytes back – a cookie is never padded); others skipped; at most 8 kept; none usable – refused |
-| Server Negotiation (6) | at most once, 1–253 bytes of host name (letters, digits, `.`, `-`) or IPv4 address – used for NTP |
-| Port Negotiation (7) | at most once, not 0 – used for NTP |
-| Error (2) | refused, with its code (Critical Bit not set or not exactly 2 bytes – refused as malformed) |
-| Warning (3) | refused (RFC 8915 §4.1.4: unknown warning codes are errors; none are defined); malformed as for Error |
-| unknown | critical bit – refused; otherwise skipped |
-| End of Message (0) | must come, Critical Bit set, empty body; nothing after it; the whole message ≤ 65 536 bytes (decrypted TLS data) |
+| Record | Critical Bit | Rule |
+|---|---|---|
+| Next Protocol (1) | must be set | exactly once, exactly {0}; an empty body – refused |
+| AEAD (4) | either | exactly once, exactly {15} |
+| New Cookie (5) | must not be set | 16–1024 bytes **and a length divisible by 4** (an NTP extension field is a multiple of 4 and the server needs its exact bytes back – a cookie is never padded); others skipped; at most 8 kept; none usable – refused |
+| Server Negotiation (6) | either | at most once, 1–253 bytes of host name (letters, digits, `.`, `-`) or IPv4 address – used for NTP |
+| Port Negotiation (7) | either | at most once, not 0 – used for NTP |
+| Error (2) | must be set | the body exactly 2 bytes; a well-formed one – refused, with its code; otherwise refused as malformed |
+| Warning (3) | must be set | the same form as Error (exactly 2 bytes); refused either way (RFC 8915 §4.1.4: unknown warning codes are errors; none are defined) |
+| unknown | – | set – refused; not set – skipped |
+| End of Message (0) | must be set | must come, empty body; nothing after it; the whole message ≤ 65 536 bytes (decrypted TLS data) |
 
-Server and Port Negotiation may carry the Critical Bit or not (§4.1.7–4.1.8).
+"must be set" / "must not be set": a record breaking it is refused (RFC 8915 §4.1); "either": both are taken.
 
 ## NTP with NTS – the request
 
