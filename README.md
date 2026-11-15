@@ -6,14 +6,10 @@
   </a>
 </p>
 
-# DeSoOS v0.78.2<img src="https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white">
-  <img src="https://img.shields.io/badge/Architecture-x86__64-blue">
-  <img src="https://img.shields.io/badge/Boot-UEFI-purple">
-  <img src="https://img.shields.io/badge/Kernel-no__std-black">
-  <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green">
+# DeSoOS <img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-purple"> <img src="https://img.shields.io/badge/Kernel-no__std-black">
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.78.2-blue">
+  
   <img src="https://img.shields.io/badge/CPUs-Up%20to%2016-orange">
   <img src="https://img.shields.io/badge/Tests-301-success">
   <img src="https://img.shields.io/badge/TLS-1.3-blue">
