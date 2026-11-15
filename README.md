@@ -1,10 +1,4 @@
-<p align="center">
-  <a href="https://www.decodesoft.pl/">
-    <img src="https://decodesoft.pl/download/deso.svg"
-         alt="DeSoOS - DecodeSoft"
-         width="400">
-  </a>
-</p>
+
 
 # desoOS <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
 
