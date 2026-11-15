@@ -6,6 +6,10 @@
   </a>
 </p>
 
+<h1 align="center">
+  <span style="font-size: 50px;">DeSoOS</span>
+</h1>
+
 # desoOS <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
 
 <p>
