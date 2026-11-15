@@ -1,3 +1,5 @@
+![DeSoOS Logo](https://decodesoft.pl/img/svg/logo.svg)
+
 # DeSoOS v0.78.2
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
