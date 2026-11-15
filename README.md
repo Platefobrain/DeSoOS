@@ -1,17 +1,12 @@
-
 <p align="center">
   <a href="https://www.decodesoft.pl/">
-    <img src="https://decodesoft.pl/img/svg/logo.svg" width="400" alt="DeSoOS">
+    <img src="https://decodesoft.pl/img/svg/logo.svg"
+         alt="DeSoOS - DecodeSoft"
+         width="400">
   </a>
 </p>
 
-<h1 align="center">DeSoOS v0.78.2</h1>
-
-<p align="center">
-  <a href="https://www.decodesoft.pl/">Website</a>
-  ·
-  <a href="https://github.com/Platefobrain">GitHub</a>
-</p>
+# DeSoOS v0.78.2
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white">
@@ -28,22 +23,6 @@
   <img src="https://img.shields.io/badge/TLS-1.3-blue">
   <img src="https://img.shields.io/badge/Status-Hobby%20OS-lightgrey">
 </p>
-
-
-
-
-
-
-
-<p align="center">
-  <a href="https://www.decodesoft.pl/">
-    <img src="https://decodesoft.pl/img/svg/logo.svg"
-         alt="DeSoOS - DecodeSoft"
-         width="400">
-  </a>
-</p>
-
-# DeSoOS v0.78.2
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
