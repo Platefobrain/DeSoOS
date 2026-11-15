@@ -2,7 +2,7 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.79.0 — in progress (stages A and B of A–D done: NTS + LKG)
+## v0.79.0 — in progress (stages A, B and C of A–D done: NTS + LKG)
 
 Not released yet: the version stays 0.78.2 until stage D passes. Plan: NTS (RFC 8915) and the last known good time;
 stage A = the cryptography and TLS parts NTS needs, checked against vectors and an independent TLS before anything
@@ -103,6 +103,36 @@ uses them.
   stops at once with exit code 3, naming the servers and the sockets on the test ports (`ss`).
 - `tests/test.sh` now waits for every host server it stopped (ntp-stub and nts-server were missing from the `wait`)
   and clears `logs/test-soak.out` each run, so a run without the soak no longer shows the previous `[RESULT-SOAK]`.
+
+### Stage C – the last known good time (LKG)
+- **`kernel/time_lkg.rs`** (new): a lower bound for the wall clock that survives a restart – `/.desoos/lkg` on the
+  system volume (the DeSoFS volume mounted read-write at `/disk`; none: in memory only, from the build date). A 56-byte
+  record (`DESOLKG1`, version, source, reserved, time, SHA-256 over the rest), read at boot and at every mount of
+  `/disk`; written atomically and durably (temporary file, read back, sync, `rename`, sync – each DeSoFS operation is
+  one transaction, so after a power loss there is the old record or the new one); never lowered; a failed save keeps
+  the raise in memory ("NOT SAVED") and the next raise saves it. Nothing in a normal build raises it yet – stage D
+  connects the only source (an authenticated time from NTS); no syscall takes a time.
+- **The clock's verdict** (syscall 59, `date`, netget, nettime, certcheck) gains reason **7** "clock earlier than the
+  last known good time" (margin 0 s) and **8** "last known good time unreadable" (a read error, wrong length, magic,
+  checksum, version, source, after 2099 – never a quiet fall-back to the build date). Order: 1–4 and 6, then 8, then
+  5, then 7. The build date keeps its 24 h tolerance as reason 5.
+- **`/.desoos` reserved** in the VFS on every DeSoFS volume: write, truncate, create, mkdir, remove, rename (out of,
+  onto, into, of the directory), mount on or inside – refused to programs and to the kernel's own file functions
+  (`FsError::Reserved` → ERROR_NOT_PERMITTED; opening for writing refused at once). Decided on the resolved volume and
+  node, not on the path's text; the kernel writes there only through the volume (`fs::with_desofs_at`). Reading
+  stays allowed.
+- `date` (and sysinfo `date`) shows the LKG, its source and the file's state; the boot log prints it (`[TIME]`).
+- **LKG TEST** (new, 38th suite): the state the boot left (nothing raised by the suites before); the verdict on 16
+  made-up states; the record on a volume (68 cases: every covered byte, version, source, after 2099, read and stat
+  errors, a temporary file left); power loss at every sector of every write of a save and a write failing at every
+  position (317 crash images – always the old record or the new); the live system on a RAM volume at `/disk` (raise,
+  never lower, reason 7 and netget https refused before sending, a damaged file → reason 8, no volume → "NOT SAVED"
+  then saved); `/.desoos` protected – 20 kernel calls and 30 attempts from a program (`/bin/timetest protect`, new)
+  refused, other names writable; sysfuzz with the LKG on `/disk` changes nothing. RESTART TEST 6 → 7 steps: an LKG
+  saved two days ahead by the first start is read back at boot, the clock refused with reason 7, netget https
+  refused, the file still protected. 309 tests.
+- New document `docs/time/LKG.md`; `docs/time/README.md`, `docs/desotls/CERTIFICATES.md` (reasons 7 and 8),
+  `docs/desofs/README.md` (`/.desoos`), ARCHITECTURE, RELEASE limitations.
 
 ## v0.78.2 — 2026-11-12
 

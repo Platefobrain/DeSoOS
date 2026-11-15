@@ -39,6 +39,8 @@ pub mod test_snap;
 pub mod test_cache;
 #[cfg(selftest)]
 pub mod restart;
+#[cfg(selftest)]
+pub mod test_lkg;
 
 use crate::desocrypto;
 

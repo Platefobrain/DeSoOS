@@ -26,6 +26,7 @@ mod sched;
 mod selftest;
 mod shell;
 mod time;
+mod time_lkg;
 mod user;
 
 use bootinfo::BootInfo;
@@ -205,6 +206,10 @@ pub extern "sysv64" fn kernel_main(
 
     // VFS – ramfs at "/", disk 0 at "/disk" (DeSoFS or FAT32).
     fs::init();
+    // The last known good time from the system volume (/disk/.desoos/lkg) – read again here
+    // so that "no system volume" is known too; the clock's verdict uses it from now on.
+    time_lkg::load();
+    serial_println!("[TIME] {}", time_lkg::describe());
     #[cfg(selftest)]
     if !selftest::skip_boot() {
         fs::self_test();
@@ -315,6 +320,11 @@ pub extern "sysv64" fn kernel_main(
     #[cfg(selftest)]
     if !selftest::looping() {
         user::ntp_self_test();
+    }
+    // The last known good time – time_lkg.rs, /.desoos protected, power loss.
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::time_self_test();
     }
     #[cfg(selftest)]
     if !selftest::looping() {

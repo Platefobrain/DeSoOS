@@ -359,6 +359,8 @@ pub fn clock_reason(status: u64) -> &'static str {
         4 => "RTC date or time out of range",
         5 => "clock earlier than the build date",
         6 => "clock later than 2099",
+        7 => "clock earlier than the last known good time",
+        8 => "last known good time unreadable",
         _ => "unknown",
     }
 }

@@ -51,6 +51,8 @@ pub enum FsError {
     InUse(usize),
     /// A sealed node (the trusted CA store): nothing may change, remove, rename or cover it.
     Immutable,
+    /// `/.desoos` of a DeSoFS volume (the last known good time): only the kernel writes there.
+    Reserved,
 }
 
 impl From<BlockError> for FsError {
@@ -83,6 +85,7 @@ impl core::fmt::Display for FsError {
             FsError::BadCursor => f.write_str("invalid directory position"),
             FsError::InUse(n) => write!(f, "in use ({} open file{} / director{})", n, if *n == 1 { "" } else { "s" }, if *n == 1 { "y" } else { "ies" }),
             FsError::Immutable => f.write_str("protected (sealed) - cannot be changed"),
+            FsError::Reserved => f.write_str("reserved for the system (/.desoos) - only the kernel writes there"),
         }
     }
 }
@@ -597,6 +600,34 @@ fn protects_locked(path: &str) -> bool {
     }
 }
 
+/// The system's own directory on a DeSoFS volume: `/.desoos` and everything under it (the
+/// last known good time, time_lkg.rs).  Decided on the resolved object – the volume the
+/// normalized path lands on and the node's path inside it – never on the text a program
+/// gave: "..", ".", relative paths and directory handles all end here, and DeSoFS has no
+/// links and compares names exactly, so no other path reaches the same node.  The kernel
+/// writes there only through `with_desofs_at` (the volume itself), never through these
+/// functions.  (Under FS_LOCK.)
+fn reserved_locked(path: &str) -> bool {
+    match find_mount(path) {
+        Ok((i, rel)) => mounts()[i].fs.kind() == "desofs" && (rel == "/.desoos" || rel.starts_with("/.desoos/")),
+        Err(_) => false,
+    }
+}
+
+/// `path` is in a DeSoFS volume's `/.desoos` (see `reserved_locked`).
+pub fn is_reserved(path: &str) -> bool {
+    let path = normalize("/", path);
+    let _g = FS_LOCK.read();
+    reserved_locked(&path)
+}
+
+fn refuse_reserved(path: &str) -> Result<()> {
+    if is_reserved(path) {
+        return Err(FsError::Reserved);
+    }
+    Ok(())
+}
+
 /// Mounts a file system at `path` (the directory must exist, except for "/").  Not over a
 /// sealed node or a directory holding one (it would hide it).
 pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
@@ -607,6 +638,10 @@ pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
     }
     if path != "/" && protects_locked(&path) {
         return Err(FsError::Immutable);
+    }
+    // Nothing is mounted on /.desoos or inside it (it would hide or replace the file).
+    if path != "/" && reserved_locked(&path) {
+        return Err(FsError::Reserved);
     }
     if path != "/" {
         match stat(&path) {
@@ -716,6 +751,19 @@ pub fn with_mounted_desofs(disk: usize, f: &mut dyn FnMut(&mut desofs::vol::Volu
     false
 }
 
+/// Runs `f` on the DeSoFS volume mounted exactly at `path` (not a snapshot view), under
+/// FS_LOCK for writing.  The kernel's own way to /.desoos (time_lkg.rs).  false – no such
+/// mount.
+pub fn with_desofs_at(path: &str, f: &mut dyn FnMut(&mut desofs::vol::Volume)) -> bool {
+    let _g = FsWrite::lock();
+    for m in mounts().iter_mut() {
+        if m.path == path && m.fs.kind() == "desofs" && m.fs.with_desofs(f) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Statistics of the file system mounted exactly at `path`.
 pub fn mount_stats(path: &str) -> Option<FsStats> {
     // A file system with its own lock (USB disk) – without locking the whole VFS.
@@ -808,18 +856,22 @@ pub fn read(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
 }
 
 pub fn write(path: &str, offset: u64, data: &[u8]) -> Result<usize> {
+    refuse_reserved(path)?;
     with_fs(path, |c, p| c.write(p, offset, data), |fs, p| fs.write(p, offset, data))
 }
 
 pub fn create(path: &str) -> Result<()> {
+    refuse_reserved(path)?;
     with_fs(path, |c, p| c.create(p), |fs, p| fs.create(p))
 }
 
 pub fn mkdir(path: &str) -> Result<()> {
+    refuse_reserved(path)?;
     with_fs(path, |c, p| c.mkdir(p), |fs, p| fs.mkdir(p))
 }
 
 pub fn remove(path: &str) -> Result<()> {
+    refuse_reserved(path)?;
     // FS_LOCK for reading during the whole operation – the mount table cannot
     // change between the check and the removal (mounting takes the write lock).
     let _g = FS_LOCK.read();
@@ -859,6 +911,10 @@ pub fn rename(from: &str, to: &str) -> Result<()> {
     if protects_locked(&from) || protects_locked(&to) || sealed_parent(&from) || sealed_parent(&to) {
         return Err(FsError::Immutable);
     }
+    // Nothing leaves /.desoos, nothing goes into it (also not /.desoos itself).
+    if reserved_locked(&from) || reserved_locked(&to) {
+        return Err(FsError::Reserved);
+    }
     let (i, rf) = find_mount(&from)?;
     let (j, rt) = find_mount(&to)?;
     if i != j {
@@ -878,6 +934,7 @@ pub fn rename(from: &str, to: &str) -> Result<()> {
 }
 
 pub fn truncate(path: &str, size: u64) -> Result<()> {
+    refuse_reserved(path)?;
     with_fs(path, |c, p| c.truncate(p, size), |fs, p| fs.truncate(p, size))
 }
 
@@ -938,6 +995,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
 
 /// Creates a file or replaces its contents.
 pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
+    refuse_reserved(path)?;
     if let Some(r) = try_concurrent(path, |c, p| c.write_whole(p, data)) {
         return r;
     }
@@ -956,6 +1014,7 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
 
 /// Appends to the end of a file (creates it if it does not exist).
 pub fn append_file(path: &str, data: &[u8]) -> Result<()> {
+    refuse_reserved(path)?;
     if let Some(r) = try_concurrent(path, |c, p| c.append(p, data)) {
         return r;
     }
@@ -1027,7 +1086,13 @@ pub fn mount_disk(disk: usize, path: &str) -> DiskMount {
                 let ro = v.read_only_reason().map(String::from);
                 let _ = mkdir(path);
                 match mount(path, Box::new(Locked::new(v))) {
-                    Ok(()) => DiskMount::DeSoFs(ro),
+                    Ok(()) => {
+                        // The system volume: its last known good time.
+                        if path == crate::time_lkg::SYSTEM_MOUNT {
+                            crate::time_lkg::load();
+                        }
+                        DiskMount::DeSoFs(ro)
+                    }
                     Err(e) => DiskMount::Nothing(alloc::format!("DeSoFS volume, mount {}: {}", path, e)),
                 }
             }

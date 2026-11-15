@@ -313,7 +313,8 @@ pub const SYS_GETRANDOM: u64 = 58;
 /// time(out): the wall clock – writes three u64 to `out`: Unix seconds (UTC, from the RTC
 /// read at boot + the time since), 0 if the clock is plausible or the reason it is not
 /// (drivers/rtc.rs Implausible: 1 not read, 2 battery lost, 3 unstable, 4 bad fields,
-/// 5 before the build date, 6 after 2099), and the build date the lower bound comes from.
+/// 5 before the build date, 6 after 2099, 7 before the last known good time, 8 the last
+/// known good time unreadable – time_lkg.rs), and the build date.
 /// No right needed (reading the time).  "Plausible" is a heuristic, not proof – see rtc.rs.
 /// Returns 0; ERROR_INVALID_ADDRESS (out is not 24 writable bytes).
 pub const SYS_TIME: u64 = 59;
@@ -390,7 +391,7 @@ fn fs_error(e: FsError) -> i64 {
         FsError::NotEmpty => ERROR_NOT_EMPTY,
         FsError::ReadOnly => ERROR_READ_ONLY,
         FsError::InUse(_) => ERROR_BUSY,
-        FsError::Immutable => ERROR_NOT_PERMITTED,
+        FsError::Immutable | FsError::Reserved => ERROR_NOT_PERMITTED,
         _ => ERROR_IO,
     }
 }
@@ -667,8 +668,9 @@ fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
     if write && fs::is_read_only(&path) {
         return Err(ERROR_READ_ONLY);
     }
-    // A sealed file (the CA store) is not even opened for writing.
-    if write && fs::is_sealed(&path) {
+    // A sealed file (the CA store) and the system's /.desoos (the last known good time) are
+    // not even opened for writing.
+    if write && (fs::is_sealed(&path) || fs::is_reserved(&path)) {
         return Err(ERROR_NOT_PERMITTED);
     }
     match fs::stat(&path) {

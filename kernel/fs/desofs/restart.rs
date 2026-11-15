@@ -139,8 +139,15 @@ fn write_set() -> T {
     made.map_err(|x| format!("snapshot: {}", x))?;
     new_file(AFTER_SNAP, &pattern(2000, 66))?;
     put("/disk/one", 0, &pattern(1, 67))?;
+    // The last known good time two days ahead of the clock (the self-test switch, as an
+    // authenticated time would raise it): after the restart it must be read back from
+    // /disk/.desoos/lkg and the clock – now "set back" below it – refused (reason 7).
+    let ahead = crate::drivers::rtc::time_status().0 + 2 * 86_400;
+    let r = crate::time_lkg::raise_for_test(ahead);
+    ensure!(r == crate::time_lkg::Raised::Saved, "the LKG was not saved: {:?}", r);
+    ensure!(crate::drivers::rtc::time_status().1 == Err(crate::drivers::rtc::Implausible::BeforeLkg), "the clock below the LKG: {:?}", crate::drivers::rtc::time_status().1);
     Ok(format!(
-        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); snapshot {} of that state, then a new file and a changed one; powering off normally",
+        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); snapshot {} of that state, then a new file and a changed one; the last known good time saved 2 days ahead of the clock; powering off normally",
         expected().len(),
         st.size / 4096,
         SNAP
@@ -153,7 +160,8 @@ const AFTER_SNAP: &str = "/disk/after-snapshot";
 /// Everything under /disk equals the expected set (extra entries allowed only in `allow`).
 fn compare_with(what: &str, allow: &[&str]) -> Result<(), String> {
     let exp = expected();
-    let allowed = |p: &str| allow.iter().any(|a| p.starts_with(a));
+    // /disk/.desoos is the system's (the last known good time) – not part of the set.
+    let allowed = |p: &str| p == "/disk/.desoos" || allow.iter().any(|a| p.starts_with(a));
     for (path, data) in &exp {
         if allowed(path) {
             continue; // changed on purpose; the caller checks it
@@ -230,6 +238,24 @@ fn run(path: &str, args: &[&str]) -> Result<String, String> {
     }
     ensure!(crate::sched::task_info(id).is_none(), "{} did not finish", path);
     Ok(String::from_utf8_lossy(&crate::user::captured_output(id).unwrap_or_default()).into_owned())
+}
+
+/// The LKG part 1 saved: read back at boot from /disk/.desoos/lkg; the clock (the host's
+/// time, two days below it) refused with reason 7, and netget https refuses before sending.
+fn last_known_good() -> T {
+    use crate::drivers::rtc::{self, Implausible};
+    use crate::time_lkg::{self as lkg, FileState, Source};
+    let (now, verdict) = rtc::time_status();
+    ensure!(lkg::file_state() == FileState::Good && lkg::source() == Source::Test, "the LKG was not read back: {:?} {:?}", lkg::file_state(), lkg::source());
+    let b = lkg::bound();
+    ensure!(b > now + 86_400 && b < now + 3 * 86_400, "the LKG read back is {} (clock {})", b, now);
+    ensure!(verdict == Err(Implausible::BeforeLkg), "the clock below the LKG: {:?}", verdict);
+    let out = run("/bin/netget", &["netget", "https://tls.desoos:58443/hello"])?;
+    ensure!(out.contains("TLS refused: clock not plausible: clock earlier than the last known good time") && out.contains("nothing sent"), "netget https: {:?}", out.trim());
+    let rec = fs::read_file("/disk/.desoos/lkg").map_err(|x| e("read the LKG", x))?;
+    ensure!(rec == lkg::encode(b, Source::Test), "the file is not the record of {}", b);
+    ensure!(fs::remove("/disk/.desoos/lkg") == Err(fs::FsError::Reserved), "the LKG file could be removed");
+    Ok(format!("read back at boot from /disk/.desoos/lkg ({} UTC, self-test); the clock {} s below it - reason 7; netget https refused before sending; the file still protected", rtc::DateTime::from_unix(b), b - now))
 }
 
 fn hex(h: &[u8; 32]) -> String {
@@ -439,7 +465,7 @@ fn report(n: usize, total: usize, name: &str, r: T) -> bool {
 pub fn prepare() {
     serial_println!("[RESTART TEST] Part 1: DeSoFS on disk 0 before a restart...");
     crate::selftest::begin();
-    if report(1, 6, "write before the restart", write_set()) {
+    if report(1, 7, "write before the restart", write_set()) {
         crate::selftest::pass();
     }
 }
@@ -448,9 +474,9 @@ pub fn prepare() {
 pub fn verify() {
     serial_println!("[RESTART TEST] Part 2: after the restart...");
     crate::selftest::begin();
-    let steps: [(&str, fn() -> T); 5] = [("automatic mount", auto_mounted), ("contents", contents), ("programs and writing", programs), ("snapshot", snapshot), ("speed and check", bench)];
+    let steps: [(&str, fn() -> T); 6] = [("automatic mount", auto_mounted), ("contents", contents), ("programs and writing", programs), ("snapshot", snapshot), ("last known good time", last_known_good), ("speed and check", bench)];
     for (k, (name, f)) in steps.iter().enumerate() {
-        if !report(2 + k, 6, name, f()) {
+        if !report(2 + k, 7, name, f()) {
             return;
         }
     }

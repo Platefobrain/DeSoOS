@@ -13,7 +13,10 @@ What it can do (details and design in `../ARCHITECTURE.md`, section "DeSoFS"):
 - `desofs check` – every block's checksum, directories and relations; `desofs repair` – back to the other
   superblock's whole state when one tree is damaged;
 - `desofs snapshot create / list / mount / delete / restore` – up to 31 snapshots, nothing copied when one is made;
-- power loss at any moment leaves the state before or after the last operation – never a mix.
+- power loss at any moment leaves the state before or after the last operation – never a mix;
+- `/.desoos` at the root of a volume belongs to the system: on the system volume (`/disk`) it holds the last known
+  good time (`../time/LKG.md`); the VFS refuses every change there by programs and by the shell's file commands –
+  only the kernel writes it. It is an ordinary directory in the format (nothing in `FORMAT.md` changes).
 
 Where things are:
 
@@ -23,5 +26,7 @@ Where things are:
 | `tests/mkdesofs.py` | an independent implementation in Python: the reference image the kernel tests read, and `--format` to make a DeSoFS disk image on the host |
 | `FORMAT.md` | the on-disk format |
 
-Tests: DESOFS TEST 1–28 (reading, writing, power loss, check / repair, snapshots), RESTART TEST (data on `/disk`
-after a real restart, `[RESULT-FS]` speed figures), INIT TEST 9 (`desofs` through the user shell).
+Tests: DESOFS TEST 1–32 (reading, writing, power loss, check / repair, snapshots, the block cache), RESTART TEST
+(data on `/disk` after a real restart, the last known good time read back, `[RESULT-FS]` speed figures), INIT TEST 9
+(`desofs` through the user shell), LKG TEST (the LKG record on a volume, power loss during its save, `/.desoos`
+protected).

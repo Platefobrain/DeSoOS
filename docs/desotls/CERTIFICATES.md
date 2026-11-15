@@ -16,7 +16,7 @@ no "insecure" switch, no fallback, nothing that turns a check off.
 | TLS | a library in the program (OpenSSL, GnuTLS, rustls); kTLS for records | Schannel in LSASS | rustls in the program | `common/desotls` in the program; the kernel has no TLS |
 | CA store | shared files `/etc/ssl/certs` (Mozilla), root-only | system store + Windows Update | webpki-roots compiled into each program | one shared file `/etc/certs/roots` (Mozilla), sealed in ramfs |
 | Mozilla trust | ca-certificates: serverAuth, distrust-after varies | Microsoft's own programme | serverAuth, no distrust-after | serverAuth + distrust-after from `certdata.txt` |
-| clock | `CLOCK_REALTIME` (NTP); systemd: the build time as a floor | system time (NTP) | `clock_gettime` | syscall 59: the RTC + "plausible" (a heuristic), the build date − 24 h as a floor; `nettime` (NTP, v0.78) only shows the difference and sets nothing |
+| clock | `CLOCK_REALTIME` (NTP); systemd: the build time as a floor | system time (NTP) | `clock_gettime` | syscall 59: the RTC + "plausible" (a heuristic), the build date − 24 h and the last known good time (v0.79) as floors; `nettime` only shows the difference and sets nothing |
 
 ## The profile
 
@@ -173,8 +173,9 @@ stable readings, every field in range (29 February only in leap years) and a tim
 on purpose (Linux distributions do, for reproducible builds), otherwise the build time (as Android: the most recent
 date possible, the strongest floor); no git, so it never depends on a repository; `build.sh` prints which,
 `date` / `sysinfo date` show it. Linux (systemd) has three layers – the build date, the last known time saved on
-disk, NTP; DeSoOS has the first, the other two are a later step (NTP preferably with NTS – plain NTP can be faked
-by anyone on the network). It is a heuristic, not proof: it refuses a lost battery, a
+disk, NTP; DeSoOS has the build date and, from v0.79, the last known good time on the system volume
+(`../time/LKG.md`: a clock below it is refused – reason 7, and an unreadable LKG file is reason 8); NTS
+(`../time/NTS.md`) reads an authenticated time and from stage D raises the LKG. It is a heuristic, not proof: it refuses a lost battery, a
 broken reading and dates older than the image, but anyone with access to the firmware can set any date inside the
 range (and so make an expired certificate "valid" again); an RTC kept in local time (Windows next to it) cannot be
 detected. Without NTP the check of a certificate's dates is as good as the RTC. `netget https://` refuses to
@@ -191,6 +192,10 @@ Why the clock is not plausible (the status of syscall 59, `date` and `certcheck`
 | 4 | RTC date or time out of range |
 | 5 | clock earlier than the build date |
 | 6 | clock later than 2099 |
+| 7 | clock earlier than the last known good time |
+| 8 | last known good time unreadable |
+
+The order when several apply: 1–4 and 6, then 8, then 5, then 7 (`../time/LKG.md`).
 
 Syscall 59 `time(out)` writes 24 bytes (little-endian): Unix seconds (u64), the status (u64), the build date in Unix
 seconds (u64). No right is needed. In programs: `time_unix()` (`WallClock` with `plausible()`), `clock_reason()`,

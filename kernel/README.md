@@ -13,8 +13,9 @@ the parts up in order and starts `/bin/init`.
 | `memory/` | frames, page tables, the kernel heap, demand paging |
 | `sched/` | the scheduler, the Big Kernel Lock, spin locks and sleeping locks (lock order in `spin.rs`) |
 | `user/` | processes and ring 3: `syscalls.rs` (every syscall), `sysrights.rs` (the rights table), `process.rs` (handles), `channel.rs` / `pipe.rs` / `shm.rs` (IPC), `vm.rs` (process memory), `dcp.rs` (permissions), `stress.rs` / `soak.rs` (starting the stress and soak tests, also from `DESOOS_AUTOSTRESS` / `DESOOS_AUTOSOAK` builds); `test_*.rs` – self-tests |
-| `fs/` | the VFS (`mod.rs`), `ramfs.rs` (`/`; sealed nodes for the CA store), `fat32.rs`, `desofs/` (own README) |
+| `fs/` | the VFS (`mod.rs`; `/.desoos` of DeSoFS volumes reserved for the kernel), `ramfs.rs` (`/`; sealed nodes for the CA store), `fat32.rs`, `desofs/` (own README) |
 | `drivers/` | framebuffer console, font (own license – see its header), PS/2 keyboard and mouse, PCI, NVMe, virtio-blk, serial, RTC (also whether the clock is plausible – the build date, syscall 59) |
+| `time.rs`, `time_lkg.rs` | the timer (PIT, uptime, sleeping); the last known good time – a lower bound for the wall clock in `/disk/.desoos/lkg`, the reasons 7 and 8 of the clock's verdict (`docs/time/LKG.md`) |
 | `block.rs`, `gpt.rs` | the block layer (disks, partitions, read-only disks, RAM disks) and GPT |
 | `random.rs` | the random number generator: entropy pool, sources and their health checks, ChaCha20 with fast key erasure, `getrandom` (see docs/ARCHITECTURE.md, "Random numbers") |
 | `shell.rs` | the kernel shell (emergency shell, and the code behind `sysinfo` / `sysctl`, including `desofs`) |

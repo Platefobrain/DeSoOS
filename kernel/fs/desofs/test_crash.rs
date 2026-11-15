@@ -56,7 +56,7 @@ pub(super) struct Log {
     writes: u64,
     flushes: u64,
     /// Fail the n-th write / flush (0 = never); after a failure everything fails.
-    fail_write: u64,
+    pub(super) fail_write: u64,
     fail_flush: u64,
     failed: bool,
 }

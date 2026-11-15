@@ -1,7 +1,8 @@
 # Time in DeSoOS
 
 How DeSoOS knows what time it is, how far it trusts that, and which sources may change it. The details of the
-protocols are in `NTS.md` (this folder); the last known good time (LKG) gets its own `LKG.md` with v0.79 stage C.
+protocols are in `NTS.md` (this folder); the last known good time (LKG) – the lower bound kept on the system volume – in
+`LKG.md`.
 
 ## The clocks
 
@@ -11,10 +12,11 @@ protocols are in `NTS.md` (this folder); the last known good time (LKG) gets its
 | the wall clock (syscall 59, `date`) | the RTC at boot + uptime, whole seconds; under QEMU TCG it drifts with uptime (seconds within minutes) | nothing yet – the time service (stage D) will keep a correction for it |
 | uptime / monotonic time | the LAPIC / TSC tick count since boot | nothing; timers, timeouts and the scheduler use only this |
 | the build date | the lower bound everything starts from (minus 24 h for certificates) | a new image |
+| the last known good time (LKG) | a lower bound kept in `/disk/.desoos/lkg` (`LKG.md`); without a system volume in memory only | only an authenticated time (stage D) – never lowered |
 
 **Plausible** (syscall 59's verdict) is a heuristic over the RTC: battery (VRT), readings that agree, valid fields, not
-before the build date, not after 2099. https (`netget`) and NTS-KE refuse when the clock is not plausible – a
-certificate cannot be checked without a time.
+after 2099, the LKG file readable (reason 8), not before the build date (5), not before the LKG (7, margin 0 s). https
+(`netget`) and NTS-KE refuse when the clock is not plausible – a certificate cannot be checked without a time.
 
 ## Sources and trust
 
@@ -32,7 +34,8 @@ wrong. That is why stage D needs two operators that agree and raises the lower b
 
 ## Tools
 
-- `date` – the wall clock and whether it is plausible.
+- `date` (and sysinfo `date`) – the wall clock, whether it is plausible, and the last known good time with its source
+  and file state.
 - `nettime [-t ms] [server[:port] ...]` – plain NTP, read only (`../ARCHITECTURE.md`, "Time from the network").
 - `nettime --nts [--anchor ca.pem] [server[:port] ...]` – NTS: NTS-KE to port 4460, then NTP with NTS; read only
   (`NTS.md`).
@@ -44,4 +47,4 @@ wrong. That is why stage D needs two operators that agree and raises the lower b
 | Linux (systemd-timesyncd / chrony) | chrony: NTS optional | systemd: build time + a file | every NTP sync (timesyncd: unauthenticated) |
 | Windows (w32time) | no NTS (MS-SNTP inside a domain) | Secure Time Seeding from TLS | NTP / SNTP |
 | RedoxOS | no NTP client found in the base system | – | – |
-| **DeSoOS** | NTS (v0.79) – plain NTP only shows | build date (+ LKG from stage C) | nothing yet; from stage D only NTS through the time service |
+| **DeSoOS** | NTS (v0.79) – plain NTP only shows | build date + LKG on the system volume | nothing yet; from stage D only NTS through the time service |

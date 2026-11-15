@@ -1386,10 +1386,24 @@ exporter), then NTP with the NTS fields (Unique Identifier, single-use cookies, 
 counts only when authenticated. NTS-KE goes one server after the other, each with a limit of 3 × `-t` for the
 lookup and connection and 3 × `-t` for TLS (a dead server cannot hold the run for netd's 15 s of SYN retries). Still read only – details in `time/NTS.md`, the model of time in `time/README.md`.
 
-NTP TEST (suite 37): `/bin/ntptest` (91 checks of the library) and `ntptest net` (73 cases of `nettime` against
-`tests/ntp-stub.py` – 31 servers on the host, one behaviour per port; the stub also checks every query byte for byte
-and counts packets and repeated Transmit values). The kernel side compares the hardware RTC minus the clock before
-and after.
+NTP TEST (suite 37): `/bin/ntptest` (200 checks of the NTP and NTS library) and `ntptest net` (140 cases of
+`nettime`: against `tests/ntp-stub.py` – 32 servers on the host, one behaviour per port; the stub also checks every
+query byte for byte and counts packets and repeated Transmit values – and `nettime --nts` against
+`tests/nts-server`, rustls). The kernel side compares the hardware RTC minus the clock before and after.
+
+### The last known good time (v0.79 stage C)
+
+`kernel/time_lkg.rs`: a lower bound for the wall clock that survives a restart – `/.desoos/lkg` on the system volume
+(the DeSoFS volume mounted read-write at `/disk`; none – in memory only, from the build date). A 56-byte record
+(`DESOLKG1`, version, source, time, SHA-256), written atomically (a temporary file, read back, `rename` – each DeSoFS
+operation is one transaction, so after a power loss there is the old record or the new one) and read at boot and at
+every mount of `/disk`. The clock's verdict gains two reasons, in the order 1–4, 6 → **8** (the file unreadable – never
+a quiet reset to the build date) → 5 → **7** (earlier than the LKG, margin 0 s). The VFS reserves `/.desoos` of
+every DeSoFS volume for the kernel (`fs::is_reserved`, on the resolved volume and node; `FsError::Reserved` →
+ERROR_NOT_PERMITTED); the kernel writes it only through the volume (`fs::with_desofs_at`). Nothing raises the LKG in
+a normal build yet – stage D connects the only source, an authenticated time from NTS; no syscall takes a time.
+Details, threats and tests: `time/LKG.md`. LKG TEST is suite 38; RESTART TEST reads back an LKG saved by the first
+start and refuses the clock below it.
 
 ### Network access is a capability
 

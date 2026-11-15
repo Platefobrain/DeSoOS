@@ -186,9 +186,11 @@ fn read_hw_checked() -> (DateTime, bool) {
 
 // ---- Is the clock plausible? (the lower bound for certificate dates – DeSoTLS) ----
 //
-// `time_plausible` is a heuristic, not a guarantee: it refuses a lost battery, a broken
-// reading and dates before the image was built, but anyone with access to the firmware can
-// set any date inside the range – without NTP the RTC is all there is.
+// `time_status` is a heuristic, not a guarantee: it refuses a lost battery, a broken
+// reading, dates before the image was built and dates before the last known good time
+// (time_lkg.rs – a lower bound kept on the system volume), but anyone with access to the
+// firmware can set any date above those bounds – only an authenticated time (NTS, v0.79
+// stage D) can do better.
 
 /// Seconds since 1970 when this image was built (build.sh: SOURCE_DATE_EPOCH when set, else
 /// the build time) and where that came from.
@@ -227,6 +229,10 @@ pub enum Implausible {
     BeforeBuild = 5,
     /// Later than 2099-12-31.
     TooLate = 6,
+    /// Earlier than the last known good time (time_lkg.rs – margin 0 s).
+    BeforeLkg = 7,
+    /// The last known good time on the system volume cannot be read (time_lkg.rs).
+    LkgUnreadable = 8,
 }
 
 impl Implausible {
@@ -238,6 +244,8 @@ impl Implausible {
             Implausible::BadFields => "RTC date or time out of range",
             Implausible::BeforeBuild => "clock earlier than the build date",
             Implausible::TooLate => "clock later than 2099",
+            Implausible::BeforeLkg => "clock earlier than the last known good time",
+            Implausible::LkgUnreadable => "last known good time unreadable",
         }
     }
 
@@ -249,6 +257,8 @@ impl Implausible {
             4 => Implausible::BadFields,
             5 => Implausible::BeforeBuild,
             6 => Implausible::TooLate,
+            7 => Implausible::BeforeLkg,
+            8 => Implausible::LkgUnreadable,
             _ => return None,
         })
     }
@@ -293,10 +303,11 @@ pub fn time_status() -> (u64, Result<(), Implausible>) {
         return (secs, Err(Implausible::BatteryLost));
     }
     let v = VERDICT.load(Ordering::Acquire);
-    let verdict = match Implausible::from_u8(v) {
+    let reading = match Implausible::from_u8(v) {
         None if secs > LATEST => Err(Implausible::TooLate),
         None => Ok(()),
         Some(e) => Err(e),
     };
-    (secs, verdict)
+    // With the last known good time (time_lkg.rs): reasons 8 and 7, in their order.
+    (secs, crate::time_lkg::verdict(reading, secs, crate::time_lkg::file_bad(), crate::time_lkg::bound()))
 }

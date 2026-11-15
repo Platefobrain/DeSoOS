@@ -81,6 +81,8 @@ mod test_tls;
 // NTP: user/lib/ntp.rs and /bin/nettime (tests/ntp-stub.py).
 #[cfg(selftest)]
 mod test_ntp;
+#[cfg(selftest)]
+mod test_time;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -786,6 +788,8 @@ pub use test_net::self_test as net_self_test;
 pub use test_tls::self_test as tls_self_test;
 #[cfg(selftest)]
 pub use test_ntp::self_test as ntp_self_test;
+#[cfg(selftest)]
+pub use test_time::self_test as time_self_test;
 #[cfg(selftest)]
 pub use test_soak::run as soak_run;
 #[cfg(selftest)]

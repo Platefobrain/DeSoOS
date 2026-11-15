@@ -66,7 +66,12 @@ More documentation:
 - Certificates: DeSoTLS (`common/desotls`) checks a server's X.509 chain the way TLS will (strict DER, RSA / ECDSA
   signatures, every RFC 5280 rule of its profile, name constraints, Mozilla's distrust dates, limits), against
   Mozilla's root store installed as `/etc/certs/roots` and sealed – no program can change it; the wall clock says
-  whether it is plausible (syscall 59: RTC battery, readings, not before the build date); tool `certcheck`.
+  whether it is plausible (syscall 59: RTC battery, readings, not before the build date, not before the last known
+  good time); tool `certcheck`.
+- The last known good time: a lower bound for the clock kept in `/disk/.desoos/lkg` on the DeSoFS system volume
+  (atomic, checked, survives a power loss); a clock below it, or an unreadable file, is not plausible and TLS
+  refuses; `/.desoos` is the kernel's – the VFS refuses every change by programs (`docs/time/LKG.md`). Only an
+  authenticated time will raise it (v0.79 stage D).
 - HTTPS: DeSoTLS speaks TLS 1.3 as a client (X25519, AES-128-GCM and ChaCha20-Poly1305, ECDSA and RSA-PSS
   server signatures, KeyUpdate, close_notify) – no TLS 1.2, no "insecure" mode: either the server is fully
   authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
@@ -81,7 +86,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (37 suites, a restart phase and a short soak, 301 tests), stress tests and a long soak test
+- Built-in self-tests (38 suites, a restart phase and a short soak, 309 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 

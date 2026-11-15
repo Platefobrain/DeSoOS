@@ -127,6 +127,11 @@ timings move by ±15% from run to run on the same build).
   plausible clock for the NTS-KE certificate; NTS-KE runs one server after the other (a dead server costs the next ones
   up to 3 × `-t`, 6 s by default); cookies and keys stay in memory
   (after a restart always a new NTS-KE); only AEAD_AES_SIV_CMAC_256; request limit 1200 bytes without PMTU discovery
+- the last known good time (v0.79 stage C): nothing raises it in a normal build until the time service (stage D); on
+  real hardware there is no writable system volume yet (the SSD is read-only), so it lives in memory only and starts
+  from the build date at every boot; the file's SHA-256 guards against accidents, not against a change outside DeSoOS;
+  rolling the disk back (an old image, `desofs snapshot restore`) can lower it – a hardware monotonic counter (TPM NV)
+  is a later step; `/.desoos` is reserved only on DeSoFS volumes
 - `nettime`'s difference is an estimate: the clock counts whole seconds, the path asymmetry adds up to delay / 2, the
   server's own error is unknown; with several servers only a median and a 2 s limit – not RFC 5905's selection;
   the acceptance limit `root_distance_proxy` ≤ 1.5 s is a simplification of the full root distance

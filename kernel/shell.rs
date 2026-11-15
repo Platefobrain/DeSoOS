@@ -348,7 +348,7 @@ static COMMANDS: &[Command] = &[
     Command { name: "df", usage: "df", help: "free space per file system", run: cmd_df },
     Command { name: "desofs", usage: "desofs info|format|mount|unmount|check|repair|snapshot <disk> | ramdisk <MiB>", help: "DeSoFS: info, format, mount (disk 0 at /disk, others at /desofs), unmount, check, repair, snapshot create|list|mount|delete|restore, ramdisk (a RAM disk to format)", run: cmd_desofs },
     Command { name: "sync", usage: "sync", help: "flush file system buffers to disk", run: cmd_sync },
-    Command { name: "date", usage: "date", help: "date and time from the RTC (UTC), whether the clock is plausible (nettime compares it with NTP servers)", run: cmd_date },
+    Command { name: "date", usage: "date", help: "date and time from the RTC (UTC), whether the clock is plausible, the last known good time (nettime compares the clock with NTP servers)", run: cmd_date },
     Command { name: "reboot", usage: "reboot", help: "restart the computer", run: cmd_reboot },
     Command { name: "halt", usage: "halt", help: "stop the CPU", run: cmd_halt },
 ];
@@ -1824,6 +1824,7 @@ fn cmd_date(_: &str, out: &mut dyn Write, _: &mut Context) {
             let _ = writeln!(out, "clock NOT plausible: {} (build date {} UTC, from {}) - TLS refuses to connect", e.as_str(), build, rtc::BUILD_EPOCH_SOURCE);
         }
     }
+    let _ = writeln!(out, "{}", crate::time_lkg::describe());
 }
 
 fn cmd_reboot(_: &str, out: &mut dyn Write, _: &mut Context) {
