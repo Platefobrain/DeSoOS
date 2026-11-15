@@ -6,15 +6,7 @@
   </a>
 </p>
 
-# DeSoOS <img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-purple"> <img src="https://img.shields.io/badge/Kernel-no__std-black">
-
-<p align="center">
-  
-  <img src="https://img.shields.io/badge/CPUs-Up%20to%2016-orange">
-  <img src="https://img.shields.io/badge/Tests-301-success">
-  <img src="https://img.shields.io/badge/TLS-1.3-blue">
-  <img src="https://img.shields.io/badge/Status-Hobby%20OS-lightgrey">
-</p>
+# DeSoOS <img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-orange"> <img src="https://img.shields.io/badge/Kernel-no__std-green">
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
