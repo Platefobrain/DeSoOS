@@ -224,6 +224,64 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.79.0 — 2026-11-15
+
+**Status: stable on QEMU (TCG and KVM) and on the Legion; NTS (RFC 8915), the last known good time on the system
+volume and the time service – the first source allowed to set the clock: authenticated time from three operators,
+set when at least two agree; 39 suites, 317 tests.**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 39/39 suites + restart 1/1 + short soak (RAM disk), 317 tests PASS | 390 s (restart 25 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | 39/39 suites + restart 1/1 + short soak (RAM disk), 317 tests PASS | 305 s (restart 12 s, soak 125 s) |
+
+The runs of the release build (`ver=0.79.0`); the stage D build before the version bump gave the same (TCG 388 s,
+KVM 305 s, 317 PASS).
+
+New suites: LKG TEST (38th – the record, power loss at every sector of a save, `/.desoos` protected under the
+operation's lock) and NTS TEST (39th – the time service against `tests/nts-server`, recovery from an unreadable LKG, the
+second check of the kept chain, the bound B, `SYS_TIME_SET` / `SYS_TIME_BOUND`). `[RESULT-CRYPTO]` checks 4204 → 4719
+(AES-SIV), `[RESULT-CERTS]` 307 → 332 (the time rules), `[RESULT-TLS]` 134 / 87 → 162 / 91 (ALPN, the exporter
+against rustls, wipe), `[RESULT-NTP]` 115 / 75 → 200 / 140 (NTS), `[RESULT-RIGHTS]` rows 59 → 61. The tests of the
+stages: A–C in their own runs (stage C fix: TCG 365 s, KVM 289 s, 310 tests); mutations: 8 (AES-SIV), 10 + 3 + 7
+(NTS stage B and its fixes), 8 + 4 (LKG), 14 (the time service) – all caught.
+
+### Real hardware (Legion laptop, Realtek RTL8111/8168, home network)
+
+- NTS with the real servers (`nettime --nts`, stage B): Cloudflare (stratum 3, ~10 ms), Netnod (stratum 1, ~45 ms),
+  PTB (stratum 1, ~43 ms) – all authenticated, also with the strict NTS-KE parser of fix 3; a server that does not
+  answer on 4460 given up after 6 s while the others gave the time.
+- The last known good time (stage C): no writable system volume on the laptop (the SSD is read-only), so "kept in
+  memory only", from the build date; `date` shows it.
+- **The time service (stage D gate)**: the DHCP lease after 15.7 s, then one round – Cloudflare 16:07:28.291 ±1019 ms,
+  Netnod .322 ±1022 ms, PTB .327 ±1023 ms (the three within 36 ms) → "set from 3 operators (cloudflare, netnod, ptb):
+  16:07:28.332 UTC ±1027 ms", the wall clock corrected by +1243 ms (the RTC was 1.2 s behind), the LKG raised to
+  16:07:25 (NTS, in memory). `services`: time running, 0 restarts; `date`: "clock plausible (authenticated time from
+  the time service, NTS)". U is almost all the 1 s resolution term (the clock counts whole seconds).
+- Two more starts the same evening, the last one with the release image (`ver`: v0.79.0): again all three operators
+  within 36 ms (19:01:12.426 / .462 / .462, correction +349 ms; 19:07:03.779 / .814 / .814, correction −233 ms),
+  ±1027 ms; without a system volume the kernel's line and the service's result say "kept in memory only (no system
+  volume)".
+
+### Performance against the previous release (v0.78.2 → v0.79.0, same machine)
+
+| | TCG v0.78.2 | TCG v0.79.0 | KVM v0.78.2 | KVM v0.79.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 102 / 4 376 | 92 / 4 740 | 49 / 5 565 | 55 / 5 626 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 211 / 12 468 | 7 230 / 12 208 | 16 000 / 53 542 | 18 875 / 54 613 |
+| DeSoFS 1000 small files create / read (ms) | 12 817 / 3 646 | 13 651 / 3 639 | 7 938 / 829 | 7 453 / 822 |
+| short soak: file operations in 2 min | 6 285 | 6 140 | 28 492 | 27 932 |
+| short soak: network MiB | 851 | 851 | 924 | 912 |
+
+Verdict: no regression. The stage D build had small-file creation ~10 % slower in both (TCG 14 100, KVM 8 732 ms)
+and I suspected the `/.desoos` check under the lock (stage C fix); the release run does not confirm it (TCG 13 651 ms
+– within the TCG noise, KVM 7 453 ms – faster than v0.78.2), so it was run-to-run noise. Soak: leaks 0, errors 0,
+longest recovery 962 ms (TCG) / 895 ms (KVM). The whole run is ~50 s longer (the two new suites).
+
+---
+
 ## v0.78.2 — 2026-11-12
 
 **Status: stable on QEMU (TCG and KVM); the summary's words of `nettime` come from one tested library function;

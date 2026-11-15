@@ -1443,7 +1443,15 @@ fn sys_time_set(p: &mut Process, h: u64, t_ms: u64, u_ms: u64, servers: u64) -> 
                 crate::drivers::rtc::DateTime::from_unix(done.lkg),
                 if done.raised { " (raised)" } else { "" },
                 if done.repair { " (unreadable file written anew)" } else { "" },
-                if done.not_saved { " - NOT SAVED" } else if done.saved { " - saved" } else { "" }
+                if done.not_saved && crate::time_lkg::file_state() == crate::time_lkg::FileState::NoVolume {
+                    " - kept in memory only (no system volume)"
+                } else if done.not_saved {
+                    " - NOT SAVED"
+                } else if done.saved {
+                    " - saved"
+                } else {
+                    ""
+                }
             );
             Ok(done.bits())
         }

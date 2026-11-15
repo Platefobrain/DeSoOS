@@ -468,7 +468,13 @@ fn round(list: &[Entry], ops: &[usize], src: &mut [Source], anchors: &dyn Anchor
                 if r & TIME_SET_RAISED != 0 { "; last known good time raised" } else { "" },
                 if r & TIME_SET_REPAIR != 0 { "; unreadable LKG file written anew" } else { "" },
                 if r & TIME_SET_SAVED != 0 { "; saved" } else { "" },
-                if r & TIME_SET_NOT_SAVED != 0 { "; LKG NOT saved" } else { "" }
+                if r & TIME_SET_NOT_SAVED == 0 {
+                    ""
+                } else if time_bound().is_ok_and(|b| b.file == 1) {
+                    "; LKG kept in memory only (no system volume)"
+                } else {
+                    "; LKG NOT saved"
+                }
             );
             Outcome::Set
         }

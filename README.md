@@ -1,4 +1,4 @@
-# desoOS <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
+# desoOS <img src="https://img.shields.io/badge/version-0.79.0-1f6feb?style=for-the-badge" alt="Version 0.79.0">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>

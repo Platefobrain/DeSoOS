@@ -2,10 +2,16 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.79.0 — in progress (stages A–D done: NTS + LKG + the time service)
+## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 
-Not released yet: the version stays 0.78.2 until stage D passes its gate (the time service with the three real
-operators on the Legion). Plan: NTS (RFC 8915) and the last known good time;
+Stages A–D, each with its own gate; the last one passed on the Legion: the time service set the clock from all three
+real operators (Cloudflare, Netnod, PTB – agreeing within 36 ms, T ± 1027 ms, correction +1243 ms).
+
+### Release
+- Version 0.79.0 (`Cargo.toml`, the README badge).
+- Without a system volume (the Legion's read-only SSD) the kernel's `[TIME] set ...` line and the time service's
+  result say "kept in memory only (no system volume)" instead of "NOT SAVED" (that one stays for a write that
+  failed), as `date` already did. Plan: NTS (RFC 8915) and the last known good time;
 stage A = the cryptography and TLS parts NTS needs, checked against vectors and an independent TLS before anything
 uses them.
 
