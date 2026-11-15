@@ -5,7 +5,8 @@
          width="300">
   </a>
 </p>
-# <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
+#b <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
+
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
