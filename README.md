@@ -3,9 +3,9 @@
     <img src="https://decodesoft.pl/download/deso.svg"
          alt="DeSoOS - DecodeSoft"
          width="300">
-  </a>
+  </a><img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
 </p>
-#b <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
+
 
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
