@@ -1,18 +1,32 @@
 // Checking a server's certificate chain (RFC 5280 path validation, the DeSoTLS profile).
 //
 //   verify::server(&chain, &anchors, "example.com", now)?   // chain[0] = the server's own
+//   verify::server_when(&chain, &anchors, host, When::Over(from, to))?
+//
+// The time rule (`When`) is the only thing that differs between the three uses:
+//   At(t)          every certificate valid at t (notBefore <= t <= notAfter) – the ordinary
+//                  check, t = a plausible clock
+//   Bootstrap(b)   every certificate notAfter >= b; notBefore not looked at – the first step of
+//                  the time service's NTS-KE while the clock is not plausible, b = the lower
+//                  bound the kernel gives (SYS_TIME_BOUND: the LKG or the build date).  This is
+//                  weaker than an ordinary check (a certificate not valid yet passes) – the
+//                  second step makes up for it
+//   Over(a, b)     every certificate valid over the whole span: notBefore <= a and
+//                  notAfter >= b – the second step, on the chain kept from that same
+//                  handshake, with [a, b] = the measured time T +- U.  Validity is a span, so
+//                  valid at both ends = valid everywhere in between
 //
 // Order of the checks (the first failure is the answer):
 //   1. limits: 1..=MAX_CHAIN certificates, each at most MAX_CERT_LEN bytes; the host valid
 //   2. the server certificate parses (x509.rs); a presented intermediate that does not
 //      parse is left out (it may be unrelated) – if no path is found, its error is the answer
-//   3. the server certificate: valid at `now`, not a CA, keyUsage (if present) with
+//   3. the server certificate: valid under the time rule, not a CA, keyUsage (if present) with
 //      digitalSignature, extKeyUsage (if present) with serverAuth, a key within the rules
 //      (RSA 2048-4096 bits, EC point on the curve), a
 //      subjectAltName dNSName matching the host (name.rs)
 //   4. a path up to a trust anchor, depth first: for the certificate on top, each anchor and
 //      then each presented certificate whose subject is byte-for-byte its issuer becomes a
-//      candidate.  A candidate must be valid at `now` (anchors too), be a CA (basicConstraints
+//      candidate.  A candidate must be valid under the time rule (anchors too), be a CA (basicConstraints
 //      cA = TRUE – for an intermediate present and critical; a v1 anchor without extensions
 //      counts as a CA), have keyCertSign if it has keyUsage, serverAuth or anyExtendedKeyUsage
 //      if it has extKeyUsage, a supported key that verifies the signature, keep its
@@ -62,7 +76,7 @@ struct Search<'a, 'b> {
     first_error: Option<Error>,
     count: usize,
     anchors: &'b dyn Anchors,
-    now: i64,
+    when: When,
     signature_checks: u32,
     /// Set when the signature budget ran out – the search stops everywhere.
     exhausted: bool,
@@ -89,11 +103,24 @@ impl From<Error> for Refused {
     }
 }
 
-fn valid_at(c: &Cert<'_>, now: i64) -> Result<(), Error> {
-    if now < c.not_before {
+/// Which validity dates a chain must have (Unix seconds) – see the file comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    At(i64),
+    Bootstrap(i64),
+    Over(i64, i64),
+}
+
+fn valid(c: &Cert<'_>, when: When) -> Result<(), Error> {
+    let (from, to) = match when {
+        When::At(t) => (Some(t), t),
+        When::Bootstrap(b) => (None, b),
+        When::Over(a, b) => (Some(a), b),
+    };
+    if from.is_some_and(|f| f < c.not_before) {
         return Err(Error::NotYetValid);
     }
-    if now > c.not_after {
+    if to > c.not_after {
         return Err(Error::Expired);
     }
     Ok(())
@@ -101,6 +128,19 @@ fn valid_at(c: &Cert<'_>, now: i64) -> Result<(), Error> {
 
 /// Checks the chain of a server certificate for `host` at `now` (Unix seconds).
 pub fn server(chain: &[&[u8]], anchors: &dyn Anchors, host: &str, now: i64) -> Result<Verified, Error> {
+    server_when(chain, anchors, host, When::At(now))
+}
+
+/// The second step of a bootstrap: the same chain, every certificate valid over [from, to].
+pub fn server_over(chain: &[&[u8]], anchors: &dyn Anchors, host: &str, from: i64, to: i64) -> Result<Verified, Error> {
+    if from > to {
+        return Err(Error::Expired);
+    }
+    server_when(chain, anchors, host, When::Over(from, to))
+}
+
+/// Checks the chain of a server certificate for `host` under the time rule `when`.
+pub fn server_when(chain: &[&[u8]], anchors: &dyn Anchors, host: &str, when: When) -> Result<Verified, Error> {
     if chain.is_empty() {
         return Err(Error::Empty);
     }
@@ -111,7 +151,7 @@ pub fn server(chain: &[&[u8]], anchors: &dyn Anchors, host: &str, now: i64) -> R
         return Err(Error::CertTooLarge);
     }
     name::check_host(host)?;
-    let mut s = Search { presented: [None; MAX_CHAIN], first_error: None, count: chain.len(), anchors, now, signature_checks: 0, exhausted: false };
+    let mut s = Search { presented: [None; MAX_CHAIN], first_error: None, count: chain.len(), anchors, when, signature_checks: 0, exhausted: false };
     s.presented[0] = Some(Cert::parse(chain[0], false)?);
     for (i, der) in chain.iter().enumerate().skip(1) {
         match Cert::parse(der, false) {
@@ -122,7 +162,7 @@ pub fn server(chain: &[&[u8]], anchors: &dyn Anchors, host: &str, now: i64) -> R
         }
     }
     let Some(leaf) = s.presented[0] else { return Err(Error::Empty) };
-    valid_at(&leaf, now)?;
+    valid(&leaf, when)?;
     if leaf.basic.is_some_and(|b| b.ca) {
         return Err(Error::CaAsLeaf);
     }
@@ -249,7 +289,7 @@ fn candidate(s: &mut Search<'_, '_>, path: &[usize; MAX_PATH], len: usize, issue
             return Err(Error::UnknownIssuer.into());
         }
     }
-    valid_at(issuer, s.now)?;
+    valid(issuer, s.when)?;
     match issuer.basic {
         Some(b) if !b.ca => return Err(Error::NotCa.into()),
         Some(b) if !anchor && !b.critical => return Err(Error::BasicConstraintsNotCritical.into()),

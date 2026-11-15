@@ -62,7 +62,7 @@ fn call(nr: u64, a: &[u64; 6]) -> i64 {
 fn main(args: Args) -> i32 {
     let edu = args.get(1).and_then(|s| s.parse::<u64>().ok());
     let mut objs = Objects { by_kind: [0; 16] };
-    // What the kernel gave us (console, HW_ROOT, SYSCTL, INPUT, BLK).
+    // What the kernel gave us (console, HW_ROOT, SYSCTL, INPUT, BLK, SETTIME).
     for h in 0..16 {
         if let Ok((k, _)) = handle_info(h) {
             if k < 16 && objs.by_kind[k as usize] == 0 {
@@ -99,7 +99,7 @@ fn main(args: Args) -> i32 {
     if d >= 0 {
         objs.by_kind[KIND_DIR as usize] = d as u64;
     }
-    for k in [KIND_CONSOLE, KIND_FILE, KIND_PIPE, KIND_CHANNEL, KIND_SHM, KIND_HW_ROOT, KIND_DEVICE, KIND_IRQ, KIND_SYSCTL, KIND_INPUT, KIND_BLK, KIND_DIR] {
+    for k in [KIND_CONSOLE, KIND_FILE, KIND_PIPE, KIND_CHANNEL, KIND_SHM, KIND_HW_ROOT, KIND_DEVICE, KIND_IRQ, KIND_SYSCTL, KIND_INPUT, KIND_BLK, KIND_DIR, KIND_SETTIME] {
         if objs.by_kind[k as usize] == 0 {
             println!("rightstest: FAIL no object of kind {}", k);
             unlink(PATH);

@@ -314,10 +314,33 @@ pub const SYS_GETRANDOM: u64 = 58;
 /// read at boot + the time since), 0 if the clock is plausible or the reason it is not
 /// (drivers/rtc.rs Implausible: 1 not read, 2 battery lost, 3 unstable, 4 bad fields,
 /// 5 before the build date, 6 after 2099, 7 before the last known good time, 8 the last
-/// known good time unreadable – time_lkg.rs), and the build date.
+/// known good time unreadable – time_lkg.rs), and the build date.  Once the time service has
+/// set the clock (time_set) the RTC's own reasons (1-6) no longer apply.
 /// No right needed (reading the time).  "Plausible" is a heuristic, not proof – see rtc.rs.
 /// Returns 0; ERROR_INVALID_ADDRESS (out is not 24 writable bytes).
 pub const SYS_TIME: u64 = 59;
+/// time_set(SETTIME, t_ms, u_ms, servers): the time service (/bin/timekeeper, v0.79 stage D)
+/// gives the time it agreed with NTS servers of `servers` different operators: T = t_ms
+/// (Unix ms) +- U = u_ms.  The kernel trusts the service's word for where the time came
+/// from (it cannot check that), and checks only what it can: servers 2 or 3, u <= 10 s,
+/// t - u not before the build date, t + u not after 2099, no overflow, t + u not below the
+/// last known good time.  Then (time_lkg.rs `set_time`): L = floor(T - U - 2 s), the LKG raised
+/// to L when higher and saved; an unreadable LKG file written anew (repair); the wall clock
+/// set to max(T, LKG) – only the wall clock: the uptime and every timeout are untouched.
+/// Every call is written to the kernel log, a refusal also to the DCP audit.
+/// Returns bits: 1 LKG raised, 2 file written, 4 the write was a repair, 8 LKG not saved;
+/// ERROR_INVALID_HANDLE (no SETTIME), ERROR_ACCESS_DENIED (SETTIME without WRITE),
+/// ERROR_INVALID_ARGUMENT (the numbers), ERROR_NOT_PERMITTED (t + u below the LKG).
+pub const SYS_TIME_SET: u64 = 60;
+/// time_bound(out, len): what the time service needs for a bootstrap – 40 bytes,
+/// little-endian (time_lkg.rs `Snapshot`): the bound B = max(LKG in memory, build date)
+/// (u64), the LKG in memory (u64, 0 = none), the build date (u64), the LKG's source (u16:
+/// 0 none, 2 NTS, 3 self-test), the file state (u16: 0 not read, 1 no volume, 2 no file,
+/// 3 good, 4 unreadable), why unreadable (u16), flags (u16: 1 recovery mode, 2 not saved,
+/// 4 clock plausible), 8 zero bytes.  One consistent picture (the same lock as time_set).
+/// No right needed (reading).  Writes exactly 40 bytes and returns 40;
+/// ERROR_INVALID_ARGUMENT (len < 40 – nothing written), ERROR_INVALID_ADDRESS.
+pub const SYS_TIME_BOUND: u64 = 61;
 /// readdir_part: the cursor value after the last part.
 pub const DIR_END: u64 = u64::MAX;
 /// Maximum number of entries in the spawn_ex map.
@@ -542,7 +565,7 @@ fn write_fd(p: &mut Process, fd: u64, data: &[u8]) -> SysResult {
     }
     match p.fd(fd)? {
         // A channel has no READ / WRITE (messages – chan_send / chan_recv).
-        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::Dir(_) => Err(ERROR_INVALID_HANDLE),
+        Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::SetTime | Fd::Dir(_) => Err(ERROR_INVALID_HANDLE),
         Fd::Pipe(e) => {
             if !e.write {
                 return Err(ERROR_INVALID_HANDLE);
@@ -625,7 +648,7 @@ fn sys_read(p: &mut Process, fd: u64, ptr: u64, len: u64) -> SysResult {
         }
     } else {
         match p.fd(fd)? {
-            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::Dir(_) => return Err(ERROR_INVALID_HANDLE),
+            Fd::Console | Fd::Channel(_) | Fd::Shm(_) | Fd::HwRoot | Fd::Device(_) | Fd::Irq(_) | Fd::Sysctl | Fd::Input(_) | Fd::Blk | Fd::SetTime | Fd::Dir(_) => return Err(ERROR_INVALID_HANDLE),
             Fd::Pipe(e) => {
                 if e.write {
                     return Err(ERROR_INVALID_HANDLE);
@@ -1402,6 +1425,43 @@ fn sys_time(p: &mut Process, out: u64) -> SysResult {
     copy_to_user(p, out, &buf).map(|_| 0)
 }
 
+fn sys_time_set(p: &mut Process, h: u64, t_ms: u64, u_ms: u64, servers: u64) -> SysResult {
+    if !matches!(p.fd(h)?, Fd::SetTime) {
+        return Err(ERROR_INVALID_HANDLE);
+    }
+    let pid = sched::current_id();
+    match crate::time_lkg::set_time(t_ms, u_ms, servers) {
+        Ok(done) => {
+            crate::serial_println!(
+                "[TIME] set by pid {}: {} UTC +-{} ms from {} servers; clock {}.{:03}; last known good {}{}{}{}",
+                pid,
+                crate::drivers::rtc::DateTime::from_unix(t_ms / 1000),
+                u_ms,
+                servers,
+                crate::drivers::rtc::DateTime::from_unix(done.clock_ms / 1000),
+                done.clock_ms % 1000,
+                crate::drivers::rtc::DateTime::from_unix(done.lkg),
+                if done.raised { " (raised)" } else { "" },
+                if done.repair { " (unreadable file written anew)" } else { "" },
+                if done.not_saved { " - NOT SAVED" } else if done.saved { " - saved" } else { "" }
+            );
+            Ok(done.bits())
+        }
+        Err(why) => {
+            crate::serial_println!("[TIME] refused for pid {}: t={} u={} servers={}: {}", pid, t_ms, u_ms, servers, why.as_str());
+            Err(if why == crate::time_lkg::Refused::BelowLkg { ERROR_NOT_PERMITTED } else { ERROR_INVALID_ARGUMENT })
+        }
+    }
+}
+
+fn sys_time_bound(p: &mut Process, out: u64, len: u64) -> SysResult {
+    if len < crate::time_lkg::SNAPSHOT_LEN as u64 {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let snap = crate::time_lkg::snapshot().encode();
+    copy_to_user(p, out, &snap).map(|_| snap.len() as u64)
+}
+
 fn sys_readdir_part(p: &mut Process, f: &SyscallFrame) -> SysResult {
     use core::fmt::Write;
     let path = dir_path(p, f.rdi, f.rsi, f.rdx, true)?;
@@ -1910,6 +1970,8 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_READDIR_PART => sys_readdir_part(p, frame),
         SYS_GETRANDOM => sys_getrandom(p, a0, a1, a2),
         SYS_TIME => sys_time(p, a0),
+        SYS_TIME_SET => sys_time_set(p, a0, a1, a2, frame.r10),
+        SYS_TIME_BOUND => sys_time_bound(p, a0, a1),
         SYS_STATAT => dir_path(p, a0, a1, a2, true).and_then(|path| stat_path(p, &path, frame.r10)),
         SYS_MKDIRAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::mkdir(&path).map(|_| 0).map_err(fs_error)),
         SYS_UNLINKAT => dir_path(p, a0, a1, a2, false).and_then(|path| fs::remove(&path).map(|_| 0).map_err(fs_error)),
@@ -1958,7 +2020,8 @@ extern "sysv64" fn syscall_dispatch(frame: &mut SyscallFrame) {
     };
     // DCP audit: refusals (sandbox, a handle without the right, ERROR_ACCESS_DENIED).
     if let Err(e) = result {
-        if sandboxed || e == ERROR_ACCESS_DENIED {
+        // time_set: every refusal (a missing right, numbers out of range, an LKG lowered).
+        if sandboxed || e == ERROR_ACCESS_DENIED || frame.rax == SYS_TIME_SET {
             audit_refusal(p, frame, sandboxed);
         }
     }

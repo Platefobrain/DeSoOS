@@ -92,9 +92,10 @@ pub fn self_test() {
     serial_println!("[RIGHTS TEST] 1/3 table: {} syscalls, names unique, every right of every handle argument taken away in turn - {} refused (ERROR_ACCESS_DENIED), wrong kind and missing handle ERROR_INVALID_HANDLE, no row ERROR_NOT_IMPLEMENTED PASS", rows, refused);
 
     // 2. Through real syscalls – every kind of object (like init: HW_ROOT,
-    // SYSCTL, INPUT, BLK; the edu device and its interrupt).
+    // SYSCTL, INPUT, BLK, SETTIME; the edu device and its interrupt).  time_set with full
+    // rights gets junk numbers – refused by the call, nothing set.
     let edu = 6u64 << 3;
-    let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, hw_root: true, sysctl: true, input: true, blk: true, ..SpawnOptions::default() };
+    let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, hw_root: true, sysctl: true, input: true, blk: true, settime: true, ..SpawnOptions::default() };
     let arg = alloc::format!("{}", edu);
     let id = exec("/bin/rightstest", &["rightstest", &arg], "/", &opts);
     check!(id.is_ok(), "cannot start /bin/rightstest");

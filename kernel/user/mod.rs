@@ -83,6 +83,9 @@ mod test_tls;
 mod test_ntp;
 #[cfg(selftest)]
 mod test_time;
+// The time service: /bin/timekeeper (tests/nts-server), SYS_TIME_SET, SYS_TIME_BOUND.
+#[cfg(selftest)]
+mod test_nts;
 // User-space services (wait_many, devices, service manager).
 #[cfg(selftest)]
 mod test_svc;
@@ -204,11 +207,13 @@ pub struct SpawnOptions {
     pub input: bool,
     /// BLK handle after INPUT (slot 6 in init) – only /bin/init and kernel tests.
     pub blk: bool,
+    /// SETTIME handle after BLK (slot 7 in init) – only /bin/init and kernel tests.
+    pub settime: bool,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false, input: false, blk: false }
+        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false, input: false, blk: false, settime: false }
     }
 }
 
@@ -283,6 +288,10 @@ pub fn spawn_elf(
     if opts.blk {
         // The only place where BLK is created (slot 6 in init).
         process.fds.push(Some(process::Handle::new(process::Fd::Blk)));
+    }
+    if opts.settime {
+        // The only place where SETTIME is created (slot 7 in init).
+        process.fds.push(Some(process::Handle::new(process::Fd::SetTime)));
     }
     apply_test_io(&mut process, opts);
     sched::spawn_user(name, user_task_entry, loaded.entry as usize, process, false)
@@ -415,7 +424,7 @@ pub const INIT_PATH: &str = "/bin/init";
 pub fn run_init() -> ! {
     let mut failures: Vec<u64> = Vec::new();
     loop {
-        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions { hw_root: true, sysctl: true, input: true, blk: true, ..SpawnOptions::default() }) {
+        let pid = match exec(INIT_PATH, &["init"], "/", &SpawnOptions { hw_root: true, sysctl: true, input: true, blk: true, settime: true, ..SpawnOptions::default() }) {
             Ok(pid) => pid,
             Err(e) => {
                 serial_println!("[INIT] cannot start {}: {} - starting the kernel shell", INIT_PATH, e);
@@ -790,6 +799,8 @@ pub use test_tls::self_test as tls_self_test;
 pub use test_ntp::self_test as ntp_self_test;
 #[cfg(selftest)]
 pub use test_time::self_test as time_self_test;
+#[cfg(selftest)]
+pub use test_nts::self_test as nts_self_test;
 #[cfg(selftest)]
 pub use test_soak::run as soak_run;
 #[cfg(selftest)]

@@ -41,6 +41,20 @@
 //   minus 24 h)  ->  7 (earlier than the LKG – margin 0 s).
 // Reason 7 compares with a stored or raised LKG; the build date keeps its 24 h tolerance
 // as reason 5 (a clock kept in local time west of UTC).
+//
+// The time service (v0.79 stage D) – the only real source:
+//   SYS_TIME_SET(t, u, servers) -> `set_time`: the kernel checks the numbers (servers 2..=3,
+//   u <= 10 s, t - u >= the build date, t + u <= 2099, no overflow; t + u below the LKG is
+//   refused), computes L = floor(T - U - 2 s) itself, raises the LKG to L when higher and
+//   saves it, then sets the wall clock to max(T, LKG).  The LKG never goes down.
+//   Repair write: while the file is unreadable (reason 8) every accepted call writes the
+//   file anew with max(L, the LKG in memory) – also when that is not higher – and only a
+//   write that succeeds makes the file good again.  A pending save (`dirty`) is retried by
+//   every call.
+//   SYS_TIME_BOUND -> `snapshot`: the bound for the time service's bootstrap,
+//   B = max(the LKG in memory, the build date), with the LKG, its source, the file state and
+//   the flags – one consistent picture, taken under the same lock as `set_time` and `load`.
+//   Recovery mode = the file is unreadable (the same B rule; the flag only tells).
 
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -148,7 +162,10 @@ static SECS: AtomicU64 = AtomicU64::new(0); // stored / raised LKG; 0 = none
 static SOURCE: AtomicU8 = AtomicU8::new(Source::Build as u8);
 static FILE_STATE: AtomicU8 = AtomicU8::new(0); // encoded FileState
 static DIRTY: AtomicBool = AtomicBool::new(false);
-/// Raises and saves run one at a time.
+/// Tests: the next N saves fail (as a disk error would).
+#[cfg(selftest)]
+pub static FAIL_SAVES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Raises, saves, set_time and snapshots run one at a time.
 static LOCK: crate::sched::sync::KMutex = crate::sched::sync::KMutex::new_named("time lkg");
 
 fn encode_state(s: FileState) -> u8 {
@@ -308,6 +325,19 @@ pub fn dirty() -> bool {
 
 // ---------------- the system volume ----------------
 
+/// Saves the record on the system volume.  Err – no system volume, or the write failed.
+fn save_system(secs: u64, source: Source) -> Result<(), ()> {
+    #[cfg(selftest)]
+    if FAIL_SAVES.load(Ordering::Acquire) > 0 {
+        FAIL_SAVES.fetch_sub(1, Ordering::AcqRel);
+        return Err(());
+    }
+    match on_system(|fs| save_to(fs, secs, source)) {
+        Some(Ok(())) => Ok(()),
+        _ => Err(()),
+    }
+}
+
 /// Runs `f` on the system volume (the DeSoFS volume mounted at /disk, read-write) – the
 /// kernel's own way in, past the VFS protection of /.desoos.  None – no such volume.
 fn on_system<R>(f: impl FnOnce(&mut dyn FileSystem) -> R) -> Option<R> {
@@ -363,8 +393,8 @@ pub enum Raised {
     InMemory,
 }
 
-/// Raises the LKG to `secs` (never lowers it) and saves it at once.  Kernel only – no
-/// syscall reaches this in stage C (stage D: the time service through SYS_TIME_SET).
+/// Raises the LKG to `secs` (never lowers it) and saves it at once.  Kernel only: the self-test
+/// switch (`raise_for_test`); the time service goes through `set_time`.
 #[cfg_attr(not(selftest), allow(dead_code))]
 pub fn raise(secs: u64, source: Source) -> Raised {
     let _g = LOCK.lock();
@@ -380,17 +410,248 @@ pub fn raise(secs: u64, source: Source) -> Raised {
     // Memory first: from now on the bound holds, whatever the disk does.
     SECS.store(t, Ordering::Release);
     SOURCE.store(src as u8, Ordering::Release);
-    match on_system(|fs| save_to(fs, t, src)) {
-        Some(Ok(())) => {
+    match save_system(t, src) {
+        Ok(()) => {
             DIRTY.store(false, Ordering::Release);
             FILE_STATE.store(encode_state(FileState::Good), Ordering::Release);
             if higher { Raised::Saved } else { Raised::NotHigher }
         }
-        _ => {
+        Err(()) => {
             DIRTY.store(true, Ordering::Release);
             if higher { Raised::InMemory } else { Raised::NotHigher }
         }
     }
+}
+
+// ---------------- the time service ----------------
+
+/// The largest uncertainty SYS_TIME_SET takes (ms).
+pub const MAX_U_MS: u64 = 10_000;
+/// L = floor(T - U - M): M = 2 s.
+pub const MARGIN_MS: u64 = 2_000;
+
+/// Why SYS_TIME_SET was refused (nothing changed).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// servers not 2 or 3.
+    Servers,
+    /// u above 10 s.
+    Uncertainty,
+    /// t - u or t + u does not fit.
+    Overflow,
+    /// t - u before the build date.
+    BeforeBuild,
+    /// t + u after 2099.
+    TooLate,
+    /// t + u below the LKG – the whole interval is too early; the LKG never goes down.
+    BelowLkg,
+}
+
+impl Refused {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refused::Servers => "servers must be 2 or 3",
+            Refused::Uncertainty => "uncertainty above 10 s",
+            Refused::Overflow => "t - u or t + u out of range",
+            Refused::BeforeBuild => "t - u before the build date",
+            Refused::TooLate => "t + u after 2099",
+            Refused::BelowLkg => "t + u below the last known good time",
+        }
+    }
+}
+
+/// What an accepted SYS_TIME_SET did (the bits it returns).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SetDone {
+    /// The LKG rose (to L).
+    pub raised: bool,
+    /// The file was written now (a raise, a repair or a retried save).
+    pub saved: bool,
+    /// The file was unreadable and the write was a repair (max(L, LKG)).
+    pub repair: bool,
+    /// The LKG is not on the disk (no system volume, or the write failed).
+    pub not_saved: bool,
+    /// The wall clock now (ms) and the LKG (s).
+    pub clock_ms: u64,
+    pub lkg: u64,
+}
+
+impl SetDone {
+    pub const RAISED: u64 = 1;
+    pub const SAVED: u64 = 2;
+    pub const REPAIR: u64 = 4;
+    pub const NOT_SAVED: u64 = 8;
+    pub fn bits(&self) -> u64 {
+        (if self.raised { Self::RAISED } else { 0 })
+            | (if self.saved { Self::SAVED } else { 0 })
+            | (if self.repair { Self::REPAIR } else { 0 })
+            | (if self.not_saved { Self::NOT_SAVED } else { 0 })
+    }
+}
+
+/// The numbers alone (pure – the tests call it): the interval [lo, hi] in ms, or why not.
+pub fn check_set(t_ms: u64, u_ms: u64, servers: u64) -> Result<(u64, u64), Refused> {
+    if !(2..=3).contains(&servers) {
+        return Err(Refused::Servers);
+    }
+    if u_ms > MAX_U_MS {
+        return Err(Refused::Uncertainty);
+    }
+    let (Some(lo), Some(hi)) = (t_ms.checked_sub(u_ms), t_ms.checked_add(u_ms)) else { return Err(Refused::Overflow) };
+    if lo < rtc::BUILD_EPOCH * 1000 {
+        return Err(Refused::BeforeBuild);
+    }
+    if hi > rtc::LATEST * 1000 + 999 {
+        return Err(Refused::TooLate);
+    }
+    Ok((lo, hi))
+}
+
+/// SYS_TIME_SET after the right was checked (see the file comment).  In this order: the
+/// numbers, L, the file (raise / repair / retried save), then the wall clock.
+pub fn set_time(t_ms: u64, u_ms: u64, servers: u64) -> Result<SetDone, Refused> {
+    let (lo, hi) = check_set(t_ms, u_ms, servers)?;
+    let _g = LOCK.lock();
+    let cur = SECS.load(Ordering::Acquire);
+    if hi < cur.saturating_mul(1000) {
+        return Err(Refused::BelowLkg);
+    }
+    let l = lo.saturating_sub(MARGIN_MS) / 1000;
+    let unreadable = matches!(file_state(), FileState::Unreadable(_));
+    let higher = l > cur && l > rtc::BUILD_EPOCH;
+    let mut done = SetDone::default();
+    // What to write, if anything: a raise; a repair of an unreadable file with
+    // max(L, LKG) even when not higher; or the retry of a save that failed before.
+    let write = if higher {
+        Some((l, Source::Nts))
+    } else if unreadable {
+        // The value in memory when there is one (never lower); otherwise L itself – even below
+        // the build date (it bounds nothing then, but it is what is certain).
+        if cur > 0 { Some((cur, self::source())) } else { Some((l, Source::Nts)) }
+    } else if DIRTY.load(Ordering::Acquire) {
+        Some((cur, self::source()))
+    } else {
+        None
+    };
+    if let Some((t, src)) = write {
+        // Memory first: from now on the bound holds, whatever the disk does.
+        SECS.store(t, Ordering::Release);
+        SOURCE.store(src as u8, Ordering::Release);
+        done.raised = higher;
+        done.repair = unreadable;
+        match save_system(t, src) {
+            Ok(()) => {
+                DIRTY.store(false, Ordering::Release);
+                FILE_STATE.store(encode_state(FileState::Good), Ordering::Release);
+                done.saved = true;
+            }
+            // The file stays unreadable (reason 8) when it was; the next call tries again.
+            Err(()) => DIRTY.store(true, Ordering::Release),
+        }
+    }
+    done.not_saved = DIRTY.load(Ordering::Acquire);
+    done.lkg = SECS.load(Ordering::Acquire);
+    // The wall clock last – never below the LKG.
+    let clock = t_ms.max(done.lkg.saturating_mul(1000));
+    rtc::set_wall_ms(clock);
+    done.clock_ms = clock;
+    LAST_SET.store(t_ms, Ordering::Release);
+    LAST_U.store(u_ms, Ordering::Release);
+    LAST_AT.store(crate::time::uptime_ms(), Ordering::Release);
+    LAST_SERVERS.store(servers as u8, Ordering::Release);
+    Ok(done)
+}
+
+// The last accepted SYS_TIME_SET (for `date`).
+static LAST_SET: AtomicU64 = AtomicU64::new(0);
+static LAST_U: AtomicU64 = AtomicU64::new(0);
+static LAST_AT: AtomicU64 = AtomicU64::new(0);
+static LAST_SERVERS: AtomicU8 = AtomicU8::new(0);
+
+/// SYS_TIME_BOUND's picture (40 bytes, little-endian – see `encode`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Snapshot {
+    /// The bootstrap bound B = max(LKG in memory, build date).
+    pub bound: u64,
+    /// The LKG in memory (0 = nothing stored or raised).
+    pub lkg: u64,
+    pub build: u64,
+    /// 0 none, 2 NTS, 3 self-test.
+    pub source: u16,
+    /// 0 not read, 1 no volume, 2 no file, 3 good, 4 unreadable.
+    pub file: u16,
+    /// Why unreadable (`Bad`), 0 otherwise.
+    pub bad: u16,
+    /// Bit 0 recovery mode (file unreadable), bit 1 not saved (dirty), bit 2 clock plausible.
+    pub flags: u16,
+}
+
+pub const SNAPSHOT_LEN: usize = 40;
+pub const FLAG_RECOVERY: u16 = 1;
+pub const FLAG_NOT_SAVED: u16 = 2;
+pub const FLAG_PLAUSIBLE: u16 = 4;
+
+impl Snapshot {
+    pub fn encode(&self) -> [u8; SNAPSHOT_LEN] {
+        let mut b = [0u8; SNAPSHOT_LEN];
+        b[0..8].copy_from_slice(&self.bound.to_le_bytes());
+        b[8..16].copy_from_slice(&self.lkg.to_le_bytes());
+        b[16..24].copy_from_slice(&self.build.to_le_bytes());
+        b[24..26].copy_from_slice(&self.source.to_le_bytes());
+        b[26..28].copy_from_slice(&self.file.to_le_bytes());
+        b[28..30].copy_from_slice(&self.bad.to_le_bytes());
+        b[30..32].copy_from_slice(&self.flags.to_le_bytes());
+        b
+    }
+}
+
+/// The bound rule (pure): B = max(LKG in memory, build date) – the same for a good file,
+/// a missing one and an unreadable one (then it is recovery mode: the file's own value is
+/// not known, so only what is in memory and the build date remain).
+pub fn bootstrap_bound(lkg: u64, build: u64) -> u64 {
+    lkg.max(build)
+}
+
+/// One consistent picture for SYS_TIME_BOUND (under the lock `set_time` and `load` take).
+pub fn snapshot() -> Snapshot {
+    let _g = LOCK.lock();
+    let lkg = SECS.load(Ordering::Acquire);
+    let state = file_state();
+    let (file, bad) = match state {
+        FileState::NotRead => (0, 0),
+        FileState::NoVolume => (1, 0),
+        FileState::Missing => (2, 0),
+        FileState::Good => (3, 0),
+        FileState::Unreadable(b) => (4, b as u16),
+    };
+    let source = if lkg == 0 { 0 } else { source() as u16 };
+    let mut flags = 0;
+    if file == 4 {
+        flags |= FLAG_RECOVERY;
+    }
+    if DIRTY.load(Ordering::Acquire) {
+        flags |= FLAG_NOT_SAVED;
+    }
+    if rtc::time_status().1.is_ok() {
+        flags |= FLAG_PLAUSIBLE;
+    }
+    Snapshot { bound: bootstrap_bound(lkg, rtc::BUILD_EPOCH), lkg, build: rtc::BUILD_EPOCH, source, file, bad, flags }
+}
+
+/// One line for `date`: the last time the time service set the clock (or that it has not).
+pub fn describe_sync() -> String {
+    if !rtc::synced() {
+        return String::from("not set by the time service in this boot (the clock is the RTC's)");
+    }
+    let ago = crate::time::uptime_ms().saturating_sub(LAST_AT.load(Ordering::Acquire)) / 1000;
+    alloc::format!(
+        "set by the time service {} s ago from {} NTS servers of different operators: {} UTC +-{} ms (correction {:+} ms)",
+        ago,
+        LAST_SERVERS.load(Ordering::Acquire),
+        rtc::DateTime::from_unix(LAST_SET.load(Ordering::Acquire) / 1000),
+        LAST_U.load(Ordering::Acquire),
+        rtc::correction_ms()
+    )
 }
 
 /// The self-test switch: the LKG raised like an authenticated time would (LKG TEST,
@@ -422,6 +683,7 @@ pub fn describe() -> String {
         FileState::Good => alloc::format!("{}{}", SYSTEM_MOUNT, FILE),
         FileState::Unreadable(b) => alloc::format!("{}{} UNREADABLE: {}", SYSTEM_MOUNT, FILE, b.as_str()),
     };
-    let saved = if dirty() { " - NOT SAVED (the write failed; retried with the next raise)" } else { "" };
+    // Without a system volume "kept in memory only" says it already.
+    let saved = if dirty() && state != FileState::NoVolume { " - NOT SAVED (the write failed; retried with the next raise)" } else { "" };
     alloc::format!("last known good {} UTC ({}; {}){}", rtc::DateTime::from_unix(when), source().as_str(), file, saved)
 }

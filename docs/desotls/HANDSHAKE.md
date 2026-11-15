@@ -50,17 +50,29 @@ after the server's Finished verified and ours was sent; every error sends an ale
   length, not offered); and in QEMU against **rustls** (`tests/nts-server`, an independent TLS 1.3): the keys DeSoTLS
   exports equal the ones rustls exported on the same connection, a server without ALPN is refused.
 
+## A bootstrap (v0.79, the time service only)
+
+`Config::bootstrap = Some(b)`: the time service's NTS-KE while the clock is not plausible. The chain is checked with
+`notAfter >= b` for every certificate instead of "valid now" (`CERTIFICATES.md`, "The time rule"), and after that check
+the client copies the chain – the exact bytes of the Certificate message, in the server's order – into its
+`PeerChain` (`chain.rs`: at most 8 certificates, 24 KiB; more refused). The copy is wiped by `reset` (every `connect`
+and `wipe`) and by any failure (`fail_on`) – a chain from a handshake that did not finish never leaves the client.
+After a successful handshake `Client::take_chain(&mut PeerChain)` moves it out (and wipes it inside); the time service
+keeps it with that server's keys and cookies until the second check – `verify::server_over` on those bytes over the
+measured T ± U. `bootstrap: None` everywhere else (netget, nettime, the tests): nothing is kept.
+
 ## The files
 
 | File | What |
 |---|---|
 | `client.rs` | `Client`: the handshake state machine, application data, KeyUpdate, close; `Transport` (whatever carries the bytes – netd's TCP for netget, a script in the tests); `TlsError` |
+| `chain.rs` | `PeerChain`: a server's chain kept after a bootstrap handshake for the second check |
 | `record.rs` | records: header, `Protection` (one direction's AEAD key, iv and record number), TLSInnerPlaintext |
 | `schedule.rs` | the key schedule (HKDF-Expand-Label, Derive-Secret, the handshake / master / traffic secrets, Finished, KeyUpdate, the exporter) |
 | `tls_tests.rs` | the tests (RFC 8448, scripted servers) – only in `/bin/tlstest` and the host checks |
 
-`Client` is about 120 KiB (a 64 KiB handshake-message buffer for the Certificate, a 24 KiB receive buffer, a
-16 KiB send buffer and 16 KiB of decrypted data); programs keep it in a static. The library has no heap and makes
+`Client` is about 145 KiB (a 64 KiB handshake-message buffer for the Certificate, a 24 KiB receive buffer, a
+16 KiB send buffer, 16 KiB of decrypted data and the 24 KiB `PeerChain`); programs keep it in a static. The library has no heap and makes
 no syscalls; the randomness (client random, session id, X25519 secret) comes from the caller (`getrandom`).
 
 ## The handshake

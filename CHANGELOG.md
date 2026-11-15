@@ -2,11 +2,63 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.79.0 — in progress (stages A, B and C of A–D done: NTS + LKG)
+## v0.79.0 — in progress (stages A–D done: NTS + LKG + the time service)
 
-Not released yet: the version stays 0.78.2 until stage D passes. Plan: NTS (RFC 8915) and the last known good time;
+Not released yet: the version stays 0.78.2 until stage D passes its gate (the time service with the three real
+operators on the Legion). Plan: NTS (RFC 8915) and the last known good time;
 stage A = the cryptography and TLS parts NTS needs, checked against vectors and an independent TLS before anything
 uses them.
+
+### Stage D – the time service (`/bin/timekeeper`), SYS_TIME_SET, SYS_TIME_BOUND
+- **The time service** – init's `time` (`user/etc/services/time.svc`), `user/bin/timekeeper.rs`: NTS to three servers
+  of three operators from a list built into the program (Cloudflare, Netnod, PTB; one entry per server with its
+  operator_id – a vote follows the entry, never a name, an address or anything a server sends; no argument or message
+  adds a server). At start and every hour: NTS-KE where the cookies ran out (backoff 10 s, ×1.5, at most 5 days, reset
+  only by an NTS-KE followed by a good answer), NTS queries to all at once, each good answer an interval T ± U
+  (δ = (T4 − T1) − (T3 − T2), T = T3 + δ/2, U = ⌈δ/2⌉ + ⌈root delay/2⌉ + ⌈root dispersion⌉ + 1 s), a quorum of at
+  least two operators whose intervals ± 1 s meet (the largest group; a tie = nothing), the envelope of their intervals
+  → `SYS_TIME_SET`. Its lines go to the console.
+- **Bootstrap without a plausible clock**: the certificates of NTS-KE need only `notAfter >= B` (B from the kernel:
+  max(the LKG in memory, the build date)), and DeSoTLS keeps the chain that server sent in that handshake; after the
+  NTS answer the **same chain** is checked again, fully, over that server's [T − U, T + U] (every certificate and the
+  anchor valid over the whole span, the name from the list) – a failure wipes the server's keys, cookies and chain and
+  it has no vote. **Recovery** from an unreadable LKG file (reason 8) is this same bootstrap (the file state, not the
+  verdict, decides; B never the build date while a higher LKG is in memory or the file is good).
+- **Kernel – `SYS_TIME_SET` (60)**, the new SETTIME handle (kind 13, init's slot 7, `grant settime`; WRITE + DUP, no
+  TRANSFER): servers 2..=3, U ≤ 10 s, T − U not before the build date, T + U not after 2099, no overflow – else
+  ERROR_INVALID_ARGUMENT; T + U below the LKG – ERROR_NOT_PERMITTED; L = ⌊T − U − 2 s⌋ raised and saved when higher;
+  an unreadable LKG file written anew with max(L, the LKG in memory) even when that is not higher (the repair write;
+  only a successful write makes it good); a pending save retried; then the wall clock = max(T, LKG) – one atomic
+  correction (`rtc::WALL_ADJ`, ms), the uptime and every timeout untouched, the RTC never written. Once set, the RTC's
+  own reasons (1–6) no longer count. Every call in the kernel log, every refusal in the DCP audit (`CLOCK_SET` in
+  `dcp`). **`SYS_TIME_BOUND` (61)**, no right: exactly 40 bytes – B, the LKG in memory, the build date, the source,
+  the file state, why unreadable, flags (recovery, not saved, plausible) – one picture under the same lock as
+  `SYS_TIME_SET`. `date` tells when the time service last set the clock.
+- **init**: manifest grants `settime` (slot 7), `net` (a service channel narrowed to connections and UDP, slot 3) and
+  `roots` (the CA store opened for reading, slot 8); `tests off` – not started by `init test`; in test mode the test
+  program gets SETTIME when init has it (only the kernel's NTS TEST gives it).
+- **DeSoTLS**: the time rule of a chain is `verify::When` – `At(t)` (as before), `Bootstrap(b)`, `Over(a, b)`
+  (`verify::server_when`, `verify::server_over`); `Config::bootstrap`; `chain::PeerChain` (at most 8 certificates,
+  24 KiB) filled in the Certificate message, wiped on any failure, handed over by `Client::take_chain`.
+  `user/lib/ntske.rs` – NTS-KE over a netd connection, shared by nettime and the time service (nettime's output
+  unchanged).
+- **Tests**: NTS TEST (39th suite, 7 steps) – `/bin/synctest` (42 checks: intervals, quorum, envelope, tie, operators,
+  backoff, span, kept chain); the kernel alone (refused numbers, L, never lower, the clock never below the LKG, repair
+  write, a failed repair retried, the clock stepped while two programs read it – each reading one clock or the other,
+  sleeps untouched); the right (`timetest set`: 18 refusals in the DCP audit, nothing changed; `timetest bound`: len
+  39 / 40 / 41 / 4096 and bad addresses); timekeeper against `tests/nts-server` (15 new servers with chosen
+  certificates and times – two operators set the clock; one server, disagreement, one operator twice, a tie, NTP
+  redirected to another entry – nothing; 1.8 s apart – U ≥ 0.9 s + their own); recovery (one operator alone –
+  nothing; a chain not valid yet – no vote; two of three repair the file); the second check (not valid yet, after the
+  CA expired, an intermediate ending inside T ± U while valid at T, an intermediate expired); the bound (reason 7 – B =
+  LKG; reason 8 with a higher LKG in memory – B = that LKG). CERT TEST 307 → 332 checks (the three time rules on real
+  chains with an intermediate). RESTART TEST: part 1 damages the LKG and the time service recovers it, part 2 reads it
+  back at boot (good, NTS, no reason 8). RIGHTS TEST: the new row with a real SETTIME handle. 317 tests;
+  `tests/test.sh`'s QEMU limit 300 → 480 s.
+- New test certificates (`tests/tls/gen-nts-certs.py`): a root with two intermediates – `nts-good` (until 2060) and
+  `nts-intshort` (its intermediate ends 2030-01-01).
+- New: `docs/time/TIMEKEEPER.md`; `docs/time/{README,NTS,LKG}.md`, `docs/desotls/{CERTIFICATES,HANDSHAKE}.md`
+  updated.
 
 ### Stage A – AES-SIV, ALPN, TLS exporter
 - **DeSoCrypto 0.7.0 – AES-CMAC (RFC 4493) and AES-SIV (RFC 5297)**, `common/desocrypto/aes_siv.rs`:

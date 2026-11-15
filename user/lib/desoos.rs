@@ -81,6 +81,10 @@ pub const SYS_UNLINKAT: u64 = 56;
 pub const SYS_READDIR_PART: u64 = 57;
 pub const SYS_GETRANDOM: u64 = 58;
 pub const SYS_TIME: u64 = 59;
+/// time_set(SETTIME, t_ms, u_ms, servers) – the time service only (the SETTIME handle).
+pub const SYS_TIME_SET: u64 = 60;
+/// time_bound(out, len) – the bootstrap bound and the LKG's state (40 bytes).
+pub const SYS_TIME_BOUND: u64 = 61;
 /// Largest single `getrandom` syscall.
 pub const GETRANDOM_MAX: usize = 4096;
 /// readdir_part: the cursor after the last part.
@@ -131,7 +135,10 @@ pub const INPUT: u64 = 5;
 pub const KIND_BLK: u64 = 11;
 /// A directory handle (dir_open): work inside it by relative paths.
 pub const KIND_DIR: u64 = 12;
+/// SETTIME handle (setting the wall clock) – held by init and the time service in slot 7.
+pub const KIND_SETTIME: u64 = 13;
 pub const BLK: u64 = 6;
+pub const SETTIME: u64 = 7;
 pub const HW_ROOT: u64 = 3;
 pub const SYSCTL: u64 = 4;
 pub const SYSCTL_REBOOT: u64 = 1;
@@ -347,6 +354,65 @@ pub fn time_unix() -> Result<WallClock, i64> {
         return Err(r);
     }
     Ok(WallClock { secs: out[0], status: out[1], build_epoch: out[2] })
+}
+
+/// time_set's result bits.
+pub const TIME_SET_RAISED: i64 = 1;
+pub const TIME_SET_SAVED: i64 = 2;
+pub const TIME_SET_REPAIR: i64 = 4;
+pub const TIME_SET_NOT_SAVED: i64 = 8;
+
+/// The time service gives the kernel the time T +- U (Unix ms) agreed by `servers` NTS
+/// servers of different operators (syscall 60).  The bits above, or an error.
+pub fn time_set(h: u64, t_ms: u64, u_ms: u64, servers: u64) -> i64 {
+    syscall6(SYS_TIME_SET, h, t_ms, u_ms, servers, 0, 0)
+}
+
+/// SYS_TIME_BOUND's answer (syscall 61).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimeBound {
+    /// The bootstrap bound B = max(LKG in memory, build date), computed by the kernel.
+    pub bound: u64,
+    /// The LKG in memory (0 = none).
+    pub lkg: u64,
+    pub build: u64,
+    /// 0 none, 2 NTS, 3 self-test.
+    pub source: u16,
+    /// 0 not read, 1 no volume, 2 no file, 3 good, 4 unreadable.
+    pub file: u16,
+    pub bad: u16,
+    /// TB_RECOVERY, TB_NOT_SAVED, TB_PLAUSIBLE.
+    pub flags: u16,
+}
+
+pub const TIME_BOUND_LEN: usize = 40;
+pub const TB_RECOVERY: u16 = 1;
+pub const TB_NOT_SAVED: u16 = 2;
+pub const TB_PLAUSIBLE: u16 = 4;
+
+impl TimeBound {
+    pub fn recovery(&self) -> bool {
+        self.flags & TB_RECOVERY != 0
+    }
+    pub fn parse(b: &[u8; TIME_BOUND_LEN]) -> TimeBound {
+        let u64_at = |i: usize| u64::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]]);
+        let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+        TimeBound { bound: u64_at(0), lkg: u64_at(8), build: u64_at(16), source: u16_at(24), file: u16_at(26), bad: u16_at(28), flags: u16_at(30) }
+    }
+}
+
+/// The raw call: writes into `buf` (of any length – the kernel wants at least 40).
+pub fn time_bound_raw(buf: u64, len: u64) -> i64 {
+    syscall3(SYS_TIME_BOUND, buf, len, 0)
+}
+
+pub fn time_bound() -> Result<TimeBound, i64> {
+    let mut b = [0u8; TIME_BOUND_LEN];
+    let r = time_bound_raw(b.as_mut_ptr() as u64, b.len() as u64);
+    if r < 0 {
+        return Err(r);
+    }
+    Ok(TimeBound::parse(&b))
 }
 
 /// The text for a WallClock status (kernel drivers/rtc.rs Implausible).

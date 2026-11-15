@@ -115,6 +115,9 @@ for src in user/bin/*.rs; do
   [ "$name" = cryptotest ] && EXTRA_CFG=(--cfg desocrypto_test)
   # DeSoTLS's test hooks (RFC 8448's own ClientHello, its 1024-bit key) – only in tlstest.
   [ "$name" = tlstest ] && EXTRA_CFG=(--cfg desotls_test)
+  # The time service's test list (tests/nts-server, the test CAs) – only in the self-test
+  # image; the normal timekeeper has the built-in list alone and takes no argument.
+  [ "$name" = timekeeper ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \

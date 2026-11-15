@@ -29,7 +29,7 @@ BUILD=1
 VERBOSE=0
 LOOP="${LOOP:-}"
 # Loop mode takes longer – a larger default timeout (set TIMEOUT to change it).
-if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-300}"; fi
+if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-480}"; fi
 # Number of QEMU cores.  More virtual CPUs than host threads =
 # long stalls (the host suspends the virtual CPU whose turn it is to take
 # the Big Kernel Lock; the watchdog reports it) – on a weak host: SMP=2 ./test.sh
@@ -161,7 +161,8 @@ NTP_PID=$!
 python3 "$T/tls-stub.py" 58443 &
 TLS_PID=$!
 # rustls test server for TLS TEST (exporter and ALPN against an independent TLS 1.3;
-# ports 58500-58502).  Built here on the host (tests/nts-server, its own Cargo.lock; the
+# ports 58500-58502), NTP TEST (NTS, 58510-58574) and NTS TEST (the time service,
+# 58600-58644).  Built here on the host (tests/nts-server, its own Cargo.lock; the
 # first build downloads its crates from crates.io).
 if ! cargo build --release --quiet --manifest-path "$T/nts-server/Cargo.toml"; then
   echo "ERROR: tests/nts-server did not build (needs cargo and, the first time, crates.io)."
@@ -194,9 +195,9 @@ for _ in $(seq 100); do
 done
 if [ -n "$MISSING" ]; then
   echo "ERROR: host test servers not listening:$MISSING (a port is held by another program)."
-  echo "Sockets on the test ports (53530, 58080, 58090, 58123-58154, 58443-58590):"
+  echo "Sockets on the test ports (53530, 58080, 58090, 58123-58154, 58443-58644):"
   command -v ss > /dev/null || echo "(ss not found - install iproute2 to see them)"
-  ss -tuanp 2>/dev/null | grep -E '127\.0\.0\.1:(53530|58080|58090|581[2-5][0-9]|58[45][0-9][0-9])[[:space:]]' || true
+  ss -tuanp 2>/dev/null | grep -E '127\.0\.0\.1:(53530|58080|58090|581[2-5][0-9]|58[4-6][0-9][0-9])[[:space:]]' || true
   kill "${SERVER_PIDS[@]}" 2>/dev/null
   wait "${SERVER_PIDS[@]}" 2>/dev/null
   rm -rf "$STUB_READY" "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"

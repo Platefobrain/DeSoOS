@@ -89,6 +89,9 @@ pub mod kind {
     /// A directory: work inside it by relative paths (READ – read and list,
     /// WRITE – create, change and remove).
     pub const DIR: u64 = 12;
+    /// Setting the wall clock and raising the last known good time (time_set) – the time
+    /// service only (init's slot 7, `grant settime`).
+    pub const SETTIME: u64 = 13;
 }
 
 /// Process handle table entry – object + rights.
@@ -127,6 +130,9 @@ impl Handle {
             Fd::Input(_) => return Handle { obj, rights: WRITE | DUP },
             // Like INPUT – WRITE (blk_attach) + DUP (init gives copies to usbd).
             Fd::Blk => return Handle { obj, rights: WRITE | DUP },
+            // Like BLK – WRITE (time_set) + DUP (init gives a copy to the time service); no
+            // TRANSFER – it cannot be sent in a message.
+            Fd::SetTime => return Handle { obj, rights: WRITE | DUP },
             // dir_open gives the rights it was asked for; this default is both.
             Fd::Dir(_) => READ | WRITE,
         };
@@ -146,6 +152,7 @@ impl Handle {
             Fd::Sysctl => kind::SYSCTL,
             Fd::Input(_) => kind::INPUT,
             Fd::Blk => kind::BLK,
+            Fd::SetTime => kind::SETTIME,
             Fd::Dir(_) => kind::DIR,
         }
     }
@@ -177,6 +184,9 @@ pub enum Fd {
     /// Right to register a disk (blk_attach) – created only by the kernel
     /// for init (slot 6), init gives a copy to every usbd.
     Blk,
+    /// Right to set the wall clock (time_set) – created only by the kernel for init
+    /// (slot 7), init gives a copy to the time service (`grant settime`).
+    SetTime,
     /// A directory (dir_open) – rights given at creation (READ / WRITE + DUP, TRANSFER).
     Dir(Arc<DirObj>),
 }

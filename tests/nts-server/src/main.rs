@@ -44,6 +44,18 @@
 //    9 an unauthenticated DENY, then the correct answer    10 a plain NTP answer
 //   11 correct NTS, stratum 16 inside    12 Authenticator with C2S instead of S2C
 //   13 two Authenticators    14 NTSN to every query
+//
+// The time service (/bin/timekeeper test:<case>, NTS TEST), +100 + j: NTS-KE with the
+// certificate below, 8 cookies, Port Negotiation = +130 + j (j 13: +130, the NTP server of
+// j 0); +130 + j: NTS answers (as behaviour 0) with the time below.
+//    0, 2 nts-good.pem, the host's time     1 nts-good, +400 ms     3 nts-good, +1800 ms
+//    4 nts-good, +30 s     5 nts-good, +3 s     6 nts-good, +6 s
+//    7 future.pem (valid from 2040), the host's time      8 expired.pem (2020-2021)
+//    9 wrongname.pem (other.desoos)     10 rsa.pem (test CA, until 2045), the time is
+//      2046-01-01 00:00:00      11 nts-intshort.pem (its intermediate ends 2030-01-01
+//      00:00:00), the time is exactly 2030-01-01 00:00:00.000     12 nts-intshort, the time
+//      is 2031-01-01     13 nts-good, NTP goes to j 0's server     14 rsa.pem, the host's time
+//
 // +39 (UDP): "reset" zeroes the counters, anything else answers "requests=N dup=N bad=N
 //   maxlen=N placeholders=N" – NTS requests seen, cookies seen twice, requests whose
 //   Authenticator did not verify, the longest request, placeholders in the last request.
@@ -66,10 +78,49 @@ const NTP_BASE: u16 = 40;
 const STATS: u16 = 39;
 const KE_FOR_NTP: u16 = 60;
 const NTP_KINDS: u16 = 15;
+/// The time service's servers: NTS-KE at +100 + j, NTP at +130 + j.
+const TIME_KE: u16 = 100;
+const TIME_NTP: u16 = 130;
+const TIME_SERVERS: u16 = 15;
+
+/// What time an NTP server tells.
+#[derive(Clone, Copy)]
+enum Clock {
+    /// The host's time plus this many ms.
+    Offset(i64),
+    /// Always this Unix time (ms).
+    Fixed(i64),
+}
+
+/// The certificate (tests/tls/<name>.pem / .key) and the clock of time server j.
+fn time_server(j: u16) -> (&'static str, Clock) {
+    const Y2030: i64 = 1_893_456_000_000;
+    const Y2031: i64 = 1_924_992_000_000;
+    const Y2046: i64 = 2_398_377_600_000;
+    match j {
+        1 => ("nts-good", Clock::Offset(400)),
+        3 => ("nts-good", Clock::Offset(1800)),
+        4 => ("nts-good", Clock::Offset(30_000)),
+        5 => ("nts-good", Clock::Offset(3000)),
+        6 => ("nts-good", Clock::Offset(6000)),
+        7 => ("future", Clock::Offset(0)),
+        8 => ("expired", Clock::Offset(0)),
+        9 => ("wrongname", Clock::Offset(0)),
+        10 => ("rsa", Clock::Fixed(Y2046)),
+        11 => ("nts-intshort", Clock::Fixed(Y2030)),
+        12 => ("nts-intshort", Clock::Fixed(Y2031)),
+        14 => ("rsa", Clock::Offset(0)),
+        _ => ("nts-good", Clock::Offset(0)),
+    }
+}
 
 fn config(dir: &str, alpn: bool) -> Arc<ServerConfig> {
-    let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(format!("{}/rsa.pem", dir)).expect("rsa.pem").map(|c| c.expect("certificate")).collect();
-    let key = PrivateKeyDer::from_pem_file(format!("{}/rsa.key", dir)).expect("rsa.key");
+    config_with(dir, "rsa", alpn)
+}
+
+fn config_with(dir: &str, name: &str, alpn: bool) -> Arc<ServerConfig> {
+    let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(format!("{}/{}.pem", dir, name)).expect("certificate file").map(|c| c.expect("certificate")).collect();
+    let key = PrivateKeyDer::from_pem_file(format!("{}/{}.key", dir, name)).expect("key file");
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut cfg = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -136,9 +187,17 @@ fn rec(ty: u16, critical: bool, body: &[u8]) -> Vec<u8> {
     r
 }
 
-/// The NTS-KE response of behaviour `k` (and whether to skip close_notify).
+/// The NTS-KE response of behaviour `k` (and whether to skip close_notify).  k >= TIME_KE:
+/// time server k - TIME_KE (a correct response, NTP at its own port).
 fn ke_response(sh: &Shared, k: u16, c2s: &[u8], s2c: &[u8]) -> (Vec<u8>, bool) {
-    let ntp_port = if k >= KE_FOR_NTP { sh.base + NTP_BASE + (k - KE_FOR_NTP) } else { sh.base + NTP_BASE };
+    let ntp_port = if k >= TIME_KE {
+        let j = k - TIME_KE;
+        sh.base + TIME_NTP + if j == 13 { 0 } else { j }
+    } else if k >= KE_FOR_NTP {
+        sh.base + NTP_BASE + (k - KE_FOR_NTP)
+    } else {
+        sh.base + NTP_BASE
+    };
     let next = rec(1, true, &[0, 0]);
     let aead = rec(4, true, &[0, 15]);
     let port = rec(7, false, &ntp_port.to_be_bytes());
@@ -272,25 +331,29 @@ fn ef(ty: u16, body: &[u8]) -> Vec<u8> {
     e
 }
 
-fn ntp_ts() -> [u8; 8] {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let s = (d.as_secs() + 2_208_988_800) as u32;
-    let f = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
+fn ntp_ts(clock: Clock) -> [u8; 8] {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    let ms = match clock {
+        Clock::Offset(o) => now + o,
+        Clock::Fixed(t) => t,
+    };
+    let s = (ms.div_euclid(1000) + 2_208_988_800) as u32;
+    let f = ((ms.rem_euclid(1000) as u64) << 32) / 1000;
     let mut b = [0u8; 8];
     b[..4].copy_from_slice(&s.to_be_bytes());
     b[4..].copy_from_slice(&(f as u32).to_be_bytes());
     b
 }
 
-fn header(origin: &[u8], stratum: u8, refid: &[u8; 4]) -> Vec<u8> {
+fn header(origin: &[u8], stratum: u8, refid: &[u8; 4], clock: Clock) -> Vec<u8> {
     let mut h = vec![4 << 3 | 4, stratum, 0, 0xEC];
     h.extend_from_slice(&0x0000_0290u32.to_be_bytes());
     h.extend_from_slice(&0x0000_0290u32.to_be_bytes());
     h.extend_from_slice(refid);
-    h.extend_from_slice(&ntp_ts());
+    h.extend_from_slice(&ntp_ts(clock));
     h.extend_from_slice(origin);
-    h.extend_from_slice(&ntp_ts());
-    h.extend_from_slice(&ntp_ts());
+    h.extend_from_slice(&ntp_ts(clock));
+    h.extend_from_slice(&ntp_ts(clock));
     h
 }
 
@@ -317,7 +380,7 @@ fn nts_answer(head: Vec<u8>, uid: &[u8], key: &[u8], plain: &[u8], corrupt: bool
     pkt
 }
 
-fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16) {
+fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16, clock: Clock) {
     let mut buf = [0u8; 2048];
     loop {
         let Ok((n, peer)) = sock.recv_from(&mut buf) else { continue };
@@ -377,9 +440,9 @@ fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16) {
         for _ in 0..1 + ph {
             plain.extend(ef(0x0204, &make_cookie(&sh.master, &c2s, &s2c, 0)));
         }
-        let good = || nts_answer(header(origin, 2, b"STUB"), &uid, &s2c, &plain, false, &[]);
+        let good = || nts_answer(header(origin, 2, b"STUB", clock), &uid, &s2c, &plain, false, &[]);
         let nak = |u: &[u8]| {
-            let mut h = header(origin, 0, b"NTSN");
+            let mut h = header(origin, 0, b"NTSN", clock);
             h.extend(ef(0x0104, u));
             h
         };
@@ -396,16 +459,16 @@ fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16) {
         let mut out: Vec<Vec<u8>> = Vec::new();
         let other: Vec<u8> = uid.iter().map(|b| b ^ 0x5A).collect();
         match m {
-            1 => out.push(nts_answer(header(origin, 2, b"STUB"), &uid, &s2c, &plain, true, &[])),
+            1 => out.push(nts_answer(header(origin, 2, b"STUB", clock), &uid, &s2c, &plain, true, &[])),
             2 => {
-                let mut h = header(origin, 2, b"STUB");
+                let mut h = header(origin, 2, b"STUB", clock);
                 h.extend(ef(0x0104, &uid));
                 out.push(h);
             }
-            3 => out.push(nts_answer(header(origin, 2, b"STUB"), &other, &s2c, &plain, false, &[])),
+            3 => out.push(nts_answer(header(origin, 2, b"STUB", clock), &other, &s2c, &plain, false, &[])),
             4 => {
                 if let Some(old) = first {
-                    out.push(nts_answer(header(origin, 2, b"STUB"), &old, &s2c, &plain, false, &[]));
+                    out.push(nts_answer(header(origin, 2, b"STUB", clock), &old, &s2c, &plain, false, &[]));
                     out.push(good());
                 }
             }
@@ -413,7 +476,7 @@ fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16) {
                 out.push(good());
                 out.push(good());
             }
-            6 => out.push(nts_answer(header(origin, 2, b"STUB"), &uid, &s2c, &plain, false, &ef(0x0F04, &[9u8; 12]))),
+            6 => out.push(nts_answer(header(origin, 2, b"STUB", clock), &uid, &s2c, &plain, false, &ef(0x0F04, &[9u8; 12]))),
             7 => {
                 if first.is_none() {
                     out.push(nak(&uid));
@@ -426,14 +489,14 @@ fn serve_ntp(sock: UdpSocket, sh: Arc<Shared>, m: u16) {
                 out.push(good());
             }
             9 => {
-                let mut h = header(origin, 0, b"DENY");
+                let mut h = header(origin, 0, b"DENY", clock);
                 h.extend(ef(0x0104, &uid));
                 out.push(h);
                 out.push(good());
             }
-            10 => out.push(header(origin, 2, b"STUB")),
-            11 => out.push(nts_answer(header(origin, 16, b"STUB"), &uid, &s2c, &plain, false, &[])),
-            12 => out.push(nts_answer(header(origin, 2, b"STUB"), &uid, &c2s, &plain, false, &[])),
+            10 => out.push(header(origin, 2, b"STUB", clock)),
+            11 => out.push(nts_answer(header(origin, 16, b"STUB", clock), &uid, &s2c, &plain, false, &[])),
+            12 => out.push(nts_answer(header(origin, 2, b"STUB", clock), &uid, &c2s, &plain, false, &[])),
             13 => {
                 let a = good();
                 // The Authenticator field follows the header (48) and the Unique Identifier (36).
@@ -530,7 +593,23 @@ fn main() {
     for m in 0..NTP_KINDS {
         let s = listen_udp(base + NTP_BASE + m);
         let sh = sh.clone();
-        handles.push(thread::spawn(move || serve_ntp(s, sh, m)));
+        handles.push(thread::spawn(move || serve_ntp(s, sh, m, Clock::Offset(0))));
+    }
+    // The time service's servers.
+    for j in 0..TIME_SERVERS {
+        let (cert, clock) = time_server(j);
+        let cfg = config_with(&dir, cert, true);
+        let l = listen_tcp(base + TIME_KE + j);
+        let sh2 = sh.clone();
+        handles.push(thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let (cfg, sh) = (cfg.clone(), sh2.clone());
+                thread::spawn(move || serve_ke(s, cfg, sh, TIME_KE + j));
+            }
+        }));
+        let u = listen_udp(base + TIME_NTP + j);
+        let sh3 = sh.clone();
+        handles.push(thread::spawn(move || serve_ntp(u, sh3, 0, clock)));
     }
     let s = listen_udp(base + STATS);
     let sh2 = sh.clone();

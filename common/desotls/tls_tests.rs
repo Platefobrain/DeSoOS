@@ -250,7 +250,7 @@ const NO_ANCHORS: AnchorList<'static> = AnchorList(&[]);
 const AES: [Suite; 1] = [Suite::Aes128Gcm];
 
 fn cfg() -> Config<'static> {
-    Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: None }
+    Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: None, bootstrap: None }
 }
 
 fn rfc_random() -> Random {
@@ -578,7 +578,7 @@ fn alpn_checks(c: &mut Checks) -> Result<(), Failure> {
     }
     // Our own ClientHello carries the extension: 00 10, length, list length, one name.
     let (cl, mut s) = fresh();
-    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(b"ntske/1") };
+    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(b"ntske/1"), bootstrap: None };
     let _ = cl.connect(&mut s, &conf, &rfc_random());
     let want = [0x00, 0x10, 0x00, 0x0a, 0x00, 0x08, 0x07, b'n', b't', b's', b'k', b'e', b'/', b'1'];
     c.check(matches!(s.next_sent(), Some(r) if r.windows(want.len()).any(|w| w == want)))?;
@@ -588,7 +588,7 @@ fn alpn_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(matches!(s.next_sent(), Some(r) if !r.windows(4).any(|w| w == [0x00, 0x10, 0x00, 0x0a])))?;
     // A name longer than 32 bytes is not offered.
     let (cl, mut s) = fresh();
-    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(&[b'a'; 33]) };
+    let conf = Config { host: "server", anchors: &NO_ANCHORS, now: 0, suites: &AES, alpn: Some(&[b'a'; 33]), bootstrap: None };
     let _ = cl.connect(&mut s, &conf, &rfc_random());
     c.check(matches!(s.next_sent(), Some(r) if !r.windows(7).any(|w| w == [0x00, 0x10, 0x00, 0x24, 0x00, 0x22, 0x21])))?;
     Ok(())

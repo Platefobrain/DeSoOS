@@ -51,12 +51,21 @@ fn raw() -> [u8; 6] {
 // registers + the update flag; under KVM each one is an exit to QEMU, on hardware
 // ~1 µs), and every file change calls it – also under the ramfs tree lock.
 // We read the RTC once (at boot); afterwards time = boot reading + uptime.
-use core::sync::atomic::{AtomicU64, Ordering};
+//
+// The time service corrects the wall clock (SYS_TIME_SET, time_lkg.rs `set_time`): one atomic
+// i64, WALL_ADJ – the milliseconds added to "boot reading + uptime".  A reader on any CPU sees
+// the old correction or the new one, never a mix.  Only the wall clock moves: the uptime,
+// timeouts, sleep, timers and the scheduler count from the uptime and never see the step.
+// The RTC is never written.
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Seconds since 1970-01-01 at the time of the RTC read (0 = not read yet).
 static BASE_SECS: AtomicU64 = AtomicU64::new(0);
 /// Uptime (ms) at that moment.
 static BASE_MS: AtomicU64 = AtomicU64::new(0);
+/// The time service's correction (ms); NOT_SYNCED – none: the clock is the RTC's.
+static WALL_ADJ: AtomicI64 = AtomicI64::new(NOT_SYNCED);
+const NOT_SYNCED: i64 = i64::MIN;
 
 /// Days since 1970-01-01 ("days from civil" algorithm, H. Hinnant).
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
@@ -122,12 +131,49 @@ pub fn init() {
 /// Current date and time: RTC reading at boot + time since that moment
 /// (no port access).  Before `init` – straight from the RTC.
 pub fn now() -> DateTime {
-    let base = BASE_SECS.load(Ordering::Acquire);
-    if base == 0 {
+    if BASE_SECS.load(Ordering::Acquire) == 0 {
         return read_hw();
     }
+    DateTime::from_unix(now_ms() / 1000)
+}
+
+/// The wall clock in Unix milliseconds: the RTC at boot + the uptime since + the time
+/// service's correction (if any).
+pub fn now_ms() -> u64 {
+    let base = BASE_SECS.load(Ordering::Acquire);
     let ms = crate::time::uptime_ms().saturating_sub(BASE_MS.load(Ordering::Relaxed));
-    DateTime::from_unix(base + ms / 1000)
+    let raw = (base * 1000 + ms) as i64;
+    let adj = WALL_ADJ.load(Ordering::Acquire);
+    let adj = if adj == NOT_SYNCED { 0 } else { adj };
+    raw.saturating_add(adj).max(0) as u64
+}
+
+/// Sets the wall clock to `ms` (Unix milliseconds) – only time_lkg::set_time (the time
+/// service, after the kernel's checks).  One store: every CPU sees the old or the new clock.
+pub fn set_wall_ms(ms: u64) {
+    let base = BASE_SECS.load(Ordering::Acquire);
+    let up = crate::time::uptime_ms().saturating_sub(BASE_MS.load(Ordering::Relaxed));
+    let raw = (base * 1000 + up) as i64;
+    let adj = (ms as i64).saturating_sub(raw);
+    WALL_ADJ.store(if adj == NOT_SYNCED { adj + 1 } else { adj }, Ordering::Release);
+}
+
+/// Whether the time service has set the clock in this boot (then the RTC's own verdict no
+/// longer counts – the time is authenticated).
+pub fn synced() -> bool {
+    WALL_ADJ.load(Ordering::Acquire) != NOT_SYNCED
+}
+
+/// The correction in ms (0 when not synced) – `date`.
+pub fn correction_ms() -> i64 {
+    let adj = WALL_ADJ.load(Ordering::Acquire);
+    if adj == NOT_SYNCED { 0 } else { adj }
+}
+
+/// Back to the RTC's clock (tests, after the time service's cases).
+#[cfg(selftest)]
+pub fn reset_wall_for_test() {
+    WALL_ADJ.store(NOT_SYNCED, Ordering::Release);
 }
 
 /// Date and time straight from the RTC (CMOS ports – slow; usually use `now`).
@@ -292,17 +338,24 @@ pub fn assess(dt: &DateTime, vrt: bool, stable: bool, build_epoch: u64) -> Resul
 static VERDICT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(Implausible::NotRead as u8);
 
 /// Unix seconds now, and whether the clock is plausible (syscall 59, DeSoTLS).
-/// TLS TEST: makes the clock report "not plausible" (only in the self-test build).
+/// Tests: makes the RTC's reading count as "battery lost" (only in the self-test build) – a
+/// clock the time service sets later is plausible again, as with a real bad RTC.
 #[cfg(selftest)]
 pub static FORCE_IMPLAUSIBLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn time_status() -> (u64, Result<(), Implausible>) {
     let secs = now().to_unix();
+    #[allow(unused_mut)]
+    let mut v = VERDICT.load(Ordering::Acquire);
     #[cfg(selftest)]
     if FORCE_IMPLAUSIBLE.load(Ordering::Acquire) {
-        return (secs, Err(Implausible::BatteryLost));
+        v = Implausible::BatteryLost as u8;
     }
-    let v = VERDICT.load(Ordering::Acquire);
+    // Set by the time service (NTS from two operators, checked by the kernel): the RTC's
+    // reading no longer matters – only 2099, the LKG file and the LKG below.
+    if synced() {
+        v = 0;
+    }
     let reading = match Implausible::from_u8(v) {
         None if secs > LATEST => Err(Implausible::TooLate),
         None => Ok(()),

@@ -237,8 +237,10 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 57 | `readdir_part` (a directory in parts through a directory handle, see DeSoFS) |
 | 58 | `getrandom(buf, len, flags)` – up to 4096 random bytes from the kernel's generator; no right needed, never blocks (see "Random numbers") |
 | 59 | `time(out)` – the wall clock: Unix seconds, 0 or why the clock is not plausible, the build date; no right needed (see "DeSoTLS" and `desotls/CERTIFICATES.md`, the clock) |
+| 60 | `time_set(SETTIME, t_ms, u_ms, servers)` – the time service gives T ± U agreed by 2–3 operators: the LKG raised / repaired, the wall clock set (`time/TIMEKEEPER.md`) |
+| 61 | `time_bound(out, len)` – 40 bytes: the bootstrap bound, the LKG in memory, the build date, the LKG's source and file state, flags; no right needed |
 
-The syscall profiler (`prof.rs`) tracks all 60 numbers (0–59). Error numbers are the Linux ones, with DeSoOS names (below).
+The syscall profiler (`prof.rs`) tracks all 62 numbers (0–61). Error numbers are the Linux ones, with DeSoOS names (below).
 
 ### Errors
 
@@ -296,6 +298,7 @@ Objects are reference-counted with `Arc` – they live as long as someone can se
 | 10 `INPUT` | an input event source (keyboard/mouse) |
 | 11 `BLK` | permission to register a block device |
 | 12 `DIR` | a directory: work inside it by relative paths (`READ` – read and list, `WRITE` – create, change, remove) |
+| 13 `SETTIME` | permission to set the wall clock and raise the last known good time (`time_set`) – the time service only |
 
 | Right | For | Meaning |
 |---|---|---|
@@ -729,11 +732,15 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   instances  4
   grant      input                # INPUT handle, slot 5
   grant      blk                  # BLK handle, slot 6
+  grant      settime              # SETTIME handle, slot 7 (the time service)
+  grant      net                  # a service channel narrowed to connections + UDP, slot 3 (not with a device)
+  grant      roots                # /etc/certs/roots opened for reading, slot 8
+  tests      off                  # not started by `init test` (talks to servers outside on its own)
   files      none                 # SPAWN_NO_FILES – no path calls at all; or `all`
   ```
 
-  Shipped: `edu` (pci 00:06.0), `echo` (no device), `usb` (class 0C0330, input + blk), `net` (class 020000) – all
-  with `files none` (no path calls, and no file or directory handle can be handed to them later). An unknown key or
+  Shipped: `edu` (pci 00:06.0), `echo` (no device), `usb` (class 0C0330, input + blk), `net` (class 020000),
+  `time` (`/bin/timekeeper`: net + settime + roots, tests off) – all with `files none` (no path calls, and no file or directory handle can be handed to them later). An unknown key or
   grant, a key or grant given twice, a missing name / program / files line, or a service name already used (also by
   an instance like `usb0`) → "bad manifest (…)", the service is not started, the others are. A class manifest whose
   devices would exceed the 16 services is not started at all (no device silently left without its driver); more
@@ -792,7 +799,7 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   pass it to programs – a program started from the shell cannot reboot the computer. System actions sit behind a
   handle, consistent with the permission model.
 
-Init slots at startup: 3 `HW_ROOT`, 4 `SYSCTL`, 5 `INPUT`, 6 `BLK`.
+Init slots at startup: 3 `HW_ROOT`, 4 `SYSCTL`, 5 `INPUT`, 6 `BLK`, 7 `SETTIME`.
 
 ### Example service – `edu`
 
@@ -1346,8 +1353,8 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 
 `/bin/nettime` asks NTP servers what time it is and compares the answer with the clock. **It only reads.** Plain NTP
 is not authenticated – anyone on the path can answer – so its result sets nothing: not the RTC, not the clock, not the
-verdict "plausible", not a lower bound (LKG). The kernel has no syscall that takes a time, so this is a property of
-the design, not of the tool's good manners. NTS (v0.79) will be the first source allowed to change anything.
+verdict "plausible", not a lower bound (LKG). The only syscall that takes a time (`time_set`) needs the SETTIME handle,
+which only the time service has, so this is a property of the design, not of the tool's good manners.
 
 - **Where:** a program, not a service – `user/lib/ntp.rs` (no I/O: query, checks, arithmetic; NTS will reuse it and
   add the extension fields) and `user/bin/nettime.rs` over the UDP sockets of netd (the `udp` right).
@@ -1384,7 +1391,7 @@ the design, not of the tool's good manners. NTS (v0.79) will be the first source
 **NTS** (v0.79 stage B, `nettime --nts`, `user/lib/nts.rs`): NTS-KE over TLS 1.3 (ALPN `ntske/1`, keys from the TLS
 exporter), then NTP with the NTS fields (Unique Identifier, single-use cookies, Authenticator with AES-SIV); an answer
 counts only when authenticated. NTS-KE goes one server after the other, each with a limit of 3 × `-t` for the
-lookup and connection and 3 × `-t` for TLS (a dead server cannot hold the run for netd's 15 s of SYN retries). Still read only – details in `time/NTS.md`, the model of time in `time/README.md`.
+lookup and connection and 3 × `-t` for TLS (a dead server cannot hold the run for netd's 15 s of SYN retries). nettime stays read only – details in `time/NTS.md`, the model of time in `time/README.md`.
 
 NTP TEST (suite 37): `/bin/ntptest` (200 checks of the NTP and NTS library) and `ntptest net` (140 cases of
 `nettime`: against `tests/ntp-stub.py` – 32 servers on the host, one behaviour per port; the stub also checks every
@@ -1400,10 +1407,36 @@ operation is one transaction, so after a power loss there is the old record or t
 every mount of `/disk`. The clock's verdict gains two reasons, in the order 1–4, 6 → **8** (the file unreadable – never
 a quiet reset to the build date) → 5 → **7** (earlier than the LKG, margin 0 s). The VFS reserves `/.desoos` of
 every DeSoFS volume for the kernel (`fs::is_reserved`, on the resolved volume and node; `FsError::Reserved` →
-ERROR_NOT_PERMITTED); the kernel writes it only through the volume (`fs::with_desofs_at`). Nothing raises the LKG in
-a normal build yet – stage D connects the only source, an authenticated time from NTS; no syscall takes a time.
-Details, threats and tests: `time/LKG.md`. LKG TEST is suite 38; RESTART TEST reads back an LKG saved by the first
-start and refuses the clock below it.
+ERROR_NOT_PERMITTED); the kernel writes it only through the volume (`fs::with_desofs_at`). Only the time service raises
+it (below). Details, threats and tests: `time/LKG.md`. LKG TEST is suite 38; RESTART TEST: the first start damages
+the LKG and the time service recovers it, the second reads it back at boot.
+
+### The time service (v0.79 stage D)
+
+`/bin/timekeeper`, init's `time` service – the only holder of the SETTIME handle. NTS to three servers of three
+operators from a list built into it (Cloudflare, Netnod, PTB – a vote follows the list entry's operator_id, nothing a
+server sends), at start and every hour: NTS-KE (`user/lib/ntske.rs`, shared with nettime; backoff 10 s × 1.5, at most
+5 days), NTS queries, each answer an interval T ± U, a quorum of at least two operators whose intervals ± 1 s meet
+(the largest group, a tie = nothing), the envelope → `time_set`. Without a plausible clock it bootstraps: the
+certificates need only `notAfter >= B` (B from `time_bound` = max(LKG in memory, build date)), DeSoTLS keeps that
+handshake's chain (`chain::PeerChain`), and after the answer the same chain is checked fully over [T − U, T + U]
+(`verify::server_over`) – a failure wipes the server's keys, cookies and chain. Recovery from an unreadable LKG file is
+this bootstrap.
+
+Kernel: `time_set` (60, SETTIME + WRITE) checks the numbers (servers 2..=3, U ≤ 10 s, T − U ≥ the build date,
+T + U ≤ 2099, T + U ≥ the LKG), raises the LKG to ⌊T − U − 2 s⌋, writes an unreadable LKG file anew (max(L, LKG in
+memory)) and sets the wall clock to max(T, LKG) – one atomic correction added to "RTC at boot + uptime"; the uptime,
+timeouts, timers and the scheduler never see it, the RTC is never written. `time_bound` (61, no right) gives the
+bootstrap bound and the LKG's state in 40 bytes, under the same lock. The kernel cannot check that the time came from
+NTS or two operators – that is the service's word; it enforces the numbers and that the LKG never goes down.
+Details: `time/TIMEKEEPER.md`. NTS TEST is suite 39.
+
+| | Who sets the clock | Agreement | Without a plausible clock |
+|---|---|---|---|
+| Linux (chrony + NTS) | chronyd as root | source selection | `nocerttimecheck` – the certificate time check skipped until the first sync |
+| Windows | w32time | – | Secure Time Seeding (TLS timestamps, known to jump the clock) |
+| RedoxOS | – | – | – |
+| **DeSoOS** | the time service with a kernel right; the kernel checks the numbers and the LKG | two of three operators, envelope | a bound from the kernel, then the full check of the same chain over T ± U |
 
 ### Network access is a capability
 
@@ -1901,7 +1934,7 @@ In short:
   fields and a date between the build date − 24 h and 2099; the build date is `SOURCE_DATE_EPOCH` or the build
   time (`build.sh`, no git). A heuristic, not proof – NTP (preferably NTS) and a saved last known time come later;
   netget refuses https without a plausible clock, before anything is sent;
-- tools `certcheck` (a chain offline, the same code), `certtest`, `tlstest`; 307 checks in CERT TEST, x509-limbo,
+- tools `certcheck` (a chain offline, the same code), `certtest`, `tlstest`; 332 checks in CERT TEST, x509-limbo,
   fuzzing and mutations on the host; TLS TEST: RFC 8448 byte for byte, 134 checks against scripted servers, 35
   `netget https://` cases against OpenSSL (`tests/tls-stub.py`) including a man in the middle holding the server's
   keys, 32 of 32 mutations caught on the host.

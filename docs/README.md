@@ -16,4 +16,5 @@ The documentation of the whole system. Change history is in `../CHANGELOG.md`; e
 | `time/README.md` | Time in DeSoOS: the RTC, the wall clock, plausibility, the sources and how far each is trusted, the tools |
 | `time/LKG.md` | The last known good time: what raises it, the record in `/disk/.desoos/lkg`, atomic saving, the order of the clock's reasons (7, 8), `/.desoos` protected, threats, LKG TEST |
 | `time/NTS.md` | NTS (RFC 8915): NTS-KE over TLS 1.3, the records accepted, keys from the exporter, NTP with NTS (fields, placeholders, the order of the checks), limits, the tests against rustls |
+| `time/TIMEKEEPER.md` | The time service (`/bin/timekeeper`): the built-in servers and operators, a round, the bootstrap and the second check of the kept chain, the quorum and the envelope, `SYS_TIME_SET` / `SYS_TIME_BOUND`, recovery from an unreadable LKG, what the kernel cannot check, NTS TEST |
 | `desotls/CERTIFICATES.md` | How a server's certificate chain is checked: the X.509 profile, the order of the checks, path building, every refusal, the CA store file format, the wall clock, the tests (x509-limbo) |

@@ -94,6 +94,7 @@ fn cap_name(k: u64) -> &'static str {
         kind::SYSCTL => "SYS_POWER",
         kind::INPUT => "INPUT_SEND",
         kind::BLK => "DISK_ATTACH",
+        kind::SETTIME => "CLOCK_SET",
         kind::DIR => "DIRECTORY",
         _ => "?",
     }
@@ -113,6 +114,7 @@ fn cap_meaning(k: u64) -> &'static str {
         kind::SYSCTL => "reboot, halt, sync, stress",
         kind::INPUT => "keys and mouse to the system",
         kind::BLK => "may add USB disks",
+        kind::SETTIME => "may set the clock (NTS time service)",
         kind::DIR => "files inside one directory",
         _ => "",
     }
@@ -307,7 +309,7 @@ fn overview(viewer: Option<Viewer>) -> String {
             String::from("-")
         };
         let mut sys = String::new();
-        for k in [kind::SYSCTL, kind::INPUT, kind::BLK] {
+        for k in [kind::SYSCTL, kind::INPUT, kind::BLK, kind::SETTIME] {
             if has(k) {
                 if !sys.is_empty() {
                     sys.push(' ');
@@ -471,6 +473,7 @@ fn syscall_name(nr: u64) -> &'static str {
         SYS_WAIT_MANY => "wait",
         SYS_INPUT_INJECT => "input",
         SYS_BLK_ATTACH => "add disk",
+        SYS_TIME_SET => "set clock",
         SYS_SYSCTL => "sysctl",
         SYS_DEV_FIND => "find device",
         _ => "syscall",

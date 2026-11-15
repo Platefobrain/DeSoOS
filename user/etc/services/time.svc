@@ -1,0 +1,11 @@
+# The time service: authenticated time from NTS servers of three different operators
+# (Cloudflare, Netnod, PTB – the list is built into /bin/timekeeper), agreed by at least two,
+# given to the kernel (SYS_TIME_SET: the wall clock and the last known good time).
+name     time
+title    NTS time service
+program  /bin/timekeeper
+grant    net
+grant    settime
+grant    roots
+tests    off
+files    none

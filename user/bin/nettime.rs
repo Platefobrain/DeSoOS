@@ -44,9 +44,11 @@ mod desotls;
 mod ntp;
 #[path = "../lib/nts.rs"]
 mod nts;
+#[path = "../lib/ntske.rs"]
+mod ntske;
 
 use desoos::*;
-use desotls::client::{Client, Config, Random, Transport};
+use desotls::client::{Client, Config};
 use desotls::record::Suite;
 use desotls::roots::{AnchorList, Anchors, Roots};
 
@@ -189,184 +191,21 @@ fn ask(s: &mut Server, pool: &mut nts::Pool, wait_ms: u64) -> Result<(), i64> {
     Ok(())
 }
 
-/// A netd TCP connection as the TLS transport, with a deadline for every wait.
-struct Chan {
-    c: u64,
-    pos: usize,
-    len: usize,
-    deadline: u64,
-}
-
-impl Transport for Chan {
-    fn send(&mut self, data: &[u8]) -> Result<(), ()> {
-        for part in data.chunks(MSG_MAX) {
-            if chan_send(self.c, part, 0) != 0 {
-                return Err(());
-            }
-        }
-        Ok(())
-    }
-    fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
-        let msg = unsafe { &mut *core::ptr::addr_of_mut!(CHAN_BUF) };
-        if self.pos == self.len {
-            let left = self.deadline.saturating_sub(uptime_ms());
-            if left == 0 || !matches!(wait_many(&[(self.c, W_READABLE)], left), Ok(m) if m != 0) {
-                return Err(());
-            }
-            let mut info = RecvInfo::default();
-            let r = chan_recv(self.c, msg, 0, &mut info);
-            if r == 0 {
-                return Err(());
-            }
-            if r < 0 {
-                return Ok(0);
-            }
-            self.pos = 0;
-            self.len = r as usize;
-        }
-        let k = (self.len - self.pos).min(buf.len());
-        buf[..k].copy_from_slice(&msg[self.pos..self.pos + k]);
-        self.pos += k;
-        Ok(k)
-    }
-}
-
-/// NTS-KE with one server: keys, cookies (into `pool`) and where NTP goes.  Err – what to
-/// tell (the server is then left out).
+/// NTS-KE with one server (user/lib/ntske.rs): keys, cookies (into `pool`) and where NTP
+/// goes.  Err – what to tell (the server is then left out).
 fn key_exchange(s: &mut Server, pool: &mut nts::Pool, card: &str, anchors: &dyn Anchors, now: i64, wait_ms: u64) -> Result<nts::Negotiated, &'static str> {
-    let Ok(c) = svc_connect(card) else { return Err("no network service") };
-    let mut req = [0u8; 300];
-    let mut n = 0;
-    let mut put = |b: &[u8], n: &mut usize| {
-        let k = b.len().min(req.len() - *n);
-        req[*n..*n + k].copy_from_slice(&b[..k]);
-        *n += k;
-    };
-    let mut d = [0u8; 5];
-    let mut v = s.port;
-    let mut dl = 0;
-    loop {
-        d[4 - dl] = b'0' + (v % 10) as u8;
-        v /= 10;
-        dl += 1;
-        if v == 0 {
-            break;
-        }
-    }
-    put(b"tcp ", &mut n);
-    put(s.name.as_bytes(), &mut n);
-    put(b" ", &mut n);
-    put(&d[5 - dl..], &mut n);
-    let msg = unsafe { &mut *core::ptr::addr_of_mut!(CHAN_BUF) };
-    let mut info = RecvInfo::default();
-    // The name lookup and the TCP connection get 3 × wait like the TLS part: netd alone would
-    // wait for a SYN-ACK 1 + 2 + 4 + 8 = 15 s, and the next servers wait behind this one.
-    // Closing the channel ends the connection attempt in netd.
-    let limit = 3 * wait_ms;
-    let r = if chan_send(c, &req[..n], 0) != 0 {
-        -1
-    } else if !matches!(wait_many(&[(c, W_READABLE)], limit), Ok(m) if m != 0) {
-        close(c);
-        eprintln!("nettime: {}: NTS-KE: no connection within {} ms", s.name, limit);
-        return Err("NTS-KE connection failed");
-    } else {
-        chan_recv(c, msg, CHAN_NONBLOCK, &mut info)
-    };
-    let reply = if r > 0 { core::str::from_utf8(&msg[..r as usize]).unwrap_or("") } else { "" };
-    if !reply.starts_with("connected ") {
-        close(c);
-        eprintln!("nettime: {}: NTS-KE: {}", s.name, if reply.is_empty() { "no answer from netd" } else { reply.trim().trim_start_matches("tcp: ") });
-        return Err("NTS-KE connection failed");
-    }
-    // "connected a.b.c.d:port from ..." – the KE server's address (the default for NTP).
-    let ip = reply.strip_prefix("connected ").and_then(|t| t.split(':').next()).unwrap_or("?");
-    s.addr_len = ip.len().min(s.addr.len());
-    s.addr[..s.addr_len].copy_from_slice(&ip.as_bytes()[..s.addr_len]);
-    let mut rnd = [0u8; 96];
-    if getrandom(&mut rnd).is_err() {
-        close(c);
-        return Err("no random numbers");
-    }
-    let mut random = Random { client_random: [0; 32], session_id: [0; 32], x25519_secret: [0; 32] };
-    random.client_random.copy_from_slice(&rnd[..32]);
-    random.session_id.copy_from_slice(&rnd[32..64]);
-    random.x25519_secret.copy_from_slice(&rnd[64..]);
-    desocrypto::wipe(&mut rnd);
     let suites = [Suite::Aes128Gcm, Suite::Chacha20Poly1305];
-    let cfg = Config { host: s.name, anchors, now, suites: &suites, alpn: Some(nts::ALPN) };
-    let cl = unsafe { &mut *core::ptr::addr_of_mut!(TLS) };
-    let mut t = Chan { c, pos: 0, len: 0, deadline: uptime_ms() + 3 * wait_ms };
-    let result = (|| -> Result<nts::Negotiated, &'static str> {
-        if let Err(e) = cl.connect(&mut t, &cfg, &random) {
-            eprintln!("nettime: {}: NTS-KE: TLS refused: {}", s.name, e);
-            return Err("NTS-KE: TLS refused");
-        }
-        if cl.write(&mut t, &nts::KE_REQUEST).is_err() {
-            return Err("NTS-KE: could not send the request");
-        }
-        // The response until End of Message, then the server's close_notify (RFC 8915 §4).
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(KE_BUF) };
-        let mut len = 0;
-        let end = loop {
-            match nts::ke_complete(&buf[..len]) {
-                Ok(0) => {}
-                Ok(e) => break e,
-                Err(e) => {
-                    eprintln!("nettime: {}: NTS-KE: {}", s.name, e.as_str());
-                    return Err("NTS-KE refused");
-                }
-            }
-            if len == buf.len() {
-                return Err("NTS-KE refused");
-            }
-            match cl.read(&mut t, &mut buf[len..]) {
-                Ok(0) => {
-                    // The server closed before End of Message: a cut record or none at all.
-                    let why = nts::parse_ke(&buf[..len], pool).err().unwrap_or(nts::KeError::NoEnd);
-                    eprintln!("nettime: {}: NTS-KE: {}", s.name, why.as_str());
-                    return Err("NTS-KE refused");
-                }
-                Ok(k) => len += k,
-                Err(e) => {
-                    eprintln!("nettime: {}: NTS-KE: {}", s.name, e);
-                    return Err("NTS-KE: connection ended before End of Message");
-                }
-            }
-        };
-        // Nothing may follow End of Message but the close_notify.
-        loop {
-            if len > end {
-                eprintln!("nettime: {}: NTS-KE: {}", s.name, nts::KeError::AfterEnd.as_str());
-                return Err("NTS-KE refused");
-            }
-            match cl.read(&mut t, &mut buf[len..]) {
-                Ok(0) => break,
-                Ok(k) => len += k,
-                Err(e) => {
-                    eprintln!("nettime: {}: NTS-KE: no close_notify after End of Message: {}", s.name, e);
-                    return Err("NTS-KE refused (no close_notify)");
-                }
-            }
-        }
-        let neg = match nts::parse_ke(&buf[..end], pool) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("nettime: {}: NTS-KE: {}", s.name, e.as_str());
-                return Err("NTS-KE refused");
-            }
-        };
-        if cl.export(nts::EXPORTER_LABEL, &nts::CONTEXT_C2S, &mut s.c2s).is_err() || cl.export(nts::EXPORTER_LABEL, &nts::CONTEXT_S2C, &mut s.s2c).is_err() {
-            return Err("NTS-KE: no keys from the TLS exporter");
-        }
-        Ok(neg)
-    })();
-    cl.close(&mut t);
-    // The session is done: its secrets, keys and buffers go (the client is a static), and so
-    // does the decrypted NTS-KE response (the cookies live on only in the pool).
-    cl.wipe();
-    desocrypto::wipe(unsafe { &mut *core::ptr::addr_of_mut!(KE_BUF) });
-    close(c);
-    result
+    let cfg = Config { host: s.name, anchors, now, suites: &suites, alpn: Some(nts::ALPN), bootstrap: None };
+    let buf = ntske::Buffers {
+        tls: unsafe { &mut *core::ptr::addr_of_mut!(TLS) },
+        msg: unsafe { &mut *core::ptr::addr_of_mut!(CHAN_BUF) },
+        ke: unsafe { &mut *core::ptr::addr_of_mut!(KE_BUF) },
+    };
+    let mut done = ntske::key_exchange("nettime", true, &cfg, s.port, card, pool, wait_ms, buf, &mut s.addr, &mut s.addr_len, None)?;
+    s.c2s = done.c2s;
+    s.s2c = done.s2c;
+    done.wipe();
+    Ok(done.neg)
 }
 
 /// A difference in ms as whole seconds (half a second away from zero, both signs).

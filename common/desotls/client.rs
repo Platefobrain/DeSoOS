@@ -34,6 +34,7 @@ use super::name;
 use super::record::{self, Protection, RecordError, Suite, HEADER_LEN, MAX_PLAINTEXT, MAX_RECORD, TAG_LEN};
 use super::roots::Anchors;
 use super::schedule::{self, Secret, HASH_LEN};
+use super::chain::PeerChain;
 use super::verify;
 use super::x509::{self, Key};
 use super::Error;
@@ -232,6 +233,11 @@ pub struct Config<'a> {
     pub anchors: &'a dyn Anchors,
     /// Unix seconds – from a plausible clock (the caller checks; syscall 59).
     pub now: i64,
+    /// Only for the time service's NTS-KE while the clock is not plausible: Some(b) – the
+    /// certificates need only notAfter >= b (verify::When::Bootstrap, `now` is not used) and
+    /// the chain is kept for the second check over T +- U (`take_chain`).  None everywhere
+    /// else.
+    pub bootstrap: Option<i64>,
     /// Cipher suites to offer, in order of preference (one or both).
     pub suites: &'a [Suite],
     /// One ALPN protocol to offer (1-32 bytes, e.g. b"ntske/1"); the server must confirm it.
@@ -379,6 +385,8 @@ struct Engine {
     /// The server's ChangeCipherSpec may still come (until its Finished).
     ccs_allowed: bool,
     skip_chain_check: bool,
+    /// The server's chain as it came, kept only for a bootstrap (chain.rs).
+    peer: PeerChain,
 }
 
 pub struct Client {
@@ -596,6 +604,7 @@ impl Client {
                 failed: None,
                 ccs_allowed: false,
                 skip_chain_check: false,
+                peer: PeerChain::new(),
             },
         }
     }
@@ -630,6 +639,7 @@ impl Client {
         s.failed = None;
         s.ccs_allowed = false;
         s.skip_chain_check = false;
+        s.peer.clear();
     }
 
     /// The whole handshake.  Returns only when the server is authenticated and our
@@ -667,6 +677,8 @@ impl Client {
                 self.st.write = None;
                 wipe(&mut self.app.buf);
                 self.app.len = 0;
+                // A chain kept for a bootstrap belongs to a handshake that failed: gone.
+                self.st.peer.clear();
             }
         }
         r
@@ -1096,6 +1108,19 @@ impl Client {
             && zero(&self.io.wbuf)
             && zero(&self.hs.buf)
             && zero(&self.app.buf)
+            && s.peer.wiped()
+    }
+
+    /// After a successful bootstrap handshake: the server's chain from that handshake moves
+    /// into `out` (and is wiped here).  Err – not connected, or no chain was kept (not a
+    /// bootstrap).
+    pub fn take_chain(&mut self, out: &mut PeerChain) -> Result<(), TlsError> {
+        self.usable()?;
+        if self.st.peer.is_empty() {
+            return Err(TlsError::local(ALERT_INTERNAL_ERROR, "no certificate chain was kept (not a bootstrap)"));
+        }
+        self.st.peer.move_to(out);
+        Ok(())
     }
 
     /// The record numbers of the current keys (send, receive) and how many KeyUpdates moved
@@ -1379,8 +1404,17 @@ impl Engine {
         if n == 0 {
             return Err(TlsError::local(ALERT_DECODE_ERROR, "the server sent no certificate"));
         }
+        let when = match cfg.bootstrap {
+            Some(b) => verify::When::Bootstrap(b),
+            None => verify::When::At(cfg.now),
+        };
         if !self.skip_chain_check {
-            self.path = verify::server(&chain[..n], cfg.anchors, cfg.host, cfg.now).map_err(|e| TlsError { kind: Kind::Certificate(e), what: "", arg: 0 })?;
+            self.path = verify::server_when(&chain[..n], cfg.anchors, cfg.host, when).map_err(|e| TlsError { kind: Kind::Certificate(e), what: "", arg: 0 })?;
+        }
+        // A bootstrap: these exact bytes are kept for the second check (they are dropped if
+        // CertificateVerify or anything after it fails – fail_on).
+        if cfg.bootstrap.is_some() {
+            self.peer.store(&chain[..n]).map_err(|e| TlsError { kind: Kind::Certificate(e), what: "", arg: 0 })?;
         }
         // The key for CertificateVerify, copied (the message buffer is reused).
         let leaf = x509::Cert::parse(chain[0], false).map_err(|e| TlsError { kind: Kind::Certificate(e), what: "", arg: 0 })?;

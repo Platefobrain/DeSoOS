@@ -18,6 +18,16 @@
 //         instances  4                   at most this many devices of the class (default 1)
 //         grant      input               the INPUT handle (slot 5: keyboard / mouse events)
 //         grant      blk                 the BLK handle (slot 6: USB disk registration)
+//         grant      settime             the SETTIME handle (slot 7: setting the wall clock –
+//                                        the time service)
+//         grant      net                 a service channel narrowed to network connections and
+//                                        UDP (slot 3, like a program's svc channel; not with
+//                                        a device, which is slot 3 too)
+//         grant      roots               the trusted CA store, /etc/certs/roots, opened for
+//                                        reading (slot 8) – certificates without file access
+//         tests      off                 not started by `init test` (the kernel self-tests):
+//                                        a service that talks to servers outside the machine
+//                                        on its own (the time service)
 //         files      none                no file access at all (SPAWN_NO_FILES) | all
 //     An unknown key or grant, a missing name / program / files line: the manifest is
 //     refused ("bad manifest") and the service is not started.
@@ -37,8 +47,10 @@
 // (net.svc: class 020000) net0, net1; a card netd has no driver for ends with exit
 // code 78 and is not restarted ("no driver").
 //
-// The kernel gives init an INPUT handle (slot 5) and a BLK handle (slot 6: USB disk
-// registration) – init passes them only to services whose manifest grants them.
+// The kernel gives init an INPUT handle (slot 5), a BLK handle (slot 6: USB disk
+// registration) and a SETTIME handle (slot 7: the wall clock) – init passes them only to
+// services whose manifest grants them.  In test mode the test program also gets SETTIME in
+// slot 7 when init has it (the kernel's NTS TEST starts init with it; nothing else does).
 //
 // The kernel gives init a SYSCTL handle (slot 4: reboot, halt, sync, stress);
 // init passes it only to the shell.
@@ -62,6 +74,12 @@ const SHELL: &str = "/bin/sh";
 /// Grants a manifest can give (bits of `Def::grants`).
 const G_INPUT: u8 = 1;
 const G_BLK: u8 = 2;
+const G_SETTIME: u8 = 4;
+const G_NETWORK: u8 = 8;
+const G_ROOTS: u8 = 16;
+/// The trusted CA store (`grant roots`) and its slot.
+const ROOTS_PATH: &str = "/etc/certs/roots";
+const ROOTS_SLOT: u64 = 8;
 
 /// A short text kept in place (no heap in init).
 #[derive(Clone, Copy)]
@@ -97,10 +115,12 @@ struct Def {
     grants: u8,
     /// `files all` – otherwise the service is started without file access.
     files: bool,
+    /// `tests off` – not started in test mode.
+    no_tests: bool,
 }
 
 impl Def {
-    const EMPTY: Def = Def { name: Text::EMPTY, path: Text::EMPTY, title: Text::EMPTY, dev: None, grants: 0, files: false };
+    const EMPTY: Def = Def { name: Text::EMPTY, path: Text::EMPTY, title: Text::EMPTY, dev: None, grants: 0, files: false, no_tests: false };
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -139,7 +159,7 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
     let (mut has_name, mut has_files) = (false, false);
     // Keys allowed once (bit per key).
     let mut seen = 0u32;
-    const ONCE: [&str; 6] = ["name", "title", "program", "device", "instances", "files"];
+    const ONCE: [&str; 7] = ["name", "title", "program", "device", "instances", "files", "tests"];
     for (i, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -188,7 +208,10 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
                 let g = match rest {
                     "input" => G_INPUT,
                     "blk" => G_BLK,
-                    _ => return err("unknown grant (known: input, blk)"),
+                    "settime" => G_SETTIME,
+                    "net" => G_NETWORK,
+                    "roots" => G_ROOTS,
+                    _ => return err("unknown grant (known: input, blk, settime, net, roots)"),
                 };
                 if m.def.grants & g != 0 {
                     return err("grant given twice");
@@ -199,6 +222,10 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
                 "none" => (m.def.files, has_files) = (false, true),
                 "all" => (m.def.files, has_files) = (true, true),
                 _ => return err("files: none or all"),
+            },
+            "tests" => match rest {
+                "off" => m.def.no_tests = true,
+                _ => return err("tests: off"),
             },
             _ => return err("unknown key"),
         }
@@ -214,6 +241,9 @@ fn parse_manifest(text: &str) -> Result<Manifest, (usize, &'static str)> {
     }
     if m.instances > 1 && !matches!(m.device, Device::Class(_)) {
         return Err((0, "instances need a device class"));
+    }
+    if m.def.grants & G_NETWORK != 0 && !matches!(m.device, Device::None) {
+        return Err((0, "grant net and a device both use slot 3"));
     }
     Ok(m)
 }
@@ -359,7 +389,7 @@ impl Svc {
     }
 }
 
-fn start_service(d: &Def, s: &mut Svc) {
+fn start_service(d: &Def, s: &mut Svc, narrowed: &mut Narrowed) {
     let mut dev = 0u64;
     if let Some((b, dv, f)) = d.dev {
         let h = dev_claim(HW_ROOT, bdf(b, dv, f));
@@ -386,11 +416,43 @@ fn start_service(d: &Def, s: &mut Svc) {
         s.next_start = uptime_ms() + 1000;
         return;
     };
-    let mut map = [(1u64, 1u64), (listen_srv, 4), (0, 0), (0, 0), (0, 0)];
+    let mut map = [(1u64, 1u64), (listen_srv, 4), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)];
     let mut n = 2;
     if dev != 0 {
         map[n] = (dev, 3);
         n += 1;
+    }
+    // `grant net`: a service channel of its own that may only open network connections and
+    // UDP sockets (served like a narrowed one; forgotten when the service's end closes).
+    let mut net_cli = 0u64;
+    if d.grants & G_NETWORK != 0 {
+        if let (Some(k), Ok((srv, cli_any))) = (narrowed.ch.iter().position(|c| c.0 == 0), channel_create()) {
+            let cli = handle_dup(cli_any, R_SEND | R_DUP);
+            close(cli_any);
+            if cli >= 0 {
+                narrowed.ch[k] = (srv, G_NET | G_UDP);
+                net_cli = cli as u64;
+                map[n] = (net_cli, 3);
+                n += 1;
+            } else {
+                close(srv);
+            }
+        }
+    }
+    // `grant settime`: a copy of the SETTIME handle (slot 7) – the wall clock.
+    if d.grants & G_SETTIME != 0 && handle_info(SETTIME).map(|(k, _)| k) == Ok(KIND_SETTIME) {
+        map[n] = (SETTIME, 7);
+        n += 1;
+    }
+    // `grant roots`: the CA store opened for reading (slot 8).
+    let mut roots = 0u64;
+    if d.grants & G_ROOTS != 0 {
+        let fd = open(ROOTS_PATH, O_READ);
+        if fd >= 0 {
+            roots = fd as u64;
+            map[n] = (roots, ROOTS_SLOT);
+            n += 1;
+        }
     }
     // `grant input`: a copy of the INPUT handle (slot 5) – keyboard / mouse events to the
     // kernel.  Each copy is a separate source (the service exiting releases its keys).
@@ -408,6 +470,12 @@ fn start_service(d: &Def, s: &mut Svc) {
     let pid = spawn_ex(d.path(), &[d.name()], &map[..n], flags);
     if dev != 0 {
         close(dev);
+    }
+    if net_cli != 0 {
+        close(net_cli);
+    }
+    if roots != 0 {
+        close(roots);
     }
     close(listen_srv);
     if pid <= 0 {
@@ -695,17 +763,23 @@ impl core::fmt::Write for Out2<'_> {
 
 /// Shell (or test program) with the svc channel in slot 3, SYSCTL in slot 4
 /// and the program channel (for the programs it starts) in slot 5.
-fn start_shell(path: &str, extra: Option<&str>, svc_client: u64, prog_client: u64) -> u64 {
+fn start_shell(path: &str, test: bool, extra: Option<&str>, svc_client: u64, prog_client: u64) -> u64 {
     loop {
         let name = path.rsplit('/').next().unwrap_or(path);
         // The shell also gets the SYSCTL handle (slot 4) – reboot, halt, sync, stress.
-        let mut map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (prog_client, 5), (0, 0)];
+        let mut map = [(0, 0), (1, 1), (2, 2), (svc_client, 3), (prog_client, 5), (0, 0), (0, 0)];
         let mut n = 4;
         if prog_client != 0 {
             n += 1;
         }
         if handle_info(SYSCTL).map(|(k, _)| k) == Ok(KIND_SYSCTL) {
             map[n] = (SYSCTL, 4);
+            n += 1;
+        }
+        // Test mode: SETTIME too, when init has it (only the kernel's NTS TEST gives it to
+        // `init test`; the shell never gets it).
+        if test && handle_info(SETTIME).map(|(k, _)| k) == Ok(KIND_SETTIME) {
+            map[n] = (SETTIME, 7);
             n += 1;
         }
         // Test mode – one argument for the program (`init test /bin/x arg`).
@@ -741,12 +815,17 @@ fn main(args: Args) -> i32 {
     let defs = &table[..nsvc];
     let mut svcs_all = [const { Svc::new() }; MAX_SERVICES];
     let svcs = &mut svcs_all[..nsvc];
+    let mut narrowed = Narrowed::new();
     for (d, s) in defs.iter().zip(svcs.iter_mut()) {
-        start_service(d, s);
+        // `tests off`: not in test mode (the kernel self-tests).
+        if test.is_some() && d.no_tests {
+            s.state = State::Stopped;
+            continue;
+        }
+        start_service(d, s, &mut narrowed);
     }
 
-    let mut narrowed = Narrowed::new();
-    let mut shell = start_shell(shell_path, test_arg, svc_client, prog_client);
+    let mut shell = start_shell(shell_path, test.is_some(), test_arg, svc_client, prog_client);
     let mut started_at = uptime_ms();
     let mut orphans = 0u64;
     loop {
@@ -756,7 +835,7 @@ fn main(args: Args) -> i32 {
         for (d, s) in defs.iter().zip(svcs.iter_mut()) {
             if s.state == State::Waiting {
                 if now >= s.next_start {
-                    start_service(d, s);
+                    start_service(d, s, &mut narrowed);
                 } else {
                     timeout = timeout.min(s.next_start - now);
                 }
@@ -832,7 +911,7 @@ fn main(args: Args) -> i32 {
                     sleep_ms(1000);
                 }
                 println!("init: shell {} {} - starting a new one", pid, describe_status(status));
-                shell = start_shell(shell_path, test_arg, svc_client, prog_client);
+                shell = start_shell(shell_path, test.is_some(), test_arg, svc_client, prog_client);
                 started_at = uptime_ms();
                 continue;
             }

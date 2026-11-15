@@ -121,15 +121,25 @@ timings move by ±15% from run to run on the same build).
 - memory per UDP socket: a socket is a channel of up to 64 messages of 1472 B – when full 64 × (1472 + 64) B =
   96 KiB of the kernel's 16 MiB message budget (it counts data + 64 B per message; allocator rounding is not
   counted), 768 KiB for all 8
-- `nettime` (NTP) reads only: no clock is set, no daemon, no periodic synchronisation; plain NTP is not
-  authenticated, so its answer is information, not trusted time; IPv4 only, no server side
-- `nettime --nts` (v0.79 stage B) is authenticated but also reads only until the time service (stage D); it needs a
-  plausible clock for the NTS-KE certificate; NTS-KE runs one server after the other (a dead server costs the next ones
-  up to 3 × `-t`, 6 s by default); cookies and keys stay in memory
-  (after a restart always a new NTS-KE); only AEAD_AES_SIV_CMAC_256; request limit 1200 bytes without PMTU discovery
-- the last known good time (v0.79 stage C): nothing raises it in a normal build until the time service (stage D); on
-  real hardware there is no writable system volume yet (the SSD is read-only), so it lives in memory only and starts
-  from the build date at every boot; the file's SHA-256 guards against accidents, not against a change outside DeSoOS;
+- `nettime` (NTP) reads only: plain NTP is not authenticated, so its answer is information, not trusted time; IPv4
+  only, no server side
+- `nettime --nts` is authenticated but reads only (the time service alone sets the clock); it needs a plausible clock
+  for the NTS-KE certificate; NTS-KE runs one server after the other (a dead server costs the next ones up to
+  3 × `-t`, 6 s by default) – in nettime and in the time service; cookies and keys stay in memory (after a restart
+  always a new NTS-KE); only AEAD_AES_SIV_CMAC_256; request limit 1200 bytes without PMTU discovery
+- the time service (v0.79 stage D): the kernel trusts its word that a time came from NTS and from different operators
+  (it checks only the numbers and that the LKG never goes down) – a fault in or a takeover of `/bin/timekeeper` means a
+  wrong time within those rules; different operators are different organisations, not proof of independent
+  infrastructure (a common upstream such as GNSS, a common provider or CA); the final interval contains the true time
+  only if at least one member's interval is a correct bound for its own measurement – root delay and dispersion are
+  the server's own estimates, NTS authenticates where they came from, not that they are right; the bootstrap's first
+  step accepts a certificate that is not valid yet (the second check and the quorum make up for it); the clock is
+  corrected by a step (no slewing), only after a quorum, at start and every hour (no drift tracking in between); the
+  server list is fixed in the program (a new image to change it); the NTS-KE backoff grows to 5 days, so a network
+  that comes back after a long time may wait for the next try; no IPv6
+- the last known good time: on real hardware there is no writable system volume yet (the SSD is read-only), so it
+  lives in memory only and starts from the build date at every boot – recovery from an unreadable file can be tested
+  only in QEMU; the file's SHA-256 guards against accidents, not against a change outside DeSoOS;
   rolling the disk back (an old image, `desofs snapshot restore`) can lower it – a hardware monotonic counter (TPM NV)
   is a later step; `/.desoos` is reserved only on DeSoFS volumes
 - `nettime`'s difference is an estimate: the clock counts whole seconds, the path asymmetry adds up to delay / 2, the

@@ -88,6 +88,23 @@ answer:
    subjectAltName dNSName matching the host;
 4. a path up to a trust anchor (below).
 
+### The time rule (v0.79)
+
+"Valid at `now`" above is one of three rules (`verify::server_when(chain, anchors, host, When)`); everything else in the
+check is the same code:
+
+| Rule | Every certificate of the path, the anchor too | Used by |
+|---|---|---|
+| `At(t)` | notBefore ≤ t ≤ notAfter | everything (`verify::server`), t = a plausible clock |
+| `Bootstrap(b)` | notAfter ≥ b; notBefore not looked at | the first step of the time service's NTS-KE while the clock is not plausible – b = the kernel's bound (the LKG or the build date) |
+| `Over(a, b)` | notBefore ≤ a and notAfter ≥ b | the second step (`verify::server_over`): the same chain, kept from that handshake (`chain::PeerChain`), over the measured [T − U, T + U] |
+
+`Bootstrap` is weaker than an ordinary check – a certificate that is not valid yet passes – and only the second step
+makes up for it; validity is a span, so valid at both ends of [a, b] means valid everywhere in between. Only the time
+service can ask for a bootstrap (`Config::bootstrap`); then the client copies the chain while it handles the Certificate
+message, wipes the copy when the handshake fails, and hands it over with `Client::take_chain` (at most 8 certificates
+and 24 KiB – real NTS servers send 2–5 KiB). `../time/TIMEKEEPER.md` has the rest.
+
 ## Path building
 
 Depth first from the server certificate; for the certificate on top, the trust
@@ -175,7 +192,8 @@ date possible, the strongest floor); no git, so it never depends on a repository
 `date` / `sysinfo date` show it. Linux (systemd) has three layers – the build date, the last known time saved on
 disk, NTP; DeSoOS has the build date and, from v0.79, the last known good time on the system volume
 (`../time/LKG.md`: a clock below it is refused – reason 7, and an unreadable LKG file is reason 8); NTS
-(`../time/NTS.md`) reads an authenticated time and from stage D raises the LKG. It is a heuristic, not proof: it refuses a lost battery, a
+(`../time/NTS.md`) reads an authenticated time, and the time service (`../time/TIMEKEEPER.md`) corrects the wall clock
+and raises the LKG with it – after that the RTC's own reasons no longer count. It is a heuristic, not proof: it refuses a lost battery, a
 broken reading and dates older than the image, but anyone with access to the firmware can set any date inside the
 range (and so make an expired certificate "valid" again); an RTC kept in local time (Windows next to it) cannot be
 detected. Without NTP the check of a certificate's dates is as good as the RTC. `netget https://` refuses to
@@ -209,7 +227,7 @@ attacks the sealed store.
 
 ## Tests
 
-`common/desotls/tests.rs` – 307 checks: DER edge cases, times (leap years, 2049 / 1950, 2100), host names
+`common/desotls/tests.rs` – 332 checks: DER edge cases, times (leap years, 2049 / 1950, 2100), the three time rules of a chain (At / Bootstrap / Over on real chains with an intermediate), host names
 and wildcards, name constraints on a wildcard with each of the two checks on its own (below), PEM, the store format and damaged stores, `vectors/certs.bin` (122 chains made with Python
 `cryptography`, the impossible ones by editing DER and signing again – every rule of the profile right and wrong,
 each limit at and past its value) and `vectors/real.bin` (12 real server chains from the rustls/webpki test data:

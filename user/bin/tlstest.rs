@@ -157,7 +157,7 @@ fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
     random.client_random.copy_from_slice(&rnd[..32]);
     random.session_id.copy_from_slice(&rnd[32..64]);
     random.x25519_secret.copy_from_slice(&rnd[64..]);
-    let cfg = Config { host: "tls.desoos", anchors: &anchors, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn };
+    let cfg = Config { host: "tls.desoos", anchors: &anchors, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn, bootstrap: None };
     let cl = unsafe { &mut *core::ptr::addr_of_mut!(XCLIENT) };
     let mut t = Chan { c, pos: 0, len: 0 };
     let info = match cl.connect(&mut t, &cfg, &random) {

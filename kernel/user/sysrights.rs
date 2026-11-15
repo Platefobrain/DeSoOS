@@ -38,6 +38,7 @@ const SYSCTL: u16 = k(kind::SYSCTL);
 const INPUT: u16 = k(kind::INPUT);
 const BLK: u16 = k(kind::BLK);
 const DIR: u16 = k(kind::DIR);
+const SETTIME: u16 = k(kind::SETTIME);
 /// Data streams: read / write.
 const STREAM: u16 = CONSOLE | FILE | PIPE;
 const ANY: u16 = 0xFFFE;
@@ -104,8 +105,8 @@ const fn with(name: &'static str, args: &'static [Arg]) -> Option<Rule> {
 }
 
 /// Indexed by syscall number.
-pub static TABLE: [Option<Rule>; 60] = {
-    let mut t = [const { None }; 60];
+pub static TABLE: [Option<Rule>; 62] = {
+    let mut t = [const { None }; 62];
     t[SYS_EXIT as usize] = plain("exit");
     t[SYS_WRITE as usize] = with("write", &[h(0, STREAM, WRITE)]);
     t[SYS_READ as usize] = with("read", &[h(0, STREAM, READ)]);
@@ -167,6 +168,8 @@ pub static TABLE: [Option<Rule>; 60] = {
     t[SYS_READDIR_PART as usize] = with("readdir_part", &[h(0, DIR, READ)]);
     t[SYS_GETRANDOM as usize] = plain("getrandom");
     t[SYS_TIME as usize] = plain("time");
+    t[SYS_TIME_SET as usize] = with("time_set", &[h(0, SETTIME, WRITE)]);
+    t[SYS_TIME_BOUND as usize] = plain("time_bound");
     t
 };
 

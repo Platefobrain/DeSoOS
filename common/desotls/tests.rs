@@ -1,5 +1,6 @@
 // DeSoTLS tests – DER edge cases, times, host names and wildcards, PEM, the CA store
-// format, and certificate chains (vectors/certs.bin – made by gen-certs.py – and real server
+// format, the time rules of a chain (At / Bootstrap / Over – tests/tls/nts-*.pem and
+// future.pem / expired.pem), and certificate chains (vectors/certs.bin – made by gen-certs.py – and real server
 // chains in vectors/real.bin – gen-real.py).
 //
 // Not part of the library: included only by /bin/certtest and the kernel CERT TEST, as a
@@ -55,6 +56,7 @@ pub fn run() -> Result<usize, Failure> {
     constraint_checks(&mut c)?;
     pem_checks(&mut c)?;
     store_checks(&mut c)?;
+    window_checks(&mut c)?;
     chain_cases(&mut c, "chains", CERTS, None)?;
     chain_cases(&mut c, "real chains", REAL, None)?;
     Ok(c.passed)
@@ -344,6 +346,82 @@ fn pem_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(pem::certificates(PEM_ONE, &mut small, &mut spans) == Err(Error::CertTooLarge))?;
     let mut one = [(0usize, 0usize); 1];
     c.check(pem::certificates(PEM_ONE, &mut out, &mut one) == Err(Error::ChainTooLong))?;
+    Ok(())
+}
+
+const NTS_ROOT: &[u8] = include_bytes!("../../tests/tls/nts-root.pem");
+const NTS_GOOD: &[u8] = include_bytes!("../../tests/tls/nts-good.pem");
+const NTS_INTSHORT: &[u8] = include_bytes!("../../tests/tls/nts-intshort.pem");
+const TEST_CA: &[u8] = include_bytes!("../../tests/tls/ca.pem");
+const FUTURE: &[u8] = include_bytes!("../../tests/tls/future.pem");
+const EXPIRED: &[u8] = include_bytes!("../../tests/tls/expired.pem");
+
+/// The time rules of verify::server_when on real chains with an intermediate (the time
+/// service's bootstrap: step 1 Bootstrap(b), step 2 Over(T - U, T + U) on the same chain).
+fn window_checks(c: &mut Checks) -> Result<(), Failure> {
+    c.group("time rules");
+    let bad = Failure { group: "time rules", case: 0 };
+    const Y2025: i64 = 1_735_689_600;
+    const Y2026: i64 = 1_767_225_600;
+    const Y2030: i64 = 1_893_456_000; // Intermediate B's notAfter
+    const Y2040: i64 = 2_208_988_800; // future.pem's notBefore
+    const Y2045: i64 = 2_366_841_600; // the test CA's notAfter
+    const Y2060: i64 = 2_840_140_800; // the NTS chain's notAfter
+    let mut roots = [0u8; 2048];
+    let mut rs = [(0usize, 0usize); 2];
+    pem::certificates(NTS_ROOT, &mut roots, &mut rs).map_err(|_| bad)?;
+    let (r0, rl) = rs[0];
+    let mut ca = [0u8; 2048];
+    let mut cs = [(0usize, 0usize); 2];
+    pem::certificates(TEST_CA, &mut ca, &mut cs).map_err(|_| bad)?;
+    let one: [&[u8]; 2] = [&roots[r0..r0 + rl], &ca[cs[0].0..cs[0].0 + cs[0].1]];
+    let anchors = super::desotls::roots::AnchorList(&one);
+    let run = |text: &[u8], when: verify::When, host: &str| -> Result<Result<(), Error>, Failure> {
+        let mut der = [0u8; 4096];
+        let mut sp = [(0usize, 0usize); 4];
+        let n = pem::certificates(text, &mut der, &mut sp).map_err(|_| bad)?;
+        let mut chain: [&[u8]; 4] = [&[]; 4];
+        for i in 0..n {
+            chain[i] = &der[sp[i].0..sp[i].0 + sp[i].1];
+        }
+        Ok(verify::server_when(&chain[..n], &anchors, host, when).map(|_| ()))
+    };
+    use verify::When::{At, Bootstrap, Over};
+    let host = "tls.desoos";
+    // An ordinary check.
+    c.check(run(NTS_GOOD, At(Y2026), host)? == Ok(()))?;
+    c.check(run(NTS_GOOD, At(Y2025 - 1), host)? == Err(Error::NotYetValid))?;
+    c.check(run(NTS_GOOD, At(Y2060 + 1), host)? == Err(Error::Expired))?;
+    // Bootstrap: only notAfter >= b counts – for every certificate, the anchor too.
+    c.check(run(NTS_GOOD, Bootstrap(Y2060), host)? == Ok(()))?;
+    c.check(run(NTS_GOOD, Bootstrap(Y2060 + 1), host)? == Err(Error::Expired))?;
+    c.check(run(NTS_GOOD, Bootstrap(Y2025 - 86_400), host)? == Ok(()))?;
+    c.check(run(FUTURE, Bootstrap(Y2026), host)? == Ok(()))?; // not valid yet: passes step 1
+    c.check(run(FUTURE, At(Y2026), host)? == Err(Error::NotYetValid))?;
+    c.check(run(EXPIRED, Bootstrap(Y2026), host)? == Err(Error::Expired))?;
+    c.check(run(NTS_INTSHORT, Bootstrap(Y2030), host)? == Ok(()))?;
+    c.check(run(NTS_INTSHORT, Bootstrap(Y2030 + 1), host)? == Err(Error::Expired))?; // the intermediate
+    c.check(run(NTS_GOOD, Bootstrap(Y2026), "other.desoos")? == Err(Error::NameMismatch))?;
+    c.check(run(NTS_GOOD, Bootstrap(Y2045 + 1), host)? == Ok(()))?;
+    // Over: valid over the whole span.
+    c.check(run(NTS_GOOD, Over(Y2026, Y2026 + 3), host)? == Ok(()))?;
+    c.check(run(NTS_GOOD, Over(Y2025 - 1, Y2026), host)? == Err(Error::NotYetValid))?;
+    c.check(run(NTS_GOOD, Over(Y2060 - 1, Y2060 + 1), host)? == Err(Error::Expired))?;
+    c.check(run(FUTURE, Over(Y2040 - 1, Y2040 + 1), host)? == Err(Error::NotYetValid))?;
+    c.check(run(FUTURE, Over(Y2040, Y2040 + 2), host)? == Ok(()))?;
+    // The intermediate ends inside the span: valid at one end, not over the span.
+    c.check(run(NTS_INTSHORT, At(Y2030), host)? == Ok(()))?;
+    c.check(run(NTS_INTSHORT, Over(Y2030 - 2, Y2030), host)? == Ok(()))?;
+    c.check(run(NTS_INTSHORT, Over(Y2030 - 1, Y2030 + 1), host)? == Err(Error::Expired))?;
+    c.check(run(NTS_INTSHORT, Over(Y2030 + 365 * 86_400, Y2030 + 365 * 86_400 + 2), host)? == Err(Error::Expired))?;
+    c.check(run(NTS_GOOD, Over(Y2026, Y2026 + 3), "other.desoos")? == Err(Error::NameMismatch))?;
+    // A span the wrong way round is refused.
+    let mut der = [0u8; 4096];
+    let mut sp = [(0usize, 0usize); 4];
+    let n = pem::certificates(NTS_GOOD, &mut der, &mut sp).map_err(|_| bad)?;
+    let chain = [&der[sp[0].0..sp[0].0 + sp[0].1], &der[sp[1].0..sp[1].0 + sp[1].1]];
+    c.check(n == 2 && verify::server_over(&chain, &anchors, host, Y2026 + 1, Y2026).is_err())?;
+    c.check(verify::server_over(&chain, &anchors, host, Y2026, Y2026 + 1).is_ok())?;
     Ok(())
 }
 

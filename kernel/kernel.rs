@@ -326,6 +326,11 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::time_self_test();
     }
+    // The time service – timekeeper against tests/nts-server, SYS_TIME_SET / SYS_TIME_BOUND.
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::nts_self_test();
+    }
     #[cfg(selftest)]
     if !selftest::looping() {
         user::stress_self_test();

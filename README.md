@@ -87,8 +87,12 @@ More documentation:
   good time); tool `certcheck`.
 - The last known good time: a lower bound for the clock kept in `/disk/.desoos/lkg` on the DeSoFS system volume
   (atomic, checked, survives a power loss); a clock below it, or an unreadable file, is not plausible and TLS
-  refuses; `/.desoos` is the kernel's – the VFS refuses every change by programs (`docs/time/LKG.md`). Only an
-  authenticated time will raise it (v0.79 stage D).
+  refuses; `/.desoos` is the kernel's – the VFS refuses every change by programs (`docs/time/LKG.md`).
+- The time service (`time`, `/bin/timekeeper`): authenticated time with NTS from three operators (Cloudflare, Netnod,
+  PTB), set only when at least two agree; the only holder of the right to set the clock (`SYS_TIME_SET`) – the kernel
+  checks the numbers and never lowers the last known good time; without a plausible clock (or with an unreadable LKG)
+  it bootstraps from the LKG / build date and checks the same certificate chain again over the measured time
+  (`docs/time/TIMEKEEPER.md`).
 - HTTPS: DeSoTLS speaks TLS 1.3 as a client (X25519, AES-128-GCM and ChaCha20-Poly1305, ECDSA and RSA-PSS
   server signatures, KeyUpdate, close_notify) – no TLS 1.2, no "insecure" mode: either the server is fully
   authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
@@ -103,7 +107,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (38 suites, a restart phase and a short soak, 310 tests), stress tests and a long soak test
+- Built-in self-tests (39 suites, a restart phase and a short soak, 317 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -202,7 +206,7 @@ Disks attached by `run-qemu.sh`:
 tests/test.sh                # build --selftest + run tests in headless QEMU
 tests/test.sh --no-build     # run only (after your own ./build.sh --selftest)
 tests/test.sh --verbose      # show the whole log live
-TIMEOUT=300 tests/test.sh    # change the timeout (default 240 s)
+TIMEOUT=600 tests/test.sh    # change the timeout (default 480 s)
 ACCEL=kvm tests/test.sh      # with KVM; SMP=N also works (default 4)
 LOOP=nobkl:400 tests/test.sh # loop mode: one suite 400 times, stops at the first failure
 ```

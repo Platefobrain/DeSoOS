@@ -139,19 +139,51 @@ fn write_set() -> T {
     made.map_err(|x| format!("snapshot: {}", x))?;
     new_file(AFTER_SNAP, &pattern(2000, 66))?;
     put("/disk/one", 0, &pattern(1, 67))?;
-    // The last known good time two days ahead of the clock (the self-test switch, as an
-    // authenticated time would raise it): after the restart it must be read back from
-    // /disk/.desoos/lkg and the clock – now "set back" below it – refused (reason 7).
-    let ahead = crate::drivers::rtc::time_status().0 + 2 * 86_400;
-    let r = crate::time_lkg::raise_for_test(ahead);
-    ensure!(r == crate::time_lkg::Raised::Saved, "the LKG was not saved: {:?}", r);
-    ensure!(crate::drivers::rtc::time_status().1 == Err(crate::drivers::rtc::Implausible::BeforeLkg), "the clock below the LKG: {:?}", crate::drivers::rtc::time_status().1);
+    // The last known good time on /disk: saved (the self-test switch), damaged on the volume
+    // (reason 8), the memory emptied as after a restart – then the time service recovers
+    // (bootstrap with the build date, NTS from two operators of tests/nts-server, the file
+    // written anew).  After the restart it must be read back at boot: good, NTS, no reason 8.
+    let lkg_line = recover_lkg()?;
     Ok(format!(
-        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); snapshot {} of that state, then a new file and a changed one; the last known good time saved 2 days ahead of the clock; powering off normally",
+        "disk 0 formatted and mounted as at start; {} files and directories (0 B to 1 MiB with a hole, 3 levels, rename replacing a file, removed files) + 300 entries with 10 removed ({} directory blocks); snapshot {} of that state, then a new file and a changed one; {}; powering off normally",
         expected().len(),
         st.size / 4096,
-        SNAP
+        SNAP,
+        lkg_line
     ))
+}
+
+/// Part 1's LKG: saved, damaged, recovered by /bin/timekeeper (init test, SETTIME).
+fn recover_lkg() -> T {
+    use crate::drivers::rtc::{self, Implausible};
+    use crate::time_lkg::{self as lkg, FileState, Source};
+    let ahead = rtc::time_status().0 + 2 * 86_400;
+    let r = lkg::raise_for_test(ahead);
+    ensure!(r == lkg::Raised::Saved, "the LKG was not saved: {:?}", r);
+    let mut damaged = false;
+    fs::with_desofs_at(lkg::SYSTEM_MOUNT, &mut |v| {
+        use crate::fs::FileSystem;
+        let mut b = [0u8; 1];
+        damaged = v.read(lkg::FILE, 20, &mut b).is_ok() && v.write(lkg::FILE, 20, &[b[0] ^ 0x40]).is_ok();
+    });
+    ensure!(damaged, "could not damage the LKG file");
+    lkg::reset_for_test();
+    lkg::load();
+    ensure!(matches!(lkg::file_state(), FileState::Unreadable(_)) && rtc::time_status().1 == Err(Implausible::LkgUnreadable), "not reason 8: {:?} {:?}", lkg::file_state(), rtc::time_status().1);
+    let opts = crate::user::SpawnOptions { stdin: Some(Vec::new()), capture: true, hw_root: true, sysctl: true, input: true, blk: true, settime: true, ..crate::user::SpawnOptions::default() };
+    let id = crate::user::exec("/bin/init", &["init", "test", "/bin/timekeeper", "test:three"], "/", &opts).map_err(|x| format!("init test timekeeper: {:?}", x))?;
+    let end = crate::time::ticks() + 120_000;
+    while crate::sched::task_info(id).is_some() && crate::time::ticks() < end {
+        crate::time::sleep_ms(5);
+    }
+    ensure!(crate::sched::task_info(id).is_none(), "timekeeper did not finish");
+    let out = String::from_utf8_lossy(&crate::user::captured_output(id).unwrap_or_default()).into_owned();
+    let result = out.lines().find(|l| l.starts_with("timekeeper: result:")).unwrap_or("").trim();
+    ensure!(out.contains("timekeeper: recovery: last known good time unreadable") && result.contains("set from 2 operators") && result.contains("unreadable LKG file written anew"), "the recovery: {:?}", out.trim());
+    ensure!(lkg::file_state() == FileState::Good && lkg::source() == Source::Nts && rtc::time_status().1.is_ok(), "after the recovery: {:?} {:?} {:?}", lkg::file_state(), lkg::source(), rtc::time_status().1);
+    // The wall clock back to the RTC's for the rest of this start.
+    rtc::reset_wall_for_test();
+    Ok(format!("the last known good time saved, damaged on the volume (reason 8) and recovered by the time service ({} UTC, NTS from 2 operators, the file written anew)", rtc::DateTime::from_unix(lkg::bound())))
 }
 
 const SNAP: &str = "before-restart";
@@ -240,22 +272,26 @@ fn run(path: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&crate::user::captured_output(id).unwrap_or_default()).into_owned())
 }
 
-/// The LKG part 1 saved: read back at boot from /disk/.desoos/lkg; the clock (the host's
-/// time, two days below it) refused with reason 7, and netget https refuses before sending.
+/// The LKG part 1 recovered: read back at boot from /disk/.desoos/lkg – good, from NTS, no
+/// reason 8, the clock plausible; the file still protected.  Then, live, an LKG two days ahead
+/// of the clock: reason 7, and netget https refuses before sending.
 fn last_known_good() -> T {
     use crate::drivers::rtc::{self, Implausible};
     use crate::time_lkg::{self as lkg, FileState, Source};
     let (now, verdict) = rtc::time_status();
-    ensure!(lkg::file_state() == FileState::Good && lkg::source() == Source::Test, "the LKG was not read back: {:?} {:?}", lkg::file_state(), lkg::source());
+    ensure!(lkg::file_state() == FileState::Good && lkg::source() == Source::Nts, "the recovered LKG was not read back: {:?} {:?}", lkg::file_state(), lkg::source());
     let b = lkg::bound();
-    ensure!(b > now + 86_400 && b < now + 3 * 86_400, "the LKG read back is {} (clock {})", b, now);
-    ensure!(verdict == Err(Implausible::BeforeLkg), "the clock below the LKG: {:?}", verdict);
+    ensure!(b + 7200 > now && b <= now, "the LKG read back is {} (clock {})", b, now);
+    ensure!(verdict.is_ok(), "the clock after the restart: {:?}", verdict);
+    let rec = fs::read_file("/disk/.desoos/lkg").map_err(|x| e("read the LKG", x))?;
+    ensure!(rec == lkg::encode(b, Source::Nts), "the file is not the record of {}", b);
+    ensure!(fs::remove("/disk/.desoos/lkg") == Err(fs::FsError::Reserved), "the LKG file could be removed");
+    let ahead = now + 2 * 86_400;
+    ensure!(lkg::raise_for_test(ahead) == lkg::Raised::Saved, "raise ahead");
+    ensure!(rtc::time_status().1 == Err(Implausible::BeforeLkg), "the clock below the LKG: {:?}", rtc::time_status().1);
     let out = run("/bin/netget", &["netget", "https://tls.desoos:58443/hello"])?;
     ensure!(out.contains("TLS refused: clock not plausible: clock earlier than the last known good time") && out.contains("nothing sent"), "netget https: {:?}", out.trim());
-    let rec = fs::read_file("/disk/.desoos/lkg").map_err(|x| e("read the LKG", x))?;
-    ensure!(rec == lkg::encode(b, Source::Test), "the file is not the record of {}", b);
-    ensure!(fs::remove("/disk/.desoos/lkg") == Err(fs::FsError::Reserved), "the LKG file could be removed");
-    Ok(format!("read back at boot from /disk/.desoos/lkg ({} UTC, self-test); the clock {} s below it - reason 7; netget https refused before sending; the file still protected", rtc::DateTime::from_unix(b), b - now))
+    Ok(format!("the recovered LKG read back at boot from /disk/.desoos/lkg ({} UTC, NTS, no reason 8, the clock plausible, {} s above it); the file still protected; an LKG 2 days ahead - reason 7, netget https refused before sending", rtc::DateTime::from_unix(b), now - b))
 }
 
 fn hex(h: &[u8; 32]) -> String {

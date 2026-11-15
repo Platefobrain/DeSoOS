@@ -26,7 +26,7 @@ Where things are:
 |---|---|
 | `common/desotls/` | the code (file map in its `README.md`) |
 | `common/desotls/tls_tests.rs` | 134 checks of the connection: RFC 8448 byte for byte, scripted servers |
-| `common/desotls/tests.rs`, `vectors/` | 307 checks of certificates, 122 made-up chains, 12 real ones |
+| `common/desotls/tests.rs`, `vectors/` | 332 checks of certificates (with the time rules At / Bootstrap / Over), 122 made-up chains, 12 real ones |
 | `user/etc/certs/` | the CA store `roots` and `gen-roots.py`, which makes it from Mozilla's `certdata.txt` |
 | `kernel/drivers/rtc.rs` | the wall clock and its verdict |
 | `user/bin/netget.rs` | `netget https://` |

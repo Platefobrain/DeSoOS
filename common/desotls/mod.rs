@@ -7,6 +7,7 @@
 //   #[path = ".../common/desocrypto/mod.rs"] mod desocrypto;
 //   #[path = ".../common/desotls/mod.rs"]    mod desotls;
 //
+//   chain   a server's chain kept after a bootstrap handshake (the time service's second check)
 //   client  the TLS 1.3 client: handshake, application data, KeyUpdate, close; ALPN
 //           (one protocol, RFC 7301) and the exporter (RFC 9846 §7.5) for NTS-KE
 //   record  records: protection with the two AEADs, TLSInnerPlaintext, limits
@@ -25,6 +26,7 @@
 
 use super::desocrypto as crypto;
 
+pub mod chain;
 pub mod client;
 pub mod der;
 pub mod name;

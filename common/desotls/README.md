@@ -13,7 +13,8 @@ turns a check off.
 | `der.rs` | strict DER reading: minimal lengths, no indefinite form, BOOLEAN 00/FF, minimal INTEGER, depth limit 16 |
 | `x509.rs` | one certificate: version, names, validity, keys (RSA, EC P-256/P-384), signature algorithms (PKCS#1, PSS with explicit parameters, ECDSA with its curve's hash), extensions |
 | `name.rs` | host names, subjectAltName matching (one-label wildcards), DNS name constraints |
-| `verify.rs` | `verify::server(chain, anchors, host, now)` – path building to a trust anchor with every check and the limits |
+| `verify.rs` | `verify::server(chain, anchors, host, now)` – path building to a trust anchor with every check and the limits; the time rule `When` (`At`, `Bootstrap`, `Over` – `server_when`, `server_over`) |
+| `chain.rs` | `PeerChain` – a server's chain kept after a bootstrap handshake (the time service's second check) |
 | `roots.rs` | the trusted CA store file (`/etc/certs/roots`) and other anchor lists |
 | `pem.rs` | PEM text to DER (for `certcheck` and the tests) |
 | `tests.rs` | certificate tests – included only by `/bin/certtest` and the kernel's CERT TEST |
@@ -32,7 +33,7 @@ let roots = desotls::roots::Roots::parse(&store_bytes)?;
 let v = desotls::verify::server(&[leaf, intermediate], &roots, "example.com", now)?;
 
 // A connection: a Transport (send / recv) and fresh randomness from getrandom.
-let cfg = desotls::client::Config { host: "example.com", anchors: &roots, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305] };
+let cfg = desotls::client::Config { host: "example.com", anchors: &roots, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn: None, bootstrap: None };
 CLIENT.connect(&mut transport, &cfg, &random)?;      // static CLIENT: Client = Client::new();
 CLIENT.write(&mut transport, request)?;
 let n = CLIENT.read(&mut transport, &mut buf)?;     // 0 = the server's close_notify

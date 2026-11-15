@@ -17,6 +17,24 @@
 //                             (ERROR_NOT_PERMITTED), as the handle keeps a path and every write
 //                             picks the volume again: "timetest stale: the write through a handle
 //                             opened before the mount was refused"
+//   timetest set             SYS_TIME_SET without the right and with numbers out of range
+//                            (the program holds a SETTIME handle – the kernel test gives it):
+//                            no handle, another kind of handle, SETTIME without WRITE,
+//                            servers 0 / 1 / 4 / u64::MAX, u above 10 s, t - u before the
+//                            build date, t + u after 2099, overflows, t + u below the LKG –
+//                            each refused with its error and SYS_TIME_BOUND unchanged after
+//                            all of them: "timetest set: K refusals, nothing changed"
+//   timetest bound           SYS_TIME_BOUND's buffer: len 39 refused and nothing written, 40 /
+//                            41 / 4096 – exactly 40 bytes written (the rest untouched),
+//                            NULL, a kernel address, an unmapped one, a read-only page, a
+//                            buffer running into the gap after a mapping – ERROR_INVALID_ADDRESS:
+//                            "timetest bound: K cases OK (B=..., file=..., flags=...)"
+//   timetest clock <a> <b> <ms>  while the kernel moves the wall clock back and forth between
+//                            the times a and b (Unix seconds): for <ms> ms every reading of
+//                            syscall 59 must be one of the two clocks (never a mix), and a
+//                            sleep of 200 ms must take 200 ms of uptime (the steps do not
+//                            touch it): "timetest clock: N readings (A at a, B at b), sleep
+//                            200 ms took T ms"
 //
 // A failure prints "timetest: FAIL ..." and exits with 1.
 #![no_std]
@@ -205,15 +223,174 @@ fn stale(file: &str, opened: &str, go: &str) -> i32 {
     0
 }
 
+/// The first SETTIME handle this process holds.
+fn settime_handle() -> Option<u64> {
+    (0..64u64).find(|&h| matches!(handle_info(h), Ok((k, _)) if k == KIND_SETTIME))
+}
+
+fn set() -> i32 {
+    let Some(h) = settime_handle() else {
+        println!("timetest: FAIL no SETTIME handle");
+        return 1;
+    };
+    let Ok(before) = time_bound() else {
+        println!("timetest: FAIL time_bound");
+        return 1;
+    };
+    let build_ms = before.build * 1000;
+    let ok_t = build_ms + 86_400_000;
+    let mut n = 0;
+    let mut bad = false;
+    let mut expect = |what: &str, r: i64, want: i64| {
+        n += 1;
+        if r != want {
+            println!("timetest: FAIL {}: {} (expected {})", what, if r >= 0 { "accepted" } else { error_name(r) }, error_name(want));
+            bad = true;
+        }
+    };
+    // The right.
+    expect("no handle", time_set(60, ok_t, 1000, 2), ERROR_INVALID_HANDLE);
+    expect("the console instead", time_set(1, ok_t, 1000, 2), ERROR_INVALID_HANDLE);
+    let weak = handle_dup(h, R_DUP);
+    if weak < 0 {
+        println!("timetest: FAIL handle_dup: {}", error_name(weak));
+        return 1;
+    }
+    expect("SETTIME without WRITE", time_set(weak as u64, ok_t, 1000, 2), ERROR_ACCESS_DENIED);
+    close(weak as u64);
+    // The numbers.
+    for servers in [0u64, 1, 4, u32::MAX as u64, u64::MAX] {
+        expect("servers out of 2..=3", time_set(h, ok_t, 1000, servers), ERROR_INVALID_ARGUMENT);
+    }
+    expect("u above 10 s", time_set(h, ok_t, 10_001, 2), ERROR_INVALID_ARGUMENT);
+    expect("u = u64::MAX", time_set(h, ok_t, u64::MAX, 2), ERROR_INVALID_ARGUMENT);
+    expect("t - u before the build date", time_set(h, build_ms + 999, 1000, 2), ERROR_INVALID_ARGUMENT);
+    expect("t = 0", time_set(h, 0, 0, 2), ERROR_INVALID_ARGUMENT);
+    expect("t - u below 0", time_set(h, 500, 1000, 3), ERROR_INVALID_ARGUMENT);
+    expect("t + u after 2099", time_set(h, 4_102_444_799_000, 1000, 2), ERROR_INVALID_ARGUMENT);
+    expect("t + u overflows", time_set(h, u64::MAX - 10, 1000, 2), ERROR_INVALID_ARGUMENT);
+    expect("t = u64::MAX", time_set(h, u64::MAX, 0, 2), ERROR_INVALID_ARGUMENT);
+    // Lowering the LKG: an interval wholly below it.
+    if before.lkg > before.build + 60 {
+        expect("t + u below the LKG", time_set(h, (before.lkg - 30) * 1000, 1000, 2), ERROR_NOT_PERMITTED);
+        expect("t + u one ms below the LKG", time_set(h, before.lkg * 1000 - 1001, 1000, 3), ERROR_NOT_PERMITTED);
+    }
+    let after = time_bound().unwrap_or_default();
+    if bad {
+        return 1;
+    }
+    if after != before {
+        println!("timetest: FAIL something changed: {:?} -> {:?}", before, after);
+        return 1;
+    }
+    println!("timetest set: {} refusals, nothing changed (LKG {}, file state {})", n, before.lkg, before.file);
+    0
+}
+
+fn bound() -> i32 {
+    let mut n = 0;
+    let mut buf = [0xAAu8; 4096];
+    let p = buf.as_mut_ptr() as u64;
+    macro_rules! case {
+        ($cond:expr, $($msg:tt)*) => {
+            n += 1;
+            if !$cond {
+                println!("timetest: FAIL bound case {}: {}", n, format_args!($($msg)*));
+                return 1;
+            }
+        };
+    }
+    let r = time_bound_raw(p, 39);
+    case!(r == ERROR_INVALID_ARGUMENT && buf.iter().all(|&b| b == 0xAA), "len 39: {} and nothing written", r);
+    let r = time_bound_raw(p, 0);
+    case!(r == ERROR_INVALID_ARGUMENT && buf.iter().all(|&b| b == 0xAA), "len 0: {}", r);
+    for len in [40u64, 41, 4096] {
+        buf.fill(0xAA);
+        let r = time_bound_raw(p, len);
+        case!(r == 40 && buf[40..].iter().all(|&b| b == 0xAA) && buf[32..40] == [0; 8], "len {}: {} - exactly 40 bytes, the last 8 zero", len, r);
+    }
+    let mut first = [0u8; 40];
+    first.copy_from_slice(&buf[..40]);
+    let tb = TimeBound::parse(&first);
+    case!(tb.bound == tb.lkg.max(tb.build) && tb.build > 0, "B = max(LKG, build date): {:?}", tb);
+    case!(tb.recovery() == (tb.file == 4), "recovery flag = file unreadable: {:?}", tb);
+    for (what, addr) in [("NULL", 0u64), ("a kernel address", 0xFFFF_8000_0000_0000), ("an unmapped address", 0x7000_0000_0000), ("the last bytes of the address space", u64::MAX - 20)] {
+        let r = time_bound_raw(addr, 40);
+        case!(r == ERROR_INVALID_ADDRESS, "{}: {}", what, error_name(r));
+    }
+    // A read-only page, and a buffer that runs from a mapping into the gap after it.
+    match (mmap(4096, PROT_READ), mmap(4096, PROT_READ | PROT_WRITE)) {
+        (Ok(ro), Ok(rw)) => {
+            let r = time_bound_raw(ro, 40);
+            case!(r == ERROR_INVALID_ADDRESS, "a read-only page: {}", error_name(r));
+            unsafe { core::ptr::write_bytes((rw + 4096 - 20) as *mut u8, 0x55, 20) };
+            let r = time_bound_raw(rw + 4096 - 20, 40);
+            let tail = unsafe { core::slice::from_raw_parts((rw + 4096 - 20) as *const u8, 20) };
+            case!(r == ERROR_INVALID_ADDRESS && tail.iter().all(|&b| b == 0x55), "across the end of a mapping: {} (nothing written)", error_name(r));
+            let r = time_bound_raw(rw + 4096 - 40, 40);
+            case!(r == 40, "the last 40 bytes of a mapping: {}", r);
+            munmap(ro, 4096);
+            munmap(rw, 4096);
+        }
+        _ => {
+            println!("timetest: FAIL mmap");
+            return 1;
+        }
+    }
+    println!("timetest bound: {} cases OK (B={}, LKG={}, file={}, flags={})", n, tb.bound, tb.lkg, tb.file, tb.flags);
+    0
+}
+
+fn clock(a: u64, b: u64, ms: u64) -> i32 {
+    let slack = ms / 1000 + 3;
+    let t0 = uptime_ms();
+    sleep_ms(200);
+    let slept = uptime_ms() - t0;
+    if !(200..600).contains(&slept) {
+        println!("timetest: FAIL sleep 200 ms took {} ms of uptime", slept);
+        return 1;
+    }
+    let (mut n, mut at_a, mut at_b) = (0u64, 0u64, 0u64);
+    let start = uptime_ms();
+    while uptime_ms() - start < ms {
+        let Ok(c) = time_unix() else {
+            println!("timetest: FAIL syscall 59");
+            return 1;
+        };
+        n += 1;
+        // One second below as well: the uptime of two CPUs may differ by a few ms, so right
+        // after a step made on another CPU a reading can fall just before the second.
+        if (a - 1..=a + slack).contains(&c.secs) {
+            at_a += 1;
+        } else if (b - 1..=b + slack).contains(&c.secs) {
+            at_b += 1;
+        } else {
+            println!("timetest: FAIL reading {}: {} is neither clock ({} / {})", n, c.secs, a, b);
+            return 1;
+        }
+    }
+    println!("timetest clock: {} readings ({} at a, {} at b), sleep 200 ms took {} ms", n, at_a, at_b, slept);
+    0
+}
+
 fn main(args: Args) -> i32 {
+    if args.get(1) == Some("clock") {
+        let num = |i| args.get(i).and_then(|x: &str| x.parse::<u64>().ok());
+        return match (num(2), num(3), num(4)) {
+            (Some(a), Some(b), Some(ms)) => clock(a, b, ms),
+            _ => 2,
+        };
+    }
     match (args.get(1), args.get(2)) {
+        (Some("set"), None) => set(),
+        (Some("bound"), None) => bound(),
         (Some("stale"), Some(file)) => match (args.get(3), args.get(4)) {
             (Some(opened), Some(go)) => stale(file, opened, go),
             _ => 2,
         },
         (Some("protect"), Some(root)) => protect(root),
         _ => {
-            let usage: String = String::from("usage: timetest protect <root> | stale <file> <opened> <go>");
+            let usage: String = String::from("usage: timetest protect <root> | stale <file> <opened> <go> | set | bound");
             println!("{}", usage);
             2
         }

@@ -1,6 +1,6 @@
 # The last known good time (LKG)
 
-A lower bound for the wall clock that survives a restart (v0.79 stage C, `kernel/time_lkg.rs`). The clock is the RTC
+A lower bound for the wall clock that survives a restart (v0.79, `kernel/time_lkg.rs`). The clock is the RTC
 read at boot plus the uptime (`README.md` in this folder); anyone with the firmware set-up can set the RTC to any date,
 and a dead battery resets it. The build date is a weak lower bound. The LKG is a better one: a time the system once
 knew to be true. A clock earlier than the LKG is not plausible, and TLS (https, NTS-KE) refuses to connect.
@@ -10,12 +10,13 @@ knew to be true. A clock earlier than the LKG is not plausible, and TLS (https, 
 | Source | Raises the LKG? |
 |---|---|
 | nothing stored yet | the build date is the bound (with its 24 h tolerance – reason 5) |
-| an authenticated time from NTS, through the time service (stage D) | **yes** – the only one, and only by what is certain: ⌊T − U − 2 s⌋ |
+| an authenticated time from NTS, through the time service (`SYS_TIME_SET`, `TIMEKEEPER.md`) | **yes** – the only one, and only by what is certain: ⌊T − U − 2 s⌋ |
 | the self-test switch (selftest builds only) | yes – LKG TEST and RESTART TEST |
 | the RTC, plain NTP, an HTTP `Date` header, a certificate's notBefore, a time a program gives | **no** – there is no way in the code |
 
-In stage C nothing in a normal build raises it yet: the mechanism (file, verdict, protection, tests) is complete,
-and stage D connects the only real source. The LKG is never lowered – a raise below the current one changes nothing.
+The LKG is never lowered – a raise below the current one changes nothing, and `SYS_TIME_SET` with T + U below it is
+refused. While the file is unreadable (reason 8), every accepted `SYS_TIME_SET` writes it anew with max(L, the LKG in
+memory) – the repair write (`TIMEKEEPER.md`).
 
 ## Where it is kept
 
@@ -43,7 +44,7 @@ changes the file outside DeSoOS and computes the sum again – see "Threats".
 |---|---|
 | does not exist | nothing stored – the build date |
 | good | loaded (a time below the build date is kept but bounds nothing) |
-| a read or stat error, wrong length, wrong magic, wrong checksum, unknown version, reserved bytes not 0, unknown source, a time after 2099 | **reason 8** "last known good time unreadable": the clock is not plausible until a new LKG is written (stage D) or the volume is repaired – never a quiet fall-back to the build date; a line on the console |
+| a read or stat error, wrong length, wrong magic, wrong checksum, unknown version, reserved bytes not 0, unknown source, a time after 2099 | **reason 8** "last known good time unreadable": the clock is not plausible until the time service writes the file anew (recovery: a bootstrap with max(LKG in memory, build date) as the bound – `TIMEKEEPER.md`) or the volume is repaired – never a quiet fall-back to the build date; a line on the console |
 
 A later mount never lowers a bound already in memory (another volume at `/disk`, or one without the file, keeps the
 higher time).
@@ -62,7 +63,8 @@ after a power loss at any point there is exactly the old record or the new one, 
 TEST cuts the power at every 512-byte sector of every write of a save and makes a write fail at every position.
 
 Every raise is saved at once. If the save fails (or there is no system volume), the raised LKG stays in memory,
-`date` shows "NOT SAVED", and the next raise tries the save again first – also when that raise is not higher.
+`date` shows "NOT SAVED" (without a system volume: "kept in memory only"), and the next raise tries the save again
+first – also when that raise is not higher.
 
 ## The verdict on the clock
 
@@ -108,7 +110,8 @@ and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through
 |---|---|
 | damage to the file (power loss, a disk error) | detected – reason 8 |
 | a program changing, removing or replacing the file | refused by the VFS |
-| a program raising the LKG (a time far ahead would block TLS) | impossible – no syscall gives the kernel a time (stage D: only the trusted time service, with its own right) |
+| a program raising the LKG (a time far ahead would block TLS) | impossible – only `SYS_TIME_SET`, which needs the SETTIME handle (init gives it only to the time service; it cannot be sent in a message) |
+| the time service itself wrong or taken over | the kernel checks the numbers and never lowers the LKG, but cannot check that the time came from NTS or two operators – a wrong time within those rules (`TIMEKEEPER.md`) |
 | a change to the file outside DeSoOS (another system, the sum computed again) | **not covered** |
 | an old disk image put back (rollback of the LKG), or `desofs snapshot restore` from the shell | **not covered** – later a TPM NV index or another hardware monotonic counter |
 | `desofs format` of the system disk from the shell | the LKG goes with the volume (the bound in memory stays until the restart) |
@@ -132,8 +135,10 @@ and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through
    the mount (`/bin/timetest stale`) writes nothing through it;
 8. sysfuzz with the LKG on `/disk`: the value and the file unchanged.
 
-RESTART TEST: the first start saves an LKG two days ahead of the clock; the second start reads it back at boot,
-refuses the clock with reason 7, netget https refuses before sending, and the file is still protected.
+RESTART TEST: the first start saves an LKG, damages it on the volume (reason 8) and lets the time service recover it
+(NTS from two operators of `tests/nts-server`, the file written anew); the second start reads it back at boot – good,
+from NTS, no reason 8, the clock plausible – and the file is still protected; then an LKG two days ahead of the clock:
+reason 7, netget https refuses before sending.  The time service's own tests: NTS TEST (`TIMEKEEPER.md`).
 
 Mutations caught: a margin of 1 s, a quiet reset on a bad file, `truncate + write` instead of `rename`, the
 protection on the text of the path, reason 7 before 8, an LKG that can go down, a failed save never retried, opening
@@ -148,4 +153,4 @@ truncate path, in `remove`, in `rename`, in `write_file` / `append_file`.
 | Windows (Secure Time Seeding) | – | timestamps from TLS handshakes | yes – known to jump the clock |
 | Android | the build time | NITZ, GNSS, NTP | yes |
 | RedoxOS | – | – | – |
-| **DeSoOS** | the build date + the LKG on the system volume | only NTS through the time service (stage D) | no – a clock below it is refused, not changed |
+| **DeSoOS** | the build date + the LKG on the system volume | only NTS through the time service (two of three operators) | the time service sets the wall clock to max(T, LKG); a clock below the LKG is otherwise refused, not changed |

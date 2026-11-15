@@ -1,9 +1,10 @@
 # NTS – Network Time Security (RFC 8915)
 
-DeSoOS's NTS client: `user/lib/nts.rs` (no input / output – records, fields, checks), `user/bin/nettime.rs`
-(`--nts` carries the bytes), DeSoTLS 0.3 (ALPN, exporter) and DeSoCrypto 0.7 (AES-SIV-CMAC-256) underneath. Status
-in v0.79 stage B: **read only** – `nettime --nts` shows an authenticated time and changes nothing. Raising the last
-known good time and correcting the clock come with the time service (stage D).
+DeSoOS's NTS client: `user/lib/nts.rs` (no input / output – records, fields, checks), `user/lib/ntske.rs` (NTS-KE over
+a netd TCP connection, shared), `user/bin/nettime.rs` (`--nts`) and the time service `user/bin/timekeeper.rs`, DeSoTLS
+0.3 (ALPN, exporter, the kept chain) and DeSoCrypto 0.7 (AES-SIV-CMAC-256) underneath. `nettime --nts` is **read
+only** – it shows an authenticated time and changes nothing. Only the time service raises the last known good time and
+corrects the clock (`TIMEKEEPER.md`); it also has the only way through NTS-KE without a plausible clock (a bootstrap).
 
 ## How it goes
 
@@ -60,10 +61,10 @@ bytes longer than the request, 1472 is netd's limit).
    new cookies come only from its encrypted part;
 4. then every check of `ntp.rs` on the header (LI, stratum 1–15, timestamps, root delay / dispersion, distance).
 
-## Limits (v0.79 stage B)
+## Limits (v0.79)
 
-- read only – nothing sets the clock or the lower bound (stage D)
-- needs a plausible clock for the certificate (the bootstrap without one comes with stage D)
+- `nettime --nts` is read only and needs a plausible clock for the certificate; the time service alone sets the clock
+  and bootstraps without one (`TIMEKEEPER.md`)
 - NTS-KE one server after the other (NTP then in parallel): a dead server delays the next ones by up to 3 × `-t`
   (6 s by default) – chrony runs every source on its own; cookies and keys only in memory – after a restart always a
   new NTS-KE (RFC 8915 recommends keeping one cookie; that needs the writable disk)

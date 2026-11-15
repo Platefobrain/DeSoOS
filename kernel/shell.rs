@@ -1817,6 +1817,9 @@ fn cmd_date(_: &str, out: &mut dyn Write, _: &mut Context) {
     let _ = writeln!(out, "{} UTC", rtc::DateTime::from_unix(secs));
     let build = rtc::DateTime::from_unix(rtc::BUILD_EPOCH);
     match verdict {
+        Ok(()) if rtc::synced() => {
+            let _ = writeln!(out, "clock plausible (authenticated time from the time service, NTS)");
+        }
         Ok(()) => {
             let _ = writeln!(out, "clock plausible (not earlier than the build date {} UTC - 24 h, from {})", build, rtc::BUILD_EPOCH_SOURCE);
         }
@@ -1825,6 +1828,7 @@ fn cmd_date(_: &str, out: &mut dyn Write, _: &mut Context) {
         }
     }
     let _ = writeln!(out, "{}", crate::time_lkg::describe());
+    let _ = writeln!(out, "clock {}", crate::time_lkg::describe_sync());
 }
 
 fn cmd_reboot(_: &str, out: &mut dyn Write, _: &mut Context) {
