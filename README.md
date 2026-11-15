@@ -6,9 +6,7 @@
   </a>
 </p>
 
-# DeSoOS v0.78.2
-
-<p align="center">
+# DeSoOS v0.78.2 <p align="center">
   <img src="https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white">
   <img src="https://img.shields.io/badge/Architecture-x86__64-blue">
   <img src="https://img.shields.io/badge/Boot-UEFI-purple">
