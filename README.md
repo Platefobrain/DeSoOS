@@ -9,7 +9,7 @@
 <h1>DeSoOS</h1>
 
 <p>
-  <b>Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time</b>
+  Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
 
 <p>
