@@ -9,8 +9,7 @@
 <h1>DeSoOS</h1>
 
 <p>
-  <b>A hobby operating system for x86_64 PCs, written in Rust from scratch</b><br>
-  hybrid kernel · drivers in user space · its own file system, TLS and authenticated time
+  <b>Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time</b>
 </p>
 
 <p>
