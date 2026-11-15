@@ -564,17 +564,47 @@ fn with_fs<R>(
     conc: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>,
     excl: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>,
 ) -> Result<R> {
+    with_fs_guard(path, false, conc, excl)
+}
+
+/// `with_fs` for an operation that changes something: `/.desoos` of a DeSoFS volume is
+/// refused under the same lock that picks the volume and runs the operation – the mount
+/// table cannot change in between (a volume mounted at /disk right after a check made
+/// outside the lock would get the write).
+fn with_fs_change<R>(
+    path: &str,
+    conc: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>,
+    excl: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>,
+) -> Result<R> {
+    with_fs_guard(path, true, conc, excl)
+}
+
+fn with_fs_guard<R>(
+    path: &str,
+    guard: bool,
+    conc: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>,
+    excl: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>,
+) -> Result<R> {
+    #[cfg(selftest)]
+    race_hook();
     {
         let _g = FS_LOCK.read();
         let (i, rel) = find_mount(path)?;
         if let Some(c) = mounts()[i].fs.concurrent() {
+            if guard && is_reserved_rel(i, &rel) {
+                return Err(FsError::Reserved);
+            }
             return conc(c, &rel);
         }
     }
     if FS_LOCK.read_held() {
         return Err(FsError::Busy);
     }
-    resolve(path, excl)
+    if guard {
+        resolve_change(path, excl)
+    } else {
+        resolve(path, excl)
+    }
 }
 
 /// Seals `path` (see ConcurrentFs::seal) – only ramfs can.
@@ -609,8 +639,29 @@ fn protects_locked(path: &str) -> bool {
 /// functions.  (Under FS_LOCK.)
 fn reserved_locked(path: &str) -> bool {
     match find_mount(path) {
-        Ok((i, rel)) => mounts()[i].fs.kind() == "desofs" && (rel == "/.desoos" || rel.starts_with("/.desoos/")),
+        Ok((i, rel)) => is_reserved_rel(i, &rel),
         Err(_) => false,
+    }
+}
+
+/// Mount `i`, path `rel` inside it (from `find_mount`, under FS_LOCK): the reserved node?
+fn is_reserved_rel(i: usize, rel: &str) -> bool {
+    mounts()[i].fs.kind() == "desofs" && (rel == "/.desoos" || rel.starts_with("/.desoos/"))
+}
+
+/// The self-test's way into the gap a check outside the lock would leave: runs once, at the
+/// start of every changing operation, before it takes FS_LOCK (LKG TEST mounts a volume at
+/// /disk there).  The check under the lock must still see that volume.
+#[cfg(selftest)]
+pub static RACE_HOOK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(selftest)]
+fn race_hook() {
+    let f = RACE_HOOK.swap(0, Ordering::SeqCst);
+    if f != 0 {
+        // Set only by the self-test, from a `fn()`.
+        let f: fn() = unsafe { core::mem::transmute::<usize, fn()>(f) };
+        f();
     }
 }
 
@@ -621,12 +672,6 @@ pub fn is_reserved(path: &str) -> bool {
     reserved_locked(&path)
 }
 
-fn refuse_reserved(path: &str) -> Result<()> {
-    if is_reserved(path) {
-        return Err(FsError::Reserved);
-    }
-    Ok(())
-}
 
 /// Mounts a file system at `path` (the directory must exist, except for "/").  Not over a
 /// sealed node or a directory holding one (it would hide it).
@@ -791,6 +836,16 @@ fn resolve<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>
     f(mounts()[i].fs.as_mut(), &rel)
 }
 
+/// `resolve` for a change: `/.desoos` refused under the same write lock.
+fn resolve_change<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>) -> Result<R> {
+    let _g = FsWrite::lock();
+    let (i, rel) = find_mount(path)?;
+    if is_reserved_rel(i, &rel) {
+        return Err(FsError::Reserved);
+    }
+    f(mounts()[i].fs.as_mut(), &rel)
+}
+
 // ------------------------------------------------------------
 // Operations (absolute paths)
 // ------------------------------------------------------------
@@ -856,29 +911,30 @@ pub fn read(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
 }
 
 pub fn write(path: &str, offset: u64, data: &[u8]) -> Result<usize> {
-    refuse_reserved(path)?;
-    with_fs(path, |c, p| c.write(p, offset, data), |fs, p| fs.write(p, offset, data))
+    with_fs_change(path, |c, p| c.write(p, offset, data), |fs, p| fs.write(p, offset, data))
 }
 
 pub fn create(path: &str) -> Result<()> {
-    refuse_reserved(path)?;
-    with_fs(path, |c, p| c.create(p), |fs, p| fs.create(p))
+    with_fs_change(path, |c, p| c.create(p), |fs, p| fs.create(p))
 }
 
 pub fn mkdir(path: &str) -> Result<()> {
-    refuse_reserved(path)?;
-    with_fs(path, |c, p| c.mkdir(p), |fs, p| fs.mkdir(p))
+    with_fs_change(path, |c, p| c.mkdir(p), |fs, p| fs.mkdir(p))
 }
 
 pub fn remove(path: &str) -> Result<()> {
-    refuse_reserved(path)?;
+    #[cfg(selftest)]
+    race_hook();
     // FS_LOCK for reading during the whole operation – the mount table cannot
-    // change between the check and the removal (mounting takes the write lock).
+    // change between the checks and the removal (mounting takes the write lock).
     let _g = FS_LOCK.read();
     if is_mount_point(&normalize("/", path)) {
         return Err(FsError::Busy);
     }
     let (i, rel) = find_mount(path)?;
+    if is_reserved_rel(i, &rel) {
+        return Err(FsError::Reserved);
+    }
     if let Some(c) = mounts()[i].fs.concurrent() {
         return c.remove(&rel);
     }
@@ -887,7 +943,7 @@ pub fn remove(path: &str) -> Result<()> {
     if is_mount_point(&normalize("/", path)) {
         return Err(FsError::Busy);
     }
-    resolve(path, |fs, p| fs.remove(p))
+    resolve_change(path, |fs, p| fs.remove(p))
 }
 
 /// Renames / moves `from` to `to` in one step – both on the same file system (otherwise
@@ -895,6 +951,8 @@ pub fn remove(path: &str) -> Result<()> {
 /// replaced (FsError::Busy).
 pub fn rename(from: &str, to: &str) -> Result<()> {
     let (from, to) = (normalize("/", from), normalize("/", to));
+    #[cfg(selftest)]
+    race_hook();
     let _g = FS_LOCK.read();
     if is_mount_point(&from) || is_mount_point(&to) || from == "/" {
         return Err(FsError::Busy);
@@ -930,12 +988,15 @@ pub fn rename(from: &str, to: &str) -> Result<()> {
     if i != j || is_mount_point(&from) || is_mount_point(&to) {
         return Err(FsError::Unsupported);
     }
+    // The lock was let go in between: the reserved check again, under this one.
+    if is_reserved_rel(i, &rf) || is_reserved_rel(j, &rt) {
+        return Err(FsError::Reserved);
+    }
     mounts()[i].fs.rename(&rf, &rt)
 }
 
 pub fn truncate(path: &str, size: u64) -> Result<()> {
-    refuse_reserved(path)?;
-    with_fs(path, |c, p| c.truncate(p, size), |fs, p| fs.truncate(p, size))
+    with_fs_change(path, |c, p| c.truncate(p, size), |fs, p| fs.truncate(p, size))
 }
 
 /// The path's file system has its own locks – we call it under FS_LOCK
@@ -947,6 +1008,22 @@ fn try_concurrent<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Resu
         Err(e) => return Some(Err(e)),
     };
     mounts()[i].fs.concurrent().map(|c| f(c, &rel))
+}
+
+/// `try_concurrent` for a change: `/.desoos` refused under the same lock.
+fn try_concurrent_change<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>) -> Option<Result<R>> {
+    #[cfg(selftest)]
+    race_hook();
+    let _g = FS_LOCK.read();
+    let (i, rel) = match find_mount(path) {
+        Ok(x) => x,
+        Err(e) => return Some(Err(e)),
+    };
+    let c = mounts()[i].fs.concurrent()?;
+    if is_reserved_rel(i, &rel) {
+        return Some(Err(FsError::Reserved));
+    }
+    Some(f(c, &rel))
 }
 
 /// Flushes the buffers of all file systems.
@@ -995,11 +1072,14 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
 
 /// Creates a file or replaces its contents.
 pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
-    refuse_reserved(path)?;
-    if let Some(r) = try_concurrent(path, |c, p| c.write_whole(p, data)) {
+    if let Some(r) = try_concurrent_change(path, |c, p| c.write_whole(p, data)) {
         return r;
     }
     let _g = FsWrite::lock();
+    // Under the write lock from here on (the calls below take it again – it is reentrant).
+    if reserved_locked(path) {
+        return Err(FsError::Reserved);
+    }
     match stat(path) {
         Ok(m) if m.kind == FileType::Directory => return Err(FsError::IsADirectory),
         Ok(_) => truncate(path, 0)?,
@@ -1014,11 +1094,14 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<()> {
 
 /// Appends to the end of a file (creates it if it does not exist).
 pub fn append_file(path: &str, data: &[u8]) -> Result<()> {
-    refuse_reserved(path)?;
-    if let Some(r) = try_concurrent(path, |c, p| c.append(p, data)) {
+    if let Some(r) = try_concurrent_change(path, |c, p| c.append(p, data)) {
         return r;
     }
     let _g = FsWrite::lock();
+    // Under the write lock from here on (the calls below take it again – it is reentrant).
+    if reserved_locked(path) {
+        return Err(FsError::Reserved);
+    }
     let size = match stat(path) {
         Ok(m) if m.kind == FileType::Directory => return Err(FsError::IsADirectory),
         Ok(m) => m.size,

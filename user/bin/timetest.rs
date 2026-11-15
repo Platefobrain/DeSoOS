@@ -9,6 +9,14 @@
 //                             readable and the same, and the rest of <root> writable:
 //                             "timetest protect: K attempts refused, lkg readable (56 bytes),
 //                             <root> writable"
+//   timetest stale <file> <opened> <go>
+//                             a handle opened before a DeSoFS volume is mounted over the path:
+//                             opens <file> for writing (still on ramfs), creates <opened>, waits
+//                             (at most 20 s) for <go> – the kernel mounts the volume in between –
+//                             then writes through the old handle: it must be refused
+//                             (ERROR_NOT_PERMITTED), as the handle keeps a path and every write
+//                             picks the volume again: "timetest stale: the write through a handle
+//                             opened before the mount was refused"
 //
 // A failure prints "timetest: FAIL ..." and exits with 1.
 #![no_std]
@@ -166,11 +174,46 @@ fn protect(root: &str) -> i32 {
     0
 }
 
+fn stale(file: &str, opened: &str, go: &str) -> i32 {
+    let fd = open(file, O_WRITE);
+    if fd < 0 {
+        println!("timetest: FAIL open {} before the mount: {}", file, error_name(fd));
+        return 1;
+    }
+    let m = open(opened, O_WRITE | O_CREATE);
+    if m < 0 {
+        println!("timetest: FAIL create {}: {}", opened, error_name(m));
+        return 1;
+    }
+    close(m as u64);
+    let mut waited = 0;
+    while stat(go).is_err() {
+        if waited >= 20_000 {
+            println!("timetest: FAIL {} never came", go);
+            return 1;
+        }
+        sleep_ms(10);
+        waited += 10;
+    }
+    let r = write(fd as u64, b"evil");
+    close(fd as u64);
+    if r != ERROR_NOT_PERMITTED {
+        println!("timetest: FAIL the write through the old handle: {} (expected {})", if r >= 0 { "allowed" } else { error_name(r) }, error_name(ERROR_NOT_PERMITTED));
+        return 1;
+    }
+    println!("timetest stale: the write through a handle opened before the mount was refused");
+    0
+}
+
 fn main(args: Args) -> i32 {
     match (args.get(1), args.get(2)) {
+        (Some("stale"), Some(file)) => match (args.get(3), args.get(4)) {
+            (Some(opened), Some(go)) => stale(file, opened, go),
+            _ => 2,
+        },
         (Some("protect"), Some(root)) => protect(root),
         _ => {
-            let usage: String = String::from("usage: timetest protect <root>");
+            let usage: String = String::from("usage: timetest protect <root> | stale <file> <opened> <go>");
             println!("{}", usage);
             2
         }

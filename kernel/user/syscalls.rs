@@ -669,7 +669,9 @@ fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
         return Err(ERROR_READ_ONLY);
     }
     // A sealed file (the CA store) and the system's /.desoos (the last known good time) are
-    // not even opened for writing.
+    // not even opened for writing.  (An early answer only: the protection itself is in the VFS,
+    // under the lock of each write – the handle keeps a path, so a volume mounted later over it
+    // is checked again.)
     if write && (fs::is_sealed(&path) || fs::is_reserved(&path)) {
         return Err(ERROR_NOT_PERMITTED);
     }

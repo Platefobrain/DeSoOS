@@ -104,6 +104,18 @@ uses them.
 - `tests/test.sh` now waits for every host server it stopped (ntp-stub and nts-server were missing from the `wait`)
   and clears `logs/test-soak.out` each run, so a run without the soak no longer shows the previous `[RESULT-SOAK]`.
 
+### Stage C fix – the reserved check under the operation's lock (code review)
+- `kernel/fs/mod.rs`: the check for `/.desoos` was made with its own short hold of the VFS lock, before the operation
+  took the lock again – a volume mounted at `/disk` in between (from the shell) could have got a write. Now every
+  changing operation checks under the same lock that picks the volume and runs it: `with_fs_change` / `resolve_change`
+  (write, create, mkdir, truncate), `try_concurrent_change` and the write lock of `write_file` / `append_file`, inside
+  `remove`, and in `rename` – once under the read lock and again after it takes the write lock. Handles were never the
+  problem: an open file keeps a path and every write picks the volume again.
+- LKG TEST 7 → 8 steps – new step 7: a volume mounted at `/disk` in the gap before each of 10 changing calls takes the
+  lock (self-test hook `fs::RACE_HOOK`) – all refused, the volume unchanged; a program's handle opened on ramfs before
+  the volume is mounted over `/disk` (`/bin/timetest stale`, new) writes nothing. 4 mutations (the check before the
+  lock in each path), all caught. 310 tests.
+
 ### Stage C – the last known good time (LKG)
 - **`kernel/time_lkg.rs`** (new): a lower bound for the wall clock that survives a restart – `/.desoos/lkg` on the
   system volume (the DeSoFS volume mounted read-write at `/disk`; none: in memory only, from the build date). A 56-byte

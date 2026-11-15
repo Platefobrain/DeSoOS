@@ -92,6 +92,12 @@ and the kernel's own file functions (the shell's `rm`, `mv`, `write` included):
 
 The check is made on the **resolved object**: the volume the normalized path lands on and the node's path inside it –
 not on the text a program gave. DeSoFS has no links and compares names exactly, so no other path reaches the same node.
+It is made **under the same lock** that picks the volume and runs the operation (`with_fs_change`, `resolve_change`,
+`try_concurrent_change`, inside `remove` and `rename` – after `rename` lets the lock go, again under the next one): a
+volume mounted at `/disk` between a check and the write cannot get the write. An open file keeps a **path**, not a
+reference to a file system, so every write through it picks the volume again under that lock – a handle opened on
+ramfs before a DeSoFS volume is mounted over `/disk` writes nothing into `/.desoos`. (Opening for writing is also
+refused at once – an early answer, not the protection itself.)
 Reading stays allowed. Only `/.desoos` at the root of a DeSoFS volume is reserved (`/disk/a/.desoos`, `/disk/.desoosx`
 and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through the volume itself
 (`fs::with_desofs_at`).
@@ -120,14 +126,19 @@ and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through
    reason 8, refused; repaired by the next LKG; no volume → in memory, "NOT SAVED", saved by the next raise;
 6. `/.desoos` protected: 20 kernel calls and 30 program attempts (`/bin/timetest protect`) refused; the file readable
    and the same; other names writable;
-7. sysfuzz with the LKG on `/disk`: the value and the file unchanged.
+7. checked under the operation's lock: a volume is mounted at `/disk` in the gap before each changing call takes the
+   VFS lock (a self-test hook, `fs::RACE_HOOK`) – write, truncate, create, mkdir, remove, rename out / over / into,
+   `write_file`, `append_file` all refused, nothing on the volume changed; a program's handle opened on ramfs before
+   the mount (`/bin/timetest stale`) writes nothing through it;
+8. sysfuzz with the LKG on `/disk`: the value and the file unchanged.
 
 RESTART TEST: the first start saves an LKG two days ahead of the clock; the second start reads it back at boot,
 refuses the clock with reason 7, netget https refuses before sending, and the file is still protected.
 
 Mutations caught: a margin of 1 s, a quiet reset on a bad file, `truncate + write` instead of `rename`, the
 protection on the text of the path, reason 7 before 8, an LKG that can go down, a failed save never retried, opening
-for writing not refused.
+for writing not refused; the reserved check made before the lock instead of under it – in the write / create / mkdir /
+truncate path, in `remove`, in `rename`, in `write_file` / `append_file`.
 
 ## Compared with other systems
 

@@ -6,7 +6,43 @@
   </a>
 </p>
 
-# <p><img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-orange"> <img src="https://img.shields.io/badge/Kernel-no__std-green"> <img src="https://img.shields.io/badge/TLS-1.3-yellow"> <img src="https://img.shields.io/badge/Architecture-Hybrid-purple"> <img src="https://img.shields.io/badge/Isolation-Ring%203-blue"> <img src="https://img.shields.io/badge/Multicore-SMP-orange"> <img src="https://img.shields.io/badge/IPC-Channels%20%26%20SHM-green"> <img src="https://img.shields.io/badge/File%20System-DeSoFS-blue"> <img src="https://img.shields.io/badge/Security-DCP-red"> <img src="https://img.shields.io/badge/Networking-TCP%2FIP-blue"> <img src="https://img.shields.io/badge/USB-xHCI-lightgrey"></p>
+<h1 align="center">DeSoOS</h1>
+
+<p align="center">
+  <b>A hobby operating system for x86_64 PCs, written in Rust from scratch</b><br>
+  hybrid kernel · drivers in user space · its own file system, TLS and authenticated time
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
+  <img src="https://img.shields.io/badge/language-Rust%20no__std-b7410e?style=for-the-badge&logo=rust&logoColor=white" alt="Rust no_std">
+  <img src="https://img.shields.io/badge/platform-x86__64%20%7C%20UEFI-555555?style=for-the-badge" alt="x86_64, UEFI">
+  <img src="https://img.shields.io/badge/self--tests-310%20passing-2ea043?style=for-the-badge" alt="310 self-tests passing">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-8250df?style=for-the-badge" alt="License GPL-3.0"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/kernel-hybrid-6f42c1" alt="Hybrid kernel">
+  <img src="https://img.shields.io/badge/isolation-ring%203-0969da" alt="Ring 3">
+  <img src="https://img.shields.io/badge/multicore-SMP-fb8500" alt="SMP">
+  <img src="https://img.shields.io/badge/IPC-channels%20%26%20SHM-2ea043" alt="IPC: channels and shared memory">
+  <img src="https://img.shields.io/badge/security-DCP-cf222e" alt="DCP">
+  <img src="https://img.shields.io/badge/file%20system-DeSoFS-0969da" alt="DeSoFS">
+  <img src="https://img.shields.io/badge/network-TCP%2FIP-0969da" alt="TCP/IP">
+  <img src="https://img.shields.io/badge/TLS-1.3-d4a72c" alt="TLS 1.3">
+  <img src="https://img.shields.io/badge/time-NTS-d4a72c" alt="NTS">
+  <img src="https://img.shields.io/badge/USB-xHCI-6e7781" alt="USB xHCI">
+</p>
+
+<p align="center">
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="docs/RELEASE.md">Release notes</a> ·
+  <a href="#real-hardware">Real hardware</a>
+</p>
+
+---
 
 DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
@@ -86,7 +122,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (38 suites, a restart phase and a short soak, 309 tests), stress tests and a long soak test
+- Built-in self-tests (38 suites, a restart phase and a short soak, 310 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 

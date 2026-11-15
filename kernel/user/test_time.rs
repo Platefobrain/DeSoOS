@@ -14,7 +14,11 @@
 //      next raise saves it
 //   6. /.desoos protected: the kernel's own file functions every way, a program every way
 //      (/bin/timetest protect), only /.desoos at the root of a DeSoFS volume
-//   7. no syscall changes the LKG: sysfuzz while the LKG is on /disk – value and file the same
+//   7. checked under the same lock as the operation: a volume mounted at /disk in the gap
+//      before a changing call takes the VFS lock (fs::RACE_HOOK) – write, truncate, create,
+//      mkdir, remove, rename (out of, over, into), write_file, append_file all refused; a
+//      program's handle opened on ramfs before the mount writes nothing through it
+//   8. no syscall changes the LKG: sysfuzz while the LKG is on /disk – value and file the same
 //
 // The LKG raised here goes into the future; at the end the RAM volume goes and the memory
 // state is set back, so the suites after this one see the clock as before.
@@ -85,6 +89,29 @@ fn unmount_ram() {
     let _ = fs::unmount(MOUNT);
 }
 
+/// RACE_HOOK: the volume mounted at /disk in the gap before the operation takes the lock.
+fn hook_mount() {
+    if let Some(d) = unsafe { DISK } {
+        let _ = fs::mount_disk(d, MOUNT);
+    }
+}
+
+/// What /disk shows of the files a changing call could have touched (on the volume).
+fn volume_untouched(lkg_rec: &[u8]) -> Result<(), String> {
+    if file_bytes().as_deref() != Some(lkg_rec) {
+        return Err(String::from("the LKG file changed"));
+    }
+    for p in ["/disk/.desoos/new", "/disk/.desoos/d", "/disk/stolen", "/disk/.desoos/other"] {
+        if fs::stat(p).is_ok() {
+            return Err(alloc::format!("{} exists", p));
+        }
+    }
+    if fs::stat("/disk/other").is_err() {
+        return Err(String::from("/disk/other is gone"));
+    }
+    Ok(())
+}
+
 /// Puts everything back: the RAM volume gone, the LKG in memory as nothing stored, the
 /// state read again (no system volume, as at boot of the test run).
 fn cleanup() {
@@ -92,6 +119,11 @@ fn cleanup() {
     if let Some(d) = unsafe { core::ptr::replace(core::ptr::addr_of_mut!(DISK), None) } {
         crate::block::remove(d);
     }
+    // What the old-handle step left on ramfs under /disk.
+    let _ = fs::remove("/disk/.desoos/lkg");
+    let _ = fs::remove("/disk/.desoos");
+    let _ = fs::remove("/tmp/lkg-opened");
+    let _ = fs::remove("/tmp/lkg-go");
     if unsafe { MADE_DIR } {
         let _ = fs::remove(MOUNT);
         unsafe { MADE_DIR = false };
@@ -138,7 +170,7 @@ pub fn self_test() {
     check!(st0 == FileState::NoVolume && lkg::bound() == 0 && !lkg::dirty() && lkg::source() == Source::Build, "the LKG changed before LKG TEST: {:?}, bound {}, dirty {}, {:?}", st0, lkg::bound(), lkg::dirty(), lkg::source());
     check!(rtc::time_status().1.is_ok(), "the clock is not plausible at the start: {:?}", rtc::time_status().1);
     check!(lkg::describe().contains("build date") && lkg::describe().contains("kept in memory only"), "describe: {}", lkg::describe());
-    serial_println!("[LKG TEST] 1/7 the state the boot left: no system volume, the build date, nothing raised by the suites before (sysfuzz among them) PASS");
+    serial_println!("[LKG TEST] 1/8 the state the boot left: no system volume, the build date, nothing raised by the suites before (sysfuzz among them) PASS");
 
     // 2. The verdict, on made-up states.
     let b = 2_000_000_000u64;
@@ -165,18 +197,18 @@ pub fn self_test() {
         check!(got == *want, "verdict({:?}, {}, bad {}, lkg {}) = {:?}, expected {:?}", rtcv, secs, bad, l, got, want);
     }
     check!(I::BeforeLkg as u8 == 7 && I::LkgUnreadable as u8 == 8, "reason numbers");
-    serial_println!("[LKG TEST] 2/7 the verdict: {} made-up states - order 1-4, 6 -> 8 -> 5 -> 7, margin 0 s (one second below the LKG refused) PASS", cases.len());
+    serial_println!("[LKG TEST] 2/8 the verdict: {} made-up states - order 1-4, 6 -> 8 -> 5 -> 7, margin 0 s (one second below the LKG refused) PASS", cases.len());
 
     // 3. The record on a volume.
     let r = crate::fs::desofs::test_lkg::file_cases();
     check!(r.is_ok(), "the record on a volume: {:?}", r.err());
-    serial_println!("[LKG TEST] 3/7 the record on a volume: {} (no file, good, saved twice, a temporary file left, length, magic, every covered byte, version, reserved, source, after 2099, read and stat errors) PASS", r.unwrap_or_default());
+    serial_println!("[LKG TEST] 3/8 the record on a volume: {} (no file, good, saved twice, a temporary file left, length, magic, every covered byte, version, reserved, source, after 2099, read and stat errors) PASS", r.unwrap_or_default());
 
     // 4. Power loss.
     let t0 = crate::time::ticks();
     let r = crate::fs::desofs::test_lkg::power_loss();
     check!(r.is_ok(), "power loss: {:?}", r.err());
-    serial_println!("[LKG TEST] 4/7 power loss at every write of a save: {} in {} ms PASS", r.unwrap_or_default(), crate::time::ticks() - t0);
+    serial_println!("[LKG TEST] 4/8 power loss at every write of a save: {} in {} ms PASS", r.unwrap_or_default(), crate::time::ticks() - t0);
 
     // 5. The live system.
     let m = mount_ram();
@@ -225,7 +257,7 @@ pub fn self_test() {
     check!(lkg::bound() == ahead3 && lkg::dirty(), "mounting a volume with an older record lowered the LKG: {}", lkg::bound());
     check!(lkg::raise_for_test(now()) == Raised::NotHigher && !lkg::dirty(), "the next raise did not save the pending LKG");
     check!(file_bytes().as_deref() == Some(&lkg::encode(ahead3, Source::Test)[..]), "the pending LKG is not on the disk");
-    serial_println!("[LKG TEST] 5/7 the live system (RAM volume at /disk): no file - the build date; raised and saved; never lower; equal to the clock - plausible; ahead - reason 7, netget https refused before sending; read back the same; damaged - reason 8 (no quiet reset), https refused, repaired by the next LKG; no volume - kept in memory, 'NOT SAVED', saved by the next raise PASS");
+    serial_println!("[LKG TEST] 5/8 the live system (RAM volume at /disk): no file - the build date; raised and saved; never lower; equal to the clock - plausible; ahead - reason 7, netget https refused before sending; read back the same; damaged - reason 8 (no quiet reset), https refused, repaired by the next LKG; no volume - kept in memory, 'NOT SAVED', saved by the next raise PASS");
 
     // 6. /.desoos protected.
     let f = alloc::format!("{}{}", MOUNT, lkg::FILE);
@@ -271,16 +303,66 @@ pub fn self_test() {
     let (kind, out) = r.unwrap_or((ExitKind::Exit(-1), String::new()));
     check!(kind == ExitKind::Exit(0) && out.contains("attempts refused"), "timetest protect: {:?} {:?}", kind, out.trim());
     check!(file_bytes().as_deref() == Some(&lkg::encode(ahead3, Source::Test)[..]) && lkg::bound() == ahead3, "the file or the LKG changed");
-    serial_println!("[LKG TEST] 6/7 /.desoos protected: {} kernel calls refused (write, truncate, remove, mkdir, create, rename from / to / into / of the directory, mount on and inside, '.', '..', '//'); {}; /.desoosx, a/.desoos and /.desoos on ramfs stay writable PASS", kernel_cases.len(), out.trim().trim_start_matches("timetest "));
+    serial_println!("[LKG TEST] 6/8 /.desoos protected: {} kernel calls refused (write, truncate, remove, mkdir, create, rename from / to / into / of the directory, mount on and inside, '.', '..', '//'); {}; /.desoosx, a/.desoos and /.desoos on ramfs stay writable PASS", kernel_cases.len(), out.trim().trim_start_matches("timetest "));
 
-    // 7. No syscall changes the LKG: sysfuzz with the LKG on /disk.
+    // 7. The check under the same lock as the operation.
+    let rec = lkg::encode(ahead3, Source::Test);
+    let _ = fs::write_file("/disk/other", b"other");
+    const F: &str = "/disk/.desoos/lkg";
+    let ops: [(&str, fn() -> fs::Result<()>); 10] = [
+        ("write", || fs::write(F, 0, b"evil").map(|_| ())),
+        ("truncate", || fs::truncate(F, 0)),
+        ("create", || fs::create("/disk/.desoos/new")),
+        ("mkdir", || fs::mkdir("/disk/.desoos/d")),
+        ("remove", || fs::remove(F)),
+        ("rename out", || fs::rename(F, "/disk/stolen")),
+        ("rename over", || fs::rename("/disk/other", F)),
+        ("rename into", || fs::rename("/disk/other", "/disk/.desoos/other")),
+        ("write_file", || fs::write_file(F, b"evil")),
+        ("append_file", || fs::append_file(F, b"evil")),
+    ];
+    for (what, op) in ops.iter() {
+        // /disk is plain ramfs when the call starts; the volume arrives in the gap.
+        unmount_ram();
+        check!(!fs::is_reserved(F), "{}: /disk still reserved after the unmount", what);
+        fs::RACE_HOOK.store(hook_mount as fn() as usize, core::sync::atomic::Ordering::SeqCst);
+        let r = op();
+        fs::RACE_HOOK.store(0, core::sync::atomic::Ordering::SeqCst);
+        check!(fs::is_reserved(F), "{}: the hook did not mount the volume", what);
+        check!(r == Err(FsError::Reserved), "{} with the volume mounted in the gap: {:?} - the check is not under the operation's lock", what, r);
+        let u = volume_untouched(&rec);
+        check!(u.is_ok(), "{}: {:?}", what, u.err());
+    }
+    // A program's handle opened on ramfs before the volume is mounted over /disk.
+    unmount_ram();
+    let _ = fs::mkdir("/disk/.desoos");
+    check!(fs::write_file(F, b"ramfs").is_ok(), "could not write the ramfs file under /disk");
+    let _ = fs::remove("/tmp/lkg-opened");
+    let _ = fs::remove("/tmp/lkg-go");
+    let opts = SpawnOptions { stdin: Some(Vec::new()), capture: true, ..SpawnOptions::default() };
+    let id = exec("/bin/timetest", &["timetest", "stale", F, "/tmp/lkg-opened", "/tmp/lkg-go"], "/", &opts).ok();
+    check!(id.is_some(), "could not start timetest stale");
+    let id = id.unwrap_or(0);
+    check!(wait_for(20_000, || fs::stat("/tmp/lkg-opened").is_ok()), "timetest stale did not open the file");
+    let d = unsafe { DISK }.unwrap_or(0);
+    check!(matches!(fs::mount_disk(d, MOUNT), fs::DiskMount::DeSoFs(None)), "mount over the open handle");
+    check!(fs::write_file("/tmp/lkg-go", b"go").is_ok(), "could not signal timetest");
+    check!(wait_for(30_000, || sched::task_info(id).is_none()), "timetest stale did not finish");
+    let kind = exit_info(id).map(|e| e.kind);
+    let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
+    check!(kind == Some(ExitKind::Exit(0)) && out.contains("was refused"), "timetest stale: {:?} {:?}", kind, out.trim());
+    let u = volume_untouched(&rec);
+    check!(u.is_ok(), "after the old handle: {:?}", u.err());
+    serial_println!("[LKG TEST] 7/8 checked under the operation's lock: the volume mounted in the gap before the lock - {} changing calls refused (write, truncate, create, mkdir, remove, rename out / over / into, write_file, append_file), nothing on the volume changed; {} PASS", ops.len(), out.trim().trim_start_matches("timetest "));
+
+    // 8. No syscall changes the LKG: sysfuzz with the LKG on /disk.
     let before = file_bytes();
     let r = run("/bin/sysfuzz", &["sysfuzz", "16", "2000"], 120_000);
     check!(r.is_some(), "sysfuzz did not finish");
     let (kind, out) = r.unwrap_or((ExitKind::Exit(-1), String::new()));
     check!(kind == ExitKind::Exit(0) && out.contains("kernel survived"), "sysfuzz: {:?} {:?}", kind, out.trim());
     check!(file_bytes() == before && lkg::bound() == ahead3 && lkg::file_state() == FileState::Good && !lkg::dirty(), "sysfuzz changed the LKG");
-    serial_println!("[LKG TEST] 7/7 sysfuzz (16 children, 2000 calls) with the LKG on /disk: value and file unchanged PASS");
+    serial_println!("[LKG TEST] 8/8 sysfuzz (16 children, 2000 calls) with the LKG on /disk: value and file unchanged PASS");
 
     cleanup();
     check!(lkg::file_state() == FileState::NoVolume && lkg::bound() == 0 && rtc::time_status().1.is_ok(), "after the cleanup: {:?} {} {:?}", lkg::file_state(), lkg::bound(), rtc::time_status().1);
