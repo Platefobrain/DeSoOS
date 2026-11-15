@@ -2,7 +2,7 @@
   <a href="https://www.decodesoft.pl/">
     <img src="https://decodesoft.pl/download/deso.svg"
          alt="DeSoOS - DecodeSoft"
-         width="350">
+         width="300">
   </a>
 </p>
 
