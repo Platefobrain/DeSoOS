@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="https://decodesoft.pl/img/svg/logo.svg" alt="DeSoOS Logo" width="350">
+  <a href="https://www.decodesoft.pl/">
+    <img src="https://decodesoft.pl/img/svg/logo.svg"
+         alt="DeSoOS - DecodeSoft"
+         width="400">
+  </a>
 </p>
 
 # DeSoOS v0.78.2
