@@ -1,4 +1,4 @@
-<p>
+<p align="center">
   <a href="https://www.decodesoft.pl/">
     <img src="https://decodesoft.pl/img/svg/logo.svg"
          alt="DeSoOS - DecodeSoft"
@@ -8,7 +8,7 @@
 
 <h1>DeSoOS</h1>
 
-<p align="center">
+<p>
   <b>A hobby operating system for x86_64 PCs, written in Rust from scratch</b><br>
   hybrid kernel · drivers in user space · its own file system, TLS and authenticated time
 </p>
