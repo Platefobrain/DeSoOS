@@ -6,7 +6,7 @@
   </a>
 </p>
 
-# DeSoOS <img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-orange"> <img src="https://img.shields.io/badge/Kernel-no__std-green"> <img src="https://img.shields.io/badge/TLS-1.3-yellow">
+# DeSoOS <p><img src="https://img.shields.io/badge/Version-0.78.2-blue"> <img src="https://img.shields.io/badge/Architecture-x86__64-blue"> <img src="https://img.shields.io/badge/Boot-UEFI-orange"> <img src="https://img.shields.io/badge/Kernel-no__std-green"> <img src="https://img.shields.io/badge/TLS-1.3-yellow"></p>
 
 
 <p>
