@@ -29,8 +29,7 @@
   <a href="docs/README.md">Documentation</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="docs/RELEASE.md">Release notes</a> ·
-  <a href="#real-hardware">Real hardware</a>
+  <a href="docs/RELEASE.md">Release notes</a>
 </p>
 
 ---
