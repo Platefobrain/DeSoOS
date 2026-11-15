@@ -1,4 +1,4 @@
-<p align="center">
+<p>
   <a href="https://www.decodesoft.pl/">
     <img src="https://decodesoft.pl/img/svg/logo.svg"
          alt="DeSoOS - DecodeSoft"
@@ -6,14 +6,14 @@
   </a>
 </p>
 
-<h1 align="center">DeSoOS</h1>
+<h1>DeSoOS</h1>
 
 <p align="center">
   <b>A hobby operating system for x86_64 PCs, written in Rust from scratch</b><br>
   hybrid kernel · drivers in user space · its own file system, TLS and authenticated time
 </p>
 
-<p align="center">
+<p>
   <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
   <img src="https://img.shields.io/badge/language-Rust%20no__std-b7410e?style=for-the-badge&logo=rust&logoColor=white" alt="Rust no_std">
   <img src="https://img.shields.io/badge/platform-x86__64%20%7C%20UEFI-555555?style=for-the-badge" alt="x86_64, UEFI">
@@ -21,7 +21,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-8250df?style=for-the-badge" alt="License GPL-3.0"></a>
 </p>
 
-<p align="center">
+<p>
   <img src="https://img.shields.io/badge/kernel-hybrid-6f42c1" alt="Hybrid kernel">
   <img src="https://img.shields.io/badge/isolation-ring%203-0969da" alt="Ring 3">
   <img src="https://img.shields.io/badge/multicore-SMP-fb8500" alt="SMP">
