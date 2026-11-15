@@ -6,18 +6,10 @@
   </a>
 </p>
 
-<h1>DeSoOS</h1>
+<h1>desoOS <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2"></h1>
 
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
-</p>
-
-<p>
-  <img src="https://img.shields.io/badge/version-0.78.2-1f6feb?style=for-the-badge" alt="Version 0.78.2">
-  <img src="https://img.shields.io/badge/language-Rust%20no__std-b7410e?style=for-the-badge&logo=rust&logoColor=white" alt="Rust no_std">
-  <img src="https://img.shields.io/badge/platform-x86__64%20%7C%20UEFI-555555?style=for-the-badge" alt="x86_64, UEFI">
-  <img src="https://img.shields.io/badge/self--tests-310%20passing-2ea043?style=for-the-badge" alt="310 self-tests passing">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-8250df?style=for-the-badge" alt="License GPL-3.0"></a>
 </p>
 
 <p>
