@@ -87,7 +87,8 @@ pub const REG_FORMAT: u32 = 3;
 pub const WP_UNKNOWN: u8 = 0;
 pub const WP_CLEAR: u8 = 1;
 pub const WP_SET: u8 = 2;
-/// Ids of timed-out FLUSH / REG requests kept (their late replies are discarded).
+/// Timed-out FLUSH / REG requests whose late replies are awaited (discarded); that many – the
+/// disk is gone (an id is never dropped from the list while the disk lives).
 const STALE_MAX: usize = 16;
 
 const NEW: u8 = 0;
@@ -307,8 +308,7 @@ struct Req {
 impl Ublk {
     /// Sends one request; Ok(its id).  A full usbd queue – Io; a closed channel – the disk is gone.
     fn send_req(&mut self, r: Req) -> Result<u32, BlockError> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.alloc_id();
         let mut data = alloc::vec![0u8; MSG_BYTES];
         data[0..4].copy_from_slice(&id.to_le_bytes());
         data[4..8].copy_from_slice(&r.op.to_le_bytes());
@@ -330,6 +330,27 @@ impl Ublk {
             return Err(BlockError::Io); // usbd queue full
         }
         Ok(id)
+    }
+
+    /// The next request id.  Every id a reply may still come for is in a busy slot, a
+    /// quarantined slot or the stale list (when that list is full the disk is declared gone –
+    /// nothing is ever dropped from it); after the 32-bit counter wraps those ids are skipped,
+    /// so a late reply can never match a new request.
+    fn alloc_id(&mut self) -> u32 {
+        loop {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            let taken = self.slots.iter().any(|s| matches!(s, Slot::Busy(x) | Slot::Quarantine(x) if *x == id)) || self.stale.contains(&id);
+            if !taken {
+                return id;
+            }
+        }
+    }
+
+    /// Self-tests: the id counter set close to its wrap.
+    #[cfg(selftest)]
+    fn set_next_id(&mut self, id: u32) {
+        self.next_id = id.max(1);
     }
 
     /// Sends a READ / WRITE for `n` blocks at `first` with free slot `slot`.
@@ -393,10 +414,12 @@ impl Ublk {
                     return Ok((status, cnt));
                 }
                 Err(e) if e == ERROR_TIMED_OUT || e == ERROR_INTERRUPTED => {
-                    if self.stale.len() >= STALE_MAX {
-                        self.stale.remove(0);
-                    }
                     self.stale.push(id);
+                    if self.stale.len() >= STALE_MAX {
+                        // So many unanswered requests – the device is not to be trusted; its ids
+                        // are never forgotten (alloc_id), the disk goes instead.
+                        self.sh.set_gone();
+                    }
                     if e == ERROR_TIMED_OUT {
                         self.timed_out();
                     }
@@ -803,6 +826,11 @@ impl BlockDevice for Ublk {
             }
             Control::Withdraw => {
                 self.withdraw();
+                Ok(0)
+            }
+            #[cfg(selftest)]
+            Control::TestNextId { id } => {
+                self.set_next_id(id);
                 Ok(0)
             }
             #[cfg(selftest)]

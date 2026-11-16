@@ -188,12 +188,19 @@ fn fake_test() -> Result<String, String> {
     }
     ck!(block::write(p2, 0, &big) == Ok(()), "write after the failed pieces");
     // A write whose reply is late: Timeout, the slot quarantined and back after the late reply.
+    // Its id is the last before the 32-bit counter wraps; the counter is then set back to it –
+    // a quarantined id is never given out again, so the late reply cannot answer the next write.
     ck!(block::control(a, Control::Test { flags: 16 }) == Ok(0), "test flag");
-    let late1 = sa.late.load(Ordering::SeqCst);
+    ck!(block::control(a, Control::TestNextId { id: u32::MAX }) == Ok(0), "id counter");
+    let (late1, proto1) = (sa.late.load(Ordering::SeqCst), sa.proto_errors.load(Ordering::SeqCst));
     let r = block::write(p2, 0, &s1);
     ck!(r == Err(BlockError::Timeout), "held write reply: {:?}", r);
-    ck!(block::read(a, 0, &mut rb).is_ok() && sa.late.load(Ordering::SeqCst) > late1, "late write reply not taken back as late");
-    ck!(block::write(p2, 0, &s1) == Ok(()), "write after the late reply");
+    ck!(block::control(a, Control::TestNextId { id: u32::MAX }) == Ok(0), "id counter");
+    let mut s2 = alloc::vec![0u8; 512];
+    fill(2, start, &mut s2);
+    ck!(block::write(p2, 0, &s2) == Ok(()), "write after the late reply");
+    ck!(sa.late.load(Ordering::SeqCst) == late1 + 1 && sa.proto_errors.load(Ordering::SeqCst) == proto1, "late reply after the id wrap: late {} -> {}, protocol errors {} -> {} (the old id was reused?)", late1, sa.late.load(Ordering::SeqCst), proto1, sa.proto_errors.load(Ordering::SeqCst));
+    ck!(block::read(a, start, &mut rb).is_ok() && rb == s2, "the write after the id wrap did not land");
     // Withdrawn – nothing.
     ck!(block::control(a, Control::Withdraw) == Ok(0), "withdraw");
     ck!(block::write(p2, 0, &s1) == Err(BlockError::ReadOnly) && block::flush(p2) == Err(BlockError::ReadOnly), "write / flush after the withdrawal");
@@ -221,6 +228,36 @@ fn fake_test() -> Result<String, String> {
     let ov_ok = ov.is_ok_and(|o| wait_for(10_000, || sched::task_info(o).is_none()) && String::from_utf8_lossy(&captured_output(o).unwrap_or_default()).contains("overflow refused"));
     super::ublk::test_set_counters(Some(saved.0), None);
     ck!(ov_ok, "blk_attach with the generation counter used up was not refused");
+    // A partition object of a removed disk never reaches the disk that got its number: an
+    // operation holding the old partition, the stick replugged (same layout, rw granted).
+    ck!(block::control(a, Control::RegisterRw { generation: ga, start, len }) == Ok(0), "rw before the replug");
+    ck!(block::set_grant(p2, Some(0)).is_ok(), "grant before the replug");
+    let old = block::hold(p2);
+    ck!(old.is_some(), "hold the partition");
+    let old = old.unwrap();
+    let (old_a, old_p2) = (a, p2);
+    ck!(block::control(a, Control::Test { flags: 0x40 }) == Ok(0), "replug flag");
+    drop(sa);
+    ck!(wait_for(10_000, || find("blkwtest").is_some_and(|s| s.generation != ga && s.probed())), "the replugged fake stick not attached");
+    let sa = find("blkwtest").unwrap();
+    let a = sa.index.load(Ordering::SeqCst);
+    let pp = parts(a);
+    ck!(pp.is_some(), "replugged stick: no partitions");
+    let (_, p2) = pp.unwrap();
+    ck!(a == old_a && p2 == old_p2, "the numbers were not reused (disk {} -> {}, partition {} -> {}) - the test needs them reused", old_a, a, old_p2, p2);
+    let ga2 = generation(a);
+    ck!(block::control(a, Control::Probe { generation: ga2 }) == Ok(0) && block::control(a, Control::RegisterRw { generation: ga2, start, len }) == Ok(0) && block::set_grant(p2, Some(0)).is_ok(), "rw on the replugged stick");
+    let mut before = alloc::vec![0u8; 512];
+    ck!(block::read(a, start + 100, &mut before).is_ok(), "read the replugged stick");
+    let mut s3 = alloc::vec![0u8; 512];
+    fill(3, start + 100, &mut s3);
+    let r = old.write(100, &s3);
+    let rf = old.flush();
+    ck!(r == Err(BlockError::NoDevice) && rf == Err(BlockError::NoDevice), "the old partition object wrote to the new disk: write {:?}, flush {:?}", r, rf);
+    let mut after = alloc::vec![0u8; 512];
+    ck!(block::read(a, start + 100, &mut after).is_ok() && after == before, "the new disk changed through the old partition");
+    ck!(block::write(p2, 100, &s3) == Ok(()), "the new partition object writes");
+    drop(old);
     // The end: the fake exits, both disks go.
     ck!(block::control(a, Control::Test { flags: 0x80 }) == Ok(0), "exit flag");
     drop((sa, sb));
@@ -498,7 +535,7 @@ pub fn self_test() {
     crate::selftest::begin();
     match fake_test() {
         Ok(line) => serial_println!(
-            "[USB WRITE TEST] 1/3 kernel side (fake stick): write protection unknown -> nothing, no registration -> refused, probe = one FLUSH (stale generation, late reply discarded), rw (one at a time, overflowing / outside ranges refused), 1 MiB in 16 pieces, first + second lock each alone, ESP refused, failed piece 1 / 8 / 16 -> whole write fails, write timeout -> slot back, format sessions (only their id, ended = never), counters never wrap: {} PASS",
+            "[USB WRITE TEST] 1/3 kernel side (fake stick): write protection unknown -> nothing, no registration -> refused, probe = one FLUSH (stale generation, late reply discarded), rw (one at a time, overflowing / outside ranges refused), 1 MiB in 16 pieces, first + second lock each alone, ESP refused, failed piece 1 / 8 / 16 -> whole write fails, write timeout -> slot back, no id reused after the 32-bit wrap, an old partition object after a replug (same numbers, rw granted) -> NoDevice, format sessions (only their id, ended = never), counters never wrap: {} PASS",
             line
         ),
         Err(e) => {

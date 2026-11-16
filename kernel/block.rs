@@ -137,6 +137,9 @@ pub enum Control {
     /// Self-tests: a test flag sent to the device (usbd / the fake), the reply's status.
     #[cfg(selftest)]
     Test { flags: u32 },
+    /// Self-tests: the request id counter set to `id` (the wrap test).
+    #[cfg(selftest)]
+    TestNextId { id: u32 },
 }
 
 /// Self-tests: the partition skips its own range check (the first lock), so that the second
@@ -164,10 +167,17 @@ pub fn check_range(dev_sectors: u64, lba: u64, len: usize) -> Result<u64, BlockE
 // Order: FS_LOCK -> partition lock -> disk lock.
 //
 // Removal (a USB disk went away): the list entry = None, the number returns to the pool
-// only when nothing uses it any more – the remover first unmounts the file
-// systems on the disk and its partitions (ublk.rs).  An operation in progress holds an Arc.
+// – the remover first unmounts the file systems on the disk and its partitions (ublk.rs).
+// An operation in progress holds an Arc of its disk object; a partition finds its parent by
+// number AND identity (`uid`), so an old partition object never reaches a new disk that got
+// the old number.
 
 struct Disk {
+    /// This disk object's identity – a counter that never repeats, unlike the number in the
+    /// list (which a later disk may get).  A partition remembers its parent's `uid` and every
+    /// operation checks it, so a partition of a removed disk never reaches the disk that got
+    /// the same number afterwards.
+    uid: u64,
     /// Copy of the name – `find` without taking the disk lock.
     name: String,
     /// Parent disk (for a partition) – `partitions_of` without disk locks.
@@ -180,6 +190,8 @@ struct Disk {
 unsafe impl Sync for Disk {}
 unsafe impl Send for Disk {}
 
+static NEXT_UID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
 static DISKS: crate::sched::spin::SpinLock<Vec<Option<Arc<Disk>>>> =
     crate::sched::spin::SpinLock::new("block list", crate::sched::spin::level::BLOCK, Vec::new());
 
@@ -190,6 +202,7 @@ fn disk(index: usize) -> Option<Arc<Disk>> {
 /// Adds a disk; returns its number (the first free one – e.g. after a removed USB disk).
 pub fn register(device: Box<dyn BlockDevice>) -> usize {
     let d = Arc::new(Disk {
+        uid: NEXT_UID.fetch_add(1, core::sync::atomic::Ordering::SeqCst),
         name: String::from(device.name()),
         parent: device.parent(),
         lock: crate::sched::sync::KMutex::new(),
@@ -233,6 +246,44 @@ pub fn with_device<R>(index: usize, f: impl FnOnce(&mut dyn BlockDevice) -> R) -
     Ok(f(unsafe { &mut **d.dev.get() }))
 }
 
+/// The identity of the disk now at `index` (None – no disk there).
+pub fn uid(index: usize) -> Option<u64> {
+    disk(index).map(|d| d.uid)
+}
+
+/// Like `with_device`, but only if the disk at `index` is still the object `uid` – after a
+/// removal and reuse of the number: NoDevice.
+fn with_disk_uid<R>(index: usize, uid: u64, f: impl FnOnce(&mut dyn BlockDevice) -> R) -> Result<R, BlockError> {
+    let d = disk(index).ok_or(BlockError::NoDevice)?;
+    if d.uid != uid {
+        return Err(BlockError::NoDevice);
+    }
+    let _g = d.lock.lock();
+    Ok(f(unsafe { &mut **d.dev.get() }))
+}
+
+/// Self-tests: a disk object kept after it left the list (an operation that started before a
+/// removal); `write` goes through the object itself.
+#[cfg(selftest)]
+pub struct Held(Arc<Disk>);
+
+#[cfg(selftest)]
+pub fn hold(index: usize) -> Option<Held> {
+    disk(index).map(Held)
+}
+
+#[cfg(selftest)]
+impl Held {
+    pub fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        let _g = self.0.lock.lock();
+        unsafe { &mut **self.0.dev.get() }.write(lba, buf)
+    }
+    pub fn flush(&self) -> Result<(), BlockError> {
+        let _g = self.0.lock.lock();
+        unsafe { &mut **self.0.dev.get() }.flush()
+    }
+}
+
 pub fn read(index: usize, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     with_device(index, |d| d.read(lba, buf))?
 }
@@ -251,13 +302,14 @@ pub fn flush(index: usize) -> Result<(), BlockError> {
     with_device(index, |d| if d.read_only() { Ok(()) } else { d.flush() })?
 }
 
-/// A write of a partition with a grant into its parent disk (the disk checks it again).
-fn write_part(index: usize, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
-    with_device(index, |d| d.write_range(lba, buf, tag))?
+/// A write of a partition with a grant into its parent disk – only if the parent is still the
+/// same object (`uid`); the disk checks it again.
+fn write_part(index: usize, uid: u64, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
+    with_disk_uid(index, uid, |d| d.write_range(lba, buf, tag))?
 }
 
-fn flush_part(index: usize, tag: u64) -> Result<(), BlockError> {
-    with_device(index, |d| d.flush_range(tag))?
+fn flush_part(index: usize, uid: u64, tag: u64) -> Result<(), BlockError> {
+    with_disk_uid(index, uid, |d| d.flush_range(tag))?
 }
 
 /// Control of a USB disk (`Control`).
@@ -300,6 +352,8 @@ pub fn partitions_of(parent: usize) -> Vec<usize> {
 pub struct Partition {
     name: String,
     parent: usize,
+    /// The parent disk object's identity (`Disk::uid`) – checked by every operation.
+    parent_uid: u64,
     /// Start and length in 512 B sectors.
     start: u64,
     sectors: u64,
@@ -348,7 +402,7 @@ impl BlockDevice for Partition {
     }
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         check_range(self.sectors, lba, buf.len())?;
-        read(self.parent, self.start + lba, buf)
+        with_disk_uid(self.parent, self.parent_uid, |d| d.read(self.start + lba, buf))?
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         // The first of the three locks: the partition's own range (with a grant – before
@@ -364,15 +418,15 @@ impl BlockDevice for Partition {
         }
         let abs = self.start.checked_add(lba).ok_or(BlockError::OutOfRange)?;
         match (self.read_only, self.grant) {
-            (false, _) => write(self.parent, abs, buf),
-            (true, Some(tag)) => write_part(self.parent, abs, buf, tag),
+            (false, _) => with_disk_uid(self.parent, self.parent_uid, |d| if d.read_only() { Err(BlockError::ReadOnly) } else { d.write(abs, buf) })?,
+            (true, Some(tag)) => write_part(self.parent, self.parent_uid, abs, buf, tag),
             (true, None) => Err(BlockError::ReadOnly),
         }
     }
     fn flush(&mut self) -> Result<(), BlockError> {
         match (self.read_only, self.grant) {
-            (true, Some(tag)) => flush_part(self.parent, tag),
-            _ => flush(self.parent),
+            (true, Some(tag)) => flush_part(self.parent, self.parent_uid, tag),
+            _ => with_disk_uid(self.parent, self.parent_uid, |d| if d.read_only() { Ok(()) } else { d.flush() })?,
         }
     }
     fn write_range(&mut self, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
@@ -401,6 +455,7 @@ pub fn scan_partitions(disk: usize) -> usize {
     else {
         return 0;
     };
+    let Some(parent_uid) = uid(disk) else { return 0 };
     let parts = match crate::gpt::read(disk) {
         Ok(Some(p)) => p,
         Ok(None) => return 0,
@@ -419,6 +474,7 @@ pub fn scan_partitions(disk: usize) -> usize {
         let part = Partition {
             name: pname.clone(),
             parent: disk,
+            parent_uid,
             start: p.first_sector,
             sectors: p.sectors,
             read_only,

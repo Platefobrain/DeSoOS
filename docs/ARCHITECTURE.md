@@ -988,7 +988,12 @@ write out until the FLUSH is answered). A FLUSH or REG that timed out leaves its
 late reply is discarded, never taken as the answer to a later request (slots: quarantine, as for reads).
 
 **A stick removed, usbd restarted.** The registration goes with the device on both sides; the stick (or the same
-stick plugged back, or usbd's restart re-attaching it) gets a new generation and no registration. Every sector is
+stick plugged back, or usbd's restart re-attaching it) gets a new generation and no registration. Disk numbers are
+reused, disk objects never: every disk object has a `uid` (a counter that never repeats) and a partition reaches its
+parent only by number **and** `uid` – an operation that still holds a partition of a removed stick gets `NoDevice`, even
+when a new stick got the same numbers and an rw registration. Request ids: every id a reply may still come for is in a
+busy or quarantined slot or in the stale list (16 – then the disk is declared gone, nothing is ever dropped from it);
+after the 32-bit counter wraps those ids are skipped. Every sector is
 then the old or the new version (USB WRITE TEST 3/3).
 
 | | Linux | Windows | DeSoOS |
@@ -1120,7 +1125,8 @@ panics; every case ends in an error or a valid result within limits.
   never wrap; then real usbd and a writable QEMU stick (`tests/mkgpt.py`: ESP + "DeSoOS system") – a real
   SYNCHRONIZE CACHE, the ESP never changes, usbd's lock alone (self-test flags: the kernel's checks off, a stale
   generation, a failed WRITE / FLUSH, a held FLUSH reply), and the stick unplugged / usbd killed during writes.
-  Mutations caught (8): ublk's range check off; the partition's range check off (seen by ublk's refusal counter –
+  Mutations caught (10): a partition reaching its parent by number only (the old partition wrote to the new
+  stick); request ids reused after the wrap; ublk's range check off; the partition's range check off (seen by ublk's refusal counter –
   the error alone is the same); usbd's range check off; usbd taking a stale generation; a failed FLUSH reported as
   done; a counter that wraps; a failed piece ignored; usbd flushing without a registration.
 - Result line `[RESULT-USB]`: `enum_avg_ms enum_max_ms kread_kbs kcat_kbs hid_n hid_avg_us hid_max_us` (keys sent via

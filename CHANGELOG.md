@@ -31,14 +31,20 @@ stages, each with its own gate.
   assertion keeps out FORMAT UNIT, MODE SELECT, WRITE SAME, UNMAP, ...), `bot_dir` (data out, the CSW residue),
   status counters `stor_writes stor_wbytes stor_flushes stor_refused`, `usblist` shows the write protection; test flags
   only in the self-test image (`--cfg selftest`: the third lock off, a failed WRITE / FLUSH, a late FLUSH reply).
+- **Disk identity** (review of the first commit): every disk object gets a `uid` that never repeats; a partition
+  reaches its parent by number and `uid`, so a partition of a removed stick never reaches a new stick that got the
+  same number (the test: an operation holding the old partition, the stick replugged with the same layout and rw
+  granted – `NoDevice`, the new stick unchanged). Request ids after the 32-bit counter wraps skip every id a reply
+  may still come for (busy / quarantined slots, the stale list – full = the disk is gone, never dropped).
 - **USB WRITE TEST** (the 40th suite, 3 parts): `/bin/blkwtest` – a writable fake stick for the kernel side; real usbd
   with a writable QEMU stick (`tests/mkgpt.py`: GPT, ESP + "DeSoOS system") – a real SYNCHRONIZE CACHE, the ESP never
   changes, usbd's lock alone, a stale generation, usbd's errors, a held probe reply; the stick unplugged and usbd
   killed during writes – back with a new generation and no registration, every sector old or new. The emulated USB
   devices: 6 (the writable stick on port 4); `qemu-hotplug.py` keeps the monitor's replies in
-  `logs/hotplug-monitor.log`; the test timeout is 600 s. Mutations caught (8): each lock's range check off (the
-  partition's seen by ublk's refusal counter), usbd taking a stale generation, a failed FLUSH reported as done, a
-  counter that wraps, a failed piece ignored, usbd flushing without a registration.
+  `logs/hotplug-monitor.log`; the test timeout is 600 s. Mutations caught (10): each lock's range check off
+  (the partition's seen by ublk's refusal counter), usbd taking a stale generation, a failed FLUSH reported as done, a
+  counter that wraps, a failed piece ignored, usbd flushing without a registration, a partition reaching its parent
+  by number only (the old partition object then wrote to the new stick), request ids reused after the wrap.
 
 ## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 

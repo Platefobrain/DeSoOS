@@ -13,7 +13,8 @@
 // FLUSH with the generation of the last registration; anything else counts as "bad".
 // Test flags (op 9, `blocks`): 2 – fail the k-th WRITE from now (k in bits 8..15), 4 – hold
 // the next FLUSH reply, 8 – fail the next FLUSH, 16 – hold the next WRITE reply (a held
-// reply goes out before the next request is served – late), 0x80 – reply and exit.
+// reply goes out before the next request is served – late), 0x40 – replug (the stick goes and
+// comes back as a new instance with the same medium), 0x80 – reply and exit.
 // A second disk ("blkwtest-wp", 64 blocks, write protection unknown) shows the kernel
 // refusing every registration on such a disk.
 //   blkwtest            the two disks, until flag 0x80 – "blkwtest: N checks OK, ..."
@@ -173,7 +174,7 @@ fn main(args: Args) -> i32 {
     }
     let mut msg = [0u8; 64];
     let mut ri = RecvInfo::default();
-    let (mut bad, mut writes, mut flushes, mut regs) = (0u64, 0u64, 0u64, 0u64);
+    let (mut bad, mut writes, mut flushes, mut regs, mut replugs) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut done = false;
     while !done {
         let list = [(devs[0].as_ref().unwrap().chan, W_READABLE), (devs[1].as_ref().unwrap().chan, W_READABLE)];
@@ -296,6 +297,26 @@ fn main(args: Args) -> i32 {
                         done = true;
                         break;
                     }
+                    if cnt & 0x40 != 0 && k == 0 {
+                        // Replug: this stick goes (its channel closes) and comes back as a new
+                        // instance with the same medium and layout.
+                        close(d.chan);
+                        sleep_ms(300);
+                        let Ok((mine, theirs)) = channel_create() else { return 2 };
+                        let buf = shm_create(4 * SLOT);
+                        let Ok(va) = shm_map(buf as u64, PROT_READ | PROT_WRITE) else { return 2 };
+                        let disk = blk_attach(blk, theirs, buf as u64, &info(BLOCKS, 1, b"blkwtest"));
+                        close(theirs);
+                        if disk < 0 {
+                            println!("blkwtest: FAIL replug blk_attach: {}", disk);
+                            return 1;
+                        }
+                        d.chan = mine;
+                        d.va = va;
+                        d.reg = (0, 0);
+                        d.held = None;
+                        replugs += 1;
+                    }
                 }
                 _ => {
                     bad += 1;
@@ -304,7 +325,7 @@ fn main(args: Args) -> i32 {
             }
         }
     }
-    println!("blkwtest: {} checks OK, writes {} flushes {} registrations {} bad {}", n, writes, flushes, regs, bad);
+    println!("blkwtest: {} checks OK, writes {} flushes {} registrations {} replugs {} bad {}", n, writes, flushes, regs, replugs, bad);
     if bad != 0 {
         return 1;
     }
