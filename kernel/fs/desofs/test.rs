@@ -121,7 +121,7 @@ pub(super) fn reseal(img: &mut [u8]) {
 
 /// Probes `img` on a RAM disk of `sectors` sectors (the image is cut to fit).
 fn run_dev(img: &[u8], sectors: u64) -> Report {
-    let disk = block::register(Box::new(RamDisk::new("dsfs", sectors)));
+    let disk = block::register(Box::new(RamDisk::new("dsfs", sectors))).unwrap_or(usize::MAX);
     let n = (img.len()).min(sectors as usize * SECTOR_SIZE);
     let _ = block::write(disk, 0, &img[..n]);
     let r = probe(disk);

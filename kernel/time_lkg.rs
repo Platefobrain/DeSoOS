@@ -359,15 +359,27 @@ fn on_system<R>(f: impl FnOnce(&mut dyn FileSystem) -> R) -> Option<R> {
 pub fn load() {
     let _g = LOCK.lock();
     let r = on_system(|fs| load_from(fs));
+    let mem = SECS.load(Ordering::Acquire);
     let state = match r {
         None => FileState::NoVolume,
-        Some(Ok(None)) => FileState::Missing,
+        Some(Ok(None)) => {
+            // A volume without the file while memory holds a time (raised earlier in this
+            // start, e.g. before a USB stick was plugged in): it must reach this volume – the
+            // next accepted SYS_TIME_SET writes max(memory, its own L) (V080 rule D).
+            if mem > 0 {
+                DIRTY.store(true, Ordering::Release);
+            }
+            FileState::Missing
+        }
         Some(Ok(Some((secs, src)))) => {
             // A stored time below the build date changes nothing (the build date bounds it
             // already); it is kept as it is.
-            if secs > SECS.load(Ordering::Acquire) {
+            if secs > mem {
                 SECS.store(secs, Ordering::Release);
                 SOURCE.store(src as u8, Ordering::Release);
+            } else if secs < mem {
+                // An older file than memory (rule D): the higher time is written next time.
+                DIRTY.store(true, Ordering::Release);
             }
             FileState::Good
         }
@@ -379,6 +391,13 @@ pub fn load() {
     if let FileState::Unreadable(bad) = state {
         crate::serial_println!("[TIME] {}{}: {} - the clock is NOT plausible (reason 8) until a new last known good time is written", SYSTEM_MOUNT, FILE, bad.as_str());
     }
+}
+
+/// The system volume went away (a USB stick unplugged): the file state is "no volume" again;
+/// the LKG stays in memory and a pending save waits for the next volume (rule D).
+pub fn volume_gone() {
+    let _g = LOCK.lock();
+    FILE_STATE.store(encode_state(FileState::NoVolume), Ordering::Release);
 }
 
 /// What a raise did.
@@ -661,6 +680,13 @@ pub fn raise_for_test(secs: u64) -> Raised {
     raise(secs, Source::Test)
 }
 
+/// Self-tests: the pending save forgotten – as when the time in memory came from a volume it
+/// was already saved on (USB DISK TEST, rule D).
+#[cfg(selftest)]
+pub fn test_clear_dirty() {
+    DIRTY.store(false, Ordering::Release);
+}
+
 /// Back to "nothing stored" in memory (LKG TEST, between its cases).
 #[cfg(selftest)]
 pub fn reset_for_test() {
@@ -684,6 +710,6 @@ pub fn describe() -> String {
         FileState::Unreadable(b) => alloc::format!("{}{} UNREADABLE: {}", SYSTEM_MOUNT, FILE, b.as_str()),
     };
     // Without a system volume "kept in memory only" says it already.
-    let saved = if dirty() && state != FileState::NoVolume { " - NOT SAVED (the write failed; retried with the next raise)" } else { "" };
+    let saved = if dirty() && state != FileState::NoVolume { " - NOT SAVED (a write failed or this volume holds an older time; written with the next raise)" } else { "" };
     alloc::format!("last known good {} UTC ({}; {}){}", rtc::DateTime::from_unix(when), source().as_str(), file, saved)
 }

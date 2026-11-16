@@ -116,6 +116,16 @@ enum Exported {
     Done { alpn: bool, got: usize, equal: bool },
 }
 
+impl core::fmt::Display for Exported {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Exported::Refused(e) => write!(f, "handshake refused: {}", e),
+            Exported::NoConnection => write!(f, "no connection"),
+            Exported::Done { alpn, got, equal } => write!(f, "alpn {} got {} bytes equal {}", alpn, got, equal),
+        }
+    }
+}
+
 /// One TLS connection to tests/nts-server: handshake (ALPN optional), read what rustls
 /// exported, export the same here, compare.
 fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
@@ -586,7 +596,7 @@ fn net() -> i32 {
     cases += 1;
     match exporter_case(RUSTLS_BASE + 2, Some(ntske)) {
         Exported::Done { alpn: true, got: 32, equal: true } => {}
-        _ => fail!("exporter vs rustls (label test, context abc): not equal"),
+        other => fail!("exporter vs rustls (label test, context abc): {}", other),
     }
     cases += 1;
     match exporter_case(RUSTLS_BASE + 1, Some(ntske)) {
@@ -597,7 +607,7 @@ fn net() -> i32 {
     cases += 1;
     match exporter_case(RUSTLS_BASE, None) {
         Exported::Done { alpn: false, got: 64, equal: true } => {}
-        _ => fail!("exporter without ALPN offered: not equal or ALPN reported"),
+        other => fail!("exporter without ALPN offered: {}", other),
     }
     cases += 1;
 

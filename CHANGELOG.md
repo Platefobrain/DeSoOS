@@ -46,6 +46,34 @@ stages, each with its own gate.
   counter that wraps, a failed piece ignored, usbd flushing without a registration, a partition reaching its parent
   by number only (the old partition object then wrote to the new stick), request ids reused after the wrap.
 
+### Stage B – a USB stick's "DeSoOS system" partition as /disk
+- **Who gets /disk** (`kernel/user/usbdisk.rs`, rule E): the internal disk (the first PCI disk, by identity) keeps
+  /disk while it holds a recognised DeSoFS – even damaged; otherwise, with /disk really free, exactly one USB
+  candidate (a "DeSoOS system" partition with a DeSoFS marker) gets it; two or more – none (also two on one stick);
+  the others read-only under /usbN (a volume never mounted twice); /disk never taken away; decided anew after every
+  change, once the USB disks were quiet for 1.5 s.
+- **The way to rw** (rule D2, one generation): write protection off → ≤ 64 GiB → probe → `desofs check` (at every rw
+  mount, never an automatic repair) → rw registration + grant → mount; any failure – read-only with the reason.
+- **The last known good time on a stick** (rule D): a volume without the LKG file or with an older one marks the time
+  in memory for saving; the stick removed – "no volume", the time stays in memory.
+- **`desofs format` on a USB partition** (rule F): only "DeSoOS system", ≤ 64 GiB, not mounted, write protection off,
+  probe, a format session ended on every way out.
+- **Disk identity**: the counter never wraps (`block::register` refuses when it is used up – every caller handles it);
+  a DeSoFS volume reads / writes / flushes with its disk's identity (`read_as` / `write_as` / `flush_as`).
+- A DeSoFS volume on a disk that takes no writes (a USB partition without a grant) is read-only from the mount on,
+  not only after its first failed commit.
+- **USB DISK TEST** (the 41st suite): `/bin/blkdtest` – two fake sticks with a write cache and power loss; every rule
+  above; power loss at each of 12 writes of an operation – the old or the new version; real usbd with the writable
+  QEMU stick. **USB RESTART TEST** – a third QEMU start without virtio and NVMe (`logs/test-usbrestart.log`): the stick
+  becomes /disk by itself with its LKG. Also in USB DISK TEST: a stick whose FLUSH is refused and a volume with a
+  bad data block – /disk only read-only. Mutations caught (9): no pending save for a volume without the LKG file /
+  with an older one, the internal disk's DeSoFS ignored, the first of several candidates taking /disk, /disk in use
+  ignored, `desofs check` skipped, the probe skipped, the format session left open, any USB partition formattable.
+- Fix (found at gate B): the block cache tests in DESOFS TEST never removed their RAM disks (~20 MiB of heap per
+  round). After enough rounds, or with a fragmented heap, TCG runs ended with "memory allocation of 65536 bytes
+  failed" (also on code from before stage B). The disks are now removed when each test ends; `LOOP=desofs:12`
+  passes 12/12 rounds.
+
 ## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 
 Stages A–D, each with its own gate; the last one passed on the Legion: the time service set the clock from all three

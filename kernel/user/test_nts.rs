@@ -107,7 +107,7 @@ fn result_u(out: &str) -> Option<u64> {
 }
 
 fn mount_ram() -> Result<(), String> {
-    let d = crate::block::register(Box::new(crate::block::RamDisk::new("ntstest", 1024 * 8)));
+    let d = crate::block::register(Box::new(crate::block::RamDisk::new("ntstest", 1024 * 8))).unwrap_or(usize::MAX);
     unsafe { DISK = Some(d) };
     let p = crate::fs::desofs::format::Params { uuid: core::array::from_fn(|i| 0x30 + i as u8), time: 1_700_000_000, label: "NTS-TEST" };
     crate::fs::desofs::format::format(d, &p).map_err(|e| alloc::format!("format: {}", e))?;

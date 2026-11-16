@@ -55,6 +55,7 @@ pub mod shm;
 pub mod inputsrc;
 // In-kernel USB disk (ublk) – read requests go over a channel to usbd.
 pub mod ublk;
+pub mod usbdisk;
 pub mod prof;
 // Process memory (brk, mmap, lazy pages).
 pub mod vm;
@@ -94,6 +95,8 @@ mod test_svc;
 mod test_usb;
 #[cfg(selftest)]
 mod test_usbw;
+#[cfg(selftest)]
+mod test_usbdisk;
 #[cfg(selftest)]
 mod test_net;
 // The long test (tests/soak.sh): init + /bin/soak instead of the self-tests.
@@ -795,6 +798,10 @@ pub use test_svc::self_test as svc_self_test;
 pub use test_usb::self_test as usb_self_test;
 #[cfg(selftest)]
 pub use test_usbw::self_test as usbw_self_test;
+#[cfg(selftest)]
+pub use test_usbdisk::self_test as usbdisk_self_test;
+#[cfg(selftest)]
+pub use test_usbdisk::usb_restart as usb_restart_test;
 #[cfg(selftest)]
 pub use test_net::self_test as net_self_test;
 #[cfg(selftest)]

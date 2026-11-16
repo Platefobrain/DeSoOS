@@ -38,7 +38,7 @@ pub(super) fn params() -> Params<'static> {
 }
 
 pub(super) fn new_disk(blocks: u64) -> usize {
-    block::register(Box::new(RamDisk::new("dsfw", blocks * 8)))
+    block::register(Box::new(RamDisk::new("dsfw", blocks * 8))).unwrap_or(usize::MAX)
 }
 
 pub(super) fn formatted(blocks: u64) -> Result<usize, String> {
@@ -589,7 +589,7 @@ pub fn t_vfs() -> T {
     for fail_at in 1..=12u64 {
         FAIL_AT.store(0, Ordering::SeqCst);
         WRITES.store(0, Ordering::SeqCst);
-        let d = block::register(Box::new(FailDisk { inner: RamDisk::new("fail", blocks * 8) }));
+        let d = block::register(Box::new(FailDisk { inner: RamDisk::new("fail", blocks * 8) })).unwrap_or(usize::MAX);
         let res = (|| -> Result<bool, String> {
             fmt::format(d, &params()).map_err(|e| format!("format: {}", e))?;
             let mut v = mount(d)?;

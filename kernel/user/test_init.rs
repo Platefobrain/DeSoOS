@@ -277,7 +277,7 @@ fn desofs_in_user_shell() -> Result<(), String> {
         return Err(alloc::format!("output limit: {:?}", t));
     }
 
-    let d = crate::block::register(alloc::boxed::Box::new(crate::block::RamDisk::new("dsfu", 2048)));
+    let d = crate::block::register(alloc::boxed::Box::new(crate::block::RamDisk::new("dsfu", 2048))).unwrap_or(usize::MAX);
     let r = (|| -> Result<(), String> {
         // A pattern, so that "unchanged" means something.
         let pattern: alloc::vec::Vec<u8> = (0..1024 * 1024u32).map(|i| (i * 7 + i / 4096) as u8).collect();

@@ -150,7 +150,7 @@ fn put(over: &mut BTreeMap<u64, Vec<u8>>, base: &Image, lba: u64, buf: &[u8]) {
 }
 
 pub(super) fn attach(base: &Image, blocks: u64, over: BTreeMap<u64, Vec<u8>>, log: Option<Rc<RefCell<Log>>>) -> usize {
-    block::register(Box::new(CrashDev { base: base.clone(), over, blocks, log }))
+    block::register(Box::new(CrashDev { base: base.clone(), over, blocks, log })).unwrap_or(usize::MAX)
 }
 
 /// The whole disk as an image (zero blocks stored empty).

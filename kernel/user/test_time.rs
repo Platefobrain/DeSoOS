@@ -72,7 +72,7 @@ fn run(path: &str, args: &[&str], ms: u64) -> Option<(ExitKind, String)> {
 /// A RAM disk with a fresh DeSoFS volume, mounted at /disk the way the kernel mounts the
 /// system volume (fs::mount_disk – which reads the LKG).
 fn mount_ram() -> Result<(), String> {
-    let d = crate::block::register(Box::new(crate::block::RamDisk::new("lkgtest", BLOCKS * 8)));
+    let d = crate::block::register(Box::new(crate::block::RamDisk::new("lkgtest", BLOCKS * 8))).unwrap_or(usize::MAX);
     unsafe { DISK = Some(d) };
     let p = crate::fs::desofs::format::Params { uuid: core::array::from_fn(|i| 0x70 + i as u8), time: 1_700_000_000, label: "TIME-TEST" };
     crate::fs::desofs::format::format(d, &p).map_err(|e| alloc::format!("format: {}", e))?;

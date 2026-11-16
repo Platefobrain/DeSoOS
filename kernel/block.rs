@@ -112,6 +112,10 @@ pub trait BlockDevice {
     fn set_grant(&mut self, _grant: Option<u64>) -> bool {
         false
     }
+    /// A partition: (start, length) in 512 B sectors of its parent.
+    fn partition_range(&self) -> Option<(u64, u64)> {
+        None
+    }
 }
 
 /// Control of a USB disk (ublk.rs) – the registrations of the write rules.  Block numbers are
@@ -199,10 +203,32 @@ fn disk(index: usize) -> Option<Arc<Disk>> {
     DISKS.lock().get(index).cloned().flatten()
 }
 
+/// Takes the next disk identity; None when the one after it would not fit (never 0, never
+/// reused – the counter does not wrap).
+fn take_uid() -> Option<u64> {
+    use core::sync::atomic::Ordering;
+    let mut cur = NEXT_UID.load(Ordering::SeqCst);
+    loop {
+        let next = cur.checked_add(1)?;
+        match NEXT_UID.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(cur),
+            Err(v) => cur = v,
+        }
+    }
+}
+
+/// Self-tests: sets the next disk identity (the overflow test); returns the old value.
+#[cfg(selftest)]
+pub fn test_set_next_uid(v: u64) -> u64 {
+    NEXT_UID.swap(v, core::sync::atomic::Ordering::SeqCst)
+}
+
 /// Adds a disk; returns its number (the first free one – e.g. after a removed USB disk).
-pub fn register(device: Box<dyn BlockDevice>) -> usize {
+/// None – the identity counter is used up (the disk is refused, never given an old identity).
+pub fn register(device: Box<dyn BlockDevice>) -> Option<usize> {
+    let uid = take_uid()?;
     let d = Arc::new(Disk {
-        uid: NEXT_UID.fetch_add(1, core::sync::atomic::Ordering::SeqCst),
+        uid,
         name: String::from(device.name()),
         parent: device.parent(),
         lock: crate::sched::sync::KMutex::new(),
@@ -215,10 +241,10 @@ pub fn register(device: Box<dyn BlockDevice>) -> usize {
     }
     if let Some(i) = list.iter().position(|e| e.is_none()) {
         list[i] = Some(d);
-        return i;
+        return Some(i);
     }
     list.push(Some(d));
-    list.len() - 1
+    Some(list.len() - 1)
 }
 
 /// Removes a disk (frees the entry).  The caller has already unmounted file systems from
@@ -260,6 +286,20 @@ fn with_disk_uid<R>(index: usize, uid: u64, f: impl FnOnce(&mut dyn BlockDevice)
     }
     let _g = d.lock.lock();
     Ok(f(unsafe { &mut **d.dev.get() }))
+}
+
+/// `read` / `write` / `flush` for a user that holds a disk by number AND identity (a DeSoFS
+/// volume): after the disk was removed and its number reused – NoDevice, never the new disk.
+pub fn read_as(index: usize, uid: u64, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+    with_disk_uid(index, uid, |d| d.read(lba, buf))?
+}
+
+pub fn write_as(index: usize, uid: u64, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    with_disk_uid(index, uid, |d| if d.read_only() { Err(BlockError::ReadOnly) } else { d.write(lba, buf) })?
+}
+
+pub fn flush_as(index: usize, uid: u64) -> Result<(), BlockError> {
+    with_disk_uid(index, uid, |d| if d.read_only() { Ok(()) } else { d.flush() })?
 }
 
 /// Self-tests: a disk object kept after it left the list (an operation that started before a
@@ -316,6 +356,60 @@ fn flush_part(index: usize, uid: u64, tag: u64) -> Result<(), BlockError> {
 #[cfg_attr(not(selftest), allow(dead_code))]
 pub fn control(index: usize, c: Control) -> Result<u64, BlockError> {
     with_device(index, |d| d.control(c))?
+}
+
+/// Partition `index`: (parent disk, start, length in the parent's DEVICE blocks).
+pub fn partition_blocks(index: usize) -> Option<(usize, u64, u64)> {
+    let (parent, range) = with_device(index, |d| (d.parent(), d.partition_range())).ok()?;
+    let (parent, (start, sectors)) = (parent?, range?);
+    let bs = with_device(parent, |d| d.logical_block_size()).ok()? as u64;
+    let f = (bs / SECTOR_SIZE as u64).max(1);
+    Some((parent, start / f, sectors / f))
+}
+
+/// The internal disk (V080 rule E): the first disk registered before the file systems start
+/// (PCI: virtio-blk, then NVMe) – remembered by identity, never by number, so a USB disk
+/// that later gets number 0 is never it.  0 = none.
+static INTERNAL_UID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static INTERNAL_INDEX: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Called once by `fs::init`: the internal disk is disk 0 if one is registered by then.
+pub fn set_internal() {
+    use core::sync::atomic::Ordering;
+    if let Some(u) = uid(0) {
+        INTERNAL_UID.store(u, Ordering::SeqCst);
+        INTERNAL_INDEX.store(0, Ordering::SeqCst);
+    }
+}
+
+/// The internal disk's number, if it is still the same object.
+pub fn internal() -> Option<usize> {
+    use core::sync::atomic::Ordering;
+    let (i, u) = (INTERNAL_INDEX.load(Ordering::SeqCst), INTERNAL_UID.load(Ordering::SeqCst));
+    if u != 0 && uid(i) == Some(u) { Some(i) } else { None }
+}
+
+/// Self-tests: makes disk `index` the internal disk (None – no internal disk); returns the old
+/// setting for `test_restore_internal`.
+#[cfg(selftest)]
+pub fn test_set_internal(index: Option<usize>) -> (usize, u64) {
+    use core::sync::atomic::Ordering;
+    let old = (INTERNAL_INDEX.load(Ordering::SeqCst), INTERNAL_UID.load(Ordering::SeqCst));
+    match index.and_then(|i| uid(i).map(|u| (i, u))) {
+        Some((i, u)) => {
+            INTERNAL_INDEX.store(i, Ordering::SeqCst);
+            INTERNAL_UID.store(u, Ordering::SeqCst);
+        }
+        None => INTERNAL_UID.store(0, Ordering::SeqCst),
+    }
+    old
+}
+
+#[cfg(selftest)]
+pub fn test_restore_internal(old: (usize, u64)) {
+    use core::sync::atomic::Ordering;
+    INTERNAL_INDEX.store(old.0, Ordering::SeqCst);
+    INTERNAL_UID.store(old.1, Ordering::SeqCst);
 }
 
 /// Sets (Some(tag)) or clears (None) the write grant of partition `index`.
@@ -437,6 +531,9 @@ impl BlockDevice for Partition {
     fn flush_range(&mut self, _tag: u64) -> Result<(), BlockError> {
         Err(BlockError::ReadOnly)
     }
+    fn partition_range(&self) -> Option<(u64, u64)> {
+        Some((self.start, self.sectors))
+    }
     fn set_grant(&mut self, grant: Option<u64>) -> bool {
         // A grant only where the disk itself is read-only (USB); elsewhere nothing changes.
         if self.read_only {
@@ -483,7 +580,10 @@ pub fn scan_partitions(disk: usize) -> usize {
             kind: p.kind,
             label: p.name.clone(),
         };
-        let index = register(Box::new(part));
+        let Some(index) = register(Box::new(part)) else {
+            crate::serial_println!("[BLK] {}: disk identities used up - partition {} not registered", name, pname);
+            continue;
+        };
         crate::serial_println!(
             "[BLK]   disk {}: {} = {} MiB, {}{}",
             index,
@@ -532,6 +632,15 @@ impl FrameDisk {
             let page = unsafe { core::slice::from_raw_parts_mut(crate::memory::phys_to_virt(self.frames[k]) as *mut u8, 4096) };
             f(&mut page[o..o + n], done..done + n);
             done += n;
+        }
+    }
+}
+
+impl Drop for FrameDisk {
+    /// Only when it was never registered (a RAM disk is never removed).
+    fn drop(&mut self) {
+        for &f in &self.frames {
+            crate::memory::free_frame(f);
         }
     }
 }
@@ -603,7 +712,13 @@ pub fn create_ram_disk(mib: u64) -> Result<usize, String> {
             }
         }
     }
-    Ok(register(Box::new(FrameDisk { name: alloc::format!("ram{}", n), frames })))
+    match register(Box::new(FrameDisk { name: alloc::format!("ram{}", n), frames })) {
+        Some(i) => Ok(i),
+        None => {
+            RAM_DISKS.fetch_sub(1, Ordering::SeqCst);
+            Err(String::from("disk identities used up"))
+        }
+    }
 }
 
 // ------------------------------------------------------------

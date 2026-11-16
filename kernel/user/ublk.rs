@@ -121,8 +121,13 @@ pub struct Shared {
     pub timeouts: AtomicU64,
     pub proto_errors: AtomicU64,
     pub late: AtomicU64,
-    /// Mount points (/usb0, …) – changed only by the monitor.
+    /// Mount points (/usb0, …, /disk) – changed only by the monitor.
     mounts: SpinLock<Vec<String>>,
+    /// The partition (block number) this stick holds /disk with (usize::MAX – none).
+    disk_part: AtomicUsize,
+    /// DeSoFS partitions mounted read-only under /usbN, and the ones already tried.
+    ro_dsfs: SpinLock<Vec<(String, usize)>>,
+    ro_tried: SpinLock<Vec<usize>>,
 }
 
 impl Shared {
@@ -146,6 +151,41 @@ impl Shared {
         if !self.gone.swap(true, Ordering::SeqCst) {
             wake_monitor();
         }
+    }
+
+    /// The partition this stick holds /disk with.
+    pub fn disk_part(&self) -> Option<usize> {
+        match self.disk_part.load(Ordering::SeqCst) {
+            usize::MAX => None,
+            p => Some(p),
+        }
+    }
+
+    pub(super) fn set_disk_part(&self, part: usize) {
+        self.disk_part.store(part, Ordering::SeqCst);
+        self.mounts.lock().push(String::from(crate::time_lkg::SYSTEM_MOUNT));
+    }
+
+    pub(super) fn ro_mount_of(&self, part: usize) -> Option<String> {
+        self.ro_dsfs.lock().iter().find(|(_, p)| *p == part).map(|(m, _)| m.clone())
+    }
+
+    pub(super) fn add_ro_mount(&self, path: &str, part: usize) {
+        self.ro_dsfs.lock().push((String::from(path), part));
+        self.mounts.lock().push(String::from(path));
+    }
+
+    pub(super) fn forget_mount(&self, path: &str) {
+        self.ro_dsfs.lock().retain(|(m, _)| m != path);
+        self.mounts.lock().retain(|m| m != path);
+    }
+
+    pub(super) fn ro_tried(&self, part: usize) -> bool {
+        self.ro_tried.lock().contains(&part)
+    }
+
+    pub(super) fn mark_ro_tried(&self, part: usize) {
+        self.ro_tried.lock().push(part);
     }
 }
 
@@ -875,6 +915,9 @@ pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots:
         proto_errors: AtomicU64::new(0),
         late: AtomicU64::new(0),
         mounts: SpinLock::new("ublk mounts", level::BLOCK, Vec::new()),
+        disk_part: AtomicUsize::new(usize::MAX),
+        ro_dsfs: SpinLock::new("ublk ro desofs", level::BLOCK, Vec::new()),
+        ro_tried: SpinLock::new("ublk ro tried", level::BLOCK, Vec::new()),
     });
     let dev = Ublk {
         sh: sh.clone(),
@@ -889,7 +932,10 @@ pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots:
         reg: Reg::None,
         stale: Vec::new(),
     };
-    let index = block::register(Box::new(dev));
+    let Some(index) = block::register(Box::new(dev)) else {
+        crate::serial_println!("[USB] disk identities used up - disk refused");
+        return Err(ERROR_NO_SPACE);
+    };
     sh.index.store(index, Ordering::SeqCst);
     crate::serial_println!(
         "[USB] {}: \"{}\", {} MiB, {}-byte blocks, read-only, write protection {} (disk {}, generation {})",
@@ -906,6 +952,7 @@ pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots:
         generation
     );
     REGISTRY.lock().push(sh);
+    super::usbdisk::changed();
     start_monitor();
     wake_monitor();
     Ok(num)
@@ -940,8 +987,11 @@ fn monitor(_: usize) {
             if sh.gone() {
                 remove(&sh);
                 REGISTRY.lock().retain(|x| !Arc::ptr_eq(x, &sh));
+                super::usbdisk::changed();
             }
         }
+        // A "DeSoOS system" partition as /disk (rules D2 / E) once the USB disks settled.
+        super::usbdisk::evaluate();
         // usbd closing the channel does not wake this task – while disks are
         // present we check every 200 ms.
         let timeout = if count() > 0 { Some(200) } else { None };
@@ -992,7 +1042,7 @@ fn probe(sh: &Shared) {
     }
 }
 
-fn free_mount_point() -> Option<String> {
+pub(super) fn free_mount_point() -> Option<String> {
     (0..16).map(|n| alloc::format!("/usb{}", n)).find(|p| crate::fs::stat(p).is_err())
 }
 
@@ -1003,6 +1053,12 @@ fn remove(sh: &Shared) {
     for m in &mounts {
         let _ = crate::fs::unmount_lost(m);
         let _ = crate::fs::remove(m);
+    }
+    if sh.disk_part().is_some() {
+        // The system volume went with the stick: the LKG stays in memory (a pending save
+        // waits for the next volume).
+        sh.disk_part.store(usize::MAX, Ordering::SeqCst);
+        crate::time_lkg::volume_gone();
     }
     let index = sh.index.load(Ordering::SeqCst);
     for p in block::partitions_of(index) {

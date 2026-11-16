@@ -12,6 +12,9 @@
 // * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
 //   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
 //   (DeSoFS written in the first start must be there, mounted at /disk by itself).
+// * USB restart phase: a third start, `opt/desoos/phase` = "usbrestart", QEMU without the virtio
+//   and NVMe disks – only USB RESTART TEST (the writable stick of the first start becomes /disk
+//   by itself, with the last known good time and a file the first start left on it).
 // * Soak phase (tests/soak.sh): `opt/desoos/phase` = "soak <seconds> <seed> [ram]"; the boot
 //   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
@@ -30,6 +33,7 @@ static STARTED: AtomicU32 = AtomicU32::new(0);
 static PASSED: AtomicU32 = AtomicU32::new(0);
 static AUTOTEST: AtomicBool = AtomicBool::new(false);
 static RESTART: AtomicBool = AtomicBool::new(false);
+static USB_RESTART: AtomicBool = AtomicBool::new(false);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
 static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
@@ -265,6 +269,11 @@ fn detect_phase() {
         serial_println!("[TEST] Restart phase: only RESTART TEST part 2 (the disk from the first start)");
         return;
     }
+    if text == "usbrestart" {
+        USB_RESTART.store(true, Ordering::SeqCst);
+        serial_println!("[TEST] USB restart phase: only USB RESTART TEST (the writable stick from the first start, no virtio / NVMe)");
+        return;
+    }
     let mut w = text.split_whitespace();
     if w.next() == Some("soak") {
         let secs = w.next().and_then(|s| s.parse::<u64>().ok()).filter(|&s| (60..=7 * 24 * 3600).contains(&s));
@@ -296,6 +305,11 @@ pub fn restart() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
+/// The third start of tests/test.sh (no virtio / NVMe disk): the writable USB stick as /disk.
+pub fn usb_restart() -> bool {
+    USB_RESTART.load(Ordering::SeqCst)
+}
+
 /// The soak start: Some((seconds, seed, on a RAM disk)); u64::MAX seconds = a bad phase
 /// (fails at once).
 pub fn soak() -> Option<(u64, u64, bool)> {
@@ -307,7 +321,7 @@ pub fn soak() -> Option<(u64, u64, bool)> {
 
 /// Restart or soak start: the boot self-tests are skipped.
 pub fn skip_boot() -> bool {
-    restart() || soak().is_some()
+    restart() || usb_restart() || soak().is_some()
 }
 
 pub fn autotest() -> bool {

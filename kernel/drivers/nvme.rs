@@ -677,9 +677,13 @@ pub fn init() -> usize {
                 if !d.write_allowed {
                     serial_println!("[NVMe] {}: real SSD - write protection ON (nothing is ever written)", d.name);
                 }
-                let index = block::register(alloc::boxed::Box::new(d));
-                block::scan_partitions(index);
-                added += 1;
+                match block::register(alloc::boxed::Box::new(d)) {
+                    Some(index) => {
+                        block::scan_partitions(index);
+                        added += 1;
+                    }
+                    None => serial_println!("[NVMe] disk identities used up - disk not registered"),
+                }
             }
             Err(e) => serial_println!("[NVMe] controller at {} [{:04x}:{:04x}]: {}", dev.address, dev.vendor, dev.device, e),
         }

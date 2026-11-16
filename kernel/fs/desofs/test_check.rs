@@ -32,7 +32,7 @@ macro_rules! ensure {
 }
 
 fn disk_of(img: &[u8]) -> usize {
-    let d = block::register(Box::new(RamDisk::new("dsfc", (img.len() / 512) as u64)));
+    let d = block::register(Box::new(RamDisk::new("dsfc", (img.len() / 512) as u64))).unwrap_or(usize::MAX);
     let _ = block::write(d, 0, img);
     d
 }
@@ -339,7 +339,7 @@ pub fn t_repair() -> T {
     refuse("generation u64::MAX", &img, "maximum")?;
     // A read-only disk.
     let img = older_damaged();
-    let ro = block::register(Box::new(RoDisk { inner: RamDisk::new("ro", (img.len() / 512) as u64) }));
+    let ro = block::register(Box::new(RoDisk { inner: RamDisk::new("ro", (img.len() / 512) as u64) })).unwrap_or(usize::MAX);
     let r = check::repair(ro, true);
     block::remove(ro);
     ensure!(matches!(&r, Err(e) if e.contains("read-only")), "read-only disk: {:?}", r);
@@ -529,7 +529,7 @@ pub fn t_mount() -> T {
     block::remove(d);
     ensure!(matches!(&r, DiskMount::DeSoFs(Some(w)) if w.contains("older")), "older tree damaged: {:?}", r);
     // FAT32 -> FAT32.
-    let d = block::register(Box::new(RamDisk::new("dsfm", 16 * 1024)));
+    let d = block::register(Box::new(RamDisk::new("dsfm", 16 * 1024))).unwrap_or(usize::MAX);
     let r = crate::fs::fat32::mkfs(d, "MTEST", true).map(|_| try_mount(d));
     ensure!(matches!(&r, Ok(DiskMount::Fat32(_))), "FAT32: {:?}", r);
     // The DeSoFS marker over a valid FAT32 (both superblocks broken): DeSoFS rules only –
@@ -542,7 +542,7 @@ pub fn t_mount() -> T {
     block::remove(d);
     ensure!(matches!(&r, DiskMount::Nothing(w) if w.contains("DeSoFS")), "marker over FAT32: {:?}", r);
     // An empty disk: nothing mounted, nothing written (never a format).
-    let d = block::register(Box::new(RamDisk::new("dsfe", 512)));
+    let d = block::register(Box::new(RamDisk::new("dsfe", 512))).unwrap_or(usize::MAX);
     let r = try_mount(d);
     let img = image(d, 64);
     block::remove(d);
@@ -623,7 +623,7 @@ pub fn t_format_mounted() -> T {
     // FAT32 whose buffers cannot be written (flush fails): the kernel-shell `desofs format`
     // cannot unmount it, so it stops – the file system stays mounted and not
     // one byte of the disk changes.
-    let f = block::register(Box::new(FlushFailDisk { inner: RamDisk::new("ff", 16 * 1024) }));
+    let f = block::register(Box::new(FlushFailDisk { inner: RamDisk::new("ff", 16 * 1024) })).unwrap_or(usize::MAX);
     let r = (|| -> T {
         crate::fs::fat32::mkfs(f, "FFTEST", true).map_err(|e| format!("mkfs: {}", e))?;
         ensure!(matches!(crate::fs::mount_disk(f, "/mt-ff"), DiskMount::Fat32(_)), "FAT32 mount");

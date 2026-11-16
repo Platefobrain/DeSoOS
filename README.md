@@ -98,7 +98,8 @@ More documentation:
   server signatures, KeyUpdate, close_notify) – no TLS 1.2, no "insecure" mode: either the server is fully
   authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
   code for a refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
-- File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
+- File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start; without an internal DeSoFS
+  disk, a USB stick's "DeSoOS system" partition becomes `/disk` – v0.80, in progress), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
@@ -108,7 +109,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (40 suites, a restart phase and a short soak, 320 tests), stress tests and a long soak test
+- Built-in self-tests (41 suites, a restart phase, a USB restart phase and a short soak, 325 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 

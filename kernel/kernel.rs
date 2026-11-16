@@ -249,6 +249,15 @@ pub extern "sysv64" fn kernel_main(
     arch::x86_64::smp::init();
     // tests/soak.sh: the long test instead of the self-tests (it needs every core, the
     // keyboard repeat task and the usb-disks task like a normal start).
+    // tests/test.sh, third start (no virtio / NVMe): the writable USB stick as /disk.
+    #[cfg(selftest)]
+    if selftest::usb_restart() {
+        input::start_repeat_task();
+        user::ublk::start_monitor();
+        user::usb_restart_test();
+        let ok = selftest::finish();
+        selftest::exit_if_autotest(ok);
+    }
     #[cfg(selftest)]
     if let Some((secs, seed, ram)) = selftest::soak() {
         input::start_repeat_task();
@@ -310,6 +319,11 @@ pub extern "sysv64" fn kernel_main(
     #[cfg(selftest)]
     if !selftest::looping() {
         user::usbw_self_test();
+    }
+    // A USB stick's "DeSoOS system" partition as /disk – rules D2 / E / D / F (v0.80 stage B).
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::usbdisk_self_test();
     }
     // Network card – netd in user space.
     #[cfg(selftest)]

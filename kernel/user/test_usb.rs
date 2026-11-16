@@ -245,7 +245,7 @@ fn release_hold(_: usize) {
 fn hung_disk_test() -> Result<u64, String> {
     use alloc::boxed::Box;
     use crate::block;
-    let disk = block::register(Box::new(SlowDisk(block::RamDisk::new("slow0", 32768))));
+    let disk = block::register(Box::new(SlowDisk(block::RamDisk::new("slow0", 32768)))).unwrap_or(usize::MAX);
     let cleanup = |disk: usize| {
         let _ = crate::fs::unmount("/tmp/slow");
         let _ = crate::fs::remove("/tmp/slow");

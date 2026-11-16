@@ -11,6 +11,17 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::cache;
 use super::probe;
 use super::test_write::{formatted, mount, params, pattern, read_all, write_all, T};
+
+/// The test's RAM disk goes when the test ends, however it ends (declared before the
+/// volume, so the volume is dropped first).  Without it every round of `LOOP=desofs` kept
+/// ~20 MiB of RAM disks on the heap and the third round ran out of it.
+struct Rm(usize);
+
+impl Drop for Rm {
+    fn drop(&mut self) {
+        block::remove(self.0);
+    }
+}
 use crate::block::{self, BlockDevice, BlockError, RamDisk};
 use crate::fs::FileSystem;
 
@@ -26,6 +37,7 @@ macro_rules! ensure {
 /// second reads nothing; a block a commit wrote serves the next read straight away.
 pub fn t_hits() -> T {
     let d = formatted(1024)?;
+    let _rm = Rm(d);
     let data = pattern(40 * 1024, 29);
     {
         let mut v = mount(d)?;
@@ -76,6 +88,7 @@ pub fn t_reuse() -> T {
     drop(c);
     // (b) on a volume.
     let d = formatted(128)?;
+    let _rm = Rm(d);
     let mut v = mount(d)?;
     let mut rounds = 0;
     for r in 0..60u32 {
@@ -109,6 +122,7 @@ impl Drop for LimitGuard {
 /// unmounting gives every byte back.
 pub fn t_limit() -> T {
     let d = formatted(2048)?;
+    let _rm = Rm(d);
     let used0 = cache::used();
     let lim = used0 + 300 * 1024;
     let _g = LimitGuard;
@@ -179,7 +193,8 @@ pub fn t_safety() -> T {
     let mut flushes = [0u64; 2];
     for (k, which) in [1u64, 2].iter().enumerate() {
         FAIL_FLUSH.store(0, Ordering::SeqCst);
-        let d = block::register(Box::new(FlushFail { inner: RamDisk::new("flushfail", 512 * 8) }));
+        let d = block::register(Box::new(FlushFail { inner: RamDisk::new("flushfail", 512 * 8) })).unwrap_or(usize::MAX);
+        let _rm = Rm(d);
         super::format::format(d, &params()).map_err(|e| format!("format: {}", e))?;
         let mut v = mount(d)?;
         v.create("/f").map_err(|e| format!("create: {}", e))?;
@@ -195,6 +210,7 @@ pub fn t_safety() -> T {
     }
     // (b) damaged copies.
     let d = formatted(1024)?;
+    let _rm = Rm(d);
     let data = pattern(64 * 1024, 34);
     {
         let mut v = mount(d)?;

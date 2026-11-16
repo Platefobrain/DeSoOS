@@ -1003,6 +1003,53 @@ then the old or the new version (USB WRITE TEST 3/3).
 | FLUSH not supported | sd: skipped when the device reports no write cache | the same | probe at mount: refused = never writable |
 | Writes outside the partition | the block layer's partition range | the same | three locks: partition, ublk, usbd |
 
+### A USB stick as /disk (v0.80)
+
+`kernel/user/usbdisk.rs`, run by the `usb-disks` task after every change of the USB disks, once they were quiet for
+1.5 s (two sticks plugged in at boot are both seen before anything is decided); each change is decided once.
+
+**Who gets /disk** (a *candidate* = a USB disk instance + a "DeSoOS system" partition with a DeSoFS marker in either
+superblock):
+1. the **internal disk** – the first disk registered before the file systems start (PCI: virtio-blk, then NVMe),
+   remembered by its identity, never by number (a USB disk that later gets number 0 is never it) – keeps /disk when it
+   holds a recognised DeSoFS (a marker in either superblock, even with a bad checksum, or a "DeSoOS system"
+   partition); no USB candidate takes it, damaged or not;
+2. otherwise, and only while /disk is really free (whatever is mounted there – e.g. FAT32 from the internal disk –
+   stays), **exactly one** candidate gets /disk; two or more – none (also two partitions on one stick), with one
+   message per change;
+3. every other candidate is mounted read-only under `/usbN`; a candidate that becomes the only one is unmounted there
+   first – a volume is never mounted twice;
+4. /disk is never taken away; a stick removed – everything is decided anew.
+
+**The way to a read-write /disk** (all for one generation of the stick): write protection known off → partition ≤
+64 GiB → **probe** (one confirmed SYNCHRONIZE CACHE) → **`desofs check`** (read only; DeSoFS has no "dirty" flag, so
+it runs at every rw mount) → rw registration + grant → `fs::mount_disk` (which reads the last known good time).
+Any step that fails: /disk read-only, the reason in the log, no registration left behind. Repair is never automatic
+(`desofs repair <disk> yes`).
+
+**The stick removed**: /disk unmounted, the file state of the last known good time back to "no volume"
+(`time_lkg::volume_gone`); the time stays in memory. **Rule D**: when a volume is mounted whose LKG file is missing or
+older than the time in memory, the save is marked pending (`DIRTY`) – the next accepted time writes max(memory, its
+own); a stick lost during the save reports nothing saved and is written once it is back.
+
+**`desofs format` on a USB partition** (rule F): only a "DeSoOS system" partition, ≤ 64 GiB, not mounted, write
+protection off, a probe first; then a format session (its identifier, the grant) only for the time of the format –
+ended on every way out before the result goes back to the shell. Synchronous: Ctrl+C does not interrupt it.
+
+**DeSoFS by identity**: a mounted volume remembers its disk's `uid` and reads / writes / flushes with it
+(`block::read_as` / `write_as` / `flush_as`) – a volume of a removed stick never reaches the disk that got its
+number.
+
+Tests – **USB DISK TEST**: fake sticks with a write cache (`/bin/blkdtest`: a write is durable only after a FLUSH; power
+loss at the k-th write keeps a random part of the unflushed writes) for every rule above and power loss at each of
+12 writes of an operation (the old or the new version, the volume comes back read-write after `desofs check`); real
+usbd with the writable QEMU stick (formatted, /disk, 1 MiB, the LKG, unplugged and plugged back). **USB RESTART
+TEST** – a third QEMU start without virtio and NVMe: the stick becomes /disk by itself and the LKG is read from it.
+In a self-test kernel the automatic /disk is off (`usbdisk::AUTO`) except in these tests – the other suites keep the
+/disk they expect. Mutations caught (9): no pending save for a volume without the LKG file / with an older one; the
+internal disk's DeSoFS ignored; the first of several candidates taking /disk; /disk in use ignored; `desofs check`
+skipped; the probe skipped; the format session left open; any USB partition formattable.
+
 ### Controller start and shutdown
 
 usbd: `dev_claim`, `dev_map` BAR0, **handoff from BIOS** (USB Legacy Support in the xHCI extended capabilities:

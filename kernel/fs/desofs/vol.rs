@@ -101,6 +101,9 @@ impl Prof {
 
 pub struct Volume {
     disk: usize,
+    /// The disk object's identity (`block::uid`) – every read and write checks it, so a volume
+    /// of a removed USB stick never reaches the disk that got its number.
+    disk_uid: u64,
     total: u64,
     uuid: [u8; 16],
     label: [u8; 32],
@@ -205,12 +208,16 @@ impl Volume {
     /// Mounts disk `index` (after the stage-1 walk).  A volume the walk allows only
     /// read-only is mounted read-only.
     pub fn mount(index: usize) -> Result<Volume, String> {
+        let disk_uid = crate::block::uid(index).ok_or_else(|| format!("disk {}: no such disk", index))?;
         let (report, sc): (Report, super::Scanned) = super::scan_volume(index)?;
         let ro = match &report.state {
             State::ReadWrite => None,
             State::ReadOnly(w) => Some(w.clone()),
             State::Refused(w) => return Err(w.clone()),
         };
+        // A disk (or USB partition without a write grant) that takes no writes: the volume is
+        // read-only from the start, not after its first failed commit.
+        let ro = ro.or_else(|| crate::block::is_read_only(index).then(|| String::from("the disk is read-only")));
         let sb = sc.sb;
         // The chosen root block's entries.
         let dev = super::Dev::open(index)?;
@@ -237,6 +244,7 @@ impl Volume {
         super::mounted_inc(index);
         Ok(Volume {
             disk: index,
+            disk_uid,
             total: sb.total_blocks,
             uuid: sb.uuid,
             label: sb.label,
@@ -661,7 +669,7 @@ impl<'a> Tx<'a> {
         }
         if !cached {
             let t0 = self.v.prof.now();
-            crate::block::read(self.v.disk, p.addr * SECT, &mut b).map_err(io)?;
+            crate::block::read_as(self.v.disk, self.v.disk_uid, p.addr * SECT, &mut b).map_err(io)?;
             let t1 = self.v.prof.now();
             good = sha256(&b) == p.sha;
             let t2 = self.v.prof.now();
@@ -710,7 +718,7 @@ impl<'a> Tx<'a> {
         let mut b = Vec::new();
         b.try_reserve_exact(BLOCK).map_err(nomem)?;
         b.resize(BLOCK, 0);
-        crate::block::read(self.v.disk, p.addr * SECT, &mut b).map_err(io)?;
+        crate::block::read_as(self.v.disk, self.v.disk_uid, p.addr * SECT, &mut b).map_err(io)?;
         self.v.prof.blk_reads += 1;
         if sha256(&b) != p.sha {
             if kind == Kind::Data {
@@ -1714,12 +1722,12 @@ impl<'a> Tx<'a> {
         self.v.prof.sha_seal_cyc += d;
         let new_root = Ptr { addr: ra, birth: self.gn, sha: rsha };
         // 1. New blocks.
-        let disk = self.v.disk;
+        let (disk, uid) = (self.v.disk, self.v.disk_uid);
         let mut err = None;
         let t0 = self.v.prof.now();
         let mut written = 0;
         for (a, d) in self.dirty.iter() {
-            if let Err(e) = crate::block::write(disk, a * SECT, &d.buf) {
+            if let Err(e) = crate::block::write_as(disk, uid, a * SECT, &d.buf) {
                 err = Some(e);
                 break;
             }
@@ -1732,7 +1740,7 @@ impl<'a> Tx<'a> {
             return Err(self.fail("write error during a commit"));
         }
         // 2. Flush.
-        let flushed = crate::block::flush(disk);
+        let flushed = crate::block::flush_as(disk, uid);
         let d = self.v.prof.since(t1);
         self.v.prof.flush1_cyc += d;
         if flushed.is_err() {
@@ -1748,14 +1756,14 @@ impl<'a> Tx<'a> {
         let rp = ptr_bytes(Some(new_root));
         let sb = superblock(&self.v.uuid, self.gn, self.v.total, used, now(), &rp, &self.v.label);
         let t2 = self.v.prof.now();
-        let wrote = crate::block::write(disk, (1 + slot as u64) * SECT, &sb);
+        let wrote = crate::block::write_as(disk, uid, (1 + slot as u64) * SECT, &sb);
         let t3 = self.v.prof.now();
         self.v.prof.sb_write_cyc += if t3.wrapping_sub(t2) > 1 << 62 { 0 } else { t3.wrapping_sub(t2) };
         if wrote.is_err() {
             return Err(self.fail("superblock write error"));
         }
         // 4. Flush – only now is the operation done.
-        let flushed = crate::block::flush(disk);
+        let flushed = crate::block::flush_as(disk, uid);
         let d = self.v.prof.since(t3);
         self.v.prof.flush2_cyc += d;
         if flushed.is_err() {

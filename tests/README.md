@@ -13,7 +13,8 @@ tests/soak.sh              the soak test: everything at once, 1 hour with KVM (D
 ```
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
-restart), then a short soak runs (2 minutes, `soak.sh` on a RAM disk). The end of the output has the summary and the `[RESULT-…]`
+restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by
+itself, with its last known good time; `logs/test-usbrestart.log`), then a short soak runs (2 minutes, `soak.sh` on a RAM disk). The end of the output has the summary and the `[RESULT-…]`
 lines (services, USB, rights, crypto, random numbers, certificates, TLS, DeSoFS, soak) copied into `docs/RELEASE.md`. Logs: `logs/test.log`,
 `logs/test-restart.log`, `logs/test-soak.log`. Exit code: 0 PASS, 1 FAIL, 2 timeout, 3 QEMU stopped otherwise or a host test server could not get its ports.
 

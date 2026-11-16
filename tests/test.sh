@@ -10,7 +10,10 @@
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
-# by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Not in loop mode.
+# by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Then a third start
+# without the virtio and NVMe disks (opt/desoos/phase=usbrestart): the writable USB stick the
+# first start formatted must become /disk by itself, with its last known good time (USB RESTART
+# TEST, logs/test-usbrestart.log).  Not in loop mode.
 # Then a short soak (2 min, tests/soak.sh on a RAM disk – all workers at once, checkpoints): the soak
 # itself keeps working ([RESULT-SOAK], log logs/test-soak.log).  Not in loop mode.
 #
@@ -227,6 +230,9 @@ fi
 kill "${SERVER_PIDS[@]}" 2>/dev/null
 wait "${SERVER_PIDS[@]}" 2>/dev/null
 
+# The first start's QEMU command, for the third start below.
+QEMU_BASE=("${QEMU[@]}")
+
 # Second start on the same test disk (only after a passing first one, not in loop mode).
 LOG2="$ROOT/logs/test-restart.log"
 : > "$LOG2"
@@ -245,6 +251,36 @@ if [ "$CODE" = 33 ] && [ -z "$LOOP" ]; then
   fi
   TIME2=$(( $(date +%s) - START2 ))
 fi
+
+# Third start (only after two passing ones, not in loop mode): QEMU without the virtio and NVMe
+# disks – no internal disk, so the writable USB stick the first start left formatted (USB DISK
+# TEST 2/2) must become /disk by itself, with its last known good time (USB RESTART TEST).
+LOG4="$ROOT/logs/test-usbrestart.log"
+: > "$LOG4"
+CODE4=33
+TIME4=0
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
+  echo "Third start: only the USB sticks, no virtio / NVMe (USB RESTART TEST)..."
+  START4=$(date +%s)
+  QEMU3=()
+  skip=0
+  for a in "${QEMU_BASE[@]}"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      file="$TEST_DISK"*|file="$TEST_NVME"*|virtio-blk-pci*|nvme,*) unset 'QEMU3[${#QEMU3[@]}-1]'; continue ;;
+    esac
+    QEMU3+=("$a")
+  done
+  QEMU3+=(-fw_cfg name=opt/desoos/phase,string=usbrestart)
+  if [ "$VERBOSE" = 1 ]; then
+    timeout "$TIMEOUT" "${QEMU3[@]}" < /dev/null 2>&1 | tee "$LOG4"
+    CODE4=${PIPESTATUS[0]}
+  else
+    timeout "$TIMEOUT" "${QEMU3[@]}" < /dev/null > "$LOG4" 2>&1
+    CODE4=$?
+  fi
+  TIME4=$(( $(date +%s) - START4 ))
+fi
 rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$TEST_USBW" "$MON"
 
 # Short soak (only after two passing starts, not in loop mode).
@@ -255,7 +291,7 @@ LOG3="$ROOT/logs/test-soak.log"
 CODE3=0
 TIME3=0
 SOAK_OK=""
-if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ]; then
   echo "Short soak (2 min, tests/soak.sh)..."
   START3=$(date +%s)
   DURATION=2m SOAK_DISK=ram ACCEL="$ACCEL" SMP="$SMP" SOAK_LOG="$LOG3" "$T/soak.sh" --no-build > "$ROOT/logs/test-soak.out" 2>&1
@@ -265,11 +301,12 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
 fi
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
+PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
 # The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
-echo "Log: logs/test.log + logs/test-restart.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, soak ${TIME3} s, ${PASSED} tests PASS)"
+SUMMARY4=$(grep -a "Self-tests:" "$LOG4" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
+echo "Log: logs/test.log + logs/test-restart.log + logs/test-usbrestart.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, USB restart ${TIME4} s, soak ${TIME3} s, ${PASSED} tests PASS)"
 # Service benchmark (kernel vs user space) – the [RESULT-SVC] line from the SVC self-test.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
@@ -309,6 +346,20 @@ if [ "$CODE" = 33 ] && [ "$CODE2" != 33 ]; then
   esac
 fi
 
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" != 33 ]; then
+  case "$CODE4" in
+    35) echo "FAIL - USB restart: ${SUMMARY4:-kernel reported an error}"
+        grep -a -E "FAIL|PANIC|\[EXC\]" "$LOG4" | head -n 20
+        exit 1 ;;
+    124) echo "TIMEOUT - the USB restart did not finish within ${TIMEOUT} s. Last lines:"
+        tail -n 15 "$LOG4"
+        exit 2 ;;
+    *) echo "ERROR - USB restart: QEMU exited with code $CODE4. Last lines:"
+        tail -n 15 "$LOG4"
+        exit 3 ;;
+  esac
+fi
+
 # The random number generator: the first bytes after the restart differ from the first start's.
 RNG1=$(grep -a -m1 "^\[RNG\] boot sample" "$LOG" | tr -d '\r')
 RNG2=$(grep -a -m1 "^\[RNG\] boot sample" "$LOG2" | tr -d '\r')
@@ -326,7 +377,7 @@ fi
 case "$CODE" in
   33)
     if [ -n "$SUMMARY2" ]; then
-      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}${SOAK_OK}"
+      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}${SOAK_OK}"
     else
       echo "PASS - ${SUMMARY}"
     fi

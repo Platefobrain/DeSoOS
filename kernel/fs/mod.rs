@@ -1134,6 +1134,9 @@ pub fn init() {
     let programs = crate::initrd::install();
     serial_println!("[FS] /bin: {} programs (ELF, built from user/bin/*.rs)", programs);
 
+    // The internal disk (disk 0, registered by the PCI drivers before this point; never a USB
+    // disk) – the one that keeps /disk when it holds DeSoFS (V080 rule E).
+    crate::block::set_internal();
     if crate::block::count() == 0 {
         serial_println!("[FS] / = ramfs (no disk)");
         return;
@@ -1305,7 +1308,7 @@ pub fn self_test() {
     serial_println!("[FS TEST] 2/12 ramfs: files, dirs, append, errors PASS");
 
     // 3. FAT32 on a RAM disk (8 MiB) – mkfs + mount.
-    let disk = block::register(alloc::boxed::Box::new(RamDisk::new("ram0", 16384)));
+    let disk = block::register(alloc::boxed::Box::new(RamDisk::new("ram0", 16384))).unwrap_or(usize::MAX);
     let info = t!(fat32::mkfs(disk, "TESTVOL", true), "mkfs");
     let fs = t!(fat32::Fat32::open(disk), "open fat32");
     t!(mkdir("/tmp/fat"), "mkdir mountpoint");
@@ -1426,9 +1429,9 @@ pub fn self_test() {
     // sectors than the partition, or a partition shorter than the volume, does not mount.
     const VOL: u64 = 16384;
     const START: u64 = 2048;
-    let src = block::register(alloc::boxed::Box::new(RamDisk::new("ram1", VOL)));
+    let src = block::register(alloc::boxed::Box::new(RamDisk::new("ram1", VOL))).unwrap_or(usize::MAX);
     t!(fat32::mkfs(src, "PARTVOL", true), "mkfs ram1");
-    let d2 = block::register(alloc::boxed::Box::new(RamDisk::new("ram2", START + VOL + 64)));
+    let d2 = block::register(alloc::boxed::Box::new(RamDisk::new("ram2", START + VOL + 64))).unwrap_or(usize::MAX);
     let mut chunk = alloc::vec![0u8; 64 * 1024];
     let mut lba = 0;
     while lba < VOL {
@@ -1522,7 +1525,7 @@ pub fn self_test() {
     b[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
     b[510] = 0x55;
     b[511] = 0xAA;
-    let sp = block::register(alloc::boxed::Box::new(Sparse(b)));
+    let sp = block::register(alloc::boxed::Box::new(Sparse(b))).unwrap_or(usize::MAX);
     let r = fat32::Fat32::open(sp);
     block::remove(sp);
     check!(matches!(r, Err(FsError::Corrupt(_))), "a volume with more than {:#x} clusters must not mount", fat32::FAT32_MAX_CLUSTERS);
@@ -1531,7 +1534,7 @@ pub fn self_test() {
     // 12. Sizes from a hostile disk do not crash the kernel: a file claiming 3.75 GiB
     // (reading it whole – as exec does – is ERROR_NO_SPACE, not a failed allocation) and a
     // directory chain longer than FAT allows (65 536 entries) – refused as corrupt.
-    let d3 = block::register(alloc::boxed::Box::new(RamDisk::new("ram3", 16384)));
+    let d3 = block::register(alloc::boxed::Box::new(RamDisk::new("ram3", 16384))).unwrap_or(usize::MAX);
     t!(fat32::mkfs(d3, "HOSTILE", true), "mkfs ram3");
     t!(mkdir("/tmp/h"), "mkdir /tmp/h");
     t!(mount("/tmp/h", Box::new(Locked::new(t!(fat32::Fat32::open(d3), "open ram3")))), "mount ram3");

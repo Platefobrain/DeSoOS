@@ -561,8 +561,11 @@ pub fn init() -> usize {
             Ok(d) => {
                 pci::set_kernel_owner(dev.address); // a service will not claim it
                 serial_println!("[VIRTIO] {}: {}", d.name, d.description());
-                block::register(alloc::boxed::Box::new(d));
-                added += 1;
+                if block::register(alloc::boxed::Box::new(d)).is_some() {
+                    added += 1;
+                } else {
+                    serial_println!("[VIRTIO] disk identities used up - disk not registered");
+                }
             }
             Err(e) => serial_println!("[VIRTIO] virtio-blk at {}: {}", dev.address, e),
         }
