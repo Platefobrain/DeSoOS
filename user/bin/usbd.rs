@@ -31,18 +31,27 @@
 //   (KeyCode, autorepeat, console).  LED state from the kernel -> Set Report to
 //   the keyboard.  Mouse: the wheel scrolls the console.  Disconnect -> release
 //   that device's keys; usbd exit -> the kernel releases them.
-// Mass storage (USB stick) READ-ONLY:
+// Mass storage (USB stick):
 //   interface 08/06/50 (SCSI, Bulk-Only) with bulk IN and OUT endpoints:
 //   Configure Endpoint, Set Configuration, INQUIRY (disks only – type 0), TEST
-//   UNIT READY (up to 10 attempts with REQUEST SENSE), READ CAPACITY(10).  DMA buffer
+//   UNIT READY (up to 10 attempts with REQUEST SENSE), READ CAPACITY(10), MODE SENSE(6)
+//   (the write-protect bit; no answer / a bad one = "unknown", never written).  DMA buffer
 //   256 KiB (4 slots of 64 KiB) and a channel -> blk_attach syscall (BLK handle in
 //   slot 6 from init) -> the kernel sees disk "sdX" and mounts FAT32 at /usbN itself.
 //   Kernel requests (READ: lba, blocks, slot) -> READ(10) straight into the buffer slot
 //   (DMA) -> reply (id, status, blocks).  Transfer error: STALL -> Clear
 //   Halt; timeout / bad CSW -> Bulk-Only Reset (reset recovery).  Disconnect ->
 //   channel closed (kernel: disk disappears, unmounted).
-//   THERE IS NO WRITE: the only SCSI commands are those in SCSI_ALLOWED (checked before
-//   sending each command; compile-time assertion – no write command).
+//   WRITING ONLY WHERE THE KERNEL REGISTERED IT (v0.80, docs/ARCHITECTURE.md "Writing to a
+//   USB disk"): the kernel sends REG messages – probe (exactly one FLUSH, no WRITE), rw
+//   (WRITE in [start, start + len) + FLUSH) or format (both only with its session id),
+//   each with the disk's generation; usbd keeps its own copy per stick (a new stick starts
+//   with none) and checks EVERY WRITE(10) / SYNCHRONIZE CACHE(10) against it – the third of
+//   three independent locks.  No registration – every WRITE and FLUSH refused.  The only
+//   SCSI commands are those in SCSI_ALLOWED; the only writing ones WRITE(10) and
+//   SYNCHRONIZE CACHE(10) (compile-time assertion: no FORMAT UNIT, MODE SELECT, WRITE
+//   SAME, UNMAP, ...).  A WRITE succeeds only with a good CSW (status 0, residue 0) for
+//   all its bytes; every error goes to the kernel.
 // USB 2 and USB 3 hubs (including hubs behind hubs, up to 5 levels):
 //   class 09 device: Configure Endpoint (interrupt IN – port change bitmap),
 //   Set Configuration, Set Hub Depth (USB 3), hub descriptor (number of ports,
@@ -117,23 +126,63 @@ const STOR_SLOT: u64 = 64 * 1024;
 const BULK_TIMEOUT_MS: u64 = 4000;
 const ENODEV_REPLY: i32 = -19;
 const EIO_REPLY: i32 = -5;
-/// The only SCSI commands usbd sends: TEST UNIT READY, REQUEST SENSE,
-/// INQUIRY, READ CAPACITY(10), READ(10).  No writes – see the assertion below.
-const SCSI_ALLOWED: [u8; 5] = [0x00, 0x03, 0x12, 0x25, 0x28];
+/// Not a reply: a FLUSH reply held back by a self-test flag (sent later).
+const HELD: i32 = i32::MIN;
+/// The only SCSI commands usbd sends: TEST UNIT READY, REQUEST SENSE, INQUIRY, READ
+/// CAPACITY(10), READ(10), MODE SENSE(6) and – only inside a kernel registration –
+/// WRITE(10) and SYNCHRONIZE CACHE(10).
+const SCSI_ALLOWED: [u8; 8] = [0x00, 0x03, 0x12, 0x25, 0x28, 0x1A, SCSI_WRITE10, SCSI_SYNC10];
+const SCSI_WRITE10: u8 = 0x2A;
+const SCSI_SYNC10: u8 = 0x35;
 const _: () = {
-    // WRITE(6/10/12/16), WRITE AND VERIFY, WRITE SAME, FORMAT UNIT, MODE SELECT
-    // (6/10), SYNCHRONIZE CACHE (10/16), WRITE BUFFER, UNMAP, START STOP UNIT.
-    const WRITES: [u8; 16] = [0x0A, 0x2A, 0xAA, 0x8A, 0x2E, 0xAE, 0x8E, 0x41, 0x93, 0x04, 0x15, 0x55, 0x35, 0x91, 0x3B, 0x42];
+    // Every other command that changes the medium: WRITE(6/12/16), WRITE AND VERIFY,
+    // WRITE SAME, FORMAT UNIT, MODE SELECT (6/10), SYNCHRONIZE CACHE(16), WRITE BUFFER,
+    // UNMAP, START STOP UNIT, REASSIGN BLOCKS.
+    const OTHERS: [u8; 15] = [0x0A, 0xAA, 0x8A, 0x2E, 0xAE, 0x8E, 0x41, 0x93, 0x04, 0x15, 0x55, 0x91, 0x3B, 0x42, 0x07];
     let mut i = 0;
     while i < SCSI_ALLOWED.len() {
         let mut j = 0;
-        while j < WRITES.len() {
-            assert!(SCSI_ALLOWED[i] != WRITES[j], "usbd must never send a writing SCSI command");
+        while j < OTHERS.len() {
+            assert!(SCSI_ALLOWED[i] != OTHERS[j], "usbd writes only with WRITE(10) and SYNCHRONIZE CACHE(10)");
             j += 1;
         }
         i += 1;
     }
 };
+/// ublk requests (kernel/user/ublk.rs): ops and registration kinds.
+const OP_READ: u32 = 1;
+const OP_WRITE: u32 = 2;
+const OP_FLUSH: u32 = 3;
+const OP_REG: u32 = 4;
+const OP_TEST: u32 = 9;
+const REG_NONE: u32 = 0;
+const REG_PROBE: u32 = 1;
+const REG_RW: u32 = 2;
+const REG_FORMAT: u32 = 3;
+/// Write protection from MODE SENSE (blk_attach): 0 unknown, 1 off, 2 on.
+const WP_CLEAR: u32 = 1;
+const WP_SET: u32 = 2;
+/// Self-test flags (op 9, accepted only in a self-test build): the third lock off, the
+/// next WRITE fails, the next FLUSH reply held back (sent before the next reply – late),
+/// the next FLUSH fails.
+const TEST_SKIP_CHECK: u32 = 1;
+const TEST_FAIL_WRITE: u32 = 2;
+const TEST_HOLD_FLUSH: u32 = 4;
+const TEST_FAIL_FLUSH: u32 = 8;
+
+/// A stick's registration – usbd's own copy (the kernel holds the other).
+#[derive(Clone, Copy)]
+struct StorReg {
+    kind: u32,
+    dgen: u64,
+    start: u64,
+    len: u64,
+    session: u64,
+    /// A probe: FLUSHes left (1, then 0 – used up).
+    flushes_left: u32,
+}
+
+const NO_REG: StorReg = StorReg { kind: REG_NONE, dgen: 0, start: 0, len: 0, session: 0, flushes_left: 0 };
 
 // Capability registers (from the start of BAR0).
 const CAPLENGTH: u64 = 0x00;
@@ -369,7 +418,7 @@ struct Hid {
     errors: u64,
 }
 
-/// USB stick (Bulk-Only + SCSI) – read-only.
+/// USB stick (Bulk-Only + SCSI) – read, and write only inside the kernel's registration.
 struct Storage {
     iface: u8,
     dci_in: u32,
@@ -401,6 +450,15 @@ struct Storage {
     /// Transfer interrupted (hub port change) – before the next command
     /// do a reset recovery (if the device is still there).
     needs_recovery: bool,
+    /// MODE SENSE: 0 unknown, 1 not write-protected, 2 write-protected.
+    wp: u32,
+    /// The registration (the third lock).
+    reg: StorReg,
+    writes: u64,
+    flushes: u64,
+    /// Self-test flags (TEST_*), and a FLUSH reply held back.
+    test: u32,
+    held: Option<(u32, i32)>,
 }
 
 /// Number of INQUIRY attempts when a USB stick starts (delays 200, 400, 600 ms).
@@ -594,6 +652,10 @@ struct Hc {
     stor_bytes: u64,
     stor_errors: u64,
     stor_requests_bad: u64,
+    stor_writes: u64,
+    stor_wbytes: u64,
+    stor_flushes: u64,
+    stor_refused: u64,
     /// Retried INQUIRYs when USB sticks start.
     stor_retries: u64,
     /// Completion code of the last failed command (diagnostics) and
@@ -1477,6 +1539,12 @@ impl Hc {
     /// SCSI command over Bulk-Only: CBW, IN data (`len` bytes to `data_pa`),
     /// CSW.  Sends ONLY commands from SCSI_ALLOWED (no writes).
     fn bot(&mut self, d: usize, cdb: &[u8], len: usize, data_pa: u64) -> Result<usize, StorError> {
+        self.bot_dir(d, cdb, len, data_pa, false).map(|(got, _)| got)
+    }
+
+    /// One Bulk-Only command; `out` – the data goes to the device (WRITE).  Ok((bytes
+    /// transferred, the CSW's residue)).
+    fn bot_dir(&mut self, d: usize, cdb: &[u8], len: usize, data_pa: u64, out: bool) -> Result<(usize, u32), StorError> {
         if cdb.is_empty() || cdb.len() > 16 || !SCSI_ALLOWED.contains(&cdb[0]) {
             return Err(StorError::Refused);
         }
@@ -1497,7 +1565,7 @@ impl Hc {
         cbw[0..4].copy_from_slice(&0x4342_5355u32.to_le_bytes());
         cbw[4..8].copy_from_slice(&tag.to_le_bytes());
         cbw[8..12].copy_from_slice(&(len as u32).to_le_bytes());
-        cbw[12] = if len > 0 { 0x80 } else { 0 };
+        cbw[12] = if len > 0 && !out { 0x80 } else { 0 };
         cbw[14] = cdb.len() as u8;
         cbw[15..15 + cdb.len()].copy_from_slice(cdb);
         unsafe { core::ptr::copy_nonoverlapping(cbw.as_ptr(), cva as *mut u8, 31) };
@@ -1516,10 +1584,10 @@ impl Hc {
         }
         let mut got = 0;
         if len > 0 {
-            match self.bulk(d, true, data_pa, len) {
+            match self.bulk(d, !out, data_pa, len) {
                 Ok(n) => got = n,
                 // The device refused the data – the CSW arrives anyway (after Clear Halt).
-                Err(XferError::Stall) => self.bulk_recover(d, true),
+                Err(XferError::Stall) => self.bulk_recover(d, !out),
                 Err(XferError::Gone) => return Err(StorError::Xfer(XferError::Gone)),
                 Err(XferError::Interrupted) => return Err(self.interrupted(d)),
                 Err(e) => {
@@ -1550,8 +1618,9 @@ impl Hc {
             self.reset_recovery(d);
             return Err(StorError::Phase);
         }
+        let residue = u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]]);
         match csw[12] {
-            0 => Ok(got),
+            0 => Ok((got, residue)),
             1 => Err(StorError::Failed),
             _ => {
                 self.reset_recovery(d);
@@ -1636,6 +1705,12 @@ impl Hc {
             reads: 0,
             errors: 0,
             needs_recovery: false,
+            wp: 0,
+            reg: NO_REG,
+            writes: 0,
+            flushes: 0,
+            test: 0,
+            held: None,
         };
         // Input context: slot (context count – the largest DCI, including the
         // HID endpoint if the device has both) + both bulk endpoints.
@@ -1758,11 +1833,29 @@ impl Hc {
         if bs != 512 && bs != 4096 {
             return Err("unsupported block size (512 or 4096 only)");
         }
+        // MODE SENSE(6), all pages: byte 2 bit 7 of the header = write-protected.  Fail-closed:
+        // no answer, a failed command or a header shorter than 4 bytes = unknown (the kernel
+        // never writes such a stick).
+        let wp = match self.scsi_in(d, &[0x1A, 0, 0x3F, 0, 64, 0], 64, &mut data) {
+            Ok(n) if n >= 4 && data[0] as usize + 1 >= 4 => {
+                if data[2] & 0x80 != 0 {
+                    WP_SET
+                } else {
+                    WP_CLEAR
+                }
+            }
+            Err(StorError::Failed) => {
+                let _ = self.scsi_in(d, &[0x03, 0, 0, 0, 18, 0], 18, &mut data);
+                0
+            }
+            _ => 0,
+        };
         let st = self.devs[d].as_mut().unwrap().stor.as_mut().unwrap();
         st.blocks = last as u64 + 1;
         st.bs = bs;
         st.name = name;
         st.nlen = nlen;
+        st.wp = wp;
         Ok(())
     }
 
@@ -1800,7 +1893,7 @@ impl Hc {
                 st.attach_error = -12;
                 continue;
             };
-            let mut info = BlkInfo { blocks: st.blocks, block_size: st.bs, slots: STOR_SLOTS as u32, timeout_ms: 0, desc: [0; 40] };
+            let mut info = BlkInfo { blocks: st.blocks, block_size: st.bs, slots: STOR_SLOTS as u32, timeout_ms: 0, wp: st.wp, desc: [0; 40] };
             info.desc[..st.nlen].copy_from_slice(&st.name[..st.nlen]);
             let r = blk_attach(BLK, theirs, self.stor_bufs[st.buf].2, &info);
             close(theirs);
@@ -1835,7 +1928,18 @@ impl Hc {
             if r < 0 {
                 return;
             }
+            // A held-back FLUSH reply (self-test) goes out before the next request is served –
+            // late, after the kernel gave up on it.
+            if let Some((hid, hst)) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()).and_then(|s| s.held.take()) {
+                let mut rep = [0u8; 16];
+                rep[0..4].copy_from_slice(&hid.to_le_bytes());
+                rep[4..8].copy_from_slice(&hst.to_le_bytes());
+                chan_send(chan, &rep, CHAN_NONBLOCK);
+            }
             let (id, status, count) = self.storage_request(d, &msg[..r as usize]);
+            if status == HELD {
+                continue;
+            }
             let mut rep = [0u8; 16];
             rep[0..4].copy_from_slice(&id.to_le_bytes());
             rep[4..8].copy_from_slice(&status.to_le_bytes());
@@ -1847,17 +1951,42 @@ impl Hc {
     /// One request: (id, status, blocks).
     fn storage_request(&mut self, d: usize, m: &[u8]) -> (u32, i32, u32) {
         let le32 = |i: usize| u32::from_le_bytes([m[i], m[i + 1], m[i + 2], m[i + 3]]);
+        let le64 = |i: usize| le32(i) as u64 | (le32(i + 4) as u64) << 32;
         if m.len() < 24 {
             self.stor_requests_bad += 1;
             return (0, EIO_REPLY, 0);
         }
         let (id, op, n, slot) = (le32(0), le32(4), le32(16), le32(20));
-        let lba = le32(8) as u64 | (le32(12) as u64) << 32;
+        let lba = le64(8);
+        // The 48-byte form (generation, session, len) – needed by everything but READ.
+        let (dgen, session, len) = if m.len() >= 48 { (le64(24), le64(32), le64(40)) } else { (0, 0, 0) };
+        if self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).is_none() {
+            return (id, ENODEV_REPLY, 0);
+        }
+        match op {
+            OP_READ => self.stor_read(d, id, lba, n, slot),
+            OP_WRITE if m.len() >= 48 => self.stor_write(d, id, lba, n, slot, dgen, session),
+            OP_FLUSH if m.len() >= 48 => self.stor_flush(d, id, dgen, session),
+            OP_REG if m.len() >= 48 => self.stor_register(d, id, n, lba, len, session, slot, dgen),
+            OP_TEST if m.len() >= 48 && cfg!(selftest) => {
+                if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
+                    st.test = n;
+                }
+                (id, 0, 0)
+            }
+            _ => {
+                self.stor_requests_bad += 1;
+                (id, EIO_REPLY, 0)
+            }
+        }
+    }
+
+    fn stor_read(&mut self, d: usize, id: u32, lba: u64, n: u32, slot: u32) -> (u32, i32, u32) {
         let Some((blocks, bs, buf)) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| (s.blocks, s.bs as u64, s.buf)) else {
             return (id, ENODEV_REPLY, 0);
         };
         let end = lba.checked_add(n as u64);
-        if op != 1 || slot as usize >= STOR_SLOTS || n == 0 || n as u64 * bs > STOR_SLOT || end.map_or(true, |e| e > blocks || e > 1 << 32) {
+        if slot as usize >= STOR_SLOTS || n == 0 || (n as u64).checked_mul(bs).map_or(true, |b| b > STOR_SLOT) || end.map_or(true, |e| e > blocks || e > 1 << 32) {
             self.stor_requests_bad += 1;
             return (id, EIO_REPLY, 0);
         }
@@ -1884,6 +2013,152 @@ impl Hc {
                 self.stor_errors += 1;
                 (id, EIO_REPLY, 0)
             }
+        }
+    }
+
+    /// A request the third lock refused – counted, ERROR_IO, nothing sent to the stick.
+    fn stor_refuse(&mut self, id: u32) -> (u32, i32, u32) {
+        self.stor_refused += 1;
+        (id, EIO_REPLY, 0)
+    }
+
+    /// WRITE(10) from a buffer slot – only inside the registration (rw with session 0, or
+    /// format with its session), with its generation, on a stick not write-protected.
+    #[allow(clippy::too_many_arguments)]
+    fn stor_write(&mut self, d: usize, id: u32, lba: u64, n: u32, slot: u32, dgen: u64, session: u64) -> (u32, i32, u32) {
+        let Some((blocks, bs, buf, reg, wp, test)) = self.devs[d].as_ref().and_then(|x| x.stor.as_ref()).map(|s| (s.blocks, s.bs as u64, s.buf, s.reg, s.wp, s.test)) else {
+            return (id, ENODEV_REPLY, 0);
+        };
+        let skip = cfg!(selftest) && test & TEST_SKIP_CHECK != 0;
+        // The request itself, always: blocks, slot, size without overflow, inside the stick
+        // and inside 32-bit LBAs (never truncated).
+        let bytes = (n as u64).checked_mul(bs);
+        let end = lba.checked_add(n as u64);
+        if n == 0 || slot as usize >= STOR_SLOTS || bytes.map_or(true, |b| b > STOR_SLOT) || end.map_or(true, |e| e > blocks || e > 1 << 32) {
+            return self.stor_refuse(id);
+        }
+        let end = end.unwrap();
+        if !skip {
+            let kind_ok = match reg.kind {
+                REG_RW => session == 0,
+                REG_FORMAT => reg.session != 0 && session == reg.session,
+                _ => false,
+            };
+            let limit = reg.start.checked_add(reg.len);
+            if !kind_ok || dgen == 0 || dgen != reg.dgen || wp != WP_CLEAR || limit.map_or(true, |l| lba < reg.start || end > l) {
+                return self.stor_refuse(id);
+            }
+        }
+        if cfg!(selftest) && test & TEST_FAIL_WRITE != 0 {
+            if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
+                st.test &= !TEST_FAIL_WRITE;
+            }
+            self.stor_errors += 1;
+            return (id, EIO_REPLY, 0);
+        }
+        let pa = self.stor_bufs[buf].1 + slot as u64 * STOR_SLOT;
+        let l = lba as u32;
+        let cdb = [SCSI_WRITE10, 0, (l >> 24) as u8, (l >> 16) as u8, (l >> 8) as u8, l as u8, 0, (n >> 8) as u8, n as u8, 0];
+        let len = (n as u64 * bs) as usize;
+        let r = self.bot_dir(d, &cdb, len, pa, true);
+        let st = self.devs[d].as_mut().and_then(|x| x.stor.as_mut());
+        match r {
+            // Every byte went out and the stick confirmed all of them.
+            Ok((got, 0)) if got == len => {
+                if let Some(st) = st {
+                    st.writes += 1;
+                }
+                self.stor_writes += 1;
+                self.stor_wbytes += len as u64;
+                (id, 0, n)
+            }
+            Err(StorError::Xfer(XferError::Gone)) => (id, ENODEV_REPLY, 0),
+            _ => {
+                if let Some(st) = st {
+                    st.errors += 1;
+                }
+                self.stor_errors += 1;
+                (id, EIO_REPLY, 0)
+            }
+        }
+    }
+
+    /// SYNCHRONIZE CACHE(10) – with a probe (its one FLUSH, then it is used up), rw or
+    /// format (its session); success only when the stick confirms it.
+    fn stor_flush(&mut self, d: usize, id: u32, dgen: u64, session: u64) -> (u32, i32, u32) {
+        let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) else { return (id, ENODEV_REPLY, 0) };
+        let (reg, test, wp) = (st.reg, st.test, st.wp);
+        let skip = cfg!(selftest) && test & TEST_SKIP_CHECK != 0;
+        let ok = dgen != 0
+            && dgen == reg.dgen
+            && wp == WP_CLEAR
+            && match reg.kind {
+                REG_PROBE => reg.flushes_left > 0 && session == 0,
+                REG_RW => session == 0,
+                REG_FORMAT => reg.session != 0 && session == reg.session,
+                _ => false,
+            };
+        if reg.kind == REG_PROBE {
+            // Used up by this FLUSH whatever happens (and by a refused one too).
+            st.reg = NO_REG;
+        }
+        if !ok && !skip {
+            return self.stor_refuse(id);
+        }
+        let fail = cfg!(selftest) && test & TEST_FAIL_FLUSH != 0;
+        let hold = cfg!(selftest) && test & TEST_HOLD_FLUSH != 0;
+        if fail || hold {
+            st.test &= !(TEST_FAIL_FLUSH | TEST_HOLD_FLUSH);
+        }
+        let status = if fail {
+            EIO_REPLY
+        } else {
+            match self.bot(d, &[SCSI_SYNC10, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0, 0) {
+                Ok(_) => 0,
+                Err(StorError::Xfer(XferError::Gone)) => ENODEV_REPLY,
+                Err(_) => EIO_REPLY,
+            }
+        };
+        if status == 0 {
+            if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
+                st.flushes += 1;
+            }
+            self.stor_flushes += 1;
+        } else if status == EIO_REPLY {
+            self.stor_errors += 1;
+        }
+        if hold {
+            // The reply goes out later, after the kernel gave up on it (self-test).
+            if let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) {
+                st.held = Some((id, status));
+            }
+            return (id, HELD, 0);
+        }
+        (id, status, 0)
+    }
+
+    /// A registration from the kernel (the only source – no client can send one).
+    #[allow(clippy::too_many_arguments)]
+    fn stor_register(&mut self, d: usize, id: u32, kind: u32, start: u64, len: u64, session: u64, limit: u32, dgen: u64) -> (u32, i32, u32) {
+        let Some(st) = self.devs[d].as_mut().and_then(|x| x.stor.as_mut()) else { return (id, ENODEV_REPLY, 0) };
+        let range_ok = len > 0 && start.checked_add(len).map_or(false, |e| e <= st.blocks && e <= 1 << 32);
+        let free = st.reg.kind == REG_NONE;
+        let new = match kind {
+            REG_NONE => Some(NO_REG),
+            // A probe: no range, no session, exactly one FLUSH.
+            REG_PROBE if free && dgen != 0 && start == 0 && len == 0 && session == 0 && limit == 1 && st.wp == WP_CLEAR => {
+                Some(StorReg { kind, dgen, start: 0, len: 0, session: 0, flushes_left: 1 })
+            }
+            REG_RW if free && dgen != 0 && range_ok && session == 0 && st.wp == WP_CLEAR => Some(StorReg { kind, dgen, start, len, session: 0, flushes_left: 0 }),
+            REG_FORMAT if free && dgen != 0 && range_ok && session != 0 && st.wp == WP_CLEAR => Some(StorReg { kind, dgen, start, len, session, flushes_left: 0 }),
+            _ => None,
+        };
+        match new {
+            Some(r) => {
+                st.reg = r;
+                (id, 0, kind)
+            }
+            None => self.stor_refuse(id),
         }
     }
 
@@ -2495,7 +2770,14 @@ impl Hc {
             match st.disk {
                 Some(n) => {
                     let mut nb = [0u8; 8];
-                    let _ = write!(out, ", disk {} ready ({} MiB, {}-byte blocks, read-only, \"{}\")", disk_name(n, &mut nb), mib, st.bs, name);
+                    // The disk is read-only as a whole; "write-protected" / "not write-protected" is
+                    // what MODE SENSE said (only the latter can ever get a writable partition).
+                    let wp = match st.wp {
+                        WP_SET => "write-protected",
+                        WP_CLEAR => "not write-protected",
+                        _ => "write protection unknown",
+                    };
+                    let _ = write!(out, ", disk {} ready ({} MiB, {}-byte blocks, read-only, {}, \"{}\")", disk_name(n, &mut nb), mib, st.bs, wp, name);
                 }
                 None if !self.blk => {
                     let _ = write!(out, ", storage ready ({} MiB, \"{}\", no BLK handle)", mib, name);
@@ -2549,7 +2831,7 @@ impl Hc {
         self.list(out);
         let _ = writeln!(
             out,
-            "usbd-status name={} noops={} polled={} irqs={} events={} port_events={} ports={} connected={} devices={} enumerated={} failures={} errors={} input={} hid={} hid_reports={} hid_events={} hid_errors={} hubs={} hub_events={} hub_errors={} blk={} storage={} disks={} stor_reads={} stor_bytes={} stor_errors={} stor_bad={} stor_retries={} enum_count={} enum_avg_ms={} enum_max_ms={}",
+            "usbd-status name={} noops={} polled={} irqs={} events={} port_events={} ports={} connected={} devices={} enumerated={} failures={} errors={} input={} hid={} hid_reports={} hid_events={} hid_errors={} hubs={} hub_events={} hub_errors={} blk={} storage={} disks={} stor_reads={} stor_bytes={} stor_writes={} stor_wbytes={} stor_flushes={} stor_refused={} stor_errors={} stor_bad={} stor_retries={} enum_count={} enum_avg_ms={} enum_max_ms={}",
             self.name,
             self.noops,
             self.polled,
@@ -2575,6 +2857,10 @@ impl Hc {
             self.storage_count().1,
             self.stor_reads,
             self.stor_bytes,
+            self.stor_writes,
+            self.stor_wbytes,
+            self.stor_flushes,
+            self.stor_refused,
             self.stor_errors,
             self.stor_requests_bad,
             self.stor_retries,
@@ -2865,6 +3151,10 @@ fn start(name: &'static str) -> Result<Hc, &'static str> {
         stor_bytes: 0,
         stor_errors: 0,
         stor_requests_bad: 0,
+        stor_writes: 0,
+        stor_wbytes: 0,
+        stor_flushes: 0,
+        stor_refused: 0,
         stor_retries: 0,
         hub_events: 0,
         hub_errors: 0,

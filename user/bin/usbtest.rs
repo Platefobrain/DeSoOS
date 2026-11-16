@@ -192,7 +192,7 @@ fn via_init() -> i32 {
     let text = core::str::from_utf8(&out[..status.unwrap()]).unwrap_or("");
     check!(n, field(text, "noops").unwrap_or(0) >= 203 && field(text, "errors") == Some(0), "usb0 status: {:?}", text);
     check!(n, field(text, "connected").unwrap_or(0) >= 1, "usb0 sees no connected device: {:?}", text);
-    check!(n, field(text, "devices") == Some(5) && field(text, "hubs") == Some(1), "usb0 devices (want 5, 1 hub): {:?}", text);
+    check!(n, field(text, "devices") == Some(6) && field(text, "hubs") == Some(1), "usb0 devices (want 6, 1 hub): {:?}", text);
     // usblist over the svc channel (as from the shell).
     let mut l = [0u8; 4096];
     let mut len = 0;
@@ -221,7 +221,7 @@ fn via_init() -> i32 {
     check!(n, disk.is_some(), "test USB disk (DESOOS.TST) not mounted in /usb0..3");
     let (u, mount_ms) = disk.unwrap();
     let l2 = ask_lsusb(&mut l);
-    check!(n, l2.matches("disk sd").count() == 2 && l2.contains("read-only"), "usblist: 2 disks ready, read-only: {:?}", l2);
+    check!(n, l2.matches("disk sd").count() == 3 && l2.matches("read-only, write-protected").count() == 2 && l2.matches("read-only, not write-protected").count() == 1, "usblist: 3 disks ready, read-only, 2 write-protected: {:?}", l2);
     // Files identical to /bin (the same programs copied into the image).
     // Buffers on the heap (the process stack is small).
     let (Ok(av), Ok(bv)) = (mmap(131072, PROT_READ | PROT_WRITE), mmap(131072, PROT_READ | PROT_WRITE)) else { return 2 };
@@ -306,7 +306,7 @@ fn ask_lsusb(l: &mut [u8; 4096]) -> &str {
 
 /// `init test /bin/usbtest hotplug` – the kernel (USB TEST 6/6) tells QEMU to
 /// detach the disk behind the hub, reattach it and detach the whole hub; here
-/// we watch usb0: devices 5 -> 4 -> 5 -> 2, with no enumeration errors.
+/// we watch usb0: devices 6 -> 5 -> 6 -> 3 (the writable test stick stays), with no enumeration errors.
 fn hotplug() -> i32 {
     let mut n = 0;
     let mut out = [0u8; 2048];
@@ -321,7 +321,7 @@ fn hotplug() -> i32 {
     }
     check!(n, c != 0, "no usb0 service");
     // Successive device counts we expect to see.
-    let want = [5u64, 4, 5, 2];
+    let want = [6u64, 5, 6, 3];
     let mut seen = 0usize;
     let mut last = 0u64;
     let mut hubs_end = u64::MAX;
@@ -339,7 +339,7 @@ fn hotplug() -> i32 {
         }
         sleep_ms(30);
     }
-    check!(n, seen == want.len(), "device count sequence 5 -> 4 -> 5 -> 2: reached step {} (last count {})", seen, last);
+    check!(n, seen == want.len(), "device count sequence 6 -> 5 -> 6 -> 3: reached step {} (last count {})", seen, last);
     check!(n, hubs_end == 0, "hub still listed after it was unplugged: hubs={}", hubs_end);
     check!(n, stat[0] == 0 && stat[1] == 0, "failures {} errors {} during hot-plug", stat[0], stat[1]);
     check!(n, stat[2] >= 2, "hub change reports: {} (want >= 2)", stat[2]);
@@ -348,6 +348,23 @@ fn hotplug() -> i32 {
     check!(n, !lt.contains("hub") && !lt.contains("mouse") && lt.contains("keyboard"), "usblist after unplugging the hub: {:?}", lt);
     close(c);
     println!("usbtest: {} checks OK, hot-plug behind the hub: disk out / in, hub out (hub + mouse + disk gone), {} hub change reports", n, stat[2]);
+    0
+}
+
+/// `init test /bin/usbtest hold` – keeps usb0 running (init stops its services when the
+/// test program exits) while the kernel's USB WRITE TEST writes to the writable test stick,
+/// unplugs it and kills usbd; ends when the kernel creates /tmp/usbw-done (at most 300 s).
+fn hold() -> i32 {
+    let mut n = 0;
+    let t0 = uptime_ms();
+    while stat("/tmp/usbw-done").is_err() {
+        if uptime_ms() - t0 > 300_000 {
+            check!(n, false, "hold: no /tmp/usbw-done from the kernel in 300 s");
+        }
+        sleep_ms(50);
+    }
+    check!(n, service("usb0").is_some_and(|s| s.0 != 0), "usb0 not running at the end of the write test");
+    println!("usbtest: {} checks OK, hold: usb0 kept for {} ms", n, uptime_ms() - t0);
     0
 }
 
@@ -506,6 +523,9 @@ fn main(args: Args) -> i32 {
     if args.get(1) == Some("hotplug") {
         return hotplug();
     }
+    if args.get(1) == Some("hold") {
+        return hold();
+    }
     if handle_info(HW_ROOT).map(|(k, _)| k) != Ok(KIND_HW_ROOT) {
         return via_init();
     }
@@ -539,7 +559,7 @@ fn main(args: Args) -> i32 {
     // QEMU: the boot flash drive (usb-storage) is attached to this controller.
     check!(n, field(st, "connected").unwrap_or(0) >= 1, "boot USB stick not seen on any port: {:?}", st);
     // Devices recognized.
-    check!(n, field(st, "devices") == Some(5) && field(st, "failures") == Some(0) && field(st, "hubs") == Some(1), "QEMU USB devices not enumerated (want 5: 2 storage, keyboard, hub, mouse behind it): {:?}", st);
+    check!(n, field(st, "devices") == Some(6) && field(st, "failures") == Some(0) && field(st, "hubs") == Some(1), "QEMU USB devices not enumerated (want 6: 3 storage, keyboard, hub, mouse behind it): {:?}", st);
     let (hid_n, inp, r0) = (field(st, "hid"), field(st, "input"), field(st, "hid_reports").unwrap_or(0));
     let mut lbuf = [0u8; 4096];
     let l = ask(c, "list", &mut lbuf).unwrap_or("");
@@ -547,7 +567,7 @@ fn main(args: Args) -> i32 {
     check!(n, l.contains("03/01/01") && l.contains("keyboard") && l.contains("QEMU USB Keyboard"), "list: no HID boot keyboard 03/01/01: {:?}", l);
     check!(n, l.contains("03/01/02") && l.contains("mouse"), "list: no HID boot mouse 03/01/02: {:?}", l);
     let lines = l.lines().filter(|x| x.contains(": ")).count();
-    check!(n, lines == 5 && l.contains("0627:0001") && l.contains("address "), "list: {} lines: {:?}", lines, l);
+    check!(n, lines == 6 && l.contains("0627:0001") && l.contains("address "), "list: {} lines: {:?}", lines, l);
     // Hub and the devices behind it (ports "N.1", "N.2").
     check!(n, l.contains("hub ready (8 ports, USB 2)") && l.contains(".1: 0627:0001") && l.contains(".2: 46f4:0001"), "list: hub with mouse (.1) and disk (.2) behind it: {:?}", l);
     // Both flash drives in the kernel (sdX), the test one mounted by the kernel.
@@ -555,7 +575,7 @@ fn main(args: Args) -> i32 {
     check!(n, disk.is_some(), "test USB disk not mounted (blk_attach / usb-disks)");
     let mount_ms = disk.unwrap().1;
     let st3 = ask(c, "status", &mut out).unwrap_or("");
-    check!(n, field(st3, "storage") == Some(2) && field(st3, "disks") == Some(2) && field(st3, "blk") == Some(1) && field(st3, "stor_errors") == Some(0) && field(st3, "stor_reads").unwrap_or(0) > 0, "storage status: {:?}", st3);
+    check!(n, field(st3, "storage") == Some(3) && field(st3, "disks") == Some(3) && field(st3, "blk") == Some(1) && field(st3, "stor_errors") == Some(0) && field(st3, "stor_reads").unwrap_or(0) > 0, "storage status: {:?}", st3);
     // Keyboard and mouse configured, reports flowing (Set Idle 16 ms –
     // QEMU then sends a report every 16 ms even with no keys pressed).
     check!(n, hid_n == Some(2) && inp == Some(1), "HID keyboard + mouse not configured: hid {:?} input {:?}", hid_n, inp);
@@ -593,7 +613,7 @@ fn main(args: Args) -> i32 {
     let st = ask(c, "status", &mut out).unwrap_or("");
     let restart_ms = uptime_ms() - t1;
     check!(n, field(st, "noops").unwrap_or(0) >= 203 && field(st, "errors") == Some(0), "restarted usbd: {:?}", st);
-    check!(n, field(st, "devices") == Some(5), "devices after restart: {:?}", st);
+    check!(n, field(st, "devices") == Some(6), "devices after restart: {:?}", st);
     // The disk disappeared with the previous usbd and came back with the new one.
     check!(n, find_disk(10_000).is_some(), "test USB disk not mounted again after the usbd restart");
 
@@ -615,11 +635,11 @@ fn main(args: Args) -> i32 {
     let (pid, listen) = s.unwrap();
     let c = connect(listen).unwrap_or(0);
     let st = ask(c, "status", &mut out).unwrap_or("");
-    check!(n, field(st, "devices") == Some(5) && field(st, "errors") == Some(0), "after kill during enumeration: {:?}", st);
-    // Enumeration time (port reset -> device ready) – 5 devices of this instance.
+    check!(n, field(st, "devices") == Some(6) && field(st, "errors") == Some(0), "after kill during enumeration: {:?}", st);
+    // Enumeration time (port reset -> device ready) – 6 devices of this instance.
     let enum_avg = field(st, "enum_avg_ms").unwrap_or(0);
     let enum_max = field(st, "enum_max_ms").unwrap_or(0);
-    check!(n, field(st, "enum_count") == Some(5) && enum_max >= enum_avg, "enumeration times: {:?}", st);
+    check!(n, field(st, "enum_count") == Some(6) && enum_max >= enum_avg, "enumeration times: {:?}", st);
 
     // End: nobody can call usbd anymore -> it exits on its own (code 0).
     close(c);

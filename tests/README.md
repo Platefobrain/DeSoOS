@@ -29,6 +29,7 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests, `--format` for a disk image |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
+| `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSoOS system" partition, primary and backup GPT |
 | `dns-stub.py`, `http-stub.py` | small DNS and HTTP servers on the host for the network tests and the soak |
 | `udp-stub.py` | a UDP echo server on the host for NET TEST (`/bin/udptest`, nettest's address-change checks) and the soak: echo, 1472-byte answer, bursts, an answer from a foreign port, silence, a per-sender count |
 | `ntp-stub.py` | 32 NTP servers on the host (one per port) for NTP TEST (`/bin/ntptest net`): correct, shifted, silent, Kiss-o'-Death, forged, late and malformed answers, servers in 1960 and 2040; checks every query byte for byte, counts packets and repeated Transmit values |
@@ -37,4 +38,4 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `nts-server/` | a test server on the host in Rust on **rustls** and RustCrypto **aes-siv** (independent of DeSoTLS / DeSoCrypto) – built by `test.sh` (`cargo build`, its own `Cargo.lock`; the first build downloads its crates): the TLS exporter and ALPN for TLS TEST (58500–58502), 27 NTS-KE responses (58510–58536), 15 kinds of NTP-with-NTS answers (58540–58554, reached through NTS-KE at 58570–58584), counters at 58539; for NTS TEST 15 time servers – NTS-KE at 58600–58614 with a chosen certificate, NTP at 58630–58644 with a chosen time (the host's, shifted, or fixed) |
 | `stubnet.py` | shared by the Python servers above: a busy port is retried for 5 s (our ports lie in Linux's range for outgoing ports, 32768–60999), and `$STUB_READY/<name>` tells `test.sh` that all ports are bound – QEMU starts only after all host servers (these five and `nts-server/`; in `soak.sh` its three) are listening, otherwise the script stops with exit code 3 and shows who holds the ports |
 | `tls/` | the test certificates and keys of `tls-stub.py` and `nts-server/` (`gen-test-certs.py` makes them; `gen-nts-certs.py` the chain with intermediates of the time service's tests – `nts-root`, `nts-good`, `nts-intshort`; test keys only) |
-| `qemu-hotplug.py` | plugs and unplugs USB devices during the test (QEMU monitor) |
+| `qemu-hotplug.py` | plugs and unplugs USB devices during the test (QEMU monitor); the monitor's replies go to `logs/hotplug-monitor.log` |

@@ -35,13 +35,18 @@ def main():
         print("qemu-hotplug: no QEMU monitor at " + sock, file=sys.stderr)
         return 1
     mon.setblocking(False)
+    # The monitor's replies go to a file next to the log (an error from device_add shows there).
+    replies = open(os.path.join(os.path.dirname(os.path.abspath(log)), "hotplug-monitor.log"), "wb")
     pos = 0
     rest = b""
     while True:
-        # We only drain monitor replies (otherwise the socket buffer fills up).
+        # Drain the monitor replies (otherwise the socket buffer fills up).
         try:
-            if mon.recv(65536) == b"":
+            got = mon.recv(65536)
+            if got == b"":
                 return 0  # QEMU closed the monitor
+            replies.write(got)
+            replies.flush()
         except BlockingIOError:
             pass
         except OSError:

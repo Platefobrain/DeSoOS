@@ -93,6 +93,8 @@ mod test_svc;
 #[cfg(selftest)]
 mod test_usb;
 #[cfg(selftest)]
+mod test_usbw;
+#[cfg(selftest)]
 mod test_net;
 // The long test (tests/soak.sh): init + /bin/soak instead of the self-tests.
 #[cfg(selftest)]
@@ -791,6 +793,8 @@ pub use test_certs::self_test as certs_self_test;
 pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]
 pub use test_usb::self_test as usb_self_test;
+#[cfg(selftest)]
+pub use test_usbw::self_test as usbw_self_test;
 #[cfg(selftest)]
 pub use test_net::self_test as net_self_test;
 #[cfg(selftest)]

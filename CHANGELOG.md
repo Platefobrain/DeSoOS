@@ -2,6 +2,44 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.80.0 — in progress (one USB stick: start + DeSoFS; programs from the disk)
+
+Plan: V080 ver 10 (accepted). One stick prepared on Linux by `make-usb.sh --with-disk`: partition 1 the ESP (DeSoOS
+only reads it), partition 2 "DeSoOS system" with DeSoFS – the only place DeSoOS ever writes on a USB disk. Four
+stages, each with its own gate.
+
+### Stage A – writing to a USB stick (usbd, ublk, the block layer)
+- **The partition type "DeSoOS system"** `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` (`gpt::DESOOS_SYSTEM`).
+- **ublk protocol, 48-byte requests**: WRITE (2), FLUSH (3), REG (4) next to READ; every request carries the disk's
+  **generation** (a counter that never repeats a value – a stick removed and another one plugged in under the same
+  number starts with no registration); `blk_attach` takes the write protection usbd saw (MODE SENSE: unknown = never
+  written).
+- **Registrations** – at most one per disk, created and withdrawn only by the kernel (`block::control`): **probe**
+  (exactly one FLUSH, no WRITE – before anything may be written, "is SYNCHRONIZE CACHE confirmed?"), **rw** (WRITE in
+  [start, start + len) and FLUSH), **format** (both only with the session's identifier). Session identifiers and
+  generations: `checked_add`, a counter that would overflow refuses instead of wrapping.
+- **Three independent locks** against a write outside the partition: the partition object (its range and a write
+  grant – without one a partition of a USB disk is read-only), ublk (its registration, every 64 KiB piece,
+  `checked_add` / `checked_mul`, a request across the boundary refused whole), usbd (its own copy of the registration,
+  the generation, write protection – before every WRITE(10) / SYNCHRONIZE CACHE(10)). The disk as a whole stays
+  read-only.
+- **Writes in 64 KiB pieces** (at most 128 blocks – the 16-bit count of WRITE(10) suffices; LBAs above 2³² refused,
+  never truncated): success only when every piece is confirmed (usbd: CSW status 0, residue 0); one failed piece fails
+  the whole write. FLUSH only after every earlier piece was answered, never reported as done when it was not. A FLUSH /
+  REG that timed out: its late reply is discarded (a short "stale" list), slots quarantined as for reads.
+- **usbd**: WRITE(10), SYNCHRONIZE CACHE(10), MODE SENSE(6) (the only medium-changing commands – a compile-time
+  assertion keeps out FORMAT UNIT, MODE SELECT, WRITE SAME, UNMAP, ...), `bot_dir` (data out, the CSW residue),
+  status counters `stor_writes stor_wbytes stor_flushes stor_refused`, `usblist` shows the write protection; test flags
+  only in the self-test image (`--cfg selftest`: the third lock off, a failed WRITE / FLUSH, a late FLUSH reply).
+- **USB WRITE TEST** (the 40th suite, 3 parts): `/bin/blkwtest` – a writable fake stick for the kernel side; real usbd
+  with a writable QEMU stick (`tests/mkgpt.py`: GPT, ESP + "DeSoOS system") – a real SYNCHRONIZE CACHE, the ESP never
+  changes, usbd's lock alone, a stale generation, usbd's errors, a held probe reply; the stick unplugged and usbd
+  killed during writes – back with a new generation and no registration, every sector old or new. The emulated USB
+  devices: 6 (the writable stick on port 4); `qemu-hotplug.py` keeps the monitor's replies in
+  `logs/hotplug-monitor.log`; the test timeout is 600 s. Mutations caught (8): each lock's range check off (the
+  partition's seen by ublk's refusal counter), usbd taking a stale generation, a failed FLUSH reported as done, a
+  counter that wraps, a failed piece ignored, usbd flushing without a registration.
+
 ## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 
 Stages A–D, each with its own gate; the last one passed on the Legion: the time service set the clock from all three

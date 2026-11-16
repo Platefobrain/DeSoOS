@@ -688,18 +688,23 @@ pub struct BlkInfo {
     pub slots: u32,
     /// 0 = default (5 s).
     pub timeout_ms: u32,
+    /// Write protection (MODE SENSE): 0 unknown, 1 off, 2 on.  Only 1 lets the kernel
+    /// ever write a partition of the disk.
+    pub wp: u32,
     pub desc: [u8; 40],
 }
 
-/// Registers a USB disk (read-only) – number (0 = sda) or -errno.
-/// The kernel sends 32 B requests over the channel (id, op 1 = READ, lba u64, blocks u32,
-/// slot u32), reply ≥ 12 B (id, status, blocks); data goes into the buffer slot.
+/// Registers a USB disk (read-only as a whole) – number (0 = sda) or -errno.
+/// The kernel sends 48 B requests over the channel (id, op, lba u64, blocks u32, slot u32,
+/// gen u64, session u64, len u64 – ops READ 1, WRITE 2, FLUSH 3, REG 4; kernel/user/ublk.rs),
+/// reply ≥ 12 B (id, status, blocks); data goes through the buffer slot.
 pub fn blk_attach(h: u64, chan: u64, buf: u64, info: &BlkInfo) -> i64 {
     let mut raw = [0u8; 64];
     raw[0..8].copy_from_slice(&info.blocks.to_le_bytes());
     raw[8..12].copy_from_slice(&info.block_size.to_le_bytes());
     raw[12..16].copy_from_slice(&info.slots.to_le_bytes());
     raw[16..20].copy_from_slice(&info.timeout_ms.to_le_bytes());
+    raw[20..24].copy_from_slice(&info.wp.to_le_bytes());
     raw[24..64].copy_from_slice(&info.desc);
     syscall6(SYS_BLK_ATTACH, h, chan, buf, raw.as_ptr() as u64, 0, 0)
 }

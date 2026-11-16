@@ -44,7 +44,7 @@ fn pat(sector: u64, i: usize) -> u8 {
 fn info(blocks: u64, bs: u32, slots: u32) -> BlkInfo {
     let mut desc = [0u8; 40];
     desc[..7].copy_from_slice(b"blktest");
-    BlkInfo { blocks, block_size: bs, slots, timeout_ms: 1000, desc }
+    BlkInfo { blocks, block_size: bs, slots, timeout_ms: 1000, wp: 0, desc }
 }
 
 fn reply(c: u64, id: u32, status: i32, n: u32) {

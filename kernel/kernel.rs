@@ -306,6 +306,11 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::usb_self_test();
     }
+    // Writing to a USB stick – registrations, the three locks, usbd, hot-plug (v0.80).
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::usbw_self_test();
+    }
     // Network card – netd in user space.
     #[cfg(selftest)]
     if !selftest::looping() {

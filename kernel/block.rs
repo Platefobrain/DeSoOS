@@ -15,6 +15,11 @@
 //     read-only (drivers/nvme.rs).
 //   * Partitions (GPT – gpt.rs) are separate disks, e.g. "nvme0n1p1": they have
 //     an offset and length and inherit "read-only" from the disk.
+//   * A USB disk (ublk) stays read-only as a whole, always.  Only one of its partitions may
+//     get a write GRANT from the kernel (`set_grant`) after the write rules (docs/ARCHITECTURE.md,
+//     "Writing to a USB disk"): tag 0 = ordinary read-write, any other tag = the identifier of
+//     the format session.  Such a partition writes through `write_range` / `flush_range` of
+//     the disk, which checks its own registration again (the second of three locks).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -83,7 +88,61 @@ pub trait BlockDevice {
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError>;
     /// Forces the device cache to be written to the medium.
     fn flush(&mut self) -> Result<(), BlockError>;
+    /// A write from a partition with a grant (`tag`: 0 rw, otherwise the format session).
+    /// A disk without registrations (everything but ublk) writes only when it is not
+    /// read-only and only with tag 0.
+    fn write_range(&mut self, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
+        if self.read_only() || tag != 0 {
+            return Err(BlockError::ReadOnly);
+        }
+        self.write(lba, buf)
+    }
+    /// A flush from a partition with a grant (as `write_range`).
+    fn flush_range(&mut self, tag: u64) -> Result<(), BlockError> {
+        if self.read_only() || tag != 0 {
+            return Err(BlockError::ReadOnly);
+        }
+        self.flush()
+    }
+    /// Registrations and other control of a USB disk (ublk); others – Unsupported.
+    fn control(&mut self, _c: Control) -> Result<u64, BlockError> {
+        Err(BlockError::Unsupported)
+    }
+    /// A partition: sets or clears its write grant; false – not a partition.
+    fn set_grant(&mut self, _grant: Option<u64>) -> bool {
+        false
+    }
 }
+
+/// Control of a USB disk (ublk.rs) – the registrations of the write rules.  Block numbers are
+/// absolute device blocks; `generation` is the disk's generation (a stale one – NoDevice).
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub enum Control {
+    /// The disk's generation.
+    Generation,
+    /// Write protection as usbd saw it: 0 unknown, 1 not protected, 2 protected.
+    WriteProtect,
+    /// A probe registration, one FLUSH through it, the probe withdrawn – Ok only after a
+    /// confirmed SYNCHRONIZE CACHE.
+    Probe { generation: u64 },
+    /// A read-write registration of [start, start + len).
+    RegisterRw { generation: u64, start: u64, len: u64 },
+    /// A format registration – Ok(the new session identifier).
+    BeginFormat { generation: u64, start: u64, len: u64 },
+    /// The end of that session (also after an error).
+    EndFormat { session: u64 },
+    /// The registration withdrawn (unmount).
+    Withdraw,
+    /// Self-tests: a test flag sent to the device (usbd / the fake), the reply's status.
+    #[cfg(selftest)]
+    Test { flags: u32 },
+}
+
+/// Self-tests: the partition skips its own range check (the first lock), so that the second
+/// and the third lock are tested alone.
+#[cfg(selftest)]
+pub static TEST_SKIP_PARTITION_CHECK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Range check shared by the drivers.
 pub fn check_range(dev_sectors: u64, lba: u64, len: usize) -> Result<u64, BlockError> {
@@ -192,6 +251,31 @@ pub fn flush(index: usize) -> Result<(), BlockError> {
     with_device(index, |d| if d.read_only() { Ok(()) } else { d.flush() })?
 }
 
+/// A write of a partition with a grant into its parent disk (the disk checks it again).
+fn write_part(index: usize, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
+    with_device(index, |d| d.write_range(lba, buf, tag))?
+}
+
+fn flush_part(index: usize, tag: u64) -> Result<(), BlockError> {
+    with_device(index, |d| d.flush_range(tag))?
+}
+
+/// Control of a USB disk (`Control`).
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn control(index: usize, c: Control) -> Result<u64, BlockError> {
+    with_device(index, |d| d.control(c))?
+}
+
+/// Sets (Some(tag)) or clears (None) the write grant of partition `index`.
+#[cfg_attr(not(selftest), allow(dead_code))]
+pub fn set_grant(index: usize, grant: Option<u64>) -> Result<(), BlockError> {
+    if with_device(index, |d| d.set_grant(grant))? {
+        Ok(())
+    } else {
+        Err(BlockError::Unsupported)
+    }
+}
+
 #[allow(dead_code)]
 pub fn is_read_only(index: usize) -> bool {
     with_device(index, |d| d.read_only()).unwrap_or(true)
@@ -220,6 +304,8 @@ pub struct Partition {
     start: u64,
     sectors: u64,
     read_only: bool,
+    /// Write grant on a read-only disk (USB): Some(0) rw, Some(session) format.
+    grant: Option<u64>,
     block_size: usize,
     kind: &'static str,
     label: String,
@@ -237,14 +323,19 @@ impl BlockDevice for Partition {
             self.sectors * SECTOR_SIZE as u64 / (1024 * 1024),
             self.kind,
             if self.label.is_empty() { String::new() } else { alloc::format!(" \"{}\"", self.label) },
-            if self.read_only { ", read-only" } else { "" }
+            match (self.read_only, self.grant) {
+                (false, _) => "",
+                (true, None) => ", read-only",
+                (true, Some(0)) => ", read-write (granted)",
+                (true, Some(_)) => ", being formatted",
+            }
         )
     }
     fn sector_count(&self) -> u64 {
         self.sectors
     }
     fn read_only(&self) -> bool {
-        self.read_only
+        self.read_only && self.grant.is_none()
     }
     fn logical_block_size(&self) -> usize {
         self.block_size
@@ -260,14 +351,44 @@ impl BlockDevice for Partition {
         read(self.parent, self.start + lba, buf)
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-        check_range(self.sectors, lba, buf.len())?;
-        if self.read_only {
-            return Err(BlockError::ReadOnly);
+        // The first of the three locks: the partition's own range (with a grant – before
+        // anything goes to the disk).
+        #[cfg(selftest)]
+        let skip = TEST_SKIP_PARTITION_CHECK.load(core::sync::atomic::Ordering::SeqCst) && self.grant.is_some();
+        #[cfg(not(selftest))]
+        let skip = false;
+        if !skip {
+            check_range(self.sectors, lba, buf.len())?;
+        } else if buf.is_empty() || buf.len() % SECTOR_SIZE != 0 {
+            return Err(BlockError::BadBuffer);
         }
-        write(self.parent, self.start + lba, buf)
+        let abs = self.start.checked_add(lba).ok_or(BlockError::OutOfRange)?;
+        match (self.read_only, self.grant) {
+            (false, _) => write(self.parent, abs, buf),
+            (true, Some(tag)) => write_part(self.parent, abs, buf, tag),
+            (true, None) => Err(BlockError::ReadOnly),
+        }
     }
     fn flush(&mut self) -> Result<(), BlockError> {
-        flush(self.parent)
+        match (self.read_only, self.grant) {
+            (true, Some(tag)) => flush_part(self.parent, tag),
+            _ => flush(self.parent),
+        }
+    }
+    fn write_range(&mut self, lba: u64, buf: &[u8], tag: u64) -> Result<(), BlockError> {
+        // Only a whole disk takes partition writes.
+        let _ = (lba, buf, tag);
+        Err(BlockError::ReadOnly)
+    }
+    fn flush_range(&mut self, _tag: u64) -> Result<(), BlockError> {
+        Err(BlockError::ReadOnly)
+    }
+    fn set_grant(&mut self, grant: Option<u64>) -> bool {
+        // A grant only where the disk itself is read-only (USB); elsewhere nothing changes.
+        if self.read_only {
+            self.grant = grant;
+        }
+        true
     }
 }
 
@@ -301,6 +422,7 @@ pub fn scan_partitions(disk: usize) -> usize {
             start: p.first_sector,
             sectors: p.sectors,
             read_only,
+            grant: None,
             block_size,
             kind: p.kind,
             label: p.name.clone(),

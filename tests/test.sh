@@ -29,7 +29,7 @@ BUILD=1
 VERBOSE=0
 LOOP="${LOOP:-}"
 # Loop mode takes longer – a larger default timeout (set TIMEOUT to change it).
-if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-480}"; fi
+if [ -n "$LOOP" ]; then TIMEOUT="${TIMEOUT:-3600}"; else TIMEOUT="${TIMEOUT:-600}"; fi
 # Number of QEMU cores.  More virtual CPUs than host threads =
 # long stalls (the host suspends the virtual CPU whose turn it is to take
 # the Big Kernel Lock; the watchdog reports it) – on a weak host: SMP=2 ./test.sh
@@ -89,6 +89,13 @@ TEST_USB="$ROOT/build-test-usb.img"
 rm -f "$TEST_USB"
 command -v python3 >/dev/null 2>&1 || { echo "python3 not found (needed for the test USB stick image)"; exit 3; }
 python3 "$T/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "ERROR: mkfat32.py"; exit 3; }
+# Writable test USB stick (USB WRITE TEST): GPT with an ESP and a "DeSoOS system" partition,
+# the only kind of partition DeSoOS ever writes on a USB disk.  A fresh one every run; a
+# -blockdev node (not -drive) so that it survives device_del and can be plugged back;
+# share-rw: a stick unplugged in the middle of a write may keep its node for a moment.
+TEST_USBW="$ROOT/build-test-usbw.img"
+rm -f "$TEST_USBW"
+python3 "$T/mkgpt.py" "$TEST_USBW" 64 > /dev/null || { echo "ERROR: mkgpt.py"; exit 3; }
 
 # build/ goes to QEMU as a READ-ONLY USB stick (like
 # a real USB stick; usbd sees it as a read-only sdX disk).
@@ -122,6 +129,9 @@ QEMU=(qemu-system-x86_64
   -blockdev driver=file,filename="$TEST_USB",node-name=usbtestf,read-only=on
   -blockdev driver=raw,file=usbtestf,node-name=usbtest,read-only=on
   -device usb-storage,bus=xhci.0,port=3.2,drive=usbtest,id=hubdisk
+  -blockdev driver=file,filename="$TEST_USBW",node-name=usbwf
+  -blockdev driver=raw,file=usbwf,node-name=usbw
+  -device usb-storage,bus=xhci.0,port=4,drive=usbw,id=usbw,share-rw=on
   -monitor unix:"$MON",server=on,wait=off
   -drive file="$TEST_DISK",format=raw,if=none,id=vd0
   -device virtio-blk-pci,drive=vd0
@@ -200,7 +210,7 @@ if [ -n "$MISSING" ]; then
   ss -tuanp 2>/dev/null | grep -E '127\.0\.0\.1:(53530|58080|58090|581[2-5][0-9]|58[4-6][0-9][0-9])[[:space:]]' || true
   kill "${SERVER_PIDS[@]}" 2>/dev/null
   wait "${SERVER_PIDS[@]}" 2>/dev/null
-  rm -rf "$STUB_READY" "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
+  rm -rf "$STUB_READY" "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$TEST_USBW" "$MON"
   exit 3
 fi
 rm -rf "$STUB_READY"
@@ -235,7 +245,7 @@ if [ "$CODE" = 33 ] && [ -z "$LOOP" ]; then
   fi
   TIME2=$(( $(date +%s) - START2 ))
 fi
-rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$MON"
+rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$TEST_USBW" "$MON"
 
 # Short soak (only after two passing starts, not in loop mode).
 LOG3="$ROOT/logs/test-soak.log"

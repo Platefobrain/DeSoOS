@@ -63,7 +63,8 @@ More documentation:
 - ACPI (MADT etc.), PCI enumeration.
 - Storage: virtio-blk, NVMe (read-only on real hardware), GPT partitions, block layer with
   read-only enforcement.
-- USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, read-only mass storage
+- USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, mass storage (read-only; writing only
+  inside a "DeSoOS system" partition the kernel registered – v0.80, in progress)
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP (also for programs – connected client sockets), DHCP, DNS, TCP client and server, loopback;
@@ -107,7 +108,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (39 suites, a restart phase and a short soak, 317 tests), stress tests and a long soak test
+- Built-in self-tests (40 suites, a restart phase and a short soak, 320 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -273,9 +274,12 @@ Yes. On real hardware DeSoOS **does not write to any disk**:
    setup commands are ever sent (no Write, TRIM, Format, Sanitize or firmware update).
 2. **Block layer** (`kernel/block.rs`) independently rejects every write to a read-only disk,
    including `desofs format`, `disk write` and writing files on `/esp`.
-3. **USB sticks are read-only**, with four independent locks: `usbd` contains no SCSI write
-   command (checked at compile time), the kernel-`usbd` protocol has no write operation, the
-   USB disk is read-only in the block layer, and FAT32 / `open` refuse writes (`ERROR_READ_ONLY`).
+3. **USB sticks are read-only**: the USB disk is read-only in the block layer and FAT32 / `open`
+   refuse writes (`ERROR_READ_ONLY`). The only exception (v0.80, being built) is a GPT partition of
+   the type "DeSoOS system" that only DeSoOS's own `make-usb.sh --with-disk` creates: the kernel may
+   write inside it, and only inside it – three independent checks (the partition, the kernel's USB
+   disk, `usbd`), never on a write-protected stick. A stick prepared by `make-usb.sh` (FAT32 only)
+   has no such partition and is never written.
 4. Verified in QEMU on a copy of a typical Linux disk layout (GPT: ESP + swap + ext4) with a
    controller posing as a real SSD and NVMe command tracing: **0 write commands** after boot,
    despite attempts such as `echo > /esp/...`, `rm`, `mkfs` and `disk write` (`mkfs` was the FAT32 formatter, removed in v0.64.1).

@@ -204,6 +204,10 @@ fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysR
     let bs = u32::from_le_bytes(raw[8..12].try_into().unwrap());
     let slots = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
     let timeout = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64;
+    // Write protection as usbd saw it (MODE SENSE): 1 off, 2 on, anything else unknown
+    // (fail-closed: such a disk is never written).
+    let wp = u32::from_le_bytes(raw[20..24].try_into().unwrap());
+    let wp = if wp <= 2 { wp as u8 } else { super::ublk::WP_UNKNOWN };
     if !matches!(bs, 512 | 4096) || blocks == 0 || blocks.checked_mul(bs as u64).is_none() {
         return Err(ERROR_INVALID_ARGUMENT);
     }
@@ -216,7 +220,7 @@ fn sys_blk_attach(p: &mut Process, h: u64, ch: u64, buf: u64, info: u64) -> SysR
         .take_while(|&&x| x != 0)
         .map(|&x| if (0x20..0x7F).contains(&x) { x as char } else { '?' })
         .collect();
-    super::ublk::attach(c, b, blocks, bs, slots, timeout, String::from(desc.trim()))
+    super::ublk::attach(c, b, blocks, bs, slots, timeout, wp, String::from(desc.trim()))
 }
 
 /// input_inject – keyboard / mouse events from a service (usbd) into the

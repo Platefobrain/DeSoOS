@@ -118,6 +118,9 @@ for src in user/bin/*.rs; do
   # The time service's test list (tests/nts-server, the test CAs) – only in the self-test
   # image; the normal timekeeper has the built-in list alone and takes no argument.
   [ "$name" = timekeeper ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
+  # usbd's test flags (the third write lock off, a failed WRITE / FLUSH, a late FLUSH
+  # reply) – only in the self-test image; the normal usbd refuses them.
+  [ "$name" = usbd ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \

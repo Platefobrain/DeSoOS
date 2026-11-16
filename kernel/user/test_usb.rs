@@ -479,7 +479,7 @@ pub fn self_test() {
     let free1 = crate::selftest::settled_free_frames();
     check!(free1 >= free0, "frames leaked by usbd ({} -> {})", free0, free1);
     let res = out.lines().find(|l| l.starts_with("usbtest-result ")).unwrap_or("").trim();
-    serial_println!("[USB TEST] 2/7 xHCI in user space: dev_find by class, BIOS handoff + reset, rings, MSI, No-Op, enumeration of 2 storage + keyboard + hub with mouse and disk behind it, HID configured (interrupt endpoints, reports), USB disks attached + test disk mounted, kill mid-command and mid-enumeration + full reset (disks gone and back), clean exit, nothing leaked: {} PASS", line);
+    serial_println!("[USB TEST] 2/7 xHCI in user space: dev_find by class, BIOS handoff + reset, rings, MSI, No-Op, enumeration of 3 storage + keyboard + hub with mouse and disk behind it, HID configured (interrupt endpoints, reports), USB disks attached + test disk mounted, kill mid-command and mid-enumeration + full reset (disks gone and back), clean exit, nothing leaked: {} PASS", line);
 
     // 3. The ublk protocol without hardware – /bin/blktest pretends to be usbd and breaks
     // the protocol; the kernel reads and checks data, timeouts, quarantine, removal.

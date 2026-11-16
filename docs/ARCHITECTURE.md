@@ -899,17 +899,23 @@ usbd creates a channel and a buffer (`dma_alloc` – the same buffer the pendriv
 usbd) and calls `blk_attach(BLK, channel_end, buffer, info)`.
 
 `info` (64 B): blocks u64, block size u32, slots u32, timeout_ms u32 (0 = 5 s; tests use shorter values,
-100..30 000), 4 zero bytes, a 40 B ASCII description (vendor + product from INQUIRY).
+100..30 000), write protection u32 (MODE SENSE: 0 unknown, 1 off, 2 on – anything but 1 means the disk is never
+written), a 40 B ASCII description (vendor + product from INQUIRY).
 
 The kernel takes **its own references** to the channel and the buffer and registers a `ublk` disk (always
-`read_only`), then scans GPT / MBR partitions as for NVMe.
+`read_only` as a whole) with a new **generation** (a counter that never repeats a value), then scans GPT / MBR
+partitions as for NVMe.
 
-Messages (32 B over the channel – control; data in the buffer):
+Messages (48 B over the channel – control; data in the buffer):
 
 | Direction | Fields |
 |---|---|
-| kernel → usbd | `id u32`, `op u32` (1 = READ; nothing else), `lba u64`, `blocks u32`, `slot u32` |
+| kernel → usbd | `id u32`, `op u32`, `lba u64`, `blocks u32`, `slot u32`, `gen u64`, `session u64`, `len u64` |
 | usbd → kernel | `id u32`, `status i32` (0, `ERROR_IO`, `ERROR_NO_DEVICE` – medium removed), `blocks u32` (reply ≥ 12 B) |
+
+Ops: 1 READ (`blocks` from `lba` into `slot`), 2 WRITE (`blocks` from `slot` to `lba`, with `gen` and `session`),
+3 FLUSH (SYNCHRONIZE CACHE, `gen`, `session`), 4 REG (a registration – next section), 9 TEST (self-test builds
+only).
 
 - "Blocks" are **device blocks** (512 or 4096 B); the kernel converts from 512 B sectors, reads whole blocks and
   copies the needed part.
@@ -936,10 +942,61 @@ Messages (32 B over the channel – control; data in the buffer):
 - **usbd does not use the VFS after startup** (it gets only handles from init). Why: it could otherwise wait for a
   lock held on its own behalf and deadlock until the timeout.
 
-**Read-only, enforced four times:** usbd contains no SCSI write command (WRITE(6/10/12/16), FORMAT, MODE SELECT,
-SYNCHRONIZE CACHE – a test checks these opcodes are absent from the binary); the ublk protocol has no write
-operation; the `ublk` disk reports `read_only` and the block layer rejects writes (`ERROR_READ_ONLY`); FAT32 on a read-only
-disk refuses `open` for writing (`ERROR_READ_ONLY`).
+**Read-only by default.** The `ublk` disk as a whole always reports `read_only` and the block layer rejects writes
+to it (`ERROR_READ_ONLY`); FAT32 on it refuses `open` for writing. A write happens only through a partition the kernel
+granted it to, inside a registration – the next section. usbd sends no other medium-changing SCSI command than
+WRITE(10) and SYNCHRONIZE CACHE(10) (a compile-time assertion: no FORMAT UNIT, MODE SELECT, WRITE SAME, UNMAP, WRITE
+BUFFER, ...).
+
+### Writing to a USB disk (v0.80)
+
+Only one kind of place on a USB stick is ever written: a GPT partition of type **"DeSoOS system"**
+(`1A0E2E7D-DE32-4C13-9442-9FCB2649CA02`, `gpt::DESOOS_SYSTEM`) on a stick that is known not to be write-protected.
+The ESP next to it, every other partition, FAT32 sticks and the whole disk stay read-only. (Which partition gets
+`/disk` and when – stage B of the V080 plan; this section is the mechanism under it.)
+
+**Registrations.** At most one per disk at a time, created and withdrawn only by the kernel (`block::control`), each a
+REG message usbd answers and keeps its own copy of. Every one carries the disk's generation:
+
+| Kind | Created | WRITE | FLUSH | Gone |
+|---|---|---|---|---|
+| probe | after GPT + type + MODE SENSE (WP off), before the full rules | never | exactly one | after that FLUSH (success or not), a timeout, removal |
+| rw | after the full rules (probe OK, superblock, `desofs check`) | inside [start, start + len) | yes | withdrawal (unmount), removal, usbd restart |
+| format | for `desofs format` (with a probe OK) | only with the session identifier | only with it | the end of the session |
+
+The probe answers "is SYNCHRONIZE CACHE confirmed at all?" before anything may be written: a stick whose FLUSH fails
+or is refused never gets rw (a FLUSH is never reported as done when it was not). Session identifiers and
+generations come from counters that never wrap: when the next value would not fit (`checked_add`), the attach /
+format is refused.
+
+**Three independent locks** against a write outside the partition:
+1. the **partition object** (`block::Partition`): its own range, and a grant (tag 0 = rw, otherwise the format
+   session) – without a grant a partition of a USB disk is read-only;
+2. **ublk**: the request against its registration (kind, tag, range), for the whole request and for every 64 KiB
+   piece, `lba + blocks` / `start + len` / `blocks × block size` with `checked_add` / `checked_mul`; a request that
+   crosses the boundary is refused whole, never trimmed;
+3. **usbd**: its own copy of the registration, generation and write protection, before every WRITE(10) /
+   SYNCHRONIZE CACHE(10); without a registration every WRITE and FLUSH is refused.
+
+**Writes and FLUSH.** A write goes out in 64 KiB pieces (one slot each, so at most 128 blocks – the 16-bit count of
+WRITE(10) always suffices; LBAs above 2³² are refused, never truncated – sticks over 2 TiB are refused at attach).
+It succeeds only when every piece got a reply with status 0 and its block count; usbd replies 0 only after a CSW
+with status 0 and residue 0 for all the bytes. Any error, timeout or refusal of one piece fails the whole write
+(the pieces already written are in an unknown state – DeSoFS publishes a superblock only after confirmed writes and
+a FLUSH). FLUSH is a barrier: it goes out only after every earlier piece was answered (the disk lock keeps the next
+write out until the FLUSH is answered). A FLUSH or REG that timed out leaves its `id` in a short "stale" list: its
+late reply is discarded, never taken as the answer to a later request (slots: quarantine, as for reads).
+
+**A stick removed, usbd restarted.** The registration goes with the device on both sides; the stick (or the same
+stick plugged back, or usbd's restart re-attaching it) gets a new generation and no registration. Every sector is
+then the old or the new version (USB WRITE TEST 3/3).
+
+| | Linux | Windows | DeSoOS |
+|---|---|---|---|
+| Who may write a USB disk | any opener with permission | any process with access | only the kernel, only a "DeSoOS system" partition with a registration |
+| Write-protect switch | MODE SENSE → read-only | the same | the same, and "unknown" = read-only |
+| FLUSH not supported | sd: skipped when the device reports no write cache | the same | probe at mount: refused = never writable |
+| Writes outside the partition | the block layer's partition range | the same | three locks: partition, ublk, usbd |
 
 ### Controller start and shutdown
 
@@ -998,7 +1055,8 @@ new instance performs a full controller reset.
 
 - Bulk-Only Transport with SCSI: `Storage` (bulk IN/OUT, rings, a command page: CBW at 0, CSW at 512, data at
   1024). INQUIRY up to 4 attempts (pauses 200 / 400 / 600 ms; counter `stor_retries`), READ CAPACITY(10),
-  READ(10).
+  MODE SENSE(6) (write protection), READ(10); WRITE(10) and SYNCHRONIZE CACHE(10) only inside a registration
+  (status counters `stor_writes`, `stor_wbytes`, `stor_flushes`, `stor_refused`).
 - Registration with the kernel happens from the main loop (`attach_pending`), because the kernel reads partitions
   immediately and usbd must already be receiving requests. Disk channels are in the `wait_many` set next to the
   interrupt and clients. Transfer events: HID handled immediately, the rest (EP0, bulk) queued.
@@ -1057,6 +1115,14 @@ panics; every case ends in an error or a valid result within limits.
 - Full queues: a flood of HID events (input buffer full – a lost-events counter, usbd is never blocked), all ublk
   slots busy, timeouts (usbd deliberately silent – test mode), late replies and replies with a foreign `id`.
 - The test image has a deliberately wrong primary FSInfo (the backup in sector 7 is correct).
+- **USB WRITE TEST** (v0.80): a writable fake stick (`/bin/blkwtest`) for the kernel side – no registration,
+  probe, rw, format sessions, each of the first two locks alone, a failed 64 KiB piece, late replies, counters that
+  never wrap; then real usbd and a writable QEMU stick (`tests/mkgpt.py`: ESP + "DeSoOS system") – a real
+  SYNCHRONIZE CACHE, the ESP never changes, usbd's lock alone (self-test flags: the kernel's checks off, a stale
+  generation, a failed WRITE / FLUSH, a held FLUSH reply), and the stick unplugged / usbd killed during writes.
+  Mutations caught (8): ublk's range check off; the partition's range check off (seen by ublk's refusal counter –
+  the error alone is the same); usbd's range check off; usbd taking a stale generation; a failed FLUSH reported as
+  done; a counter that wraps; a failed piece ignored; usbd flushing without a registration.
 - Result line `[RESULT-USB]`: `enum_avg_ms enum_max_ms kread_kbs kcat_kbs hid_n hid_avg_us hid_max_us` (keys sent via
   `sendkey`).
 
