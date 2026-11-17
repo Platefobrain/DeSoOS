@@ -732,6 +732,13 @@ pub fn unmount_lost(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// The disk (block number) of the file system mounted exactly at `path`.
+pub fn mounted_disk(path: &str) -> Option<usize> {
+    let _g = FS_LOCK.read();
+    let path = normalize("/", path);
+    mounts().iter().find(|m| m.path == path).and_then(|m| m.fs.disk())
+}
+
 /// The path lies on a read-only file system.
 pub fn is_read_only(path: &str) -> bool {
     let _g = FS_LOCK.read();

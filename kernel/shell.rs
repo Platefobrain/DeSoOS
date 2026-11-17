@@ -1749,6 +1749,9 @@ fn cmd_desofs(args: &str, out: &mut dyn Write, ctx: &mut Context) {
             for p in paths {
                 let _ = match crate::fs::unmount(&p) {
                     Ok(()) => {
+                        // A USB stick's partition: its write registration goes now, and it
+                        // is not mounted again by itself until the stick is replugged.
+                        crate::user::usbdisk::unmounted_by_user(&p);
                         if under(ctx.cwd, &p) {
                             *ctx.cwd = String::from("/");
                         }

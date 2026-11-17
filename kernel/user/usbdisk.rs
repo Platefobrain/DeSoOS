@@ -11,6 +11,11 @@
 //      internal disk stays), EXACTLY ONE candidate gets /disk; two or more – none does;
 //   3. every other candidate is mounted read-only under /usbN, never two mounts of one volume;
 //   4. /disk already taken is never taken away; after each change everything is decided anew.
+//   5. who holds what is read from the mount table, not remembered: /disk or /usbN unmounted
+//      some other way – the stale record is dropped (rw registration withdrawn) and the choice
+//      made again;
+//   6. a partition the user unmounted (`desofs unmount`) is left alone until the stick is
+//      plugged in again – it is no candidate (Linux udisks, Windows "safely remove" alike).
 // The way to /disk (rule D2), all for ONE generation of the stick: write protection known off
 // → partition ≤ 64 GiB → probe (one confirmed SYNCHRONIZE CACHE) → `desofs check` (read only)
 // → rw registration + grant → the volume mounted read-write.  Any step that fails – /disk
@@ -61,7 +66,7 @@ fn candidates() -> Vec<Cand> {
         }
         let disk = sh.index.load(Ordering::SeqCst);
         for p in block::partitions_of(disk) {
-            if block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME) && crate::fs::desofs::has_marker(p) {
+            if !sh.user_off(p) && block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME) && crate::fs::desofs::has_marker(p) {
                 v.push(Cand { sh: sh.clone(), disk, part: p });
             }
         }
@@ -79,12 +84,62 @@ fn disk_taken() -> bool {
     crate::fs::mount_list().iter().any(|m| m.0 == crate::time_lkg::SYSTEM_MOUNT)
 }
 
+/// /disk given up by a stick: no rw registration, no grant, no record; the LKG waits for the
+/// next system volume.
+fn release_disk(sh: &Shared, part: usize, why: &str) {
+    let _ = block::control(sh.index.load(Ordering::SeqCst), Control::Withdraw);
+    let _ = block::set_grant(part, None);
+    if sh.clear_disk_part() {
+        crate::time_lkg::volume_gone();
+        serial_println!("[USB] {}: /disk {} - write registration withdrawn", sh.name, why);
+    }
+}
+
+/// Rule 5: the records against the mount table.  A stick "holds /disk" only while DeSoFS of
+/// its partition is really mounted there; the same for /usbN.
+fn reconcile() {
+    for sh in ublk::list() {
+        if sh.gone() {
+            continue;
+        }
+        if let Some(p) = sh.disk_part() {
+            if crate::fs::mounted_disk(crate::time_lkg::SYSTEM_MOUNT) != Some(p) {
+                release_disk(&sh, p, "no longer mounted");
+            }
+        }
+        for (path, part) in sh.ro_mounts() {
+            if crate::fs::mounted_disk(&path) != Some(part) {
+                sh.forget_mount(&path);
+            }
+        }
+    }
+}
+
+/// `desofs unmount` of /disk or /usbN: the stick's records dropped at once (no write
+/// registration left for a volume nobody has), and the partition left alone until replugged
+/// (rule 6).
+pub fn unmounted_by_user(path: &str) {
+    for sh in ublk::list() {
+        if path == crate::time_lkg::SYSTEM_MOUNT {
+            if let Some(p) = sh.disk_part() {
+                sh.set_user_off(p);
+            }
+        }
+        if let Some((_, part)) = sh.ro_mounts().into_iter().find(|(m, _)| m == path) {
+            sh.set_user_off(part);
+        }
+    }
+    reconcile();
+    changed();
+}
+
 /// The decision, after the USB disks settled (called by the usb-disks task).
 pub fn evaluate() {
     let change = LAST_CHANGE.load(Ordering::SeqCst);
     if !AUTO.load(Ordering::SeqCst) || DECIDED.load(Ordering::SeqCst) == change || crate::time::ticks().saturating_sub(change) < SETTLE_MS {
         return;
     }
+    reconcile();
     let cands = candidates();
     let owner = cands.iter().position(|c| c.sh.disk_part() == Some(c.part));
     let reserved = internal_reserves();
@@ -116,27 +171,39 @@ pub fn evaluate() {
         }
         to_disk(c);
     }
+    let mut retry = false;
     for (k, c) in cands.iter().enumerate() {
-        if Some(k) == owner || Some(k) == target || c.sh.ro_mount_of(c.part).is_some() || c.sh.ro_tried(c.part) {
+        if Some(k) == owner || Some(k) == target || c.sh.ro_mount_of(c.part).is_some() || c.sh.ro_given_up(c.part) {
             continue;
         }
-        ro_mount(c);
+        retry |= ro_mount(c);
     }
     DECIDED.store(change, Ordering::SeqCst);
+    if retry {
+        // A failed mount is tried again after the next settle window.
+        changed();
+    }
 }
 
-/// A candidate that does not get /disk: read-only under /usbN.
-fn ro_mount(c: &Cand) {
-    c.sh.mark_ro_tried(c.part);
-    let Some(path) = ublk::free_mount_point() else { return };
+/// A candidate that does not get /disk: read-only under /usbN.  True – try again later.
+/// Only a result counts as an attempt: no free /usbN is no attempt (an unmount or a removed
+/// stick frees one and is a change by itself).
+fn ro_mount(c: &Cand) -> bool {
+    let Some(path) = ublk::free_mount_point() else {
+        serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted: no free /usbN", c.sh.name, c.part);
+        return false;
+    };
     match crate::fs::mount_disk(c.part, &path) {
         DiskMount::DeSoFs(_) => {
             serial_println!("[USB] {}: {} = DeSoFS (partition disk {}), read-only", c.sh.name, path, c.part);
             c.sh.add_ro_mount(&path, c.part);
+            false
         }
         other => {
             let _ = crate::fs::remove(&path);
-            serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted: {:?}", c.sh.name, c.part, other);
+            let n = c.sh.note_ro_fail(c.part);
+            serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted (attempt {}/{}): {:?}", c.sh.name, c.part, n, ublk::RO_TRIES, other);
+            n < ublk::RO_TRIES
         }
     }
 }

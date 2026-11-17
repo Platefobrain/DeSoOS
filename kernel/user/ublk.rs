@@ -125,10 +125,17 @@ pub struct Shared {
     mounts: SpinLock<Vec<String>>,
     /// The partition (block number) this stick holds /disk with (usize::MAX – none).
     disk_part: AtomicUsize,
-    /// DeSoFS partitions mounted read-only under /usbN, and the ones already tried.
+    /// DeSoFS partitions mounted read-only under /usbN.
     ro_dsfs: SpinLock<Vec<(String, usize)>>,
-    ro_tried: SpinLock<Vec<usize>>,
+    /// Failed read-only mounts per partition (given up after `RO_TRIES`).
+    ro_fail: SpinLock<Vec<(usize, u8)>>,
+    /// Partitions the user unmounted: never mounted again by themselves (this plug-in).
+    user_off: SpinLock<Vec<usize>>,
 }
+
+/// Read-only mounts of one partition tried this often before giving up (a damaged volume
+/// fails every time; an I/O hiccup once).
+pub(super) const RO_TRIES: u8 = 3;
 
 impl Shared {
     pub fn gone(&self) -> bool {
@@ -161,6 +168,17 @@ impl Shared {
         }
     }
 
+    /// /disk no longer held (unmounted): true when it was.
+    pub(super) fn clear_disk_part(&self) -> bool {
+        let was = self.disk_part.swap(usize::MAX, Ordering::SeqCst) != usize::MAX;
+        self.mounts.lock().retain(|m| m != crate::time_lkg::SYSTEM_MOUNT);
+        was
+    }
+
+    pub(super) fn ro_mounts(&self) -> Vec<(String, usize)> {
+        self.ro_dsfs.lock().clone()
+    }
+
     pub(super) fn set_disk_part(&self, part: usize) {
         self.disk_part.store(part, Ordering::SeqCst);
         self.mounts.lock().push(String::from(crate::time_lkg::SYSTEM_MOUNT));
@@ -180,12 +198,35 @@ impl Shared {
         self.mounts.lock().retain(|m| m != path);
     }
 
-    pub(super) fn ro_tried(&self, part: usize) -> bool {
-        self.ro_tried.lock().contains(&part)
+    /// No more read-only attempts for this partition: given up, or unmounted by the user.
+    pub(super) fn ro_given_up(&self, part: usize) -> bool {
+        self.ro_fail.lock().iter().any(|&(p, n)| p == part && n >= RO_TRIES) || self.user_off(part)
     }
 
-    pub(super) fn mark_ro_tried(&self, part: usize) {
-        self.ro_tried.lock().push(part);
+    /// One more failed read-only mount; the count so far.
+    pub(super) fn note_ro_fail(&self, part: usize) -> u8 {
+        let mut v = self.ro_fail.lock();
+        match v.iter_mut().find(|(p, _)| *p == part) {
+            Some((_, n)) => {
+                *n = n.saturating_add(1);
+                *n
+            }
+            None => {
+                v.push((part, 1));
+                1
+            }
+        }
+    }
+
+    pub fn user_off(&self, part: usize) -> bool {
+        self.user_off.lock().contains(&part)
+    }
+
+    pub(super) fn set_user_off(&self, part: usize) {
+        let mut v = self.user_off.lock();
+        if !v.contains(&part) {
+            v.push(part);
+        }
     }
 }
 
@@ -917,7 +958,8 @@ pub fn attach(chan: Arc<ChanEnd>, buf: Arc<ShmObj>, blocks: u64, bs: u32, slots:
         mounts: SpinLock::new("ublk mounts", level::BLOCK, Vec::new()),
         disk_part: AtomicUsize::new(usize::MAX),
         ro_dsfs: SpinLock::new("ublk ro desofs", level::BLOCK, Vec::new()),
-        ro_tried: SpinLock::new("ublk ro tried", level::BLOCK, Vec::new()),
+        ro_fail: SpinLock::new("ublk ro fail", level::BLOCK, Vec::new()),
+        user_off: SpinLock::new("ublk user off", level::BLOCK, Vec::new()),
     });
     let dev = Ublk {
         sh: sh.clone(),
@@ -1042,8 +1084,17 @@ fn probe(sh: &Shared) {
     }
 }
 
+/// A free /usbN: nothing mounted there and the name unused – or an empty directory left by
+/// an earlier mount (`desofs unmount` keeps the directory).
 pub(super) fn free_mount_point() -> Option<String> {
-    (0..16).map(|n| alloc::format!("/usb{}", n)).find(|p| crate::fs::stat(p).is_err())
+    let mounted: Vec<String> = crate::fs::mount_list().into_iter().map(|m| m.0).collect();
+    (0..16).map(|n| alloc::format!("/usb{}", n)).find(|p| {
+        !mounted.contains(p)
+            && match crate::fs::stat(p) {
+                Err(_) => true,
+                Ok(m) => m.kind == crate::fs::FileType::Directory && crate::fs::read_dir(p).is_ok_and(|v| v.is_empty()),
+            }
+    })
 }
 
 /// Disk gone: unmount (no write-back – the disk is read-only anyway),
@@ -1054,10 +1105,9 @@ fn remove(sh: &Shared) {
         let _ = crate::fs::unmount_lost(m);
         let _ = crate::fs::remove(m);
     }
-    if sh.disk_part().is_some() {
+    if sh.clear_disk_part() {
         // The system volume went with the stick: the LKG stays in memory (a pending save
         // waits for the next volume).
-        sh.disk_part.store(usize::MAX, Ordering::SeqCst);
         crate::time_lkg::volume_gone();
     }
     let index = sh.index.load(Ordering::SeqCst);

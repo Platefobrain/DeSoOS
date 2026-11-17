@@ -271,6 +271,73 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     // Free again – stick 1 gets /disk once something changes.
     super::usbdisk::changed();
     ck!(wait_for(8_000, || find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "stick 1 did not get the freed /disk");
+    // Rule 5 / 6 (review of stage B): who holds what comes from the mount table.
+    // (a) No free /usbN: no attempt counted – a mount point freed later is used.
+    let mut filled = Vec::new();
+    while let Some(pt) = super::ublk::free_mount_point() {
+        let _ = crate::fs::mkdir(&pt);
+        ck!(crate::fs::write_file(&alloc::format!("{}/x", pt), b"x").is_ok(), "fill {}", pt);
+        filled.push(pt);
+    }
+    let s1 = find("blkd-1").unwrap();
+    ck!(flag(&s1, 0x200), "attach stick 2");
+    ck!(wait_for(8_000, || find("blkd-2").is_some()), "blkd-2 not attached");
+    crate::time::sleep_ms(super::usbdisk::SETTLE_MS + 600);
+    ck!(usb_desofs_mounts() == 0, "mounted with no free /usbN ({})", usb_desofs_mounts());
+    let free_one = |pt: &str| {
+        let _ = crate::fs::remove(&alloc::format!("{}/x", pt));
+        let _ = crate::fs::remove(pt);
+    };
+    free_one(&filled[0]);
+    super::usbdisk::changed();
+    ck!(wait_for(8_000, || usb_desofs_mounts() == 1), "a freed /usbN not used (the partition marked tried before mounting?)");
+    free_one(&filled[1]);
+    super::usbdisk::changed();
+    ck!(wait_for(8_000, || usb_desofs_mounts() == 2), "the second partition not mounted after a /usbN was freed");
+    for pt in &filled[2..] {
+        free_one(pt);
+    }
+    // (c) `desofs unmount` of a /usbN: not mounted again by itself (the user's intent).
+    let s2 = find("blkd-2").unwrap();
+    let ro = s2.ro_mounts();
+    ck!(ro.len() == 2, "stick 2 records {} read-only mounts", ro.len());
+    ck!(crate::fs::unmount(&ro[0].0).is_ok(), "unmount {}", ro[0].0);
+    super::usbdisk::unmounted_by_user(&ro[0].0);
+    ck!(s2.ro_mount_of(ro[0].1).is_none() && s2.user_off(ro[0].1), "the user's unmount of {} not recorded", ro[0].0);
+    crate::time::sleep_ms(super::usbdisk::SETTLE_MS + 600);
+    ck!(usb_desofs_mounts() == 1, "a partition the user unmounted came back by itself ({})", usb_desofs_mounts());
+    // ... an unmount some other way (not through `desofs unmount`): the record follows the
+    // mount table and the partition is mounted again.
+    ck!(crate::fs::unmount(&ro[1].0).is_ok(), "unmount {}", ro[1].0);
+    super::usbdisk::changed();
+    ck!(wait_for(8_000, || usb_desofs_mounts() == 1 && s2.ro_mount_of(ro[1].1).is_some_and(|m| mounted(&m).is_some())), "a partition unmounted some other way not mounted again (stale record?)");
+    ck!(flag(&s2, 0x20), "detach stick 2");
+    ck!(wait_for(8_000, || find("blkd-2").is_none() && usb_desofs_mounts() == 0), "stick 2 not gone");
+    // (b) `desofs unmount` of /disk: the write registration goes AT ONCE, /disk stays free,
+    // the LKG has no volume; the stick plugged in again gets /disk back.
+    let p1 = s1.disk_part().unwrap();
+    ck!(crate::fs::unmount("/disk").is_ok(), "unmount /disk");
+    super::usbdisk::unmounted_by_user("/disk");
+    ck!(s1.disk_part().is_none() && block::is_read_only(p1), "/disk unmounted by the user: the stick still holds it or may write (record {:?})", s1.disk_part());
+    let d1 = s1.index.load(Ordering::SeqCst);
+    ck!(block::control(d1, Control::RegisterRw { generation: s1.generation, start: 2048, len: 5952 }) == Ok(0) && block::control(d1, Control::Withdraw) == Ok(0), "the rw registration left after /disk was unmounted");
+    ck!(crate::time_lkg::file_state() == crate::time_lkg::FileState::NoVolume, "LKG still sees a system volume after /disk was unmounted");
+    crate::time::sleep_ms(super::usbdisk::SETTLE_MS + 600);
+    ck!(mounted("/disk").is_none() && usb_desofs_mounts() == 0, "the partition the user unmounted came back by itself ({:?})", mounted("/disk"));
+    // ... unmounted some other way: dropped by the next decision and /disk given again.
+    AUTO.store(false, Ordering::SeqCst);
+    let g = s1.generation;
+    ck!(flag(&s1, 0x40), "replug flag");
+    ck!(wait_for(8_000, || find("blkd-1").is_some_and(|s| s.generation != g)), "blkd-1 not back");
+    AUTO.store(true, Ordering::SeqCst);
+    super::usbdisk::changed();
+    ck!(wait_for(8_000, || find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "the replugged stick did not get /disk");
+    let s1 = find("blkd-1").unwrap();
+    let p1 = s1.disk_part().unwrap();
+    ck!(crate::fs::unmount("/disk").is_ok(), "unmount /disk");
+    super::usbdisk::changed();
+    ck!(wait_for(8_000, || s1.disk_part() == Some(p1) && mounted("/disk").is_some()), "/disk unmounted some other way not given again (stale owner?)");
+    ck!(!crate::fs::is_read_only("/disk/x"), "/disk given again is read-only");
     // Power loss at every write of an operation: the old or the new version, never anything
     // else, and the volume passes `desofs check` (it comes back read-write).
     let mut losses = 0;
@@ -425,7 +492,7 @@ pub fn self_test() {
     crate::selftest::begin();
     match fake_test() {
         Ok(l) => serial_println!(
-            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, {} PASS",
+            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again, {} PASS",
             l
         ),
         Err(e) => {

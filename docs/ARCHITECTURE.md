@@ -1020,6 +1020,16 @@ superblock):
 3. every other candidate is mounted read-only under `/usbN`; a candidate that becomes the only one is unmounted there
    first – a volume is never mounted twice;
 4. /disk is never taken away; a stick removed – everything is decided anew.
+5. **who holds what comes from the mount table**, not from a remembered flag: a stick holds /disk only while DeSoFS of
+   its partition is really mounted there (the same for `/usbN`); /disk unmounted some other way – the record is
+   dropped, the rw registration withdrawn, and the choice made again;
+6. **`desofs unmount`** of /disk or `/usbN` on a stick: the rw registration goes at once, and the partition is no
+   candidate until the stick is plugged in again (the user unmounted it, perhaps to pull it out – like udisks on
+   Linux and "safely remove" on Windows; mounting it back by itself 1.5 s later would write to a stick being pulled).
+
+A read-only mount under `/usbN` counts as an attempt only with a result: no free `/usbN` (16 names; an empty directory
+left by an unmount is free again) is no attempt – an unmount or a removed stick frees one and is a change by itself;
+a failed mount is retried after the next settle window, 3 times at most.
 
 **The way to a read-write /disk** (all for one generation of the stick): write protection known off → partition ≤
 64 GiB → **probe** (one confirmed SYNCHRONIZE CACHE) → **`desofs check`** (read only; DeSoFS has no "dirty" flag, so
@@ -1046,9 +1056,11 @@ loss at the k-th write keeps a random part of the unflushed writes) for every ru
 usbd with the writable QEMU stick (formatted, /disk, 1 MiB, the LKG, unplugged and plugged back). **USB RESTART
 TEST** – a third QEMU start without virtio and NVMe: the stick becomes /disk by itself and the LKG is read from it.
 In a self-test kernel the automatic /disk is off (`usbdisk::AUTO`) except in these tests – the other suites keep the
-/disk they expect. Mutations caught (9): no pending save for a volume without the LKG file / with an older one; the
+/disk they expect. Mutations caught (9 + 4): no pending save for a volume without the LKG file / with an older one; the
 internal disk's DeSoFS ignored; the first of several candidates taking /disk; /disk in use ignored; `desofs check`
-skipped; the probe skipped; the format session left open; any USB partition formattable.
+skipped; the probe skipped; the format session left open; any USB partition formattable. After the review of stage B (4 more): an attempt
+counted with no free `/usbN`; the owner taken from the record, not the mount table; the registration left after
+`desofs unmount /disk`; a partition the user unmounted mounted again by itself.
 
 ### Controller start and shutdown
 

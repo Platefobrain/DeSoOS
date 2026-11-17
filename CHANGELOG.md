@@ -46,6 +46,24 @@ stages, each with its own gate.
   counter that wraps, a failed piece ignored, usbd flushing without a registration, a partition reaching its parent
   by number only (the old partition object then wrote to the new stick), request ids reused after the wrap.
 
+### Stage B fix – who holds /disk comes from the mount table (code review)
+- **A read-only mount tried too early** (review): a partition was marked "tried" before a free `/usbN` was found, so
+  with all 16 names taken (or one failed mount) it was never mounted until the stick was replugged; also a mount point
+  freed later started nothing. Now only a result counts: no free `/usbN` is no attempt, a failed mount is retried
+  after the settle window (3 times at most), and an empty `/usbN` directory left by an unmount is free again.
+- **A stale owner of /disk** (review): the owner came from a remembered flag. After /disk was unmounted some other way
+  the flag stayed – /disk free, but nobody got it, and the rw registration of the stick stayed on. Now the records
+  are checked against the mount table before each decision (`fs::mounted_disk`): a stale one is dropped, the
+  registration withdrawn, the LKG back to "no volume", and the choice made again; the same for `/usbN`.
+- **`desofs unmount`** of /disk or `/usbN` on a stick: the registration goes at once, and the partition is left alone
+  until the stick is plugged in again (mounting it back by itself 1.5 s later would write to a stick that may be
+  pulled out – udisks and Windows behave the same).
+- Tests – USB DISK TEST 1/2: all `/usbN` taken → nothing mounted, then each freed name used; `desofs unmount` of a
+  `/usbN` and of /disk → not back by itself, registration gone at once, LKG without a volume, back after a replug;
+  /disk or `/usbN` unmounted some other way → mounted again. Mutations caught (4): an attempt counted with no free
+  `/usbN`, the owner from the record, the registration left after the unmount, a partition the user unmounted mounted
+  again.
+
 ### Stage B – a USB stick's "DeSoOS system" partition as /disk
 - **Who gets /disk** (`kernel/user/usbdisk.rs`, rule E): the internal disk (the first PCI disk, by identity) keeps
   /disk while it holds a recognised DeSoFS – even damaged; otherwise, with /disk really free, exactly one USB
