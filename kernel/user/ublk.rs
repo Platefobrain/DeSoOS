@@ -218,6 +218,11 @@ impl Shared {
         }
     }
 
+    /// A read-only mount worked: earlier failures no longer count against later attempts.
+    pub(super) fn clear_ro_fail(&self, part: usize) {
+        self.ro_fail.lock().retain(|(p, _)| *p != part);
+    }
+
     pub fn user_off(&self, part: usize) -> bool {
         self.user_off.lock().contains(&part)
     }

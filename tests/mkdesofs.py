@@ -6,7 +6,9 @@
 #
 #   python3 tests/mkdesofs.py image.img                  reference image (below)
 #   python3 tests/mkdesofs.py --format BLOCKS image.img  what `desofs format` writes
-#                                                         (chapter 14; fixed uuid / time)
+#                                                         (chapter 14; tools/mkdesofs.py –
+#                                                         the production formatter – with a
+#                                                         fixed uuid / time)
 #
 # Contents (fixed uuid and times, so the image is the same on every build):
 #   superblock A (block 1): generation 4 -> tree v4
@@ -16,6 +18,7 @@
 #   /sub/a.txt   4 bytes
 # Never writes anything but the named image file.
 import hashlib
+import os
 import struct
 import sys
 
@@ -177,30 +180,16 @@ def pattern(k):
 
 
 FMT_UUID = bytes(range(0xA0, 0xB0))
-FMT_LABEL = b"DESOFS-FMT"
+FMT_LABEL = "DESOFS-FMT"
 
 
 def format_image(blocks, path):
-    """docs/desofs/FORMAT.md chapter 14: the state right after `desofs format`."""
-    global img, TOTAL, next_free, UUID
-    TOTAL = blocks
-    img = bytearray(TOTAL * BLOCK)
-    next_free = 16
-    UUID = FMT_UUID
-    n1 = node(1, 2, 0, 0, 1, 1, b"")
-    nd = dsnd({1: n1}, 1)           # block 16
-    nt = dspt(1, [ptr(nd, 1)], 1)   # block 17
-    rt = root_block([(1, ptr(nt, 1), 1, 2, 0, b"")], 1)  # block 18
-    sb = b"DESOFS01" + struct.pack("<II", 1, BLOCK) + UUID
-    sb += struct.pack("<QQQQ", 1, TOTAL, 3, TIME)
-    sb += struct.pack("<IIII", 0, 0, 0, 0)
-    sb += ptr(rt, 1) + FMT_LABEL + bytes(32 - len(FMT_LABEL))
-    sb += bytes(4064 - len(sb))
-    sb += hashlib.sha256(sb).digest()
-    put(1, sb)
-    put(2, sb)
-    with open(path, "wb") as f:
-        f.write(img)
+    """docs/desofs/FORMAT.md chapter 14: the state right after `desofs format` – written by
+    the production formatter tools/mkdesofs.py with a fixed uuid and time (DESOFS TEST
+    compares it with the kernel's format byte for byte)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    import mkdesofs as tool
+    tool.format_image(path, blocks, FMT_UUID, TIME, FMT_LABEL)
 
 
 def main():

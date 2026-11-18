@@ -4,6 +4,14 @@
 #   ./make-usb.sh --list                 show USB flash drives attached to the computer
 #   ./make-usb.sh /media/${USER:-$(id -un)}/NAME     install DeSoOS onto a mounted FAT32 flash drive
 #   ./make-usb.sh --format /dev/sdX      (optional) format the flash drive as FAT32 – ERASES it
+#   ./make-usb.sh --with-disk /dev/sdX   a flash drive with a disk – ERASES it: partition 1 = ESP
+#                                        (FAT32 "DESOOS", BOOTX64.EFI, read-only in DeSoOS),
+#                                        partition 2 = "DeSoOS system" (an empty DeSoFS, at most
+#                                        64 GiB) = /disk in DeSoOS, where your files and the
+#                                        last known good time stay.  Add --dry-run to only check.
+#   ./make-usb.sh --with-disk --image FILE SIZE_MIB [--efi BOOTX64.EFI]
+#                                        the same layout into an image file (no sudo; the tests
+#                                        use it – the same code, tools/mkusb.py)
 #   DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/...   the kernel, 5 s after boot,
 #                                        runs a 60 s stress test by itself and shows the result
 #   DESOOS_AUTOSOAK=3600 ./make-usb.sh /media/...   the kernel runs a 1-hour soak test on a
@@ -21,12 +29,26 @@
 #     not overwritten without --overwrite,
 #   * --format: USB only, not a system disk, nothing on it may be
 #     mounted, and the device name must be retyped.
+#   * --with-disk: a whole disk (not a partition, loop or dm), removable, USB, at most 256 GiB,
+#     512-byte sectors, not a system disk, nothing on it mounted, no swap on it, no holders
+#     (LVM / RAID / dm-crypt), model / size / serial / partitions shown, the device name retyped;
+#     everything checked AGAIN right before writing (the same major:minor, serial and size –
+#     else nothing is written), and tools/mkusb.py opens it exclusively (O_EXCL) and checks the
+#     major:minor and size once more.  Any unclear answer = stop.
+# Updating a flash drive made with --with-disk: ./make-usb.sh /media/$USER/DESOOS – only
+# BOOTX64.EFI on the ESP is replaced; the DeSoFS partition (your files) is not touched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# tests/make-usb-test.sh runs the checks against a fake /sys and /proc (and fake lsblk /
+# findmnt in PATH); the real ones otherwise.
+SYS="${DESOOS_SYS:-/sys}"
+PROC="${DESOOS_PROC:-/proc}"
+DESOOS_SYSTEM_GUID="1a0e2e7d-de32-4c13-9442-9fcb2649ca02"
 
 # Disk (e.g. sdb) for a device or partition (e.g. /dev/sdb1).
 parent_disk() {
@@ -86,6 +108,109 @@ format_usb() {
   echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
 }
 
+# --with-disk: every check on device $1.  Sets DEV, NAME, MAJMIN, SERIAL, BYTES, MODEL; dies
+# on anything unclear.
+check_device() {
+  local dev name t tran rm ssz bytes mnt p sw swdev hold
+  dev="$(readlink -f -- "$1")" || die "cannot resolve $1"
+  if [ -z "${DESOOS_SYS:-}" ]; then
+    [ -b "$dev" ] || die "$dev is not a block device"
+  fi
+  case "$dev" in
+    /dev/loop*|/dev/dm-*|/dev/md*|/dev/mapper/*) die "$dev is not a physical disk (loop / dm / md) - refusing" ;;
+  esac
+  t="$(lsblk -dno TYPE "$dev" 2>/dev/null | tr -d ' ')"
+  [ "$t" = "disk" ] || die "$dev is not a whole disk (type '$t') - give e.g. /dev/sdb, not /dev/sdb1"
+  name="$(basename "$dev")"
+  [ -d "$SYS/block/$name" ] || die "$SYS/block/$name missing - not a disk the kernel lists"
+  tran="$(lsblk -dno TRAN "$dev" 2>/dev/null | tr -d ' ')"
+  [ "$tran" = "usb" ] || die "$dev is not attached via USB (TRAN='$tran') - refusing"
+  rm="$(cat "$SYS/block/$name/removable" 2>/dev/null || true)"
+  [ "$rm" = "1" ] || die "$dev is not a removable disk (removable='$rm') - refusing"
+  ssz="$(cat "$SYS/block/$name/queue/logical_block_size" 2>/dev/null || true)"
+  [ "$ssz" = "512" ] || die "$dev has ${ssz:-unknown}-byte sectors - DeSoOS reads 512-byte sectors only"
+  bytes="$(lsblk -dbno SIZE "$dev" 2>/dev/null | tr -d ' ')"
+  case "$bytes" in ''|*[!0-9]*) die "size of $dev unknown" ;; esac
+  [ "$bytes" -le $((256 << 30)) ] || die "$dev is larger than 256 GiB - not a flash drive? refusing"
+  [ "$bytes" -ge $((200 << 20)) ] || die "$dev is smaller than 200 MiB (ESP 128 MiB + DeSoOS system 64 MiB)"
+  is_system_disk "$name" && die "$dev is a system disk - refusing"
+  mnt="$(lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | tr -d '[:space:]')"
+  [ -z "$mnt" ] || die "something on $dev is mounted - unmount it (e.g. Eject in the file manager) and try again"
+  while read -r swdev _; do
+    case "$swdev" in Filename|"") continue ;; esac
+    p="$(basename "$(readlink -f -- "$swdev" 2>/dev/null || echo "$swdev")")"
+    for sw in $(lsblk -nlo NAME "$dev" 2>/dev/null); do
+      [ "$p" = "$sw" ] && die "$dev holds a swap area ($swdev) - turn it off first (swapoff)"
+    done
+  done < "$PROC/swaps"
+  hold="$(ls -A "$SYS/block/$name/holders" 2>/dev/null || true)"
+  for p in "$SYS/block/$name/$name"*; do
+    [ -d "$p/holders" ] && hold="$hold$(ls -A "$p/holders" 2>/dev/null || true)"
+  done
+  [ -z "$hold" ] || die "$dev or one of its partitions is held by $hold (LVM / RAID / dm-crypt) - refusing"
+  SERIAL="$(lsblk -dno SERIAL "$dev" 2>/dev/null | tr -d ' ')"
+  MAJMIN="$(lsblk -dno MAJ:MIN "$dev" 2>/dev/null | tr -d ' ')"
+  case "$MAJMIN" in *:*) ;; *) die "major:minor of $dev unknown" ;; esac
+  MODEL="$(lsblk -dno MODEL "$dev" 2>/dev/null | xargs || true)"
+  DEV="$dev"; NAME="$name"; BYTES="$bytes"
+}
+
+# Every check again, and still the device asked about: the same major:minor, serial and size.
+same_device() {
+  check_device "$1"
+  [ "$DEV" = "$1" ] && [ "$MAJMIN" = "$2" ] && [ "$SERIAL" = "$3" ] && [ "$BYTES" = "$4" ] || die "$1 changed since the question (now $MAJMIN, serial '$SERIAL', $BYTES B) - nothing written"
+}
+
+with_disk_device() {
+  local dry="$1" d1 m1 s1 b1
+  check_device "$2"
+  d1="$DEV"; m1="$MAJMIN"; s1="$SERIAL"; b1="$BYTES"
+  echo "WARNING: this will ERASE EVERYTHING on $DEV and make it a DeSoOS flash drive with a disk:"
+  echo "  model: ${MODEL:-?}   size: $((BYTES >> 20)) MiB   serial: ${SERIAL:-none}   device: $MAJMIN"
+  lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPENAME "$DEV" 2>/dev/null || true
+  if lsblk -nro PARTTYPE "$DEV" 2>/dev/null | grep -qi "$DESOOS_SYSTEM_GUID"; then
+    echo
+    echo "NOTE: it already has a \"DeSoOS system\" partition - YOUR DeSoOS DATA (files, the last known"
+    echo "good time) WILL BE LOST.  To update DeSoOS only, mount the flash drive and run:"
+    echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
+  fi
+  echo
+  read -r -p "Type exactly '$DEV' to continue: " answer
+  [ "$answer" = "$DEV" ] || die "aborted - nothing changed"
+  if [ "$dry" = 1 ]; then
+    same_device "$d1" "$m1" "$s1" "$b1"
+    echo "Dry run: all checks passed - would write $DEV ($MAJMIN, serial '${SERIAL:-none}', $BYTES B); nothing written."
+    return
+  fi
+  echo "Building the regular kernel (no self-tests)..."
+  mkdir -p logs
+  ./build.sh > logs/build-usb.log 2>&1 || { tail -n 20 logs/build-usb.log; die "build failed (log: logs/build-usb.log)"; }
+  # Everything again, right before writing: the same disk, nothing mounted meanwhile.
+  same_device "$d1" "$m1" "$s1" "$b1"
+  echo "Writing $DEV (sudo)..."
+  sudo python3 tools/mkusb.py --device "$DEV" --expect-rdev "$MAJMIN" --expect-bytes "$BYTES" --efi build/EFI/BOOT/BOOTX64.EFI || die "writing the flash drive failed - see above (make it again before using it)"
+  sudo partprobe "$DEV" 2>/dev/null || true
+  echo
+  echo "Done: $DEV = ESP 'DESOOS' (BOOTX64.EFI) + \"DeSoOS system\" (DeSoFS, /disk in DeSoOS)."
+  echo "Now: unplug the flash drive, restart the computer, open the boot menu (usually F12, F11, F9 or Esc)"
+  echo "-> choose the flash drive (EFI USB Device).  To update DeSoOS later: ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
+}
+
+with_disk_image() {
+  local file="$1" mib="$2" efi="$3"
+  [ -n "$file" ] && [ -n "$mib" ] || die "give a file and a size: ./make-usb.sh --with-disk --image FILE SIZE_MIB"
+  case "$mib" in ''|*[!0-9]*) die "size in MiB, a number (got: $mib)" ;; esac
+  [ ! -b "$file" ] || die "$file is a block device - --image writes files only (for a flash drive: --with-disk /dev/sdX)"
+  if [ -z "$efi" ]; then
+    echo "Building the regular kernel (no self-tests)..."
+    mkdir -p logs
+    ./build.sh > logs/build-usb.log 2>&1 || { tail -n 20 logs/build-usb.log; die "build failed (log: logs/build-usb.log)"; }
+    efi=build/EFI/BOOT/BOOTX64.EFI
+  fi
+  python3 tools/mkusb.py --image "$file" --size-mib "$mib" --efi "$efi" || die "making the image failed"
+  echo "Done: $file (start it in QEMU as a USB disk with bootindex=0, or write it to a flash drive)."
+}
+
 install_to() {
   local mnt="$1" overwrite="$2" src fstype disk tran
   mnt="$(realpath "$mnt")"
@@ -131,7 +256,20 @@ install_to() {
 case "${1:-}" in
   --list|-l) list_usb ;;
   --format) [ -n "${2:-}" ] || die "give a device, e.g. ./make-usb.sh --format /dev/sdb (check: ./make-usb.sh --list)"; format_usb "$2" ;;
-  -h|--help|"") sed -n '2,20p' "$0" ;;
+  --with-disk)
+    shift
+    case "${1:-}" in
+      --image)
+        efi=""
+        [ "${4:-}" = "--efi" ] && efi="${5:-}"
+        [ "${4:-}" != "--efi" ] || [ -n "$efi" ] || die "--efi needs a file"
+        with_disk_image "${2:-}" "${3:-}" "$efi" ;;
+      --dry-run) [ -n "${2:-}" ] || die "give a device"; with_disk_device 1 "$2" ;;
+      "") die "give a device, e.g. ./make-usb.sh --with-disk /dev/sdb (check: ./make-usb.sh --list)" ;;
+      *)
+        if [ "${2:-}" = "--dry-run" ]; then with_disk_device 1 "$1"; else with_disk_device 0 "$1"; fi ;;
+    esac ;;
+  -h|--help|"") sed -n '2,40p' "$0" ;;
   *)
     overwrite=0
     [ "${2:-}" = "--overwrite" ] && overwrite=1

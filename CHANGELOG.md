@@ -92,6 +92,33 @@ stages, each with its own gate.
   failed" (also on code from before stage B). The disks are now removed when each test ends; `LOOP=desofs:12`
   passes 12/12 rounds.
 
+### Stage C – `make-usb.sh --with-disk`: one stick with a disk
+- **`./make-usb.sh --with-disk /dev/sdX`** erases a USB stick and makes partition 1 the ESP (128 MiB, FAT32 `DESOOS`,
+  `BOOTX64.EFI`) and partition 2 "DeSoOS system" with an empty DeSoFS (the rest, at most 64 GiB; anything over it left
+  unallocated and reported) – /disk in DeSoOS. Safety, every unclear answer stops: a whole removable USB disk (not a
+  partition, loop, dm or md), 200 MiB – 256 GiB, 512-byte sectors, not a system disk, nothing mounted, no swap, no
+  holders (LVM / RAID / dm-crypt); model, size, serial and partitions shown, an existing "DeSoOS system" partition named
+  ("your DeSoOS data will be lost"), the device name retyped; after the build every check again and the same
+  major:minor, serial and size, else nothing is written; the writer opens the device with `O_EXCL` and checks
+  major:minor and size once more. `--dry-run` only checks. `--image FILE SIZE_MIB [--efi FILE]` writes the same layout
+  into a file (no sudo).
+- **`tools/mkusb.py`** (new) – the one code path for a stick and an image: GPT (random GUIDs, both headers), the FAT32
+  ESP built in Python (no `sgdisk`, `mkfs.vfat` or `mtools` needed, no root for an image), DeSoFS; old tables cleared
+  first, the GPT written last, then everything read back – both GPT headers, `BOOTX64.EFI` through the FAT, both DeSoFS
+  superblocks.
+- **`tools/mkdesofs.py`** (new) – the production DeSoFS formatter (random uuid, the current time, only the blocks of the
+  format in the kernel's order, refuses over 64 GiB); `tests/mkdesofs.py --format` now calls it with the fixed uuid /
+  time, and DESOFS TEST still compares it with the kernel's `desofs format` byte for byte.
+- **Updating** such a stick is unchanged: `./make-usb.sh /media/$USER/DESOOS` replaces `BOOTX64.EFI` only.
+- **`DESOOS_BUILD_TAG`** (build.sh, up to 8 letters / digits): a build's own name, shown by `ver`.
+- Tests – **ONE STICK TEST** (`tests/test.sh`, a fourth and fifth start, `logs/test-onestick.log`): QEMU with only an
+  image from `tools/mkusb.py`; UEFI boots its ESP, `/usb0` = the ESP read-only, `/disk` = partition 2 read-write, both of
+  the same disk; start 2 finds the file and the LKG of start 1; the ESP unchanged byte for byte. **`tests/make-usb-test.sh`**
+  (gate C): 15 refusals / checks of `make-usb.sh --with-disk` against a fake `/sys`, `/proc`, `lsblk`, `findmnt`; the
+  image (`fsck.vfat`); an update from build `v1` to `v2` started in QEMU – partition 2 unchanged, `ver` = v2, the file and
+  the LKG kept. 331 tests (the count tests/test.sh prints).
+- Review of the stage B fix: a working read-only mount clears the partition's earlier failures (`ro_fail`).
+
 ## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 
 Stages A–D, each with its own gate; the last one passed on the Legion: the time service set the clock from all three

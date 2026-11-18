@@ -371,7 +371,7 @@ fn cmd_echo(args: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 fn cmd_ver(_: &str, out: &mut dyn Write, _: &mut Context) {
-    let _ = writeln!(out, "DeSoOS v{} (x86_64, UEFI)", VERSION);
+    let _ = writeln!(out, "DeSoOS v{} (x86_64, UEFI){}", VERSION, BUILD_TAG.filter(|t| !t.is_empty()).map(|t| alloc::format!(", build {}", t)).unwrap_or_default());
 }
 
 fn cmd_uptime(_: &str, out: &mut dyn Write, _: &mut Context) {
@@ -1946,6 +1946,10 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
 /// (sector read / write, run – only in the kernel fallback shell).  `columns` is not a
 /// command: the terminal width the line editors draw for (console::columns()).
+/// A build's own name (`DESOOS_BUILD_TAG`, up to 8 letters / digits – build.sh checks it):
+/// shown by `ver`; tests/make-usb-test.sh tells two builds apart with it.
+pub const BUILD_TAG: Option<&str> = option_env!("DESOOS_BUILD_TAG");
+
 pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "columns"];
 
 pub fn sysinfo(line: &str) -> Option<String> {

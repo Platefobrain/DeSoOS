@@ -52,6 +52,16 @@ esac
 if [ "$DESOOS_TRUST_CPU$DESOOS_TRUST_BOOTLOADER" != 11 ]; then
   echo "Random numbers: RDSEED counted: $DESOOS_TRUST_CPU, firmware RNG counted: $DESOOS_TRUST_BOOTLOADER"
 fi
+# DESOOS_BUILD_TAG=NAME – the build's own name, shown by `ver` (up to 8 letters / digits;
+# tests/make-usb-test.sh tells two builds apart with it).  Unset – no name.
+if [ -n "${DESOOS_BUILD_TAG:-}" ]; then
+  case "$DESOOS_BUILD_TAG" in
+    *[!A-Za-z0-9]*) echo "DESOOS_BUILD_TAG: letters and digits only (got: $DESOOS_BUILD_TAG)"; exit 1 ;;
+  esac
+  [ "${#DESOOS_BUILD_TAG}" -le 8 ] || { echo "DESOOS_BUILD_TAG: at most 8 characters (got: $DESOOS_BUILD_TAG)"; exit 1; }
+  export DESOOS_BUILD_TAG
+  echo "Build tag: $DESOOS_BUILD_TAG"
+fi
 # DESOOS_STRESS_POOL=P – stress with P processes per CPU (full load);
 # unset / 0 = comparison mode (3 per CPU, at most 48 – the default).
 export DESOOS_STRESS_POOL="${DESOOS_STRESS_POOL:-0}"

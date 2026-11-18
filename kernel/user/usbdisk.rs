@@ -197,6 +197,7 @@ fn ro_mount(c: &Cand) -> bool {
         DiskMount::DeSoFs(_) => {
             serial_println!("[USB] {}: {} = DeSoFS (partition disk {}), read-only", c.sh.name, path, c.part);
             c.sh.add_ro_mount(&path, c.part);
+            c.sh.clear_ro_fail(c.part);
             false
         }
         other => {

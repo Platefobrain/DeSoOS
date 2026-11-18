@@ -23,7 +23,8 @@ Where things are:
 | Path | What |
 |---|---|
 | `kernel/fs/desofs/` | the code (map in its `README.md`) |
-| `tests/mkdesofs.py` | an independent implementation in Python: the reference image the kernel tests read, and `--format` to make a DeSoFS disk image on the host |
+| `tests/mkdesofs.py` | an independent implementation in Python: the reference image the kernel tests read; `--format` = `tools/mkdesofs.py` with a fixed uuid / time |
+| `tools/mkdesofs.py` | the production formatter on the host (an empty volume, chapter 14 – the kernel's `desofs format` byte for byte; random uuid, the current time, ≤ 64 GiB); `tools/mkusb.py` uses it for partition 2 of `make-usb.sh --with-disk` |
 | `FORMAT.md` | the on-disk format |
 
 Tests: DESOFS TEST 1–32 (reading, writing, power loss, check / repair, snapshots, the block cache), RESTART TEST

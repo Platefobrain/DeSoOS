@@ -12,6 +12,8 @@
 // * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
 //   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
 //   (DeSoFS written in the first start must be there, mounted at /disk by itself).
+// * One-stick phases: `opt/desoos/phase` = "onestick1" / "onestick2 [TAG]" – QEMU started from an
+//   image made by tools/mkusb.py (make-usb.sh --with-disk), nothing else attached (ONE STICK TEST).
 // * USB restart phase: a third start, `opt/desoos/phase` = "usbrestart", QEMU without the virtio
 //   and NVMe disks – only USB RESTART TEST (the writable stick of the first start becomes /disk
 //   by itself, with the last known good time and a file the first start left on it).
@@ -34,6 +36,10 @@ static PASSED: AtomicU32 = AtomicU32::new(0);
 static AUTOTEST: AtomicBool = AtomicBool::new(false);
 static RESTART: AtomicBool = AtomicBool::new(false);
 static USB_RESTART: AtomicBool = AtomicBool::new(false);
+/// ONE STICK TEST (V080 stage C): 1 / 2 – the start from a `make-usb.sh --with-disk` image; the
+/// build tag the second start expects (up to 8 bytes, packed little-endian; 0 – none).
+static ONE_STICK: AtomicU32 = AtomicU32::new(0);
+static ONE_STICK_TAG: AtomicU64 = AtomicU64::new(0);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
 static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
@@ -275,7 +281,19 @@ fn detect_phase() {
         return;
     }
     let mut w = text.split_whitespace();
-    if w.next() == Some("soak") {
+    let first = w.next();
+    if first == Some("onestick1") || first == Some("onestick2") {
+        let tag = w.next().unwrap_or("");
+        if tag.len() > 8 || w.next().is_some() {
+            serial_println!("[TEST] bad one-stick phase {:?}", text);
+            STARTED.fetch_add(1, Ordering::SeqCst);
+        }
+        ONE_STICK_TAG.store(pack_tag(tag), Ordering::SeqCst);
+        ONE_STICK.store(if first == Some("onestick1") { 1 } else { 2 }, Ordering::SeqCst);
+        serial_println!("[TEST] One-stick phase {}: only ONE STICK TEST (started from a make-usb.sh --with-disk image)", if first == Some("onestick1") { 1 } else { 2 });
+        return;
+    }
+    if first == Some("soak") {
         let secs = w.next().and_then(|s| s.parse::<u64>().ok()).filter(|&s| (60..=7 * 24 * 3600).contains(&s));
         let seed = w.next().and_then(|s| s.parse::<u64>().ok());
         let ram = match w.next() {
@@ -310,6 +328,22 @@ pub fn usb_restart() -> bool {
     USB_RESTART.load(Ordering::SeqCst)
 }
 
+/// Up to 8 bytes of a build tag as one number (0 – no tag).
+pub fn pack_tag(t: &str) -> u64 {
+    let mut b = [0u8; 8];
+    let n = t.len().min(8);
+    b[..n].copy_from_slice(&t.as_bytes()[..n]);
+    u64::from_le_bytes(b)
+}
+
+/// ONE STICK TEST: Some((1 or 2, the expected build tag packed)).
+pub fn one_stick() -> Option<(u32, u64)> {
+    match ONE_STICK.load(Ordering::SeqCst) {
+        0 => None,
+        n => Some((n, ONE_STICK_TAG.load(Ordering::SeqCst))),
+    }
+}
+
 /// The soak start: Some((seconds, seed, on a RAM disk)); u64::MAX seconds = a bad phase
 /// (fails at once).
 pub fn soak() -> Option<(u64, u64, bool)> {
@@ -321,7 +355,7 @@ pub fn soak() -> Option<(u64, u64, bool)> {
 
 /// Restart or soak start: the boot self-tests are skipped.
 pub fn skip_boot() -> bool {
-    restart() || usb_restart() || soak().is_some()
+    restart() || usb_restart() || one_stick().is_some() || soak().is_some()
 }
 
 pub fn autotest() -> bool {

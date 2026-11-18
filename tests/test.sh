@@ -13,7 +13,11 @@
 # by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Then a third start
 # without the virtio and NVMe disks (opt/desoos/phase=usbrestart): the writable USB stick the
 # first start formatted must become /disk by itself, with its last known good time (USB RESTART
-# TEST, logs/test-usbrestart.log).  Not in loop mode.
+# TEST, logs/test-usbrestart.log).  Then two starts from an image made by tools/mkusb.py – the
+# code of make-usb.sh --with-disk – with nothing else attached (phases onestick1 / onestick2):
+# UEFI boots BOOTX64.EFI from the image's ESP, /usb0 = its ESP read-only, /disk = its "DeSoOS
+# system" partition read-write; the second start finds the first one's file and LKG, and the ESP
+# is the same byte for byte afterwards (ONE STICK TEST, logs/test-onestick.log).  Not in loop mode.
 # Then a short soak (2 min, tests/soak.sh on a RAM disk – all workers at once, checkpoints): the soak
 # itself keeps working ([RESULT-SOAK], log logs/test-soak.log).  Not in loop mode.
 #
@@ -283,6 +287,50 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
 fi
 rm -f "$TEST_DISK" "$TEST_NVME" "$TEST_USB" "$TEST_USBW" "$MON"
 
+# Fourth and fifth start (after three passing ones, not in loop mode): from a stick image made by
+# tools/mkusb.py (make-usb.sh --with-disk) – the only disk, the boot disk (ONE STICK TEST).
+LOG5="$ROOT/logs/test-onestick.log"
+: > "$LOG5"
+CODE5=33
+TIME5=0
+ONE_IMG="$ROOT/build-test-onestick.img"
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ]; then
+  echo "Fourth and fifth start: from a make-usb.sh --with-disk image only (ONE STICK TEST)..."
+  START5=$(date +%s)
+  rm -f "$ONE_IMG"
+  esp_sum() { dd if="$ONE_IMG" bs=512 skip=2048 count=262144 status=none | sha256sum | cut -d' ' -f1; }
+  if ! python3 "$ROOT/tools/mkusb.py" --image "$ONE_IMG" --size-mib 256 --efi "$ROOT/build/EFI/BOOT/BOOTX64.EFI" >> "$LOG5" 2>&1; then
+    echo "[ONE STICK TEST] FAIL: tools/mkusb.py could not make the image" >> "$LOG5"
+    CODE5=35
+  fi
+  ESP_BEFORE=$(esp_sum)
+  for phase in onestick1 onestick2; do
+    [ "$CODE5" = 33 ] || break
+    QEMU5=(qemu-system-x86_64 -machine q35 -m 512M -smp "$SMP" "${ACCEL_ARGS[@]}"
+      -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
+      -device qemu-xhci,id=xhci
+      -drive if=none,id=onestick,format=raw,file="$ONE_IMG"
+      -device usb-storage,bus=xhci.0,port=1,drive=onestick,bootindex=0
+      -device isa-debug-exit,iobase=0xf4,iosize=0x04
+      -fw_cfg name=opt/desoos/autotest,string=1
+      -fw_cfg name=opt/desoos/phase,string=$phase
+      -serial stdio -display none -no-reboot)
+    if [ "$VERBOSE" = 1 ]; then
+      timeout "$TIMEOUT" "${QEMU5[@]}" < /dev/null 2>&1 | tee -a "$LOG5"
+      CODE5=${PIPESTATUS[0]}
+    else
+      timeout "$TIMEOUT" "${QEMU5[@]}" < /dev/null >> "$LOG5" 2>&1
+      CODE5=$?
+    fi
+  done
+  if [ "$CODE5" = 33 ] && [ "$(esp_sum)" != "$ESP_BEFORE" ]; then
+    echo "[ONE STICK TEST] FAIL: the ESP of the image changed (DeSoOS must never write it)" >> "$LOG5"
+    CODE5=35
+  fi
+  rm -f "$ONE_IMG"
+  TIME5=$(( $(date +%s) - START5 ))
+fi
+
 # Short soak (only after two passing starts, not in loop mode).
 LOG3="$ROOT/logs/test-soak.log"
 : > "$LOG3"
@@ -291,7 +339,7 @@ LOG3="$ROOT/logs/test-soak.log"
 CODE3=0
 TIME3=0
 SOAK_OK=""
-if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ]; then
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ "$CODE5" = 33 ] && [ -z "$LOOP" ]; then
   echo "Short soak (2 min, tests/soak.sh)..."
   START3=$(date +%s)
   DURATION=2m SOAK_DISK=ram ACCEL="$ACCEL" SMP="$SMP" SOAK_LOG="$LOG3" "$T/soak.sh" --no-build > "$ROOT/logs/test-soak.out" 2>&1
@@ -301,12 +349,13 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ];
 fi
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
+PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c " PASS" "$LOG5" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
 # The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY4=$(grep -a "Self-tests:" "$LOG4" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
-echo "Log: logs/test.log + logs/test-restart.log + logs/test-usbrestart.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, USB restart ${TIME4} s, soak ${TIME3} s, ${PASSED} tests PASS)"
+ONE_PASS=$(grep -ac "^\[ONE STICK TEST\] .* PASS" "$LOG5" || true)
+echo "Log: logs/test.log + logs/test-restart.log + logs/test-usbrestart.log + logs/test-onestick.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, USB restart ${TIME4} s, one stick ${TIME5} s, soak ${TIME3} s, ${PASSED} tests PASS)"
 # Service benchmark (kernel vs user space) – the [RESULT-SVC] line from the SVC self-test.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
@@ -360,6 +409,20 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" != 33 ]; then
   esac
 fi
 
+if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ "$CODE5" != 33 ]; then
+  case "$CODE5" in
+    35) echo "FAIL - one stick:"
+        grep -a -E "FAIL|PANIC|\[EXC\]|ERROR" "$LOG5" | head -n 20
+        exit 1 ;;
+    124) echo "TIMEOUT - a start from the stick image did not finish within ${TIMEOUT} s. Last lines:"
+        tail -n 15 "$LOG5"
+        exit 2 ;;
+    *) echo "ERROR - one stick: QEMU exited with code $CODE5 (did UEFI boot the image?). Last lines:"
+        tail -n 15 "$LOG5"
+        exit 3 ;;
+  esac
+fi
+
 # The random number generator: the first bytes after the restart differ from the first start's.
 RNG1=$(grep -a -m1 "^\[RNG\] boot sample" "$LOG" | tr -d '\r')
 RNG2=$(grep -a -m1 "^\[RNG\] boot sample" "$LOG2" | tr -d '\r')
@@ -377,7 +440,7 @@ fi
 case "$CODE" in
   33)
     if [ -n "$SUMMARY2" ]; then
-      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}${SOAK_OK}"
+      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}; one stick: ${ONE_PASS}/2 starts PASSED${SOAK_OK}"
     else
       echo "PASS - ${SUMMARY}"
     fi

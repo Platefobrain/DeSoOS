@@ -109,7 +109,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (41 suites, a restart phase, a USB restart phase and a short soak, 325 tests), stress tests and a long soak test
+- Built-in self-tests (41 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, 331 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -276,7 +276,7 @@ Yes. On real hardware DeSoOS **does not write to any disk**:
 2. **Block layer** (`kernel/block.rs`) independently rejects every write to a read-only disk,
    including `desofs format`, `disk write` and writing files on `/esp`.
 3. **USB sticks are read-only**: the USB disk is read-only in the block layer and FAT32 / `open`
-   refuse writes (`ERROR_READ_ONLY`). The only exception (v0.80, being built) is a GPT partition of
+   refuse writes (`ERROR_READ_ONLY`). The only exception (v0.80) is a GPT partition of
    the type "DeSoOS system" that only DeSoOS's own `make-usb.sh --with-disk` creates: the kernel may
    write inside it, and only inside it – three independent checks (the partition, the kernel's USB
    disk, `usbd`), never on a write-protected stick. A stick prepared by `make-usb.sh` (FAT32 only)
@@ -302,6 +302,16 @@ a system disk) and refuses to overwrite another boot loader (e.g. an OS installe
 add `--overwrite`. Sticks formatted as exFAT/NTFS (common for large, new ones) must be
 reformatted to FAT32 once, which **erases** the stick: `./make-usb.sh --format /dev/sdX` (checks
 that it is USB and asks you to retype the device name), or use your desktop's disk utility.
+
+**A stick with a disk** (v0.80): `./make-usb.sh --with-disk /dev/sdX` **erases** the stick and makes
+two partitions – the ESP (FAT32 `DESOOS` with `BOOTX64.EFI`, read-only in DeSoOS, `/usb0`) and a
+"DeSoOS system" partition with an empty DeSoFS (the rest of the stick, at most 64 GiB) that DeSoOS
+mounts read-write at `/disk`: your files and the last known good time survive a restart. The
+script refuses anything but a whole, removable USB disk of at most 256 GiB with nothing mounted, no
+swap and no LVM / RAID / dm-crypt on it, never a system disk; it shows model, size, serial and the
+partitions, asks you to retype the device name, checks everything again right before writing and
+reads the result back. `--dry-run` only checks. Update DeSoOS on such a stick as before:
+`./make-usb.sh /media/$USER/DESOOS` replaces `BOOTX64.EFI` only – `/disk` is not touched.
 
 To run a stress test without a keyboard: `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
 (see [Stress test on real hardware](#stress-test-on-real-hardware)). A plain `./make-usb.sh`
@@ -507,6 +517,7 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
+- `tools/` - host tools a real stick is made with: `mkusb.py` (GPT + ESP + DeSoFS), `mkdesofs.py` (an empty DeSoFS).
 - `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.
 - `build/` - build output; `logs/` - test and build logs.
 

@@ -284,6 +284,13 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     ck!(wait_for(8_000, || find("blkd-2").is_some()), "blkd-2 not attached");
     crate::time::sleep_ms(super::usbdisk::SETTLE_MS + 600);
     ck!(usb_desofs_mounts() == 0, "mounted with no free /usbN ({})", usb_desofs_mounts());
+    // Two earlier failures of each partition (review of the stage B fix): a mount that works
+    // clears them – they do not count against later attempts.
+    let s2 = find("blkd-2").unwrap();
+    for &p in &sys_parts(s2.index.load(Ordering::SeqCst)) {
+        let _ = s2.note_ro_fail(p);
+        let _ = s2.note_ro_fail(p);
+    }
     let free_one = |pt: &str| {
         let _ = crate::fs::remove(&alloc::format!("{}/x", pt));
         let _ = crate::fs::remove(pt);
@@ -294,6 +301,9 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     free_one(&filled[1]);
     super::usbdisk::changed();
     ck!(wait_for(8_000, || usb_desofs_mounts() == 2), "the second partition not mounted after a /usbN was freed");
+    for &p in &sys_parts(s2.index.load(Ordering::SeqCst)) {
+        ck!(s2.note_ro_fail(p) == 1, "earlier failures of disk {} still counted after it was mounted", p);
+    }
     for pt in &filled[2..] {
         free_one(pt);
     }
@@ -492,7 +502,7 @@ pub fn self_test() {
     crate::selftest::begin();
     match fake_test() {
         Ok(l) => serial_println!(
-            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again, {} PASS",
+            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), a working mount clears earlier failures, the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again, {} PASS",
             l
         ),
         Err(e) => {
@@ -556,5 +566,90 @@ pub fn usb_restart() {
             crate::selftest::pass();
         }
         Err(e) => serial_println!("[USB RESTART TEST] FAIL: {}", e),
+    }
+}
+
+/// ONE STICK TEST (V080 stage C) – QEMU started from an image made by tools/mkusb.py (the code of
+/// `make-usb.sh --with-disk`), nothing else attached: UEFI loads BOOTX64.EFI from its ESP, the
+/// stick's ESP is /usb0 (read-only) and its "DeSoOS system" partition /disk (read-write) – both
+/// from the same disk.  Start 1 writes a file and the last known good time; start 2 (the same
+/// image, in tests/make-usb-test.sh after the ESP got a new build) finds both, and `tag` – when
+/// given – is the build tag the running kernel must have.
+pub fn one_stick(part: u32, tag: u64) {
+    serial_println!("[ONE STICK TEST] Starting part {}: started from a make-usb.sh --with-disk image...", part);
+    crate::selftest::begin();
+    let r = (|| -> Result<String, String> {
+        if block::internal().is_some() {
+            return Err(String::from("an internal disk exists (QEMU must run with the stick image only)"));
+        }
+        AUTO.store(true, Ordering::SeqCst);
+        super::usbdisk::changed();
+        let _ = crate::fs::remove("/tmp/usbw-done");
+        let opts = SpawnOptions { stdin: Some(Vec::new()), capture: true, hw_root: true, sysctl: true, input: true, blk: true, ..SpawnOptions::default() };
+        let id = exec("/bin/init", &["init", "test", "/bin/usbtest", "hold"], "/", &opts).map_err(|_| String::from("cannot start init"))?;
+        let t0 = ticks();
+        let up = wait_for(40_000, || super::ublk::list().iter().any(|s| s.disk_part().is_some()) && mounted("/usb0").is_some());
+        let ms = ticks() - t0;
+        let res = (|| -> Result<String, String> {
+            if !up {
+                return Err(alloc::format!("/disk or /usb0 missing (/disk {:?}, /usb0 {:?})", mounted("/disk"), mounted("/usb0")));
+            }
+            let sticks = super::ublk::list();
+            if sticks.len() != 1 {
+                return Err(alloc::format!("{} USB disks, expected the one stick", sticks.len()));
+            }
+            let disk = sticks[0].index.load(Ordering::SeqCst);
+            let parent = |p: &str| crate::fs::mounted_disk(p).and_then(|d| block::with_device(d, |x| x.parent()).ok().flatten());
+            if parent("/usb0") != Some(disk) || parent("/disk") != Some(disk) {
+                return Err(alloc::format!("/usb0 and /disk not both from the stick (disk {}): {:?} / {:?}", disk, parent("/usb0"), parent("/disk")));
+            }
+            let esp = crate::fs::mounted_disk("/usb0").unwrap_or(usize::MAX);
+            if block::partition_kind(esp) != Some("EFI System") || !crate::fs::is_read_only("/usb0/x") || crate::fs::write_file("/usb0/X.TXT", b"x").is_ok() {
+                return Err(String::from("/usb0 is not the read-only ESP"));
+            }
+            if crate::fs::is_read_only("/disk/x") {
+                return Err(String::from("/disk is read-only"));
+            }
+            if crate::fs::read_file("/usb0/EFI/BOOT/BOOTX64.EFI").map(|b| b.len()).unwrap_or(0) < 1 << 20 {
+                return Err(String::from("BOOTX64.EFI not readable on /usb0"));
+            }
+            let build = crate::shell::BUILD_TAG.filter(|t| !t.is_empty()).unwrap_or("");
+            if tag != 0 && crate::selftest::pack_tag(build) != tag {
+                return Err(alloc::format!("this kernel is build {:?}, not the expected one", build));
+            }
+            let lkg = crate::drivers::rtc::BUILD_EPOCH + 10 * 86_400;
+            if part == 1 {
+                if crate::fs::stat("/disk/onestick").is_ok() {
+                    return Err(String::from("/disk/onestick exists on a new stick"));
+                }
+                crate::fs::write_file("/disk/onestick", alloc::format!("{}", lkg).as_bytes()).map_err(|e| alloc::format!("write /disk/onestick: {}", e))?;
+                let r = crate::time_lkg::raise_for_test(lkg);
+                if r != crate::time_lkg::Raised::Saved || lkg_on_disk() != Some(lkg) {
+                    return Err(alloc::format!("LKG not saved on the stick: {:?}, file {:?}", r, lkg_on_disk()));
+                }
+                Ok(alloc::format!("/usb0 = ESP read-only, /disk = DeSoOS system read-write {} ms after init started (one disk), file and LKG {} written", ms, lkg))
+            } else {
+                let marker = crate::fs::read_file("/disk/onestick").map_err(|e| alloc::format!("/disk/onestick from start 1: {}", e))?;
+                let want: u64 = core::str::from_utf8(&marker).ok().and_then(|t| t.trim().parse().ok()).ok_or_else(|| String::from("bad /disk/onestick"))?;
+                let snap = crate::time_lkg::snapshot();
+                if snap.lkg != want || snap.file != 3 {
+                    return Err(alloc::format!("LKG {} (want {} from start 1), file state {}", snap.lkg, want, snap.file));
+                }
+                Ok(alloc::format!("the same image again{}: /disk read-write {} ms after init started, the file and LKG {} of start 1 there (read at mount)", if build.is_empty() { String::new() } else { alloc::format!(", build {}", build) }, ms, want))
+            }
+        })();
+        AUTO.store(false, Ordering::SeqCst);
+        let _ = crate::fs::write_file("/tmp/usbw-done", b"1");
+        if !wait_for(30_000, || sched::task_info(id).is_none()) {
+            let _ = sched::request_exit(id);
+        }
+        res
+    })();
+    match r {
+        Ok(l) => {
+            serial_println!("[ONE STICK TEST] {}/2 {} PASS", part, l);
+            crate::selftest::pass();
+        }
+        Err(e) => serial_println!("[ONE STICK TEST] FAIL: {}/2: {}", part, e),
     }
 }

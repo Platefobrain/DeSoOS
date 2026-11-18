@@ -258,6 +258,15 @@ pub extern "sysv64" fn kernel_main(
         let ok = selftest::finish();
         selftest::exit_if_autotest(ok);
     }
+    // tests/test.sh and tests/make-usb-test.sh: started from a make-usb.sh --with-disk image.
+    #[cfg(selftest)]
+    if let Some((part, tag)) = selftest::one_stick() {
+        input::start_repeat_task();
+        user::ublk::start_monitor();
+        user::one_stick_test(part, tag);
+        let ok = selftest::finish();
+        selftest::exit_if_autotest(ok);
+    }
     #[cfg(selftest)]
     if let Some((secs, seed, ram)) = selftest::soak() {
         input::start_repeat_task();

@@ -1062,6 +1062,46 @@ skipped; the probe skipped; the format session left open; any USB partition form
 counted with no free `/usbN`; the owner taken from the record, not the mount table; the registration left after
 `desofs unmount /disk`; a partition the user unmounted mounted again by itself.
 
+### A stick with a disk: `make-usb.sh --with-disk` (v0.80)
+
+`./make-usb.sh --with-disk /dev/sdX` (on Linux) erases a USB stick and lays it out with **`tools/mkusb.py`** – the
+same code writes an image file (`--image FILE SIZE_MIB`, no sudo), which `tests/test.sh` and
+`tests/make-usb-test.sh` start in QEMU, so the tests run the code a real stick gets:
+
+| | Partition 1 | Partition 2 | Rest |
+|---|---|---|---|
+| Type | EFI System | "DeSoOS system" `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` | unallocated |
+| Size | 128 MiB from 1 MiB | the rest, 1 MiB aligned, 64 MiB – 64 GiB | what is over 64 GiB (reported) |
+| Content | FAT32 `DESOOS`, `EFI/BOOT/BOOTX64.EFI` (built in Python: 512 B clusters, FSInfo, backup boot sector) | an empty DeSoFS (`tools/mkdesofs.py`: random uuid, the current time) | – |
+| In DeSoOS | `/usb0`, never written | `/disk` read-write (rules D2 / E) | – |
+
+Order of the writes: the old table areas (sectors 0–2047 and the last 33) cleared → the ESP → DeSoFS (the kernel's
+order, flushed) → the GPT and the protective MBR last – an interrupted run leaves no table pointing at half-written
+data. Then a read-back (on a device after `BLKFLSBUF`): both GPT headers and tables (CRC32), the types and ranges,
+`BOOTX64.EFI` read through the FAT equal to the built file, both DeSoFS superblocks. Partitions and FAT are written by
+our own code rather than `sgdisk` / `mkfs.vfat` + `mcopy`: no packages beyond Python, no root for an image, and the image
+the tests start is made by the very code that writes a stick (`fsck.vfat -n` checks the ESP in
+`tests/make-usb-test.sh`).
+
+Safety (`make-usb.sh`, every unclear answer stops): a whole disk (not a partition, loop, dm or md), removable
+(`/sys/block/X/removable`), USB (`TRAN`), 200 MiB – 256 GiB, 512-byte sectors, not a system disk (`/`, `/boot`,
+`/boot/efi`), nothing mounted on it, no swap on it or its partitions (`/proc/swaps`), no holders (LVM / RAID /
+dm-crypt); model, size, serial and partitions shown, a "DeSoOS system" partition already there named ("your DeSoOS data
+will be lost"), the device name retyped; then, after the build, **every check again** and the same major:minor, serial
+and size – otherwise nothing is written; `tools/mkusb.py` opens the device with `O_EXCL` (Linux refuses while anything
+on it is mounted or held) and checks major:minor and size once more. `--dry-run` stops before the build.
+
+**Update**: `./make-usb.sh /media/$USER/DESOOS` (the ESP mounted by the desktop) – the same install as for a FAT32
+stick: only `BOOTX64.EFI` is replaced; partition 2 is not touched. `tests/make-usb-test.sh` checks it: build `v1`
+(`DESOOS_BUILD_TAG`, shown by `ver`) → ONE STICK TEST part 1 (a file and the LKG on `/disk`) → the ESP rebuilt with
+build `v2` (`tools/mkusb.py --update-esp`) → partition 2 the same byte for byte → part 2 from the same image: the
+kernel is `v2`, the file and the LKG are there.
+
+**ONE STICK TEST** (`tests/test.sh`, fourth and fifth start, phases `onestick1` / `onestick2`): QEMU with only the image
+(`bootindex=0`, no virtio, no NVMe, no other USB disk): UEFI loads `BOOTX64.EFI` from the image's ESP, `/usb0` = that ESP
+read-only (a write refused), `/disk` = partition 2 read-write – both partitions of the same disk; start 1 writes a file
+and the LKG, start 2 finds both (the LKG read at mount); the ESP is unchanged byte for byte afterwards.
+
 ### Controller start and shutdown
 
 usbd: `dev_claim`, `dev_map` BAR0, **handoff from BIOS** (USB Legacy Support in the xHCI extended capabilities:

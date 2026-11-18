@@ -803,6 +803,8 @@ pub use test_usbdisk::self_test as usbdisk_self_test;
 #[cfg(selftest)]
 pub use test_usbdisk::usb_restart as usb_restart_test;
 #[cfg(selftest)]
+pub use test_usbdisk::one_stick as one_stick_test;
+#[cfg(selftest)]
 pub use test_net::self_test as net_self_test;
 #[cfg(selftest)]
 pub use test_tls::self_test as tls_self_test;
