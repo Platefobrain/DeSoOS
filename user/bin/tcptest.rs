@@ -9,15 +9,15 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../lib/netproto.rs"]
 mod netproto;
 #[path = "../lib/tcp.rs"]
 mod tcp;
 
-use desoos::*;
+use deso::*;
 use netproto::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
 use tcp::{reset_for, End, Event, Out, Seg, State, Tcb, FIN_WAIT2_MS, MSS, RCV_BUF, TIME_WAIT_MS, WSCALE};
 

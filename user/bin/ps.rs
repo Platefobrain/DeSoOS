@@ -5,16 +5,16 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 use alloc::vec;
-use desoos::{ERROR_BUFFER_TOO_SMALL, strerror, tasks};
+use deso::{ERROR_BUFFER_TOO_SMALL, strerror, tasks};
 
 entry!(main);
 
-fn main(_: desoos::Args) -> i32 {
+fn main(_: deso::Args) -> i32 {
     let mut buf = vec![0u8; 4096];
     let n = loop {
         let n = tasks(&mut buf);
@@ -28,7 +28,7 @@ fn main(_: desoos::Args) -> i32 {
         eprintln!("ps: {}", strerror(n));
         return 1;
     }
-    let me = desoos::getpid();
+    let me = deso::getpid();
     println!("  PID  PPID  NAME          MODE    STATE     CPU   CPU ms  SWITCHES");
     let text = core::str::from_utf8(&buf[..n as usize]).unwrap_or("");
     for line in text.lines() {

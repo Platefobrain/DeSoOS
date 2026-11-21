@@ -8,7 +8,7 @@
 //            directories several levels deep, a directory of 300 entries with deleted
 //            ones, a rename that replaces a file, removed files.  The system then
 //            powers off normally;
-//   part 2 – a second start (fw_cfg opt/desoos/phase=restart, only this group): the
+//   part 2 – a second start (fw_cfg opt/deso/phase=restart, only this group): the
 //            kernel must have mounted /disk as DeSoFS read-write by itself; every file
 //            and directory equals the set byte for byte, the 300-entry directory read
 //            in parts, programs (ring 3) on /disk, a new file written and read; then
@@ -192,8 +192,8 @@ const AFTER_SNAP: &str = "/disk/after-snapshot";
 /// Everything under /disk equals the expected set (extra entries allowed only in `allow`).
 fn compare_with(what: &str, allow: &[&str]) -> Result<(), String> {
     let exp = expected();
-    // /disk/.desoos is the system's (the last known good time) – not part of the set.
-    let allowed = |p: &str| p == "/disk/.desoos" || allow.iter().any(|a| p.starts_with(a));
+    // /disk/.deso is the system's (the last known good time) – not part of the set.
+    let allowed = |p: &str| p == "/disk/.deso" || allow.iter().any(|a| p.starts_with(a));
     for (path, data) in &exp {
         if allowed(path) {
             continue; // changed on purpose; the caller checks it
@@ -272,7 +272,7 @@ fn run(path: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&crate::user::captured_output(id).unwrap_or_default()).into_owned())
 }
 
-/// The LKG part 1 recovered: read back at boot from /disk/.desoos/lkg – good, from NTS, no
+/// The LKG part 1 recovered: read back at boot from /disk/.deso/lkg – good, from NTS, no
 /// reason 8, the clock plausible; the file still protected.  Then, live, an LKG two days ahead
 /// of the clock: reason 7, and netget https refuses before sending.
 fn last_known_good() -> T {
@@ -283,15 +283,15 @@ fn last_known_good() -> T {
     let b = lkg::bound();
     ensure!(b + 7200 > now && b <= now, "the LKG read back is {} (clock {})", b, now);
     ensure!(verdict.is_ok(), "the clock after the restart: {:?}", verdict);
-    let rec = fs::read_file("/disk/.desoos/lkg").map_err(|x| e("read the LKG", x))?;
+    let rec = fs::read_file("/disk/.deso/lkg").map_err(|x| e("read the LKG", x))?;
     ensure!(rec == lkg::encode(b, Source::Nts), "the file is not the record of {}", b);
-    ensure!(fs::remove("/disk/.desoos/lkg") == Err(fs::FsError::Reserved), "the LKG file could be removed");
+    ensure!(fs::remove("/disk/.deso/lkg") == Err(fs::FsError::Reserved), "the LKG file could be removed");
     let ahead = now + 2 * 86_400;
     ensure!(lkg::raise_for_test(ahead) == lkg::Raised::Saved, "raise ahead");
     ensure!(rtc::time_status().1 == Err(Implausible::BeforeLkg), "the clock below the LKG: {:?}", rtc::time_status().1);
-    let out = run("/bin/netget", &["netget", "https://tls.desoos:58443/hello"])?;
+    let out = run("/bin/netget", &["netget", "https://tls.deso:58443/hello"])?;
     ensure!(out.contains("TLS refused: clock not plausible: clock earlier than the last known good time") && out.contains("nothing sent"), "netget https: {:?}", out.trim());
-    Ok(format!("the recovered LKG read back at boot from /disk/.desoos/lkg ({} UTC, NTS, no reason 8, the clock plausible, {} s above it); the file still protected; an LKG 2 days ahead - reason 7, netget https refused before sending", rtc::DateTime::from_unix(b), now - b))
+    Ok(format!("the recovered LKG read back at boot from /disk/.deso/lkg ({} UTC, NTS, no reason 8, the clock plausible, {} s above it); the file still protected; an LKG 2 days ahead - reason 7, netget https refused before sending", rtc::DateTime::from_unix(b), now - b))
 }
 
 fn hex(h: &[u8; 32]) -> String {

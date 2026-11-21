@@ -70,7 +70,7 @@ impl Report {
             format!("{} ms on {} CPU(s)", self.ms, self.cpus),
             format!(
                 "  mode:  {} - pool {} processes, {} driver(s)",
-                if pool_per_cpu() == 0 { "compare (default)" } else { "max load (DESOOS_STRESS_POOL)" },
+                if pool_per_cpu() == 0 { "compare (default)" } else { "max load (DESO_STRESS_POOL)" },
                 self.pool,
                 self.drivers
             ),
@@ -408,7 +408,7 @@ pub fn run(ms: u64) -> Result<Report, String> {
     // the last CAPTURED_LOG = 256, the exit log EXIT_LOG = 2048 – with headroom.
     // Two measurement modes.  Default (3 per CPU, at most 48) – fixed,
     // comparable between versions.  Full load: build with
-    // DESOOS_STRESS_POOL=P (P per CPU, at most 128 – the captured
+    // DESO_STRESS_POOL=P (P per CPU, at most 128 – the captured
     // output log keeps the last 256).  In default mode a noticeable share of
     // idle time remains – the stress test limits itself.
     let per_cpu = pool_per_cpu();
@@ -554,18 +554,18 @@ pub fn run(ms: u64) -> Result<Report, String> {
 // Automatic stress test after boot
 // ------------------------------------------------------------
 
-/// Seconds from the build (`DESOOS_AUTOSTRESS=60 ./make-usb.sh ...` or
+/// Seconds from the build (`DESO_AUTOSTRESS=60 ./make-usb.sh ...` or
 /// `./build.sh --autostress=60`); 0 = disabled.
-/// Processes per CPU from the build (`DESOOS_STRESS_POOL`); 0 = default mode.
+/// Processes per CPU from the build (`DESO_STRESS_POOL`); 0 = default mode.
 pub fn pool_per_cpu() -> usize {
-    match option_env!("DESOOS_STRESS_POOL") {
+    match option_env!("DESO_STRESS_POOL") {
         Some(s) => s.trim().parse::<usize>().unwrap_or(0).min(32),
         None => 0,
     }
 }
 
 pub fn auto_seconds() -> u64 {
-    match option_env!("DESOOS_AUTOSTRESS") {
+    match option_env!("DESO_AUTOSTRESS") {
         Some(s) => s.trim().parse::<u64>().unwrap_or(0).min(3600),
         None => 0,
     }

@@ -244,7 +244,7 @@ fn coding_ok(e: &[u8]) -> bool {
     n > 0 && params_ok(&e[n..])
 }
 
-/// Fields that may not come in trailers (DeSoOS policy from the categories of RFC 9110
+/// Fields that may not come in trailers (DeSo OS policy from the categories of RFC 9110
 /// §6.5.1: framing, routing, authentication, control, content coding – needed before the
 /// content).
 const NOT_IN_TRAILERS: &[&str] = &[

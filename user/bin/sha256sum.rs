@@ -4,15 +4,15 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 
 use desocrypto::sha256::Sha256;
-use desoos::{O_READ, close, open, read, strerror};
+use deso::{O_READ, close, open, read, strerror};
 
 entry!(main);
 
@@ -31,7 +31,7 @@ fn hash_fd(fd: u64) -> Result<[u8; 32], i64> {
         h.update(&buf[..n as usize]);
     }
     // A file cannot reach 2^61 bytes; report it anyway instead of a wrong sum.
-    h.finish().map_err(|_| desoos::ERROR_NO_SPACE)
+    h.finish().map_err(|_| deso::ERROR_NO_SPACE)
 }
 
 fn show(name: &str, digest: &[u8; 32]) {
@@ -41,7 +41,7 @@ fn show(name: &str, digest: &[u8; 32]) {
     }
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     if args.len() < 2 {
         return match hash_fd(0) {
             Ok(d) => {

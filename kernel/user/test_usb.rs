@@ -171,7 +171,7 @@ fn data_bin_sum() -> u64 {
 }
 
 fn test_disk_path() -> Option<String> {
-    crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST")).map(|m| alloc::format!("{}/DATA.BIN", m.0))
+    crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOTEST")).map(|m| alloc::format!("{}/DATA.BIN", m.0))
 }
 
 /// Task: reads the file over and over in 64 KiB chunks until a read fails (error time in READER_DONE).
@@ -324,9 +324,9 @@ fn robust_test() -> bool {
     true
 }
 
-/// Test USB stick (label DESOOSTEST) mounted at /usbN.
+/// Test USB stick (label DESOTEST) mounted at /usbN.
 fn test_disk_mounted() -> bool {
-    crate::fs::mount_list().iter().any(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST"))
+    crate::fs::mount_list().iter().any(|m| m.0.starts_with("/usb") && m.2.contains("DESOTEST"))
 }
 
 /// USB TEST 7/7: a disk behind a hub unplugged and replugged, then the whole hub unplugged.
@@ -363,7 +363,7 @@ fn hotplug_test() -> bool {
     );
     // `df` – the image's primary FSInfo is stale (mkfat32.py), the kernel
     // counts free clusters from the FAT; the real number is in the FSInfo copy (sector 7).
-    let m = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOOSTEST"));
+    let m = crate::fs::mount_list().into_iter().find(|m| m.0.starts_with("/usb") && m.2.contains("DESOTEST"));
     ck!(m.is_some(), "test disk not mounted for df");
     let m = m.unwrap();
     let disk = m.2.split(' ').next().and_then(crate::block::find);

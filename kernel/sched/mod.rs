@@ -1922,15 +1922,15 @@ pub fn idle_us(c: usize) -> u64 {
 }
 
 /// How many µs an idle CPU spins before `hlt` (from the build:
-/// `DESOOS_IDLE_POLL_US`, default 200; 0 = hlt immediately).  Rationale: on
+/// `DESO_IDLE_POLL_US`, default 200; 0 = hlt immediately).  Rationale: on
 /// real hardware `hlt` puts the core into a deeper sleep (AMD: C1 → CC6), the wake-up
 /// takes tens of µs and lengthens every task hand-off – with less lock contention
 /// cores spin less and sleep more often (on real hardware: idle 26 → 28–32%,
 /// stress −5%; no drop under KVM).  Like `haltpoll` in Linux.
 /// This is the UPPER bound of the window; each CPU's window adapts itself
-/// (`DESOOS_IDLE_POLL_ADAPT`, default 1), see `idle_adapt`.
+/// (`DESO_IDLE_POLL_ADAPT`, default 1), see `idle_adapt`.
 pub fn idle_poll_us() -> u64 {
-    match option_env!("DESOOS_IDLE_POLL_US") {
+    match option_env!("DESO_IDLE_POLL_US") {
         Some(s) => s.trim().parse::<u64>().unwrap_or(200).min(10_000),
         None => 200,
     }
@@ -1941,7 +1941,7 @@ pub fn idle_poll_us() -> u64 {
 /// would have caught it); longer idleness – window /2, down to 0 (an idle system
 /// does not spin – battery).  0 – fixed window = `idle_poll_us()`.
 pub fn idle_adapt() -> bool {
-    !matches!(option_env!("DESOOS_IDLE_POLL_ADAPT").map(|s| s.trim()), Some("0"))
+    !matches!(option_env!("DESO_IDLE_POLL_ADAPT").map(|s| s.trim()), Some("0"))
 }
 
 const POLL_GROW_MIN_US: u64 = 10;

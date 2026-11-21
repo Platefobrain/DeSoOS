@@ -61,9 +61,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../lib/netproto.rs"]
 mod netproto;
 #[path = "../lib/dhcp.rs"]
@@ -76,7 +76,7 @@ mod tcp;
 mod desocrypto;
 
 use core::fmt::Write;
-use desoos::*;
+use deso::*;
 use dhcp::{Client, Event, Msg, BROADCAST_IP, INFINITE};
 use dns::{Name, DNS_PORT};
 use tcp::Tcb;

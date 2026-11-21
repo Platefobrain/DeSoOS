@@ -33,9 +33,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
@@ -47,7 +47,7 @@ mod nts;
 #[path = "../lib/ntske.rs"]
 mod ntske;
 
-use desoos::*;
+use deso::*;
 use desotls::client::{Client, Config};
 use desotls::record::Suite;
 use desotls::roots::{AnchorList, Anchors, Roots};

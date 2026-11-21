@@ -1,4 +1,4 @@
-// USB DISK TEST – a USB stick's "DeSoOS system" partition as /disk (v0.80 stage B; rules D, D2,
+// USB DISK TEST – a USB stick's "DeSo system" partition as /disk (v0.80 stage B; rules D, D2,
 // E, F of the V080 plan).  Only in builds with --cfg selftest.
 //
 // 1/2 fake sticks with a write cache (/bin/blkdtest): `desofs format` only in a format session
@@ -37,9 +37,9 @@ fn find(name: &str) -> Option<alloc::sync::Arc<super::ublk::Shared>> {
     super::ublk::list().into_iter().find(|s| s.desc == name && !s.gone() && s.probed())
 }
 
-/// The "DeSoOS system" partitions of disk `d`, in table order.
+/// The "DeSo system" partitions of disk `d`, in table order.
 fn sys_parts(d: usize) -> Vec<usize> {
-    let mut v: Vec<usize> = block::partitions_of(d).into_iter().filter(|&p| block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME)).collect();
+    let mut v: Vec<usize> = block::partitions_of(d).into_iter().filter(|&p| block::partition_kind(p) == Some(crate::gpt::DESO_SYSTEM_NAME)).collect();
     v.sort();
     v
 }
@@ -138,16 +138,16 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     let (e1, p1) = (esp_part(d1), sys_parts(d1));
     ck!(e1.is_some() && p1.len() == 1, "blkd-1: partitions {:?} / {:?}", e1, p1);
     let (e1, p1) = (e1.unwrap(), p1[0]);
-    // Rule F: only "DeSoOS system", only in a session; refused – nothing written.
+    // Rule F: only "DeSo system", only in a session; refused – nothing written.
     let r = format(e1, &params());
-    ck!(r.as_ref().is_err_and(|e| e.contains("only a \"DeSoOS system\"")), "format of the ESP: {:?}", r);
+    ck!(r.as_ref().is_err_and(|e| e.contains("only a \"DeSo system\"")), "format of the ESP: {:?}", r);
     let saved = super::ublk::test_set_counters(None, Some(u64::MAX));
     let r = format(p1, &params());
     super::ublk::test_set_counters(None, Some(saved.1));
     ck!(r.as_ref().is_err_and(|e| e.contains("no format session")), "format with the session counter used up: {:?}", r);
     ck!(!crate::fs::desofs::has_marker(p1), "a refused format wrote a superblock");
     let r = format(p1, &params());
-    ck!(r.is_ok() && crate::fs::desofs::has_marker(p1), "format of the DeSoOS system partition: {:?}", r);
+    ck!(r.is_ok() && crate::fs::desofs::has_marker(p1), "format of the DeSo system partition: {:?}", r);
     ck!(block::is_read_only(p1), "the format grant was left on the partition");
     let g1 = s1.generation;
     ck!(block::control(d1, Control::RegisterRw { generation: g1, start: 2048, len: 5952 }) == Ok(0) && block::control(d1, Control::Withdraw) == Ok(0), "a registration was left after the format session");
@@ -200,12 +200,12 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     ck!(lkg_on_disk() == Some(T0 + 100) && crate::time_lkg::dirty(), "after the loss: file {:?}, dirty {}", lkg_on_disk(), crate::time_lkg::dirty());
     let _ = crate::time_lkg::raise_for_test(T0 + 200);
     ck!(lkg_on_disk() == Some(T0 + 200) && !crate::time_lkg::dirty(), "the LKG not written after the stick came back");
-    // Rule E: the choice between sticks.  Stick 2 with two DeSoOS system partitions.
+    // Rule E: the choice between sticks.  Stick 2 with two DeSo system partitions.
     ck!(flag(&s1, 0x200), "attach stick 2");
     ck!(wait_for(8_000, || find("blkd-2").is_some()), "blkd-2 not attached");
     let s2 = find("blkd-2").unwrap();
     let p2 = sys_parts(s2.index.load(Ordering::SeqCst));
-    ck!(p2.len() == 2, "blkd-2: {} DeSoOS system partitions", p2.len());
+    ck!(p2.len() == 2, "blkd-2: {} DeSo system partitions", p2.len());
     ck!(format(p2[0], &params()).is_ok() && format(p2[1], &params()).is_ok(), "format of stick 2");
     // /disk is never taken away: stick 2's partitions only read-only.
     ck!(wait_for(8_000, || usb_desofs_mounts() == 2), "stick 2's partitions not mounted read-only ({})", usb_desofs_mounts());
@@ -671,7 +671,7 @@ pub fn usb_restart() {
 
 /// ONE STICK TEST (V080 stage C) – QEMU started from an image made by tools/mkusb.py (the code of
 /// `make-usb.sh --with-disk`), nothing else attached: UEFI loads BOOTX64.EFI from its ESP, the
-/// stick's ESP is /usb0 (read-only) and its "DeSoOS system" partition /disk (read-write) – both
+/// stick's ESP is /usb0 (read-only) and its "DeSo system" partition /disk (read-write) – both
 /// from the same disk.  Start 1 writes a file and the last known good time; start 2 (the same
 /// image, in tests/make-usb-test.sh after the ESP got a new build) finds both, and `tag` – when
 /// given – is the build tag the running kernel must have.
@@ -727,7 +727,7 @@ pub fn one_stick(part: u32, tag: u64) {
                 if r != crate::time_lkg::Raised::Saved || lkg_on_disk() != Some(lkg) {
                     return Err(alloc::format!("LKG not saved on the stick: {:?}, file {:?}", r, lkg_on_disk()));
                 }
-                Ok(alloc::format!("/usb0 = ESP read-only, /disk = DeSoOS system read-write {} ms after init started (one disk), file and LKG {} written", ms, lkg))
+                Ok(alloc::format!("/usb0 = ESP read-only, /disk = DeSo system read-write {} ms after init started (one disk), file and LKG {} written", ms, lkg))
             } else {
                 let marker = crate::fs::read_file("/disk/onestick").map_err(|e| alloc::format!("/disk/onestick from start 1: {}", e))?;
                 let want: u64 = core::str::from_utf8(&marker).ok().and_then(|t| t.trim().parse().ok()).ok_or_else(|| String::from("bad /disk/onestick"))?;

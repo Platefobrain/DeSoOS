@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Autostress in QEMU – the same test as on real hardware (DESOOS_AUTOSTRESS),
+# Autostress in QEMU – the same test as on real hardware (DESO_AUTOSTRESS),
 # but on this computer, before writing the USB stick.
 #
 #   tests/stress-qemu.sh              build with autostress + QEMU, result on screen
@@ -83,7 +83,7 @@ qemu-system-x86_64 \
   -drive file="$TMP_DISK",format=raw,if=none,id=vd0 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$TMP_NVME",format=raw,if=none,id=nv0 \
-  -device nvme,serial=desoos-stress,drive=nv0 \
+  -device nvme,serial=deso-stress,drive=nv0 \
   -device edu,addr=06 \
   -serial stdio -display none -no-reboot < /dev/null > "$LOG" 2>&1 &
 QPID=$!

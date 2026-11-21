@@ -1,4 +1,4 @@
-# kernel – the DeSoOS kernel
+# kernel – the DeSo OS kernel
 
 A hybrid kernel: memory, scheduling, syscalls, handles and IPC, plus the drivers the system needs before user space
 runs; other drivers and services (network, USB) are user-space programs in `user/bin/`. Design:
@@ -12,11 +12,11 @@ the parts up in order and starts `/bin/init`.
 | `arch/x86_64/` | CPU setup: GDT / IDT, exceptions, interrupts (PIC, I/O APIC, LAPIC, MSI), SMP, `syscall.rs` (entry), TLB shootdown, FPU |
 | `memory/` | frames, page tables, the kernel heap, demand paging |
 | `sched/` | the scheduler, the Big Kernel Lock, spin locks and sleeping locks (lock order in `spin.rs`) |
-| `user/` | processes and ring 3: `syscalls.rs` (every syscall), `sysrights.rs` (the rights table), `abi_generated.rs` (generated from `abi/abi.toml` by `tools/abigen.py` – the ABI TEST's expected rights table and constants; never edited by hand), `process.rs` (handles), `channel.rs` / `pipe.rs` / `shm.rs` (IPC), `vm.rs` (process memory), `dcp.rs` (permissions), `ublk.rs` (USB disks: the request protocol, the write registrations), `usbdisk.rs` (a USB stick as /disk), `stress.rs` / `soak.rs` (starting the stress and soak tests, also from `DESOOS_AUTOSTRESS` / `DESOOS_AUTOSOAK` builds); `test_*.rs` – self-tests |
-| `fs/` | the VFS (`mod.rs`; `/.desoos` of DeSoFS volumes reserved for the kernel), `ramfs.rs` (`/`; sealed nodes for the CA store), `fat32.rs`, `desofs/` (own README) |
+| `user/` | processes and ring 3: `syscalls.rs` (every syscall), `sysrights.rs` (the rights table), `abi_generated.rs` (generated from `abi/abi.toml` by `tools/abigen.py` – the ABI TEST's expected rights table and constants; never edited by hand), `process.rs` (handles), `channel.rs` / `pipe.rs` / `shm.rs` (IPC), `vm.rs` (process memory), `dcp.rs` (permissions), `ublk.rs` (USB disks: the request protocol, the write registrations), `usbdisk.rs` (a USB stick as /disk), `stress.rs` / `soak.rs` (starting the stress and soak tests, also from `DESO_AUTOSTRESS` / `DESO_AUTOSOAK` builds); `test_*.rs` – self-tests |
+| `fs/` | the VFS (`mod.rs`; `/.deso` of DeSoFS volumes reserved for the kernel), `ramfs.rs` (`/`; sealed nodes for the CA store), `fat32.rs`, `desofs/` (own README) |
 | `drivers/` | framebuffer console, font (own license – see its header), PS/2 keyboard and mouse, PCI, NVMe, virtio-blk, serial, RTC (also whether the clock is plausible – the build date, syscall 59) |
-| `time.rs`, `time_lkg.rs` | the timer (PIT, uptime, sleeping); the last known good time – a lower bound for the wall clock in `/disk/.desoos/lkg`, the reasons 7 and 8 of the clock's verdict (`docs/time/LKG.md`), and the kernel's side of the time service: `set_time` (SYS_TIME_SET – the numbers, L, the repair write, the wall clock) and `snapshot` (SYS_TIME_BOUND) (`docs/time/TIMEKEEPER.md`) |
-| `block.rs`, `gpt.rs` | the block layer (disks, partitions, read-only disks, write grants of USB partitions, RAM disks) and GPT (with the "DeSoOS system" partition type) |
+| `time.rs`, `time_lkg.rs` | the timer (PIT, uptime, sleeping); the last known good time – a lower bound for the wall clock in `/disk/.deso/lkg`, the reasons 7 and 8 of the clock's verdict (`docs/time/LKG.md`), and the kernel's side of the time service: `set_time` (SYS_TIME_SET – the numbers, L, the repair write, the wall clock) and `snapshot` (SYS_TIME_BOUND) (`docs/time/TIMEKEEPER.md`) |
+| `block.rs`, `gpt.rs` | the block layer (disks, partitions, read-only disks, write grants of USB partitions, RAM disks) and GPT (with the "DeSo system" partition type) |
 | `random.rs` | the random number generator: entropy pool, sources and their health checks, ChaCha20 with fast key erasure, `getrandom` (see docs/ARCHITECTURE.md, "Random numbers") |
 | `shell.rs` | the kernel shell (emergency shell, and the code behind `sysinfo` / `sysctl`, including `desofs`) |
 | `initrd.rs` | the programs from `user/bin/` built into the kernel image, the service manifests and the trusted CA store (`/etc/certs/roots`, sealed) |

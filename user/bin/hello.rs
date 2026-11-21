@@ -2,13 +2,13 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 entry!(main);
 
-fn main(_args: desoos::Args) -> i32 {
-    println!("Hello from an ELF program! (pid {})", desoos::getpid());
+fn main(_args: deso::Args) -> i32 {
+    println!("Hello from an ELF program! (pid {})", deso::getpid());
     0
 }

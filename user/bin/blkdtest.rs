@@ -1,12 +1,12 @@
 // Fake writable USB sticks with a device cache for USB DISK TEST (v0.80 stage B): a stick's
-// "DeSoOS system" partition as /disk, the choice between sticks, the last known good time on a
+// "DeSo system" partition as /disk, the choice between sticks, the last known good time on a
 // stick, power loss under ublk.
 //
 // Like /bin/blkwtest it pretends to be usbd (blk_attach with plain shared memory, 1 s
 // timeout), but every stick has its own 4 MiB medium and a WRITE CACHE: a write lands in the
 // cache (reads see it), only a confirmed FLUSH makes it durable.  Two sticks:
-//   1 "blkd-1": partition 1 "EFI System" 40–2047, partition 2 "DeSoOS system" 2048–7999
-//   2 "blkd-2": "EFI System" 40–2047, two "DeSoOS system" partitions 2048–4999 and 5000–7999
+//   1 "blkd-1": partition 1 "EFI System" 40–2047, partition 2 "DeSo system" 2048–7999
+//   2 "blkd-2": "EFI System" 40–2047, two "DeSo system" partitions 2048–4999 and 5000–7999
 // At start only stick 1 is attached.  Test flags (op 9, `blocks`, sent to a stick):
 //   0x20 detach this stick (it stays away; its media are kept)
 //   0x40 replug this stick (it goes and comes back at once as a new instance, from its
@@ -25,11 +25,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 

@@ -4,13 +4,13 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use desoos::{close, dir_for_listing, readdir_part, stat, strerror, DIR_END};
+use deso::{close, dir_for_listing, readdir_part, stat, strerror, DIR_END};
 
 entry!(main);
 
@@ -95,7 +95,7 @@ fn list(path: &str, header: bool) -> i32 {
     status
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     if args.len() < 2 {
         return list(".", false);
     }

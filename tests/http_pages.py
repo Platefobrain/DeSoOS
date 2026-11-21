@@ -8,7 +8,7 @@
 # The guest's expected exit codes are in user/bin/tlstest.rs and user/bin/nettest.rs.
 import random
 
-H11 = b"HTTP/1.1 200 OK\r\nServer: desoos-test\r\n"
+H11 = b"HTTP/1.1 200 OK\r\nServer: deso-test\r\n"
 CHUNKED = H11 + b"Transfer-Encoding: chunked\r\n\r\n"
 CHUNKED_BODY = [CHUNKED, b"7;lang=en\r\nchu", b"nked\r\n1\r\n \r\n6\r\nwo", b"rks\n\r\n0\r\n\r\n"]
 BIG = 1024 * 1024

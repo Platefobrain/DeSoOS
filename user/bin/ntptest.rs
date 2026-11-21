@@ -7,7 +7,7 @@
 // "ntptest: N checks OK".
 //
 // `ntptest net` (started by init with the services) – /bin/nettime against
-// tests/ntp-stub.py on the host (10.0.2.2:58123-58153, the name ntp.desoos from
+// tests/ntp-stub.py on the host (10.0.2.2:58123-58153, the name ntp.deso from
 // tests/dns-stub.py): a correct answer, forged and late ones, Kiss-o'-Death, silence and
 // the one retry, every malformed answer, two to four servers, the arguments, the udp
 // right, how many packets went out and what was in them – and at the end the clock's
@@ -22,9 +22,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../lib/ntp.rs"]
@@ -33,7 +33,7 @@ mod ntp;
 mod nts;
 
 use desocrypto::aes_siv::AesSiv;
-use desoos::*;
+use deso::*;
 use ntp::{Answer, Kod, Reject};
 
 entry!(main);
@@ -287,7 +287,7 @@ fn ke_from(parts: &[&str]) -> &'static [u8] {
             "Warn" => rec(b, &mut n, 0x8003, &[0, 0]),
             "U" => rec(b, &mut n, 50, &[1, 2, 3, 4]),
             "Ucrit" => rec(b, &mut n, 0x8000 | 50, &[1, 2, 3, 4]),
-            "S" => rec(b, &mut n, 6, b"ntp.desoos"),
+            "S" => rec(b, &mut n, 6, b"ntp.deso"),
             "Sbad" => rec(b, &mut n, 6, b"bad host!"),
             "P" => rec(b, &mut n, 7, &[0xE4, 0xD8]),
             "P0" => rec(b, &mut n, 7, &[0, 0]),
@@ -302,7 +302,7 @@ fn ke_from(parts: &[&str]) -> &'static [u8] {
             "WarnNc" => rec(b, &mut n, 0x0003, &[0, 0]),
             "Warn3" => rec(b, &mut n, 0x8003, &[0, 0, 0]),
             "Ccrit" => rec(b, &mut n, 0x8005, &[0xC0; 96]),
-            "Scrit" => rec(b, &mut n, 0x8006, b"ntp.desoos"),
+            "Scrit" => rec(b, &mut n, 0x8006, b"ntp.deso"),
             "Pcrit" => rec(b, &mut n, 0x8007, &[0xE4, 0xD8]),
             "cut" => n -= 3,
             _ => {}
@@ -371,7 +371,7 @@ fn nts_checks(n: &mut usize) -> i32 {
         check!(k, got == *want, "NTS-KE {:?}: {:?}, expected {:?}", parts, got, want);
     }
     let neg = nts::parse_ke(ke_from(&["N", "A", "C", "S", "P", "E"]), pool);
-    check!(k, matches!(&neg, Ok(g) if g.server() == Some("ntp.desoos") && g.port == 0xE4D8), "negotiated server and port");
+    check!(k, matches!(&neg, Ok(g) if g.server() == Some("ntp.deso") && g.port == 0xE4D8), "negotiated server and port");
     let neg = nts::parse_ke(ke_from(&["N", "A", "C", "E"]), pool);
     check!(k, matches!(&neg, Ok(g) if g.server().is_none() && g.port == 123), "no negotiation: the KE server and port 123");
     let _ = nts::parse_ke(ke_from(&["N", "A", "C98", "C", "C", "C", "C", "C", "C", "C", "C", "C", "E"]), pool);
@@ -731,12 +731,12 @@ fn net() -> i32 {
     case!(n, stats(true) == Some((0, 0, 0)), "the stub's counters after a reset: {:?}", stats(false));
 
     // A correct answer, by name.  QEMU's RTC is the host's clock and the stub answers with
-    // the host's clock, but DeSoOS's clock is the RTC at boot plus uptime, and uptime runs
+    // the host's clock, but DeSo OS's clock is the RTC at boot plus uptime, and uptime runs
     // slow under TCG (seconds after a few minutes) – hence NEAR.
-    let r = run(&["ntp.desoos:58123"]);
-    case!(n, r.code == 0 && r.out.contains("nettime: ntp.desoos (10.0.2.2): stratum 2, delay ") && r.out.contains("not changed: plain NTP is not authenticated"), "a correct answer: {} {:?}", r.code, r.out);
+    let r = run(&["ntp.deso:58123"]);
+    case!(n, r.code == 0 && r.out.contains("nettime: ntp.deso (10.0.2.2): stratum 2, delay ") && r.out.contains("not changed: plain NTP is not authenticated"), "a correct answer: {} {:?}", r.code, r.out);
     case!(n, matches!(rtc_offset(r.out), Some(o) if o.abs() <= NEAR), "the clock against the host's time: {:?} {:?}", rtc_offset(r.out), r.out);
-    case!(n, r.out.contains("path asymmetry bound +-") && r.out.contains(" ntp.desoos (the clock counts whole seconds"), "the summary names the limits: {:?}", r.out);
+    case!(n, r.out.contains("path asymmetry bound +-") && r.out.contains(" ntp.deso (the clock counts whole seconds"), "the summary names the limits: {:?}", r.out);
     case!(n, stats(false) == Some((1, 0, 0)), "one minimal query for one answer: {:?}", stats(false));
     let r = run(&[server(0, 15)]);
     case!(n, r.code == 0 && rtc_offset(r.out).is_some(), "an answer with an extension field: {} {:?}", r.code, r.out);
@@ -828,21 +828,21 @@ fn net() -> i32 {
     // The arguments.
     let huge = "99999999999999999999";
     for args in [
-        &["-t", "99", "ntp.desoos:58123"][..],
-        &["-t", "10001", "ntp.desoos:58123"],
-        &["-t", "0", "ntp.desoos:58123"],
-        &["-t", "abc", "ntp.desoos:58123"],
-        &["-t", "2000abc", "ntp.desoos:58123"],
-        &["-t", huge, "ntp.desoos:58123"],
-        &["-t", "-5", "ntp.desoos:58123"],
-        &["-t", "+500", "ntp.desoos:58123"],
-        &["-t", "", "ntp.desoos:58123"],
+        &["-t", "99", "ntp.deso:58123"][..],
+        &["-t", "10001", "ntp.deso:58123"],
+        &["-t", "0", "ntp.deso:58123"],
+        &["-t", "abc", "ntp.deso:58123"],
+        &["-t", "2000abc", "ntp.deso:58123"],
+        &["-t", huge, "ntp.deso:58123"],
+        &["-t", "-5", "ntp.deso:58123"],
+        &["-t", "+500", "ntp.deso:58123"],
+        &["-t", "", "ntp.deso:58123"],
         &["-t"],
-        &["-x", "ntp.desoos:58123"],
+        &["-x", "ntp.deso:58123"],
         &["a:1", "b:1", "c:1", "d:1", "e:1"],
-        &["ntp.desoos:0"],
-        &["ntp.desoos:65536"],
-        &["ntp.desoos:12x"],
+        &["ntp.deso:0"],
+        &["ntp.deso:65536"],
+        &["ntp.deso:12x"],
         &[":58123"],
     ] {
         stats(true);
@@ -853,7 +853,7 @@ fn net() -> i32 {
     case!(n, r.code == 0, "-t 100: {} {:?}", r.code, r.out);
     let r = run(&["-t", "10000", server(0, 0), "net0"]);
     case!(n, r.code == 0, "-t 10000 and the card's name: {} {:?}", r.code, r.out);
-    let r = run(&["nx.desoos:58123"]);
+    let r = run(&["nx.deso:58123"]);
     case!(n, r.code == 2 && r.out.contains("no such name"), "an unknown name: {} {:?}", r.code, r.out);
     let r = run(&[server(0, 0), "net9"]);
     case!(n, r.code == 2, "a card that is not there: {} {:?}", r.code, r.out);
@@ -898,15 +898,16 @@ const NTS_BASE: u16 = 58500;
 const NTS_CA: &[u8] = include_bytes!("../../tests/tls/ca.pem");
 const NTS_CA_PATH: &str = "/nts-ca.pem";
 
-/// "tls.desoos:<port>" (the certificate's name; the DNS stub gives 10.0.2.2), static.
+/// "tls.deso:<port>" (the certificate's name; the DNS stub gives 10.0.2.2), static.
 fn ke_server(port: u16) -> &'static str {
     static mut NAME: [u8; 24] = [0; 24];
     let b = unsafe { &mut *core::ptr::addr_of_mut!(NAME) };
-    b[..11].copy_from_slice(b"tls.desoos:");
+    const HOST: &[u8] = b"tls.deso:";
+    b[..HOST.len()].copy_from_slice(HOST);
     for i in 0..5 {
-        b[11 + i] = b'0' + (port / 10u16.pow(4 - i as u32) % 10) as u8;
+        b[HOST.len() + i] = b'0' + (port / 10u16.pow(4 - i as u32) % 10) as u8;
     }
-    core::str::from_utf8(&b[..16]).unwrap_or("")
+    core::str::from_utf8(&b[..HOST.len() + 5]).unwrap_or("")
 }
 
 /// The server's counters (requests, dup, bad, maxlen, placeholders); `reset` zeroes them.
@@ -1004,10 +1005,10 @@ fn nts_net(n: &mut usize) -> i32 {
     // A KE server that never answers the SYN (tests/tls-stub.py, port 58471 – like a dead
     // server): the lookup and the connection get 3 × wait, not netd's 15 s of SYN retries;
     // the failure line has no "()" (no address known) and no "(0 queries ...)".
-    let dead = "tls.desoos:58471";
+    let dead = "tls.deso:58471";
     tcp_room();
     let r = run(&["-t", "300", "--nts", "--anchor", NTS_CA_PATH, dead]);
-    case!(k, r.code == 3 && r.out.contains("nettime: tls.desoos: NTS-KE: no connection within 900 ms") && r.out.contains("nettime: tls.desoos: NTS-KE connection failed\n") && !r.out.contains("()") && !r.out.contains("queries") && r.ms < 3000, "dead NTS-KE server: given up after 3 x wait: {} {} ms {:?}", r.code, r.ms, r.out);
+    case!(k, r.code == 3 && r.out.contains("nettime: tls.deso: NTS-KE: no connection within 900 ms") && r.out.contains("nettime: tls.deso: NTS-KE connection failed\n") && !r.out.contains("()") && !r.out.contains("queries") && r.ms < 3000, "dead NTS-KE server: given up after 3 x wait: {} {} ms {:?}", r.code, r.ms, r.out);
     // The dead server before a good one: the good one still gives the time, well before the
     // 15 s netd alone would have waited.
     tcp_room();

@@ -1,5 +1,5 @@
 // edud – driver for the QEMU `edu` device as a user-space service.
-// The first real DeSoOS service: registers via dev_map, interrupts via
+// The first real DeSo OS service: registers via dev_map, interrupts via
 // irq_bind + wait_many, DMA via dma_alloc; clients via channels.
 //
 // Handles at startup (given by whoever starts the service – the service manager in init):
@@ -10,13 +10,13 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../lib/edu_proto.rs"]
 mod edu_proto;
 
-use desoos::*;
+use deso::*;
 use edu_proto::*;
 
 entry!(main);

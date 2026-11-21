@@ -74,7 +74,7 @@ pub fn self_test() {
 
     // 3. A clock that is not plausible: refused before anything is sent.
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);
-    let r = run("/bin/netget", &["netget", "https://tls.desoos:58443/hello"], 30_000);
+    let r = run("/bin/netget", &["netget", "https://tls.deso:58443/hello"], 30_000);
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(false, core::sync::atomic::Ordering::Release);
     check!(r.is_some(), "netget did not finish");
     let (kind, out) = r.unwrap();

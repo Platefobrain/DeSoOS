@@ -2,7 +2,7 @@
 // service channel; tests/udp-stub.py on the host at 10.0.2.2:58090, names from
 // tests/dns-stub.py).  UDP promises neither order nor delivery – the checks that need a
 // datagram retry it; the burst is only measured.
-//   1. echo of text, all 256 byte values, an empty datagram; a name (router.desoos);
+//   1. echo of text, all 256 byte values, an empty datagram; a name (router.deso);
 //   2. 1472 bytes both ways; 1473 through the library – refused, nothing sent; 1473
 //      straight into the channel – netd does not send it (udp_toolong +1, the stub got
 //      nothing);
@@ -22,11 +22,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -153,7 +153,7 @@ fn main(_args: Args) -> i32 {
     }
     check!(n, round(c, &all, &all), "echo of all 256 byte values");
     check!(n, round(c, b"", b""), "an empty datagram and its echo");
-    let named = open("router.desoos", PORT);
+    let named = open("router.deso", PORT);
     check!(n, matches!(named, Ok((nc, _)) if { let ok = round(nc, b"by name", b"by name"); close(nc); ok }), "a socket by name: {:?}", named.err());
 
     // 2. The size limit, in the library and in netd.
@@ -266,7 +266,7 @@ fn main(_args: Args) -> i32 {
         ("239.255.255.250", PORT, "multicast"),
         ("0.0.0.0", PORT, "0.0.0.0"),
         (STUB, 0, "port 1-65535"),
-        ("nx.desoos", PORT, "no such name"),
+        ("nx.deso", PORT, "no such name"),
     ] {
         let r = open(host, port);
         check!(n, matches!(r, Err(t) if t.contains(why)), "udp {} {}: {:?}", host, port, r.map(|s| s.1));
@@ -281,7 +281,7 @@ fn main(_args: Args) -> i32 {
     let r = open_via(with_udp, STUB, PORT);
     close(with_udp);
     check!(n, matches!(r, Ok((uc, _)) if { let ok = round(uc, b"sandboxed", b"sandboxed"); close(uc); ok }), "narrowed channel with udp: {:?}", r.err());
-    check!(n, run(&["udpsend", "router.desoos", "58090", "hello"]) == 0, "udpsend with an answer must exit 0");
+    check!(n, run(&["udpsend", "router.deso", "58090", "hello"]) == 0, "udpsend with an answer must exit 0");
     check!(n, run(&["udpsend", "-t", "300", STUB, "58090", "silent"]) == 3, "udpsend without an answer must exit 3");
     check!(n, run(&["udpsend", "255.255.255.255", "58090", "x"]) == 2, "udpsend to broadcast must exit 2");
     check!(n, run(&["udpsend", STUB]) == 2, "udpsend usage must exit 2");

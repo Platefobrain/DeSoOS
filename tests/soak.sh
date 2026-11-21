@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The long test: all workers at once for hours, checkpoints for leaks and DeSoFS
 # (/bin/soak, see user/bin/soak.rs).  QEMU with the same devices as tests/test.sh; the
-# boot self-tests are skipped (fw_cfg opt/desoos/phase = "soak <seconds> <seed>").
+# boot self-tests are skipped (fw_cfg opt/deso/phase = "soak <seconds> <seed>").
 #
 #   tests/soak.sh                      1 hour, KVM
 #   DURATION=8h tests/soak.sh          for the night (s / m / h: 90s, 30m, 8h)
@@ -87,7 +87,7 @@ rm -f "$ROOT/build/NvVars"
 
 mkdir -p "$ROOT/logs"
 LOG="${SOAK_LOG:-$ROOT/logs/soak.log}"
-MON="${TMPDIR:-/tmp}/desoos-soak-monitor-$$.sock"
+MON="${TMPDIR:-/tmp}/deso-soak-monitor-$$.sock"
 rm -f "$MON"
 : > "$LOG"
 
@@ -109,11 +109,11 @@ QEMU=(qemu-system-x86_64
   -drive file="$SOAK_IMG",format=raw,if=none,id=vd0
   -device virtio-blk-pci,drive=vd0
   -drive file="$SOAK_NVME",format=raw,if=none,id=nv0
-  -device nvme,serial=desoos-test,drive=nv0
+  -device nvme,serial=deso-test,drive=nv0
   -device edu,addr=06
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
-  -fw_cfg name=opt/desoos/autotest,string=1
-  -fw_cfg name=opt/desoos/phase,string="soak $SECS $SEED$PHASE_DISK"
+  -fw_cfg name=opt/deso/autotest,string=1
+  -fw_cfg name=opt/deso/phase,string="soak $SECS $SEED$PHASE_DISK"
   -serial stdio -display none -no-reboot)
 
 echo "Soak in QEMU: ${SECS} s, SEED=$SEED ($ACCEL, $SMP CPU, $SOAK_DISK disk) - log: $LOG"
@@ -220,7 +220,7 @@ TIME=$(( $(date +%s) - START ))
 echo "--- last 50 lines of $LOG ---"
 tail -n 50 "$LOG" | tr -d '\r'
 echo "--- QEMU exit code $CODE, ${TIME} s ---"
-VER=$(grep -a -m1 -o "DeSoOS v[0-9.]*" "$LOG" | head -n1 | sed 's/DeSoOS //')
+VER=$(grep -a -m1 -o "DeSo OS v[0-9.]*" "$LOG" | head -n1 | sed 's/DeSo OS //')
 grep -a "^\[RESULT-SOAK\]" "$LOG" | tail -n1 | tr -d '\r' | sed "s/\$/ ver=${VER:-?} accel=$ACCEL cpus=$SMP mem=512M wall_s=$TIME/" || true
 
 case "$RESULT" in

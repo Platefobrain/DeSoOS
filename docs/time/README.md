@@ -1,6 +1,6 @@
-# Time in DeSoOS
+# Time in DeSo OS
 
-How DeSoOS knows what time it is, how far it trusts that, and which sources may change it. The details of the
+How DeSo OS knows what time it is, how far it trusts that, and which sources may change it. The details of the
 protocols are in `NTS.md` (this folder); the last known good time (LKG) – the lower bound kept on the system volume – in
 `LKG.md`; the time service that sets the clock (`/bin/timekeeper`) in `TIMEKEEPER.md`.
 
@@ -8,11 +8,11 @@ protocols are in `NTS.md` (this folder); the last known good time (LKG) – the 
 
 | Clock | What it is | Who changes it |
 |---|---|---|
-| RTC (CMOS) | the hardware clock, read once at boot (kept in UTC – a Windows-style local-time RTC cannot be detected) | nobody: DeSoOS never writes it |
+| RTC (CMOS) | the hardware clock, read once at boot (kept in UTC – a Windows-style local-time RTC cannot be detected) | nobody: DeSo OS never writes it |
 | the wall clock (syscall 59, `date`) | the RTC at boot + uptime + the time service's correction (one atomic value, ms) | only the time service (`SYS_TIME_SET`), to max(T, LKG); without it the RTC's clock, which under QEMU TCG drifts with uptime (seconds within minutes) |
 | uptime / monotonic time | the LAPIC / TSC tick count since boot | nothing; timers, timeouts and the scheduler use only this |
 | the build date | the lower bound everything starts from (minus 24 h for certificates) | a new image |
-| the last known good time (LKG) | a lower bound kept in `/disk/.desoos/lkg` (`LKG.md`); without a system volume in memory only | only the time service: ⌊T − U − 2 s⌋ of a time agreed by two operators – never lowered |
+| the last known good time (LKG) | a lower bound kept in `/disk/.deso/lkg` (`LKG.md`); without a system volume in memory only | only the time service: ⌊T − U − 2 s⌋ of a time agreed by two operators – never lowered |
 
 **Plausible** (syscall 59's verdict) is a heuristic over the RTC: battery (VRT), readings that agree, valid fields, not
 after 2099, the LKG file readable (reason 8), not before the build date (5), not before the LKG (7, margin 0 s). Once the
@@ -51,4 +51,4 @@ wrong. That is why the time service needs two operators that agree and raises th
 | Linux (systemd-timesyncd / chrony) | chrony: NTS optional | systemd: build time + a file | every NTP sync (timesyncd: unauthenticated) |
 | Windows (w32time) | no NTS (MS-SNTP inside a domain) | Secure Time Seeding from TLS | NTP / SNTP |
 | RedoxOS | no NTP client found in the base system | – | – |
-| **DeSoOS** | NTS (v0.79) – plain NTP only shows | build date + LKG on the system volume | only NTS through the time service, two of three operators agreeing |
+| **DeSo OS** | NTS (v0.79) – plain NTP only shows | build date + LKG on the system volume | only NTS through the time service, two of three operators agreeing |

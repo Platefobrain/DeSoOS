@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# The layout of a DeSoOS USB stick with a disk (V080 stage C) – one code path for a real stick
+# The layout of a DeSo OS USB stick with a disk (V080 stage C) – one code path for a real stick
 # (make-usb.sh --with-disk /dev/sdX, after its safety checks) and for an image file
 # (make-usb.sh --with-disk --image, tests/test.sh, tests/make-usb-test.sh):
 #
 #   GPT (protective MBR, primary and backup header with their CRC32 sums, random GUIDs)
 #   partition 1  "EFI System" (C12A7328-F81F-11D2-BA4B-00A0C93EC93B), 128 MiB from 1 MiB,
-#                FAT32 "DESOOS" with EFI/BOOT/BOOTX64.EFI – never written by DeSoOS
-#   partition 2  "DeSoOS system" (1A0E2E7D-DE32-4C13-9442-9FCB2649CA02) – the rest, at most
+#                FAT32 "DESO" with EFI/BOOT/BOOTX64.EFI – never written by DeSo OS
+#   partition 2  "DeSo system" (1A0E2E7D-DE32-4C13-9442-9FCB2649CA02) – the rest, at most
 #                64 GiB (the format-1 limit of this DeSoFS), at least 64 MiB; an empty DeSoFS
 #                from tools/mkdesofs.py (random uuid, the current time)
 #   the rest     unallocated (reported)
@@ -29,7 +29,7 @@
 # held) and must still be the device make-usb.sh asked about – the same major:minor (of the
 # open descriptor), size and serial number (the udev record of that major:minor – what lsblk
 # shows; missing, empty or unclear = refused, never just the device number); 512-byte logical
-# sectors only (what DeSoOS reads).
+# sectors only (what DeSo OS reads).
 import argparse
 import fcntl
 import os
@@ -45,7 +45,7 @@ import mkdesofs  # noqa: E402
 
 SECTOR = 512
 ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
-DESOOS_SYSTEM = "1A0E2E7D-DE32-4C13-9442-9FCB2649CA02"
+DESO_SYSTEM = "1A0E2E7D-DE32-4C13-9442-9FCB2649CA02"
 ENTRIES = 128
 ENTRY_SIZE = 128
 TABLE_SECTORS = ENTRIES * ENTRY_SIZE // SECTOR  # 32
@@ -74,7 +74,7 @@ def layout(total_sectors):
     room = last_usable - P2_START + 1
     p2_len = min(room, P2_MAX) // ALIGN * ALIGN
     if p2_len < P2_MIN:
-        raise Fail("too small: %d MiB - needs at least %d MiB (ESP 128 MiB + DeSoOS system 64 MiB)"
+        raise Fail("too small: %d MiB - needs at least %d MiB (ESP 128 MiB + DeSo system 64 MiB)"
                    % (total_sectors * SECTOR >> 20, (P2_START + P2_MIN + ALIGN) * SECTOR >> 20))
     return P1_START, P2_START - 1, P2_START, P2_START + p2_len - 1, room - p2_len
 
@@ -101,7 +101,7 @@ def gpt_header(my_lba, alt_lba, first_usable, last_usable, disk_guid, table_lba,
 def gpt(total, p1, p2):
     """[(byte offset, bytes)] – protective MBR, primary header + table, backup table + header."""
     table = gpt_entry(ESP_TYPE, os.urandom(16), p1[0], p1[1], "EFI system partition")
-    table += gpt_entry(DESOOS_SYSTEM, os.urandom(16), p2[0], p2[1], "DeSoOS system")
+    table += gpt_entry(DESO_SYSTEM, os.urandom(16), p2[0], p2[1], "DeSo system")
     table = table.ljust(ENTRIES * ENTRY_SIZE, b"\0")
     tcrc = zlib.crc32(table) & 0xFFFFFFFF
     disk_guid = os.urandom(16)
@@ -185,7 +185,7 @@ def fat32_esp(efi, sectors, hidden, now):
     bs[3:11] = b"MSWIN4.1"
     struct.pack_into("<HBHBHHBHHHII", bs, 11, SECTOR, spc, reserved, nfats, 0, 0, 0xF8, 0, 32, 64, hidden, sectors)
     struct.pack_into("<IHHIHH", bs, 36, fatsz, 0, 0, root, 1, 6)
-    struct.pack_into("<BBBI11s8s", bs, 64, 0x80, 0, 0x29, volid, b"DESOOS     ", b"FAT32   ")
+    struct.pack_into("<BBBI11s8s", bs, 64, 0x80, 0, 0x29, volid, b"DESO       ", b"FAT32   ")
     bs[510:512] = b"\x55\xaa"
     fsinfo = bytearray(SECTOR)
     struct.pack_into("<I", fsinfo, 0, 0x41615252)
@@ -202,7 +202,7 @@ def fat32_esp(efi, sectors, hidden, now):
     def dir_cluster(entries):
         return b"".join(entries).ljust(cl, b"\0")
 
-    data = dir_cluster([dir_entry(b"DESOOS     ", 0x08, 0, 0, now), dir_entry(b"EFI        ", 0x10, efi_dir, 0, now)])
+    data = dir_cluster([dir_entry(b"DESO       ", 0x08, 0, 0, now), dir_entry(b"EFI        ", 0x10, efi_dir, 0, now)])
     data += dir_cluster([dir_entry(b".          ", 0x10, efi_dir, 0, now), dir_entry(b"..         ", 0x10, 0, 0, now), dir_entry(b"BOOT       ", 0x10, boot_dir, 0, now)])
     data += dir_cluster([dir_entry(b".          ", 0x10, boot_dir, 0, now), dir_entry(b"..         ", 0x10, efi_dir, 0, now), dir_entry(b"BOOTX64 EFI", 0x20, file0, len(efi), now)])
     data += efi.ljust(n * cl, b"\0")
@@ -351,7 +351,7 @@ def open_device(path, rdev, nbytes, serial):
     check_identity(st.st_rdev, size, UDEV_DATA, rdev, nbytes, serial)
     ssz = struct.unpack("<I", fcntl.ioctl(fd, BLKSSZGET, b"\0" * 4))[0]
     if ssz != SECTOR:
-        raise Fail("%s has %d-byte sectors - DeSoOS reads 512-byte sectors only" % (path, ssz))
+        raise Fail("%s has %d-byte sectors - DeSo OS reads 512-byte sectors only" % (path, ssz))
     if size > MAX_DEVICE:
         raise Fail("%s is larger than 256 GiB" % path)
     return Target(fd, size, True)
@@ -402,7 +402,7 @@ def verify(t, efi):
     total = t.size // SECTOR
     parts = read_gpt(t.read, total)
     p1a, p1b, p2a, p2b, _ = layout(total)
-    want = [(ESP_TYPE, p1a, p1b), (DESOOS_SYSTEM, p2a, p2b)]
+    want = [(ESP_TYPE, p1a, p1b), (DESO_SYSTEM, p2a, p2b)]
     if parts != want:
         raise Fail("partitions %s, expected %s" % (parts, want))
     got = fat32_read_file(t.read, p1a * SECTOR, "EFI/BOOT/BOOTX64.EFI")
@@ -419,18 +419,18 @@ def verify(t, efi):
 
 def update_esp(t, efi):
     """Tests (tests/make-usb-test.sh): the ESP rebuilt with a new BOOTX64.EFI – what
-    `make-usb.sh /media/.../DESOOS` does on a mounted stick; partition 2 is not touched."""
+    `make-usb.sh /media/.../DESO` does on a mounted stick; partition 2 is not touched."""
     total = t.size // SECTOR
     parts = read_gpt(t.read, total)
     if len(parts) != 2 or parts[0][0] != ESP_TYPE:
-        raise Fail("not a DeSoOS stick image")
+        raise Fail("not a DeSo OS stick image")
     _, a, b = parts[0]
     t.write(a * SECTOR, fat32_esp(efi, b - a + 1, a, int(time.time())))
     t.flush()
 
 
 def main():
-    ap = argparse.ArgumentParser(description="DeSoOS USB stick with a disk: GPT, ESP, DeSoFS.")
+    ap = argparse.ArgumentParser(description="DeSo OS USB stick with a disk: GPT, ESP, DeSoFS.")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--image")
     g.add_argument("--device")
@@ -441,7 +441,7 @@ def main():
     ap.add_argument("--expect-bytes", type=int)
     ap.add_argument("--expect-serial")
     ap.add_argument("--efi", required=True)
-    ap.add_argument("--label", default="DESOOS")
+    ap.add_argument("--label", default="DESO")
     a = ap.parse_args()
     try:
         with open(a.efi, "rb") as f:
@@ -475,7 +475,7 @@ def main():
             except OSError:
                 pass
         os.close(t.fd)
-        print("mkusb: partition 1 ESP %d MiB (BOOTX64.EFI %d B), partition 2 DeSoOS system %d MiB (DeSoFS %d blocks)"
+        print("mkusb: partition 1 ESP %d MiB (BOOTX64.EFI %d B), partition 2 DeSo system %d MiB (DeSoFS %d blocks)"
               % ((p1b - p1a + 1) * SECTOR >> 20, len(efi), (p2b - p2a + 1) * SECTOR >> 20, blocks))
         if rest >= ALIGN:
             print("mkusb: %d MiB left unallocated (a DeSoFS volume of this version holds at most 64 GiB)" % (rest * SECTOR >> 20))

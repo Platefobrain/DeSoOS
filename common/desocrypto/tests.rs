@@ -2013,7 +2013,7 @@ fn bignum_checks(c: &mut Checks) -> Result<(), Failure> {
     Ok(())
 }
 
-const RSA_MSG: &[u8] = b"DeSoOS signature test";
+const RSA_MSG: &[u8] = b"DeSoOS signature test"; // fixed test data: the vectors are signatures over these exact bytes
 
 fn rsa_checks(c: &mut Checks) -> Result<(), Failure> {
     c.group("rsa");
@@ -2031,7 +2031,7 @@ fn rsa_checks(c: &mut Checks) -> Result<(), Failure> {
         let verify = |m: &[u8], s: &[u8]| if kind == 0 { key.verify_pkcs1(h, m, s) } else { key.verify_pss(&p, m, s) };
         c.check(verify(RSA_MSG, s).is_ok())?;
         // Another message, a flipped signature bit (low byte: stays below n), a flipped top byte.
-        c.check(verify(b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?;
+        c.check(verify(b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?; // fixed test data
         let mut t = [0u8; 513];
         t[..k].copy_from_slice(s);
         t[k - 1] ^= 1;
@@ -2149,7 +2149,7 @@ fn ecdsa_checks(c: &mut Checks) -> Result<(), Failure> {
         let s = bytes(sig, &mut sb);
         c.check(ecdsa::verify(curve, key, RSA_MSG, s).is_ok())?;
         c.check(ecdsa::check_public_key(curve, key).is_ok())?;
-        c.check(ecdsa::verify(curve, key, b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?;
+        c.check(ecdsa::verify(curve, key, b"DeSoOS signature tesu", s) == Err(Error::Mismatch))?; // fixed test data
         // The other curve refuses the key (wrong length).
         let other = if curve == Curve::P256 { Curve::P384 } else { Curve::P256 };
         c.check(ecdsa::verify(other, key, RSA_MSG, s) == Err(Error::InvalidKey))?;

@@ -55,7 +55,7 @@
 // Cookies are used once (each query takes a new one, also when its answer never comes – a
 // cookie never goes out twice) – that keeps queries unlinkable (§5.7).  They and the keys
 // stay in memory only; nothing is written to a file or a log (RFC 8915 recommends keeping
-// one across restarts – DeSoOS does not yet: after a restart, always a new NTS-KE).  The
+// one across restarts – DeSo OS does not yet: after a restart, always a new NTS-KE).  The
 // decrypted part of an answer is zeroed on every way out of `check_response` (`Wiped`).
 #![allow(dead_code)]
 

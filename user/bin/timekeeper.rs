@@ -43,9 +43,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
@@ -59,7 +59,7 @@ mod ntske;
 #[path = "../lib/timesync.rs"]
 mod timesync;
 
-use desoos::*;
+use deso::*;
 use desotls::chain::{self, PeerChain};
 use desotls::client::{Client, Config};
 use desotls::record::Suite;
@@ -493,7 +493,7 @@ mod test_list {
     use super::{Entry, MAX};
     /// tests/nts-server: the time service's servers, NTS-KE at 58600 + j.
     const fn e(j: u16, operator: &'static str) -> Entry {
-        Entry { host: "tls.desoos", port: 58600 + j, operator }
+        Entry { host: "tls.deso", port: 58600 + j, operator }
     }
     /// The cases of NTS TEST (kernel/user/test_nts.rs).  The test CAs (tests/tls/ca.pem and
     /// nts-root.pem) are the only anchors.
@@ -559,7 +559,7 @@ fn test_roots(der: &mut [u8; 4096], spans: &mut [(usize, usize); 2]) -> bool {
 }
 
 /// Test mode: init has just started netd – wait for net0's DHCP address and point DNS at
-/// tests/dns-stub.py (tls.desoos = the host).
+/// tests/dns-stub.py (tls.deso = the host).
 #[cfg(selftest)]
 fn test_network() -> bool {
     static mut REPLY: [u8; MSG_MAX] = [0; MSG_MAX];

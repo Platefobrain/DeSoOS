@@ -363,9 +363,9 @@ pub const O_CREATE: u64 = 4;
 pub const O_TRUNC: u64 = 8;
 pub const O_APPEND: u64 = 16;
 
-// DeSoOS errors – negative syscall results, the same names and numbers in
-// programs (user/lib/desoos.rs).  The numbers are the Unix ones (a future Linux
-// compatibility layer needs no translation); the names are DeSoOS's.
+// DeSo OS errors – negative syscall results, the same names and numbers in
+// programs (user/lib/deso.rs).  The numbers are the Unix ones (a future Linux
+// compatibility layer needs no translation); the names are DeSo OS's.
 pub const ERROR_NOT_PERMITTED: i64 = -1;
 pub const ERROR_NOT_FOUND: i64 = -2;
 pub const ERROR_NO_PROCESS: i64 = -3;
@@ -399,7 +399,7 @@ pub const ERROR_NOT_EMPTY: i64 = -39;
 pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
 /// No reply in time (ublk – usbd did not respond).
 pub const ERROR_TIMED_OUT: i64 = -110;
-/// The program needs an ABI this system does not give (exec – ELF ABI note; DeSoOS-only
+/// The program needs an ABI this system does not give (exec – ELF ABI note; DeSo-only
 /// codes start at -200, below every Unix number).
 pub const ERROR_ABI: i64 = -200;
 
@@ -698,7 +698,7 @@ fn open_path(p: &mut Process, path: String, flags: u64) -> SysResult {
     if write && fs::is_read_only(&path) {
         return Err(ERROR_READ_ONLY);
     }
-    // A sealed file (the CA store) and the system's /.desoos (the last known good time) are
+    // A sealed file (the CA store) and the system's /.deso (the last known good time) are
     // not even opened for writing.  (An early answer only: the protection itself is in the VFS,
     // under the lock of each write – the handle keeps a path, so a volume mounted later over it
     // is checked again.)

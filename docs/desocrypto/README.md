@@ -1,7 +1,7 @@
 # DeSoCrypto
 
-DeSoOS's own cryptographic library (`common/desocrypto/`, v0.7.0): hashes, MACs, key derivation, three AEADs (incl. AES-SIV), X25519,
-signature verification and the random number generator's core. Written for DeSoOS only – no Cargo crate, no outside
+DeSo OS's own cryptographic library (`common/desocrypto/`, v0.7.0): hashes, MACs, key derivation, three AEADs (incl. AES-SIV), X25519,
+signature verification and the random number generator's core. Written for DeSo OS only – no Cargo crate, no outside
 code. It is a library, not a service: whoever needs it includes the files (`#[path]`) and calls them directly – the
 kernel and programs alike. `core` only: no heap, no syscalls.
 
@@ -21,7 +21,7 @@ TEST), `netd` (its own generator keyed from `getrandom`), `/bin/sha256sum`, `/bi
 
 How it compares:
 
-| | Linux | Windows | RedoxOS | DeSoOS |
+| | Linux | Windows | RedoxOS | DeSo OS |
 |---|---|---|---|---|
 | in the kernel | the kernel crypto API (`crypto/`) | CNG kernel mode (`cng.sys`) | – | the same library as in programs (no SIMD paths) |
 | in programs | a library per program (OpenSSL, libsodium, …) | CNG (`bcrypt.dll`) | Rust crates (ring, RustCrypto) | `common/desocrypto` included in the program |

@@ -698,8 +698,8 @@ pub fn self_test() {
 
     // 6. String / format! / Vec<String>.
     {
-        let s = alloc::format!("DeSoOS {} {}", 3, "heap");
-        check!(s == "DeSoOS 3 heap", "format!");
+        let s = alloc::format!("DeSo OS {} {}", 3, "heap");
+        check!(s == "DeSo OS 3 heap", "format!");
         let mut names: Vec<String> = Vec::new();
         for i in 0..200 {
             names.push(alloc::format!("entry-{}", i));

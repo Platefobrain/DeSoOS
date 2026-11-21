@@ -1,4 +1,4 @@
-// DeSoTLS – the DeSoOS TLS library (version: VERSION below): a TLS 1.3 client and the
+// DeSoTLS – the DeSo OS TLS library (version: VERSION below): a TLS 1.3 client and the
 // checking of a server's X.509 certificate chain.
 //
 // Plain code over DeSoCrypto, like it: no heap, no syscalls, only `core`; whoever uses it

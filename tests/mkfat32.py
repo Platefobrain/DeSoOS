@@ -2,7 +2,7 @@
 # Test USB stick image for ./test.sh (QEMU usb-storage, read-
 # only) – no mtools and no sudo: an MBR with one FAT32 partition (type 0x0C, starting
 # at sector 2048, as on a real USB stick), 512 B clusters, root directory:
-#   DESOOS.TST  – marker (text),
+#   DESO.TST  – marker (text),
 #   DATA.BIN    – 4 MiB pattern: 32-bit word no. k = (k * 2654435761) mod 2^32
 #                 (the kernel / usbtest check every byte and measure MB/s),
 #   files from the arguments (8.3 name = file name in upper case).
@@ -17,7 +17,7 @@ SIZE_MB = 48
 PART_START = 2048
 RESERVED = 32
 NUM_FATS = 2
-LABEL = b"DESOOSTEST "
+LABEL = b"DESOTEST   "
 
 
 def pattern(size):
@@ -38,7 +38,7 @@ def main():
     if len(sys.argv) < 2:
         raise SystemExit("usage: mkfat32.py image.img [file ...]")
     image = sys.argv[1]
-    files = [("DESOOS.TST", b"DeSoOS USB test disk - read-only\n"), ("DATA.BIN", pattern(4 * 1024 * 1024))]
+    files = [("DESO.TST", b"DeSo OS USB test disk - read-only\n"), ("DATA.BIN", pattern(4 * 1024 * 1024))]
     for path in sys.argv[2:]:
         with open(path, "rb") as f:
             files.append((os.path.basename(path), f.read()))
@@ -102,7 +102,7 @@ def main():
     # FAT32 boot sector (+ a copy in sector 6) and FSInfo (sector 1, copy in 7).
     bs = bytearray(SECTOR)
     bs[0:3] = b"\xeb\x58\x90"
-    bs[3:11] = b"DESOOS  "
+    bs[3:11] = b"DESO    "
     struct.pack_into("<HBHBHHBHHHII", bs, 11, SECTOR, 1, RESERVED, NUM_FATS, 0, 0, 0xF8, 0, 32, 64, PART_START, part)
     struct.pack_into("<IHHIHH", bs, 36, fat, 0, 0, 2, 1, 6)
     bs[64] = 0x80

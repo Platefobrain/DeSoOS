@@ -7,8 +7,8 @@
 // NTP, an HTTP `Date` header, a certificate's notBefore or a time a program gives).  A clock
 // earlier than the LKG is not plausible (reason 7), and TLS refuses to connect.
 //
-// Where: `/.desoos/lkg` on the system volume – the DeSoFS volume mounted at /disk, written
-// only by the kernel.  The VFS refuses every change under `/.desoos` of a DeSoFS volume to
+// Where: `/.deso/lkg` on the system volume – the DeSoFS volume mounted at /disk, written
+// only by the kernel.  The VFS refuses every change under `/.deso` of a DeSoFS volume to
 // everybody else (fs/mod.rs `is_reserved`: by the resolved volume and node, not by the text
 // of a path).  No system volume (no disk, FAT32, read-only – a real SSD today): the LKG
 // lives in memory only, from the build date on.
@@ -17,7 +17,7 @@
 //   0  "DESOLKG1"      8  version (u16, 1)   10  source (u16: 2 NTS, 3 self-test)
 //   12 0 (u32)         16 time (u64, Unix seconds UTC)
 //   24 SHA-256 over bytes 0..24 – against an accident (a torn write, a bad sector), not
-//      against a deliberate change by someone with the disk outside DeSoOS (out of scope,
+//      against a deliberate change by someone with the disk outside DeSo OS (out of scope,
 //      docs/time/LKG.md).
 //
 // Reading (`load`, at boot after the system volume is mounted):
@@ -29,8 +29,8 @@
 //   good                                      -> loaded
 // A time in the record earlier than the build date is kept but never lowers the bound.
 //
-// Writing (`save_to`, atomic and durable): the whole record into `/.desoos/lkg.new`, read
-// back and compared, then `rename` onto `/.desoos/lkg`.  Every DeSoFS operation is its own
+// Writing (`save_to`, atomic and durable): the whole record into `/.deso/lkg.new`, read
+// back and compared, then `rename` onto `/.deso/lkg`.  Every DeSoFS operation is its own
 // transaction (copy-on-write, flushed, one new superblock), so after a power loss at any
 // point there is exactly the old record or the new one – never an empty or mixed file
 // (LKG TEST cuts the power at every write of a save and checks).  A save that fails keeps
@@ -69,10 +69,10 @@ pub const RECORD_LEN: usize = 56;
 /// Where the system volume is mounted, and the files on it (paths inside the volume).
 pub const SYSTEM_MOUNT: &str = "/disk";
 #[cfg_attr(not(selftest), allow(dead_code))]
-pub const DIR: &str = "/.desoos";
-pub const FILE: &str = "/.desoos/lkg";
+pub const DIR: &str = "/.deso";
+pub const FILE: &str = "/.deso/lkg";
 #[cfg_attr(not(selftest), allow(dead_code))]
-pub const TEMP: &str = "/.desoos/lkg.new";
+pub const TEMP: &str = "/.deso/lkg.new";
 
 /// Who raised the LKG.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -339,7 +339,7 @@ fn save_system(secs: u64, source: Source) -> Result<(), ()> {
 }
 
 /// Runs `f` on the system volume (the DeSoFS volume mounted at /disk, read-write) – the
-/// kernel's own way in, past the VFS protection of /.desoos.  None – no such volume.
+/// kernel's own way in, past the VFS protection of /.deso.  None – no such volume.
 fn on_system<R>(f: impl FnOnce(&mut dyn FileSystem) -> R) -> Option<R> {
     let mut f = Some(f);
     let mut out = None;

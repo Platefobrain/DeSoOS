@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# HTTPS servers for the self-tests (tests/test.sh starts it; /bin/tlstest in DeSoOS talks
-# to them as tls.desoos = 10.0.2.2).  Only the Python standard library (ssl = OpenSSL).
+# HTTPS servers for the self-tests (tests/test.sh starts it; /bin/tlstest in DeSo OS talks
+# to them as tls.deso = 10.0.2.2).  Only the Python standard library (ssl = OpenSSL).
 #
 #   58443  TLS 1.3, RSA certificate (tests/tls/rsa.pem) – the pages below
 #   58444  TLS 1.3, ECDSA P-256 certificate
-#   58445  expired certificate      58446  not yet valid      58447  issued for other.desoos
+#   58445  expired certificate      58446  not yet valid      58447  issued for other.deso
 #   58448  certificate with a broken signature                58449  issued by another CA
 #   58450  TLS 1.2 only             58451  key exchange P-256 only (no X25519)
 #   58460-58467  a man in the middle in front of a 58443-like server (each its own):
@@ -50,7 +50,7 @@ import stubnet
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERTS = os.path.join(HERE, "tls")
-KEYLOG_DIR = tempfile.mkdtemp(prefix="desoos-tls-")
+KEYLOG_DIR = tempfile.mkdtemp(prefix="deso-tls-")
 BIG = 1024 * 1024
 BIG_BODY = None
 SEEN = {}
@@ -71,7 +71,7 @@ def page(path):
         parts, end = got
         return parts, "notify" if end == "close" else end
     def ok(body, extra=""):
-        return [("HTTP/1.0 200 OK\r\nServer: desoos-tls-test\r\n%sContent-Length: %d\r\n\r\n" % (extra, len(body))).encode() + body]
+        return [("HTTP/1.0 200 OK\r\nServer: deso-tls-test\r\n%sContent-Length: %d\r\n\r\n" % (extra, len(body))).encode() + body]
     if path == "/hello":
         return ok(b"Hello over TLS\n"), "notify"
     if path == "/big":

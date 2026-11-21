@@ -3,11 +3,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::{O_READ, close, open, read, strerror, write};
+use deso::{O_READ, close, open, read, strerror, write};
 
 entry!(main);
 
@@ -22,7 +22,7 @@ fn copy(fd: u64) -> i64 {
     }
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     if args.len() < 2 {
         return if copy(0) < 0 { 1 } else { 0 };
     }

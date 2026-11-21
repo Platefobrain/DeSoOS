@@ -1,4 +1,4 @@
-// DSB – DeSoOS Boot (UEFI loader).
+// DSB – DeSo OS Boot (UEFI loader).
 //
 // The kernel is an ELF (PT_LOAD segments) linked at 0xffff_ffff_8000_0000.
 // DSB:
@@ -312,7 +312,7 @@ fn load_kernel(ranges: &[(u64, u64)]) -> Result<Loaded, &'static str> {
 
 fn fail(what: &str, status: Status) -> Status {
     println!("DSB: ERROR: {}", what);
-    println!("DSB: cannot start DeSoOS ({:?})", status);
+    println!("DSB: cannot start DeSo OS ({:?})", status);
     boot::stall(core::time::Duration::from_secs(10));
     status
 }

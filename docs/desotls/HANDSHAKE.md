@@ -23,7 +23,7 @@ after the server's Finished verified and ours was sent; every error sends an ale
 | ALPN – one protocol, which the server must confirm (0.3, for NTS-KE) | a list of protocols; netget sends none |
 | the exporter of keying material (RFC 9846 §7.5, 0.3) | the early exporter (no 0-RTT) |
 
-| | Linux (OpenSSL / rustls) | Windows (Schannel) | RedoxOS (rustls) | DeSoOS (DeSoTLS) |
+| | Linux (OpenSSL / rustls) | Windows (Schannel) | RedoxOS (rustls) | DeSo OS (DeSoTLS) |
 |---|---|---|---|---|
 | where | a library in the program | LSASS + the program's process | a library in the program | `common/desotls` in the program; the kernel has no TLS |
 | TLS 1.2 | yes | yes | yes | no |
@@ -246,7 +246,7 @@ Chunked bodies: the size in 1–16 hex digits (17 – also with leading zeros �
 overflows 64 bits); chunk extensions are skipped but must follow RFC 9112 §7.1.1 (`;name[=token|quoted-string]`,
 an unclosed quote or a backslash before nothing is an error); CRLF exactly (a bare LF is an error), also after
 every chunk's data; a chunk-size line of at most 4 KiB. Trailers are kept apart from the head – never merged,
-never framing; at most 8 KiB, the same syntax as headers; refused there (DeSoOS policy built from the categories of
+never framing; at most 8 KiB, the same syntax as headers; refused there (DeSo OS policy built from the categories of
 RFC 9110 §6.5.1 – fields needed before the content): Content-Length, Transfer-Encoding, Host, Content-Encoding,
 Content-Type, Content-Range, Trailer, Connection, Keep-Alive, TE, Upgrade, Cache-Control, Expires, Set-Cookie,
 Authorization, WWW-Authenticate – and every field the answer's Connection names. `-v` prints the heads (also the

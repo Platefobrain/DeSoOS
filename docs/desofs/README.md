@@ -1,6 +1,6 @@
 # DeSoFS
 
-DeSoOS's own file system: copy-on-write (a block is never overwritten in place), the SHA-256 of every block stored in
+DeSo OS's own file system: copy-on-write (a block is never overwritten in place), the SHA-256 of every block stored in
 its parent's pointer, two superblocks, every operation committed to the disk before it returns, snapshots of the whole
 volume. Format 1 is closed – `FORMAT.md` describes it byte by byte.
 
@@ -14,7 +14,7 @@ What it can do (details and design in `../ARCHITECTURE.md`, section "DeSoFS"):
   superblock's whole state when one tree is damaged;
 - `desofs snapshot create / list / mount / delete / restore` – up to 31 snapshots, nothing copied when one is made;
 - power loss at any moment leaves the state before or after the last operation – never a mix;
-- `/.desoos` at the root of a volume belongs to the system: on the system volume (`/disk`) it holds the last known
+- `/.deso` at the root of a volume belongs to the system: on the system volume (`/disk`) it holds the last known
   good time (`../time/LKG.md`); the VFS refuses every change there by programs and by the shell's file commands –
   only the kernel writes it. It is an ordinary directory in the format (nothing in `FORMAT.md` changes).
 
@@ -29,5 +29,5 @@ Where things are:
 
 Tests: DESOFS TEST 1–32 (reading, writing, power loss, check / repair, snapshots, the block cache), RESTART TEST
 (data on `/disk` after a real restart, the last known good time read back, `[RESULT-FS]` speed figures), INIT TEST 9
-(`desofs` through the user shell), LKG TEST (the LKG record on a volume, power loss during its save, `/.desoos`
+(`desofs` through the user shell), LKG TEST (the LKG record on a volume, power loss during its save, `/.deso`
 protected).

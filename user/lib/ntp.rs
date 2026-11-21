@@ -18,7 +18,7 @@
 //      Transmit != 0, Transmit not before Receive, root delay (signed 16.16) >= 0 and
 //      < 16 s, root dispersion (unsigned 16.16) < 16 s, and
 //      root_distance_proxy = root delay / 2 + root dispersion <= 1.5 s.  The 1.5 s is
-//      DeSoOS's own limit: RFC 5905's MAXDIST (1 s) is for the full root distance with
+//      DeSo OS's own limit: RFC 5905's MAXDIST (1 s) is for the full root distance with
 //      peer delay, dispersion and jitter, which one query does not have.
 #![allow(dead_code)]
 

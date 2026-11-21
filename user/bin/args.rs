@@ -2,13 +2,13 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 entry!(main);
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     println!("argc = {}", args.len());
     for (i, a) in args.iter().enumerate() {
         println!("argv[{}] = {}", i, a);

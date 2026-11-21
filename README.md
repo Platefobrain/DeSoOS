@@ -1,4 +1,4 @@
-# desoOS <img src="https://img.shields.io/badge/version-0.80.1-1f6feb?style=for-the-badge" alt="Version 0.80.1">
+# DeSo OS <img src="https://img.shields.io/badge/version-0.80.1-1f6feb?style=for-the-badge" alt="Version 0.80.1">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
@@ -25,7 +25,7 @@
 
 ---
 
-DeSoOS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
+DeSo OS is a hobby operating system for x86_64 PCs and laptops with UEFI firmware, written in
 Rust. It uses a hybrid design: a small kernel, with drivers and services running as ordinary
 user-space processes that talk to the kernel and to each other over IPC (handles, channels and
 shared memory).
@@ -33,7 +33,7 @@ shared memory).
 Boot chain:
 
 ```
-UEFI firmware (OVMF in QEMU) -> DSB (DeSoOS boot loader) -> DeSoOS kernel
+UEFI firmware (OVMF in QEMU) -> DSB (DeSo OS boot loader) -> DeSo OS kernel
 ```
 
 More documentation:
@@ -65,7 +65,7 @@ More documentation:
 - Storage: virtio-blk, NVMe (read-only on real hardware), GPT partitions, block layer with
   read-only enforcement.
 - USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, mass storage (read-only; writing only
-  inside a "DeSoOS system" partition the kernel registered; a stick made by `make-usb.sh --with-disk`)
+  inside a "DeSo system" partition the kernel registered; a stick made by `make-usb.sh --with-disk`)
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP (also for programs – connected client sockets), DHCP, DNS, TCP client and server, loopback;
@@ -73,7 +73,7 @@ More documentation:
 - Permissions (DCP): a process may do exactly what its handles allow; one rights table checked before every
   syscall; a file sandbox (`nofiles`) with directory handles (a program sees one directory only); network
   administration only for `netconfig`.
-- Cryptography: DeSoCrypto, DeSoOS's own library (`common/desocrypto`) for the kernel and programs – SHA-256/384/512,
+- Cryptography: DeSoCrypto, DeSo OS's own library (`common/desocrypto`) for the kernel and programs – SHA-256/384/512,
   HMAC and HKDF over them, ChaCha20, Poly1305, ChaCha20-Poly1305 (AEAD), X25519, AES-128-GCM (AES-NI and PCLMULQDQ
   in programs, a bitsliced fallback without tables), RSA (PKCS#1 v1.5, PSS) and ECDSA (P-256, P-384) signature
   verification, tested with Wycheproof (no heap, no syscalls; not audited – not for production use);
@@ -87,9 +87,9 @@ More documentation:
   Mozilla's root store installed as `/etc/certs/roots` and sealed – no program can change it; the wall clock says
   whether it is plausible (syscall 59: RTC battery, readings, not before the build date, not before the last known
   good time); tool `certcheck`.
-- The last known good time: a lower bound for the clock kept in `/disk/.desoos/lkg` on the DeSoFS system volume
+- The last known good time: a lower bound for the clock kept in `/disk/.deso/lkg` on the DeSoFS system volume
   (atomic, checked, survives a power loss); a clock below it, or an unreadable file, is not plausible and TLS
-  refuses; `/.desoos` is the kernel's – the VFS refuses every change by programs (`docs/time/LKG.md`).
+  refuses; `/.deso` is the kernel's – the VFS refuses every change by programs (`docs/time/LKG.md`).
 - The time service (`time`, `/bin/timekeeper`): authenticated time with NTS from three operators (Cloudflare, Netnod,
   PTB), set only when at least two agree; the only holder of the right to set the clock (`SYS_TIME_SET`) – the kernel
   checks the numbers and never lowers the last known good time; without a plausible clock (or with an unreadable LKG)
@@ -100,7 +100,7 @@ More documentation:
   authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
   code for a refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start; without an internal DeSoFS
-  disk, a USB stick's "DeSoOS system" partition becomes `/disk`; programs copied to `/disk/bin` run by name), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
+  disk, a USB stick's "DeSo system" partition becomes `/disk`; programs copied to `/disk/bin` run by name), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSo OS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
@@ -142,13 +142,13 @@ Build-time environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DESOOS_AUTOSTRESS=S` | `0` (off) | Same as `--autostress=S`: stress test for S seconds 5 s after boot. |
-| `DESOOS_AUTOSOAK=S` | `0` (off) | Same as `--autosoak=S`: the soak test for S seconds (at least 60) on a RAM disk before init. Not together with `DESOOS_AUTOSTRESS`. |
-| `DESOOS_TRUST_CPU=0/1` | `1` | Whether RDSEED counts entropy in the kernel's random number generator (0: still mixed in, counts nothing). |
-| `DESOOS_TRUST_BOOTLOADER=0/1` | `1` | Whether the firmware's RNG (RAW algorithm) counts entropy (0: still mixed in, counts nothing). |
-| `DESOOS_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
-| `DESOOS_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
-| `DESOOS_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |
+| `DESO_AUTOSTRESS=S` | `0` (off) | Same as `--autostress=S`: stress test for S seconds 5 s after boot. |
+| `DESO_AUTOSOAK=S` | `0` (off) | Same as `--autosoak=S`: the soak test for S seconds (at least 60) on a RAM disk before init. Not together with `DESO_AUTOSTRESS`. |
+| `DESO_TRUST_CPU=0/1` | `1` | Whether RDSEED counts entropy in the kernel's random number generator (0: still mixed in, counts nothing). |
+| `DESO_TRUST_BOOTLOADER=0/1` | `1` | Whether the firmware's RNG (RAW algorithm) counts entropy (0: still mixed in, counts nothing). |
+| `DESO_STRESS_POOL=P` | `0` | Stress with P processes per CPU (full load). `0` = comparison mode (3 per CPU, at most 48). |
+| `DESO_IDLE_POLL_US=N` | `200` | Upper bound (us) for spinning an idle CPU before `hlt`; `0` = `hlt` immediately. |
+| `DESO_IDLE_POLL_ADAPT=0/1` | `1` | `1` = the polling window adapts per CPU; `0` = fixed N. |
 | `SOURCE_DATE_EPOCH=S` | the build time | The build date (Unix seconds): a clock earlier than it minus 24 h is not plausible (certificates). `build.sh` prints the date and where it came from. |
 
 Outputs:
@@ -167,7 +167,7 @@ kernel is located physically.
 
 User programs live in `user/bin/*.rs` and are embedded in the kernel image as `/bin/<name>`.
 To add one, create `user/bin/<name>.rs` (see `user/bin/hello.rs`) and run `./build.sh`. The
-user library `user/lib/desoos.rs` provides `println!`, files, directories, `spawn`/`wait`/`kill`,
+user library `user/lib/deso.rs` provides `println!`, files, directories, `spawn`/`wait`/`kill`,
 `sleep_ms`, `readkey`, arguments, and `Vec`/`String` via `extern crate alloc;`.
 
 ## Running in QEMU
@@ -176,10 +176,10 @@ user library `user/lib/desoos.rs` provides `println!`, files, directories, `spaw
 ./run-qemu.sh
 ```
 
-The kernel starts `/bin/init`, which starts the user-space shell (`desoos:/$`). Output appears
+The kernel starts `/bin/init`, which starts the user-space shell (`deso:/$`). Output appears
 both in the QEMU window and in the terminal; you can type in either (the QEMU window uses a PS/2
 keyboard). Type `help` for the command list. If `/bin/init` is missing or keeps crashing, the
-kernel emergency shell (`desoos>`) starts instead.
+kernel emergency shell (`deso>`) starts instead.
 
 Note: in the terminal (`-serial stdio`) Ctrl+C quits QEMU; in the QEMU window it goes to the shell.
 
@@ -198,7 +198,7 @@ Disks attached by `run-qemu.sh`:
 
 - `disk.img` - virtio-blk data disk (64 MiB, created on first run), DeSoFS or FAT32 at `/disk`.
 - `nvme.img` - disk on QEMU's emulated NVMe controller (created on first run). This is the only
-  NVMe device DeSoOS ever writes to.
+  NVMe device DeSo OS ever writes to.
 - `build/` - presented as a read-only USB stick, like a real boot from a USB stick.
 - `usb.img` (optional, in the repository root) - a second, read-only USB stick, mounted at
   `/usb0`. Create one with your own files: `python3 tests/mkfat32.py usb.img file1 file2`.
@@ -231,7 +231,7 @@ QEMU/build error (3). Full logs: `logs/test.log`, `logs/test-restart.log`, `logs
 `disk.img` is left untouched. Do not run `test.sh` at the same time as `run-qemu.sh` or another `test.sh` (they
 share `build/` and a host port) – `test.sh` checks this and stops with "another test or QEMU is already running".
 
-How it works: QEMU receives the fw_cfg file `opt/desoos/autotest` and an `isa-debug-exit`
+How it works: QEMU receives the fw_cfg file `opt/deso/autotest` and an `isa-debug-exit`
 device; after the tests (or on a panic / critical exception) the kernel powers QEMU off with the
 result code. A `--selftest` build started with plain `./run-qemu.sh` runs the tests and then
 starts the shell as usual. Test code is marked `#[cfg(selftest)]` and is not compiled into a
@@ -269,11 +269,11 @@ Logs of `make-usb.sh` builds go to `logs/build-usb.log`.
 
 ## Real hardware
 
-DeSoOS boots on a PC or laptop from a USB stick in UEFI mode.
+DeSo OS boots on a PC or laptop from a USB stick in UEFI mode.
 
 ### Is my data safe?
 
-Yes. On real hardware DeSoOS **does not write to any disk**:
+Yes. On real hardware DeSo OS **does not write to any disk**:
 
 1. **NVMe driver**: only QEMU's emulated controller (PCI `1b36:0010`) is writable. Every real
    SSD is read-only: a write fails before anything reaches the device. Only read and queue
@@ -282,7 +282,7 @@ Yes. On real hardware DeSoOS **does not write to any disk**:
    including `desofs format`, `disk write` and writing files on `/esp`.
 3. **USB sticks are read-only**: the USB disk is read-only in the block layer and FAT32 / `open`
    refuse writes (`ERROR_READ_ONLY`). The only exception (v0.80) is a GPT partition of
-   the type "DeSoOS system" that only DeSoOS's own `make-usb.sh --with-disk` creates: the kernel may
+   the type "DeSo system" that only DeSo OS's own `make-usb.sh --with-disk` creates: the kernel may
    write inside it, and only inside it – three independent checks (the partition, the kernel's USB
    disk, `usbd`), never on a write-protected stick. A stick prepared by `make-usb.sh` (FAT32 only)
    has no such partition and is never written.
@@ -299,7 +299,7 @@ Any FAT32 USB stick works (for example a new, empty one). The whole system is a 
 
 ```bash
 ./make-usb.sh --list                 # list USB disks (system disks are marked and never touched)
-./make-usb.sh /media/$USER/<LABEL>   # build and copy DeSoOS to the mounted stick
+./make-usb.sh /media/$USER/<LABEL>   # build and copy DeSo OS to the mounted stick
 ```
 
 The script **does not format anything**. It checks that the target is FAT32 on a USB disk (not
@@ -309,21 +309,21 @@ reformatted to FAT32 once, which **erases** the stick: `./make-usb.sh --format /
 that it is USB and asks you to retype the device name), or use your desktop's disk utility.
 
 **A stick with a disk** (v0.80): `./make-usb.sh --with-disk /dev/sdX` **erases** the stick and makes
-two partitions – the ESP (FAT32 `DESOOS` with `BOOTX64.EFI`, read-only in DeSoOS, `/usb0`) and a
-"DeSoOS system" partition with an empty DeSoFS (the rest of the stick, at most 64 GiB) that DeSoOS
+two partitions – the ESP (FAT32 `DESO` with `BOOTX64.EFI`, read-only in DeSo OS, `/usb0`) and a
+"DeSo system" partition with an empty DeSoFS (the rest of the stick, at most 64 GiB) that DeSo OS
 mounts read-write at `/disk`: your files and the last known good time survive a restart. The
 script refuses anything but a whole, removable USB disk of at most 256 GiB with nothing mounted, no
 swap and no LVM / RAID / dm-crypt on it, never a system disk; it shows model, size, serial and the
 partitions, asks you to retype the device name, checks everything again right before writing and
-reads the result back. `--dry-run` only checks. Update DeSoOS on such a stick as before:
-`./make-usb.sh /media/$USER/DESOOS` replaces `BOOTX64.EFI` only – `/disk` is not touched.
+reads the result back. `--dry-run` only checks. Update DeSo OS on such a stick as before:
+`./make-usb.sh /media/$USER/DESO` replaces `BOOTX64.EFI` only – `/disk` is not touched.
 
 **Programs from the disk**: copy a program to `/disk/bin` (e.g. `cp /usb1/prog /disk/bin/prog` from another FAT32
 stick) and type its name in the shell. It is looked up after everything of the system – it can never replace a
 built-in, a `/bin` program or an information command – and it gets what any program typed by hand gets: no system
 actions (`sysctl`), no clock setting, no network administration. No signatures yet (packages come later).
 
-To run a stress test without a keyboard: `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
+To run a stress test without a keyboard: `DESO_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
 (see [Stress test on real hardware](#stress-test-on-real-hardware)). A plain `./make-usb.sh`
 builds a regular kernel.
 
@@ -340,7 +340,7 @@ Open the firmware setup (usually F2 or Del at the vendor logo):
 
 Insert the stick, power on, open your firmware boot menu (usually F12, F11, F9 or Esc at the
 vendor logo) and choose the USB stick (`EFI USB Device`). You will see boot logs, then
-`desoos:/$`. Useful checks:
+`deso:/$`. Useful checks:
 
 - `disk` - NVMe disks and GPT partitions (all `read-only`)
 - `ls /esp` - the disk's EFI partition (read-only), e.g. `ls /esp/EFI`
@@ -354,20 +354,20 @@ something goes wrong). To shut down: `k halt` and then hold the power button, or
 power button. Remove the stick and the computer boots normally from its disk.
 
 Internal laptop keyboards are often USB devices rather than PS/2 (no 8042 controller); they
-work through `usbd`. If no keyboard works, DeSoOS still boots and shows its logs.
+work through `usbd`. If no keyboard works, DeSo OS still boots and shows its logs.
 
 ### Stress test on real hardware
 
-Build with `DESOOS_AUTOSTRESS=S` (or `./build.sh --autostress=S`). 5 s after boot the kernel
+Build with `DESO_AUTOSTRESS=S` (or `./build.sh --autostress=S`). 5 s after boot the kernel
 measures USB reads of the largest file on `/usb0` (256 KiB and 4 KiB buffers, KiB/s) and USB
 keyboard latency (interrupt to character, in us; press a few keys meanwhile), printing a
 `[RESULT-USB]` line. It then runs the stress test for S seconds, continuously reading that file
 from `/usb0` (a `usb:` line with MiB, KiB/s, per-pass checksums and errors), and finally prints
-`[AUTOSTRESS] PASS/FAIL`, `cpus` and `mem`. Use `DESOOS_STRESS_POOL=P` for full load.
+`[AUTOSTRESS] PASS/FAIL`, `cpus` and `mem`. Use `DESO_STRESS_POOL=P` for full load.
 
 ### Soak test on real hardware
 
-Build with `DESOOS_AUTOSOAK=S` (`DESOOS_AUTOSOAK=3600 ./make-usb.sh /media/$USER/<LABEL>`). Before `init` the
+Build with `DESO_AUTOSOAK=S` (`DESO_AUTOSOAK=3600 ./make-usb.sh /media/$USER/<LABEL>`). Before `init` the
 kernel runs the same soak test as `tests/soak.sh`, but on a RAM disk it makes itself (`desofs ramdisk`, 256 MiB
 when there is enough memory) – nothing is written to the computer's own disks. The services it kills are whatever
 runs (network cards, USB controllers, `echo`); the network check is a ping of the router (and 60 s for a service to
@@ -401,9 +401,9 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
 - `usblist` - USB devices: port (`3.2` = controller port 3, hub port 2), VID:PID, speed, type
   (keyboard, mouse, mass storage, hub, ...), interface classes, manufacturer and product.
   `usblist -v` also prints each controller (version, ports, BIOS handoff and its timing).
-- `dcp` - permissions (DCP, DeSoOS Capability Permissions): what every process may do (devices,
+- `dcp` - permissions (DCP, DeSo OS Capability Permissions): what every process may do (devices,
   system powers, files). `dcp inspect <pid>` - every capability of one process with its rights;
-  `dcp audit` - the last refused attempts. DeSoOS has no users or `rwx` bits: a program may do
+  `dcp audit` - the last refused attempts. DeSo OS has no users or `rwx` bits: a program may do
   exactly what its capabilities allow (see docs/ARCHITECTURE.md, "Syscalls and handles").
 - `netconfig` - network cards: driver, MAC address, link, IPv4 address, gateway and DNS servers (from
   DHCP), lease time, frame counters. `netconfig renew` - renew the DHCP lease now. `netconfig set
@@ -413,7 +413,7 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   DNS 10.0.2.3). Only `netconfig` may change network settings; other programs started from the shell can use
   the network but not reconfigure it. `netarp <a.b.c.d>` - send one ARP request and show who answered.
 - `ping <address or name> [count]` - ICMP echo, one per second (default 4), each answer with its time, then a
-  summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSoOS also answers pings
+  summary (in QEMU: `ping 10.0.2.2`, or `ping example.com` when the host is online). DeSo OS also answers pings
   to its own address. Several programs can use the network at the same time.
 - `netget [-o file] [-v] [--cipher aes|chacha] [--anchor ca.pem] [--key-update] http[s]://host[:port]/path` -
   download a page over HTTP/1.1 or HTTPS (TLS 1.3 with DeSoTLS, TCP through netd; chunked answers, one request
@@ -434,8 +434,8 @@ The user-space shell (`user/bin/sh.rs`, ring 3):
   servers do not agree.
 - `netweb [-n count] <port> < page` - a minimal web server; the page comes from stdin, so it runs without any
   file access: `nofiles --listen netweb 8080 < /index.html`. `run-qemu.sh` forwards the host's 127.0.0.1:18080 to
-  port 8080 of DeSoOS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it
-  off). Connections to 127.0.0.1 or to DeSoOS's own address stay inside (loopback).
+  port 8080 of DeSo OS: `curl http://127.0.0.1:18080/` on the host (`HOSTFWD=port` changes it, `HOSTFWD=0` turns it
+  off). Connections to 127.0.0.1 or to DeSo OS's own address stay inside (loopback).
 - `host <name>` - the IPv4 addresses of a name (DNS; answers are cached). `netconfig dns <a.b.c.d[:port]>` uses
   another DNS server, `netconfig dns auto` the one from DHCP.
 - `nofiles <program> [args]` - run a program in the file sandbox: it cannot open any path, only
@@ -466,7 +466,7 @@ Line editing and console:
 - `/` is a ramfs (in memory, lost on reboot); `/disk` is the disk `disk.img` (persistent). At start the kernel
   looks at it: the DeSoFS marker → DeSoFS (read-write, or read-only with a message if a tree is damaged, or not
   mounted – never FAT32 instead); otherwise FAT32.
-- A new `disk.img` is empty: format it once in DeSoOS with `desofs format 0 yes` (DeSoFS; DeSoOS no longer creates FAT32);
+- A new `disk.img` is empty: format it once in DeSo OS with `desofs format 0 yes` (DeSoFS; DeSo OS no longer creates FAT32);
   it is mounted at `/disk` immediately and at every start. Until then `/disk` does not exist. `df` then shows two
   lines (`/` and `/disk`).
 - Commands: `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `rm`, `cp`, `mv`, `stat`, `sha256sum`, `mount`, `df`,
@@ -503,7 +503,7 @@ Line editing and console:
 
 ### Kernel emergency shell test programs
 
-In the kernel shell (`desoos>`), `run` lists programs from `/bin` plus built-in assembly test
+In the kernel shell (`deso>`), `run` lists programs from `/bin` plus built-in assembly test
 programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 
 - `run sum` (prints 5050); `run pf` / `gp` / `ud` / `nx` / `sse` - faults that end only the
@@ -520,8 +520,8 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `boot/` - DSB, the UEFI boot loader (`dsb.rs`).
 - `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
   syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
-- `user/` - user-space programs (`bin/`), library (`lib/desoos.rs`) and linker script.
-- `common/` - code shared by different parts of DeSoOS: ELF parsing (boot loader, kernel), DeSoCrypto
+- `user/` - user-space programs (`bin/`), library (`lib/deso.rs`) and linker script.
+- `common/` - code shared by different parts of DeSo OS: ELF parsing (boot loader, kernel), DeSoCrypto
   (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
 - `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
@@ -536,12 +536,12 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 
 ## License
 
-DeSoOS is licensed under the GNU General Public License v3 or later (`GPL-3.0-or-later`); full
+DeSo OS is licensed under the GNU General Public License v3 or later (`GPL-3.0-or-later`); full
 text in `LICENSE`.
 
 Exception: `kernel/drivers/font.rs` is a modified subset of Terminus Font (Copyright (c) 2020
 Dimitar Toshkov Zhekov), licensed solely under the SIL Open Font License 1.1 (`OFL-1.1`); the full license text is
 in the header of that file.
 
-When distributing DeSoOS (including `BOOTX64.EFI`), include `LICENSE` and the font license from
+When distributing DeSo OS (including `BOOTX64.EFI`), include `LICENSE` and the font license from
 `kernel/drivers/font.rs`.

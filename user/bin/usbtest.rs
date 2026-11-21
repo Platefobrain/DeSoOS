@@ -15,11 +15,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -93,13 +93,13 @@ fn start_usbd(bdf: u64) -> Option<(u64, u64)> {
     Some((pid as u64, listen))
 }
 
-/// /usbN directory with the test flash drive (file DESOOS.TST); waits up to `ms`.
+/// /usbN directory with the test flash drive (file DESO.TST); waits up to `ms`.
 fn find_disk(ms: u64) -> Option<(u8, u64)> {
     let t0 = uptime_ms();
     loop {
         for n in 0..4u8 {
             let mut p = [0u8; 20];
-            let path = usb_path(&mut p, n, "DESOOS.TST");
+            let path = usb_path(&mut p, n, "DESO.TST");
             if stat(path).is_ok() {
                 return Some((n, uptime_ms() - t0));
             }
@@ -218,7 +218,7 @@ fn via_init() -> i32 {
     // Test flash drive (FAT32 image from test.sh) – the kernel mounted it
     // by itself; files are read via VFS -> FAT32 -> ublk -> usbd -> xHCI.
     let disk = find_disk(10_000);
-    check!(n, disk.is_some(), "test USB disk (DESOOS.TST) not mounted in /usb0..3");
+    check!(n, disk.is_some(), "test USB disk (DESO.TST) not mounted in /usb0..3");
     let (u, mount_ms) = disk.unwrap();
     let l2 = ask_lsusb(&mut l);
     check!(n, l2.matches("disk sd").count() == 3 && l2.matches("read-only, write-protected").count() == 2 && l2.matches("read-only, not write-protected").count() == 1, "usblist: 3 disks ready, read-only, 2 write-protected: {:?}", l2);

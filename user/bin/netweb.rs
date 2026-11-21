@@ -5,15 +5,15 @@
 // GET / or /index.html -> the page, anything else -> 404.  One request at a
 // time (5 s to send it), one log line per request.  -n: exit after that many
 // requests (tests).  In QEMU, run-qemu.sh forwards the host's 127.0.0.1:8080 to
-// port 8080 of DeSoOS: `curl http://127.0.0.1:8080/` on the host.
+// port 8080 of DeSo OS: `curl http://127.0.0.1:8080/` on the host.
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -119,7 +119,7 @@ fn serve(s: u64, page: &[u8], html: bool, buf: &mut [u8; MSG_MAX]) -> (&'static 
         buf,
         &[
             if ok { b"HTTP/1.0 200 OK\r\n".as_slice() } else { b"HTTP/1.0 404 Not Found\r\n" },
-            b"Server: DeSoOS-netweb\r\nContent-Type: ",
+            b"Server: DeSo-netweb\r\nContent-Type: ",
             if ok && html { b"text/html".as_slice() } else { b"text/plain" },
             b"\r\nContent-Length: ",
             lt,

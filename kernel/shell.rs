@@ -19,8 +19,8 @@ use core::fmt::Write;
 
 use crate::console::{self, Key};
 
-/// Version from Cargo.toml (build.sh passes it in the DESOOS_VERSION variable).
-pub const VERSION: &str = match option_env!("DESOOS_VERSION") {
+/// Version from Cargo.toml (build.sh passes it in the DESO_VERSION variable).
+pub const VERSION: &str = match option_env!("DESO_VERSION") {
     Some(v) => v,
     None => "dev",
 };
@@ -86,10 +86,10 @@ impl LineEditor {
         ed
     }
 
-    /// Prompt with the current directory: "desoos:/disk> ".
+    /// Prompt with the current directory: "deso:/disk> ".
     pub fn set_prompt(&mut self, cwd: &str) {
-        self.prompt = alloc::format!("\x1b[1;32mdesoos\x1b[0m:\x1b[1;34m{}\x1b[0m> ", cwd);
-        self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
+        self.prompt = alloc::format!("\x1b[1;32mdeso\x1b[0m:\x1b[1;34m{}\x1b[0m> ", cwd);
+        self.prompt_width = "deso:".len() + cwd.chars().count() + 2;
     }
 
     /// The terminal's width (the screen console's columns; tests set their own).
@@ -371,7 +371,7 @@ fn cmd_echo(args: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 fn cmd_ver(_: &str, out: &mut dyn Write, _: &mut Context) {
-    let _ = writeln!(out, "DeSoOS v{} (x86_64, UEFI){}", VERSION, BUILD_TAG.filter(|t| !t.is_empty()).map(|t| alloc::format!(", build {}", t)).unwrap_or_default());
+    let _ = writeln!(out, "DeSo OS v{} (x86_64, UEFI){}", VERSION, BUILD_TAG.filter(|t| !t.is_empty()).map(|t| alloc::format!(", build {}", t)).unwrap_or_default());
 }
 
 fn cmd_uptime(_: &str, out: &mut dyn Write, _: &mut Context) {
@@ -1946,9 +1946,9 @@ pub fn execute(line: &str, out: &mut dyn Write, ctx: &mut Context) -> bool {
 /// they replace the kcmd bridge.  Arguments: only `lspci -v`; `disk` only lists
 /// (sector read / write, run – only in the kernel fallback shell).  `columns` is not a
 /// command: the terminal width the line editors draw for (console::columns()).
-/// A build's own name (`DESOOS_BUILD_TAG`, up to 8 letters / digits – build.sh checks it):
+/// A build's own name (`DESO_BUILD_TAG`, up to 8 letters / digits – build.sh checks it):
 /// shown by `ver`; tests/make-usb-test.sh tells two builds apart with it.
-pub const BUILD_TAG: Option<&str> = option_env!("DESOOS_BUILD_TAG");
+pub const BUILD_TAG: Option<&str> = option_env!("DESO_BUILD_TAG");
 
 pub const SYSINFO_TOPICS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "columns"];
 
@@ -2225,7 +2225,7 @@ fn run_to_string(line: &str) -> String {
 pub fn run() -> ! {
     let mut out = console::writer();
     let _ = writeln!(out);
-    let _ = writeln!(out, "\x1b[1;36mDeSoOS v{}\x1b[0m - type 'help' for commands", VERSION);
+    let _ = writeln!(out, "\x1b[1;36mDeSo OS v{}\x1b[0m - type 'help' for commands", VERSION);
 
     let mut editor = LineEditor::new();
     let mut cwd = String::from("/");
@@ -2487,7 +2487,7 @@ pub fn self_test() {
     check!(r.is_empty(), "short line after Enter: {:?}", r);
     // A wider screen shows more: the same 200 characters fit in 240 columns.
     ed.set_columns(240);
-    check!(ed.view_width() == 240 - 11, "view width at 240 columns: {}", ed.view_width());
+    check!(ed.view_width() == 240 - 9, "view width at 240 columns: {}", ed.view_width());
     ed.handle(Key::Home);
     let mut r = String::new();
     ed.render(&mut r);

@@ -673,7 +673,7 @@ pub fn build_dhcp(buf: &mut [u8], kind: u8, xid: u32, mac: [u8; 6], ciaddr: [u8;
     }
     if kind != DHCP_RELEASE && kind != DHCP_DECLINE {
         opt(OPT_PARAMS, &[OPT_MASK, OPT_ROUTER, OPT_DNS, OPT_LEASE, OPT_SERVER, OPT_T1, OPT_T2], b);
-        opt(OPT_HOSTNAME, b"desoos", b);
+        opt(OPT_HOSTNAME, b"deso", b);
     }
     b[i] = OPT_END;
     300

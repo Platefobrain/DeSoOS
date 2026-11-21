@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # Makes the certificates of the HTTPS self-tests (tests/tls-stub.py, /bin/tlstest):
 #
-#   ca.pem            "DeSoOS Test CA" (ECDSA P-256) – the guest trusts it with --anchor
+#   ca.pem            "DeSo OS Test CA" (ECDSA P-256) – the guest trusts it with --anchor
 #   other-ca.pem      "Other Test CA" – the one a man in the middle would use
-#   rsa.pem/.key      tls.desoos, RSA 2048 (CertificateVerify: RSA-PSS)
-#   ecdsa.pem/.key    tls.desoos, ECDSA P-256
-#   expired.pem/.key  tls.desoos, valid 2020-2021
-#   future.pem/.key   tls.desoos, valid from 2040
-#   wrongname.pem/.key  other.desoos (the guest connects to tls.desoos)
+#   rsa.pem/.key      tls.deso, RSA 2048 (CertificateVerify: RSA-PSS)
+#   ecdsa.pem/.key    tls.deso, ECDSA P-256
+#   expired.pem/.key  tls.deso, valid 2020-2021
+#   future.pem/.key   tls.deso, valid from 2040
+#   wrongname.pem/.key  other.deso (the guest connects to tls.deso)
 #   badsig.pem        rsa.pem with one bit of its signature changed (key: rsa.key)
-#   mitm.pem/.key     tls.desoos, issued by Other Test CA
+#   mitm.pem/.key     tls.deso, issued by Other Test CA
 #
 # Each server .pem holds the server certificate and the CA certificate after it.  Run once;
 # the files are kept in the repository (test keys only – never trust them anywhere else).
@@ -63,7 +63,7 @@ def pem(c):
     return c.public_bytes(serialization.Encoding.PEM)
 
 
-ca_key, ca_cert = ca("DeSoOS Test CA")
+ca_key, ca_cert = ca("DeSo OS Test CA")
 other_key, other_cert = ca("Other Test CA")
 write("ca.pem", pem(ca_cert))
 write("other-ca.pem", pem(other_cert))
@@ -71,12 +71,12 @@ write("other-ca.pem", pem(other_cert))
 rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 ec_key = ec.generate_private_key(ec.SECP256R1())
 servers = {
-    "rsa": (rsa_key, leaf(rsa_key, "tls.desoos", ca_key, ca_cert), ca_cert),
-    "ecdsa": (ec_key, leaf(ec_key, "tls.desoos", ca_key, ca_cert), ca_cert),
-    "expired": (ec_key, leaf(ec_key, "tls.desoos", ca_key, ca_cert, datetime.datetime(2020, 1, 1, tzinfo=UTC), datetime.datetime(2021, 1, 1, tzinfo=UTC)), ca_cert),
-    "future": (ec_key, leaf(ec_key, "tls.desoos", ca_key, ca_cert, datetime.datetime(2040, 1, 1, tzinfo=UTC), FAR), ca_cert),
-    "wrongname": (ec_key, leaf(ec_key, "other.desoos", ca_key, ca_cert), ca_cert),
-    "mitm": (ec_key, leaf(ec_key, "tls.desoos", other_key, other_cert), other_cert),
+    "rsa": (rsa_key, leaf(rsa_key, "tls.deso", ca_key, ca_cert), ca_cert),
+    "ecdsa": (ec_key, leaf(ec_key, "tls.deso", ca_key, ca_cert), ca_cert),
+    "expired": (ec_key, leaf(ec_key, "tls.deso", ca_key, ca_cert, datetime.datetime(2020, 1, 1, tzinfo=UTC), datetime.datetime(2021, 1, 1, tzinfo=UTC)), ca_cert),
+    "future": (ec_key, leaf(ec_key, "tls.deso", ca_key, ca_cert, datetime.datetime(2040, 1, 1, tzinfo=UTC), FAR), ca_cert),
+    "wrongname": (ec_key, leaf(ec_key, "other.deso", ca_key, ca_cert), ca_cert),
+    "mitm": (ec_key, leaf(ec_key, "tls.deso", other_key, other_cert), other_cert),
 }
 for n, (k, c, issuer) in servers.items():
     write(n + ".pem", pem(c) + pem(issuer))

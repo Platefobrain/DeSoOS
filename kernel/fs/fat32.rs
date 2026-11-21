@@ -1497,7 +1497,7 @@ pub fn mkfs(disk: usize, label: &str, allow_small: bool) -> Result<String> {
     let volume_id = ((d as u32) << 16 | t as u32) ^ (crate::time::ticks() as u32).wrapping_mul(2654435761);
     let mut bs = [0u8; SECTOR_SIZE];
     bs[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
-    bs[3..11].copy_from_slice(b"DESOOS  ");
+    bs[3..11].copy_from_slice(b"DESO    ");
     put16(&mut bs, 11, SECTOR_SIZE as u16);
     bs[13] = spc as u8;
     put16(&mut bs, 14, reserved as u16);

@@ -2,17 +2,17 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 entry!(main);
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     let Some(ms) = args.get(1).and_then(|a| a.parse::<u64>().ok()) else {
         eprintln!("usage: sleep <ms>");
         return 2;
     };
-    desoos::sleep_ms(ms);
+    deso::sleep_ms(ms);
     0
 }

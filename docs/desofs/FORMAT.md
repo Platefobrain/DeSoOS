@@ -1,6 +1,6 @@
 # DeSoFS on-disk format 1
 
-DeSoFS is the native file system of DeSoOS: copy-on-write, SHA-256 over every block (a Merkle tree), two
+DeSoFS is the native file system of DeSo OS: copy-on-write, SHA-256 over every block (a Merkle tree), two
 superblocks, no journal and no allocation structure on disk. This document is the **closed specification of format
 1** (version 8 of the design, accepted 2026-11-01, plus errata E1–E3). The binary layout does not change during
 implementation stages 1–4; problems found while implementing are added as numbered errata at the end, and errata may

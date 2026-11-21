@@ -19,7 +19,7 @@
 // counts 1/64 of a bit and why jitter and interrupts are one class (max).
 //   RTC, HPET, CPUID, disk serial numbers           0 – they only tell machines apart
 //
-// Trust policy (build time): DESOOS_TRUST_CPU=0 – RDSEED counts 0; DESOOS_TRUST_BOOTLOADER=0 –
+// Trust policy (build time): DESO_TRUST_CPU=0 – RDSEED counts 0; DESO_TRUST_BOOTLOADER=0 –
 // the firmware's RAW bytes count 0.  Both are still mixed in and health-checked; with both
 // off only the timing class counts (the start may then wait – a line every second).
 //
@@ -412,7 +412,7 @@ fn drain_irq(pool: &mut Pool) -> u32 {
 // The generator state
 // ------------------------------------------------------------
 
-/// Which sources may count entropy (DESOOS_TRUST_CPU / DESOOS_TRUST_BOOTLOADER at build
+/// Which sources may count entropy (DESO_TRUST_CPU / DESO_TRUST_BOOTLOADER at build
 /// time, default both).  A source not trusted is still mixed into the pool and still
 /// health-checked – only its counted bits are 0.  It never changes the classes: UEFI RAW
 /// and RDSEED stay one hardware class (max).
@@ -427,7 +427,7 @@ impl Policy {
 
     /// The build's policy (`./build.sh` checks the values are 0 or 1).
     pub const fn from_build() -> Policy {
-        Policy { trust_cpu: !build_flag_off(option_env!("DESOOS_TRUST_CPU")), trust_bootloader: !build_flag_off(option_env!("DESOOS_TRUST_BOOTLOADER")) }
+        Policy { trust_cpu: !build_flag_off(option_env!("DESO_TRUST_CPU")), trust_bootloader: !build_flag_off(option_env!("DESO_TRUST_BOOTLOADER")) }
     }
 }
 
@@ -637,7 +637,7 @@ pub fn init() {
     let kind = BOOT_SEED_KIND.load(Ordering::SeqCst);
     st.take_firmware_seed(kind, &seed);
     let uefi = match (kind, st.pool.credit.uefi) {
-        (SEED_RAW, 0) if !st.policy.trust_bootloader => "RAW (not counted: DESOOS_TRUST_BOOTLOADER=0)",
+        (SEED_RAW, 0) if !st.policy.trust_bootloader => "RAW (not counted: DESO_TRUST_BOOTLOADER=0)",
         (SEED_RAW, 0) => "RAW, implausible (not counted)",
         (SEED_RAW, _) => "RAW",
         (SEED_DEFAULT, _) => "default algorithm (a DRBG – mixed, not counted)",

@@ -240,8 +240,8 @@ fn read_hw_checked() -> (DateTime, bool) {
 
 /// Seconds since 1970 when this image was built (build.sh: SOURCE_DATE_EPOCH when set, else
 /// the build time) and where that came from.
-pub const BUILD_EPOCH: u64 = parse_u64(env!("DESOOS_BUILD_EPOCH"));
-pub const BUILD_EPOCH_SOURCE: &str = env!("DESOOS_BUILD_EPOCH_SOURCE");
+pub const BUILD_EPOCH: u64 = parse_u64(env!("DESO_BUILD_EPOCH"));
+pub const BUILD_EPOCH_SOURCE: &str = env!("DESO_BUILD_EPOCH_SOURCE");
 /// The clock may be up to 24 h behind the build date (time zones, a build on a fast clock).
 pub const BUILD_SLACK: u64 = 86_400;
 /// 2099-12-31 23:59:59 – the RTC keeps two year digits (no century register read).
@@ -252,7 +252,7 @@ const fn parse_u64(s: &str) -> u64 {
     let mut v = 0u64;
     let mut i = 0;
     while i < b.len() {
-        assert!(b[i].is_ascii_digit(), "DESOOS_BUILD_EPOCH must be a number");
+        assert!(b[i].is_ascii_digit(), "DESO_BUILD_EPOCH must be a number");
         v = v * 10 + (b[i] - b'0') as u64;
         i += 1;
     }

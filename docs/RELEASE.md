@@ -1,7 +1,7 @@
-# DeSoOS Release Report
+# DeSo OS Release Report
 
 One section per release, newest on top: what was tested, where, with what result, what is known to be wrong, and
-how performance moved against the previous release. Details of every change: `CHANGELOG.md`; what DeSoOS does
+how performance moved against the previous release. Details of every change: `CHANGELOG.md`; what DeSo OS does
 not do yet: "Current limitations" below (kept up to date with every release).
 
 How the numbers are taken: `tests/test.sh` (QEMU TCG) and `ACCEL=kvm tests/test.sh` on the build machine; the
@@ -142,9 +142,9 @@ timings move by ±15% from run to run on the same build).
   that comes back after a long time may wait for the next try; no IPv6
 - the last known good time: on real hardware there is no writable system volume yet (the SSD is read-only), so it
   lives in memory only and starts from the build date at every boot – recovery from an unreadable file can be tested
-  only in QEMU; the file's SHA-256 guards against accidents, not against a change outside DeSoOS;
+  only in QEMU; the file's SHA-256 guards against accidents, not against a change outside DeSo OS;
   rolling the disk back (an old image, `desofs snapshot restore`) can lower it – a hardware monotonic counter (TPM NV)
-  is a later step; `/.desoos` is reserved only on DeSoFS volumes
+  is a later step; `/.deso` is reserved only on DeSoFS volumes
 - `nettime`'s difference is an estimate: the clock counts whole seconds, the path asymmetry adds up to delay / 2, the
   server's own error is unknown; with several servers only a median and a 2 s limit – not RFC 5905's selection;
   the acceptance limit `root_distance_proxy` ≤ 1.5 s is a simplification of the full root distance
@@ -191,7 +191,7 @@ timings move by ±15% from run to run on the same build).
 - without a serial port, logs only on screen (status bar in the top-right corner: time, keyboard)
 - USB keyboard only via usbd (user space): a dead usbd = no keyboard until init restarts it
 - USB keyboard and mouse only in boot protocol (no multimedia keys); the test laptop's touchpad is unsupported
-- USB disks read-only (deliberately) except one GPT partition of the type "DeSoOS system" made by
+- USB disks read-only (deliberately) except one GPT partition of the type "DeSo system" made by
   `make-usb.sh --with-disk` (≤ 64 GiB – the format-1 limit of this DeSoFS; a larger stick keeps the rest unallocated);
   512 / 4096 B blocks, ≤ 2 TiB, LUN 0, no UAS; `make-usb.sh --with-disk` and `/disk` on a stick: 512-byte sectors only
 - the guarantee "the old or the new version" after a power cut on a stick is as good as the stick's SYNCHRONIZE CACHE:
@@ -216,7 +216,7 @@ timings move by ±15% from run to run on the same build).
 **Files**
 - FAT32: no GPT, FAT12/16, sectors ≠ 512 B; files max 4 GiB; `mv` of directories not implemented; times in UTC
 - one lock for the whole VFS
-- OVMF (QEMU firmware) writes NvVars to the first FAT – also to `/disk` or the ESP of the NVMe disk (firmware behavior, not DeSoOS; `build/` is read-only)
+- OVMF (QEMU firmware) writes NvVars to the first FAT – also to `/disk` or the ESP of the NVMe disk (firmware behavior, not DeSo OS; `build/` is read-only)
 
 **Console**
 - scrollback 1000 lines, shell line max 71 characters, font with 234 glyphs (the rest shown as `?`)
@@ -224,7 +224,7 @@ timings move by ±15% from run to run on the same build).
 
 **Tests**
 - recovery procedure in `exceptions.rs` (`RESUME_RIP`, `probe_read`) only for tests
-- the soak test on real hardware (`DESOOS_AUTOSOAK`) runs before init and only on a RAM disk; its network check
+- the soak test on real hardware (`DESO_AUTOSOAK`) runs before init and only on a RAM disk; its network check
   there is a ping of the router (no download server); no random allocation failures (fault injection) and no
   `sysfuzz` worker yet
 - RAM disks (`desofs ramdisk`) cannot be removed – their memory comes back at the next start

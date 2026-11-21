@@ -3,10 +3,10 @@
 # an intermediate CA, so the second check of a bootstrap (every certificate valid over
 # T +- U) can be tested on the intermediate too.
 #
-#   nts-root.pem        "DeSoOS NTS Test Root" (ECDSA P-256, pathLen 1, 2025-2060) – the
+#   nts-root.pem        "DeSo OS NTS Test Root" (ECDSA P-256, pathLen 1, 2025-2060) – the
 #                       time service's test table trusts it (and ca.pem)
-#   nts-good.pem/.key   tls.desoos (2025-2060) <- "NTS Test Intermediate A" (2025-2060)
-#   nts-intshort.pem/.key  tls.desoos (2025-2060) <- "NTS Test Intermediate B", valid only
+#   nts-good.pem/.key   tls.deso (2025-2060) <- "NTS Test Intermediate A" (2025-2060)
+#   nts-intshort.pem/.key  tls.deso (2025-2060) <- "NTS Test Intermediate B", valid only
 #                       until 2030-01-01 00:00:00 UTC (the server certificate outlives it)
 #
 # Each server .pem holds the server certificate and its intermediate (not the root).  Run
@@ -47,12 +47,12 @@ def ca(cn, key, issuer_name, issuer_key, path_len, end):
 
 
 def leaf(key, issuer, issuer_key):
-    return (x509.CertificateBuilder().subject_name(name("tls.desoos")).issuer_name(issuer.subject).public_key(key.public_key())
+    return (x509.CertificateBuilder().subject_name(name("tls.deso")).issuer_name(issuer.subject).public_key(key.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(START).not_valid_after(END)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("tls.desoos")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("tls.deso")]), critical=False)
             .sign(issuer_key, hashes.SHA256()))
 
 
@@ -62,7 +62,7 @@ def write(fname, data):
 
 
 root_key = ec.generate_private_key(ec.SECP256R1())
-root = ca("DeSoOS NTS Test Root", root_key, name("DeSoOS NTS Test Root"), root_key, 1, END)
+root = ca("DeSo OS NTS Test Root", root_key, name("DeSo OS NTS Test Root"), root_key, 1, END)
 int_a_key = ec.generate_private_key(ec.SECP256R1())
 int_a = ca("NTS Test Intermediate A", int_a_key, root.subject, root_key, 0, END)
 int_b_key = ec.generate_private_key(ec.SECP256R1())

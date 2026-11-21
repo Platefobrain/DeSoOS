@@ -12,8 +12,8 @@
 //      reason 7 and netget https refuses before sending anything; a damaged file -> reason
 //      8, never a quiet reset; no volume -> the raise stays in memory ("not saved") and the
 //      next raise saves it
-//   6. /.desoos protected: the kernel's own file functions every way, a program every way
-//      (/bin/timetest protect), only /.desoos at the root of a DeSoFS volume
+//   6. /.deso protected: the kernel's own file functions every way, a program every way
+//      (/bin/timetest protect), only /.deso at the root of a DeSoFS volume
 //   7. checked under the same lock as the operation: a volume mounted at /disk in the gap
 //      before a changing call takes the VFS lock (fs::RACE_HOOK) – write, truncate, create,
 //      mkdir, remove, rename (out of, over, into), write_file, append_file all refused; a
@@ -101,7 +101,7 @@ fn volume_untouched(lkg_rec: &[u8]) -> Result<(), String> {
     if file_bytes().as_deref() != Some(lkg_rec) {
         return Err(String::from("the LKG file changed"));
     }
-    for p in ["/disk/.desoos/new", "/disk/.desoos/d", "/disk/stolen", "/disk/.desoos/other"] {
+    for p in ["/disk/.deso/new", "/disk/.deso/d", "/disk/stolen", "/disk/.deso/other"] {
         if fs::stat(p).is_ok() {
             return Err(alloc::format!("{} exists", p));
         }
@@ -120,8 +120,8 @@ fn cleanup() {
         crate::block::remove(d);
     }
     // What the old-handle step left on ramfs under /disk.
-    let _ = fs::remove("/disk/.desoos/lkg");
-    let _ = fs::remove("/disk/.desoos");
+    let _ = fs::remove("/disk/.deso/lkg");
+    let _ = fs::remove("/disk/.deso");
     let _ = fs::remove("/tmp/lkg-opened");
     let _ = fs::remove("/tmp/lkg-go");
     if unsafe { MADE_DIR } {
@@ -150,7 +150,7 @@ fn damage() -> bool {
 
 /// netget https: refused before anything is sent, with this reason.
 fn https_refused(reason: &str) -> Result<(), String> {
-    let r = run("/bin/netget", &["netget", "https://tls.desoos:58443/hello"], 30_000).ok_or("netget did not finish")?;
+    let r = run("/bin/netget", &["netget", "https://tls.deso:58443/hello"], 30_000).ok_or("netget did not finish")?;
     let (kind, out) = r;
     if kind == ExitKind::Exit(5) && out.contains("TLS refused: clock not plausible") && out.contains(reason) && out.contains("nothing sent") {
         Ok(())
@@ -160,7 +160,7 @@ fn https_refused(reason: &str) -> Result<(), String> {
 }
 
 pub fn self_test() {
-    serial_println!("[LKG TEST] Starting the last known good time tests (time_lkg.rs, /.desoos)...");
+    serial_println!("[LKG TEST] Starting the last known good time tests (time_lkg.rs, /.deso)...");
     crate::selftest::begin();
     let now = || rtc::time_status().0;
 
@@ -259,7 +259,7 @@ pub fn self_test() {
     check!(file_bytes().as_deref() == Some(&lkg::encode(ahead3, Source::Test)[..]), "the pending LKG is not on the disk");
     serial_println!("[LKG TEST] 5/8 the live system (RAM volume at /disk): no file - the build date; raised and saved; never lower; equal to the clock - plausible; ahead - reason 7, netget https refused before sending; read back the same; damaged - reason 8 (no quiet reset), https refused, repaired by the next LKG; no volume - kept in memory, 'NOT SAVED', saved by the next raise PASS");
 
-    // 6. /.desoos protected.
+    // 6. /.deso protected.
     let f = alloc::format!("{}{}", MOUNT, lkg::FILE);
     let res = |r: fs::Result<()>| r == Err(FsError::Reserved);
     let _ = fs::write_file("/disk/lkg-other", b"x");
@@ -270,31 +270,31 @@ pub fn self_test() {
         ("write", fs::write(&f, 0, b"x") == Err(FsError::Reserved)),
         ("truncate", res(fs::truncate(&f, 0))),
         ("remove the file", res(fs::remove(&f))),
-        ("remove /.desoos", res(fs::remove("/disk/.desoos"))),
-        ("mkdir inside", res(fs::mkdir("/disk/.desoos/d"))),
-        ("create inside", res(fs::create("/disk/.desoos/new"))),
-        ("create lkg.new", res(fs::create("/disk/.desoos/lkg.new"))),
+        ("remove /.deso", res(fs::remove("/disk/.deso"))),
+        ("mkdir inside", res(fs::mkdir("/disk/.deso/d"))),
+        ("create inside", res(fs::create("/disk/.deso/new"))),
+        ("create lkg.new", res(fs::create("/disk/.deso/lkg.new"))),
         ("rename out", res(fs::rename(&f, "/disk/stolen"))),
         ("rename over", res(fs::rename("/disk/lkg-other", &f))),
-        ("rename into", res(fs::rename("/disk/lkg-other", "/disk/.desoos/other"))),
-        ("rename the directory", res(fs::rename("/disk/.desoos", "/disk/other-dir"))),
-        ("rename a directory onto it", res(fs::rename("/disk/a", "/disk/.desoos"))),
-        ("mount on /.desoos", fs::mount("/disk/.desoos", Box::new(fs::ramfs::RamFs::new())) == Err(FsError::Reserved)),
-        ("mount inside", fs::mount("/disk/.desoos/x", Box::new(fs::ramfs::RamFs::new())) == Err(FsError::Reserved)),
-        ("'.' spelling", res(fs::remove("/disk/./.desoos/./lkg"))),
-        ("'..' spelling", res(fs::write_file("/disk/a/../.desoos/lkg", b"evil"))),
-        ("doubled slashes", res(fs::truncate("//disk//.desoos//lkg", 0))),
-        ("relative-looking", res(fs::remove("/disk/a/../a/../.desoos"))),
+        ("rename into", res(fs::rename("/disk/lkg-other", "/disk/.deso/other"))),
+        ("rename the directory", res(fs::rename("/disk/.deso", "/disk/other-dir"))),
+        ("rename a directory onto it", res(fs::rename("/disk/a", "/disk/.deso"))),
+        ("mount on /.deso", fs::mount("/disk/.deso", Box::new(fs::ramfs::RamFs::new())) == Err(FsError::Reserved)),
+        ("mount inside", fs::mount("/disk/.deso/x", Box::new(fs::ramfs::RamFs::new())) == Err(FsError::Reserved)),
+        ("'.' spelling", res(fs::remove("/disk/./.deso/./lkg"))),
+        ("'..' spelling", res(fs::write_file("/disk/a/../.deso/lkg", b"evil"))),
+        ("doubled slashes", res(fs::truncate("//disk//.deso//lkg", 0))),
+        ("relative-looking", res(fs::remove("/disk/a/../a/../.deso"))),
     ];
     for (what, ok) in kernel_cases.iter() {
-        check!(*ok, "kernel {} on /.desoos allowed", what);
+        check!(*ok, "kernel {} on /.deso allowed", what);
     }
-    // Not wider than it should be: other names, /.desoos below the root of the volume, a
-    // /.desoos on ramfs.
-    for p in ["/disk/.desoosx", "/disk/a/.desoos", "/disk/.desoo"] {
+    // Not wider than it should be: other names, /.deso below the root of the volume, a
+    // /.deso on ramfs.
+    for p in ["/disk/.desox", "/disk/a/.deso", "/disk/.des"] {
         check!(fs::mkdir(p).is_ok() && fs::remove(p).is_ok(), "{} is not writable", p);
     }
-    check!(!fs::is_reserved("/.desoos") && fs::mkdir("/.desoos").is_ok() && fs::remove("/.desoos").is_ok(), "/.desoos on ramfs is protected - only DeSoFS volumes are");
+    check!(!fs::is_reserved("/.deso") && fs::mkdir("/.deso").is_ok() && fs::remove("/.deso").is_ok(), "/.deso on ramfs is protected - only DeSoFS volumes are");
     check!(fs::read_file(&f).map(|d| d.len()) == Ok(lkg::RECORD_LEN), "the file is not readable");
     let _ = fs::remove("/disk/lkg-other");
     let _ = fs::remove("/disk/a");
@@ -303,21 +303,21 @@ pub fn self_test() {
     let (kind, out) = r.unwrap_or((ExitKind::Exit(-1), String::new()));
     check!(kind == ExitKind::Exit(0) && out.contains("attempts refused"), "timetest protect: {:?} {:?}", kind, out.trim());
     check!(file_bytes().as_deref() == Some(&lkg::encode(ahead3, Source::Test)[..]) && lkg::bound() == ahead3, "the file or the LKG changed");
-    serial_println!("[LKG TEST] 6/8 /.desoos protected: {} kernel calls refused (write, truncate, remove, mkdir, create, rename from / to / into / of the directory, mount on and inside, '.', '..', '//'); {}; /.desoosx, a/.desoos and /.desoos on ramfs stay writable PASS", kernel_cases.len(), out.trim().trim_start_matches("timetest "));
+    serial_println!("[LKG TEST] 6/8 /.deso protected: {} kernel calls refused (write, truncate, remove, mkdir, create, rename from / to / into / of the directory, mount on and inside, '.', '..', '//'); {}; /.desox, a/.deso and /.deso on ramfs stay writable PASS", kernel_cases.len(), out.trim().trim_start_matches("timetest "));
 
     // 7. The check under the same lock as the operation.
     let rec = lkg::encode(ahead3, Source::Test);
     let _ = fs::write_file("/disk/other", b"other");
-    const F: &str = "/disk/.desoos/lkg";
+    const F: &str = "/disk/.deso/lkg";
     let ops: [(&str, fn() -> fs::Result<()>); 10] = [
         ("write", || fs::write(F, 0, b"evil").map(|_| ())),
         ("truncate", || fs::truncate(F, 0)),
-        ("create", || fs::create("/disk/.desoos/new")),
-        ("mkdir", || fs::mkdir("/disk/.desoos/d")),
+        ("create", || fs::create("/disk/.deso/new")),
+        ("mkdir", || fs::mkdir("/disk/.deso/d")),
         ("remove", || fs::remove(F)),
         ("rename out", || fs::rename(F, "/disk/stolen")),
         ("rename over", || fs::rename("/disk/other", F)),
-        ("rename into", || fs::rename("/disk/other", "/disk/.desoos/other")),
+        ("rename into", || fs::rename("/disk/other", "/disk/.deso/other")),
         ("write_file", || fs::write_file(F, b"evil")),
         ("append_file", || fs::append_file(F, b"evil")),
     ];
@@ -335,7 +335,7 @@ pub fn self_test() {
     }
     // A program's handle opened on ramfs before the volume is mounted over /disk.
     unmount_ram();
-    let _ = fs::mkdir("/disk/.desoos");
+    let _ = fs::mkdir("/disk/.deso");
     check!(fs::write_file(F, b"ramfs").is_ok(), "could not write the ramfs file under /disk");
     let _ = fs::remove("/tmp/lkg-opened");
     let _ = fs::remove("/tmp/lkg-go");

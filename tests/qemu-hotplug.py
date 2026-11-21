@@ -4,7 +4,7 @@
 # socket) – e.g. „device_del hubdisk”.  The kernel self-test (USB TEST 6/6) prints these
 # lines and checks whether the disk / hub really disappeared and came back.
 #
-#   python3 tests/qemu-hotplug.py logs/test.log /tmp/desoos-monitor.sock
+#   python3 tests/qemu-hotplug.py logs/test.log /tmp/deso-monitor.sock
 #
 # Exits by itself when QEMU closes the monitor (end of the tests).
 import os

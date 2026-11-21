@@ -157,7 +157,7 @@ kill net0\n";
         "sh: nosuchcmd: command not found",
         "argc = 3\nargv[0] = args\nargv[1] = one two\nargv[2] = three\n",
         "\naXbc\n",
-        "DeSoOS v",
+        "DeSo OS v",
         "/m16/up: file,",
         "kill: 1: no such process",
         "kill: net0: not a number (services need the shell started by init)",

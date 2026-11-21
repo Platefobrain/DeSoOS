@@ -7,15 +7,15 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../lib/netproto.rs"]
 mod netproto;
 #[path = "../lib/dns.rs"]
 mod dns;
 
-use desoos::*;
+use deso::*;
 use dns::*;
 use netproto::NetError;
 
@@ -84,23 +84,23 @@ fn name(s: &str) -> Name {
     Name::parse(s).unwrap_or(Name::EMPTY)
 }
 
-/// The usual answer: router.desoos A 10.0.2.2, TTL 300.
+/// The usual answer: router.deso A 10.0.2.2, TTL 300.
 fn simple() -> B {
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&PTR_Q).a(300, [10, 0, 2, 2]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&PTR_Q).a(300, [10, 0, 2, 2]);
     b
 }
 
-/// www.desoos -> CNAME web.desoos -> CNAME srv.desoos -> A, with pointers.
+/// www.deso -> CNAME web.deso -> CNAME srv.deso -> A, with pointers.
 fn chain() -> B {
     let mut b = B::new();
-    b.head(ID, OK, 1, 3).question("www.desoos");
-    // CNAME 1: owner = question; target "web" + pointer to "desoos" in the question.
-    let q_desoos = 12 + 4; // after "\x03www"
-    b.put(&PTR_Q).u16(TYPE_CNAME).u16(CLASS_IN).u32(600).u16(6).put(&[3, b'w', b'e', b'b', 0xC0, q_desoos as u8]);
+    b.head(ID, OK, 1, 3).question("www.deso");
+    // CNAME 1: owner = question; target "web" + pointer to "deso" in the question.
+    let q_deso = 12 + 4; // after "\x03www"
+    b.put(&PTR_Q).u16(TYPE_CNAME).u16(CLASS_IN).u32(600).u16(6).put(&[3, b'w', b'e', b'b', 0xC0, q_deso as u8]);
     let web_at = b.n - 6;
-    // CNAME 2: owner = pointer to "web.desoos"; target "srv" + pointer.
-    b.put(&[0xC0, web_at as u8]).u16(TYPE_CNAME).u16(CLASS_IN).u32(120).u16(6).put(&[3, b's', b'r', b'v', 0xC0, q_desoos as u8]);
+    // CNAME 2: owner = pointer to "web.deso"; target "srv" + pointer.
+    b.put(&[0xC0, web_at as u8]).u16(TYPE_CNAME).u16(CLASS_IN).u32(120).u16(6).put(&[3, b's', b'r', b'v', 0xC0, q_deso as u8]);
     let srv_at = b.n - 6;
     b.put(&[0xC0, srv_at as u8]).a(900, [10, 0, 2, 9]);
     b
@@ -128,42 +128,42 @@ fn main(_args: Args) -> i32 {
 
     // 2. The query, byte for byte.
     let mut q = [0u8; 300];
-    let len = build_query(&mut q, ID, &name("router.desoos"));
-    let want: [u8; 31] = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 6, b'r', b'o', b'u', b't', b'e', b'r', 6, b'd', b'e', b's', b'o', b'o', b's', 0, 0, 1, 0, 1];
+    let len = build_query(&mut q, ID, &name("router.deso"));
+    let want: [u8; 29] = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 6, b'r', b'o', b'u', b't', b'e', b'r', 4, b'd', b'e', b's', b'o', 0, 0, 1, 0, 1];
     check!(n, q[..len] == want, "query bytes {:?}", &q[..len]);
     let len = build_query(&mut q, 1, &name(s253));
     check!(n, len == 12 + 255 + 4, "longest query {} bytes", len);
 
     // 3. Valid answers.
-    let r = parse_response(simple().bytes(), ID, &name("router.desoos"));
+    let r = parse_response(simple().bytes(), ID, &name("router.deso"));
     check!(n, matches!(r, Ok(a) if a.rcode == 0 && a.n == 1 && a.addrs[0] == [10, 0, 2, 2] && a.ttl == 300 && a.cname.is_empty()), "simple answer {:?}", r);
-    let r = parse_response(chain().bytes(), ID, &name("www.desoos"));
-    check!(n, matches!(r, Ok(a) if a.n == 1 && a.addrs[0] == [10, 0, 2, 9] && a.ttl == 120 && a.cname.as_str() == "srv.desoos"), "CNAME chain with pointers {:?}", r);
+    let r = parse_response(chain().bytes(), ID, &name("www.deso"));
+    check!(n, matches!(r, Ok(a) if a.n == 1 && a.addrs[0] == [10, 0, 2, 9] && a.ttl == 120 && a.cname.as_str() == "srv.deso"), "CNAME chain with pointers {:?}", r);
     let mut b = B::new();
-    b.head(ID, OK, 1, 2).question("h.desoos").name("other.desoos").a(60, [6, 6, 6, 6]).name("H.DESOOS").a(60, [10, 0, 2, 5]);
-    let r = parse_response(b.bytes(), ID, &name("h.desoos"));
+    b.head(ID, OK, 1, 2).question("h.deso").name("other.deso").a(60, [6, 6, 6, 6]).name("H.DESO").a(60, [10, 0, 2, 5]);
+    let r = parse_response(b.bytes(), ID, &name("h.deso"));
     check!(n, matches!(r, Ok(a) if a.n == 1 && a.addrs[0] == [10, 0, 2, 5]), "a record for another name must be ignored, case folded: {:?}", r);
     let mut b = B::new();
-    b.head(ID, OK, 1, 3).question("h.desoos");
+    b.head(ID, OK, 1, 3).question("h.deso");
     b.put(&PTR_Q).u16(28).u16(CLASS_IN).u32(60).u16(16).put(&[0x20; 16]); // AAAA
     b.put(&PTR_Q).u16(TYPE_A).u16(3).u32(60).u16(4).put(&[7, 7, 7, 7]); // class CH
     b.put(&PTR_Q).a(30, [10, 0, 2, 6]);
-    let r = parse_response(b.bytes(), ID, &name("h.desoos"));
+    let r = parse_response(b.bytes(), ID, &name("h.deso"));
     check!(n, matches!(r, Ok(a) if a.n == 1 && a.addrs[0] == [10, 0, 2, 6] && a.ttl == 30), "other types and classes skipped: {:?}", r);
     let mut b = B::new();
-    b.head(ID, OK, 1, 6).question("big.desoos");
+    b.head(ID, OK, 1, 6).question("big.deso");
     for i in 1..=6u8 {
         b.put(&PTR_Q).a(100 - i as u32, [10, 0, 3, i]);
     }
-    let r = parse_response(b.bytes(), ID, &name("big.desoos"));
+    let r = parse_response(b.bytes(), ID, &name("big.deso"));
     check!(n, matches!(r, Ok(a) if a.n == ADDRS_MAX && a.addrs[3] == [10, 0, 3, 4] && a.ttl == 96), "six addresses: four kept {:?}", r);
     let mut b = B::new();
-    b.head(ID, OK | 3, 1, 0).question("nx.desoos");
-    let r = parse_response(b.bytes(), ID, &name("nx.desoos"));
+    b.head(ID, OK | 3, 1, 0).question("nx.deso");
+    let r = parse_response(b.bytes(), ID, &name("nx.deso"));
     check!(n, matches!(r, Ok(a) if a.rcode == RCODE_NXDOMAIN && a.n == 0), "no such name {:?}", r);
 
     // 4. Malicious answers: (what, message, expected error).
-    let q = name("router.desoos");
+    let q = name("router.deso");
     let mut cases: [(&str, B, NetError); 19] = core::array::from_fn(|_| ("", B::new(), NetError::Short));
     let mut k = 0;
     let mut add = |what: &'static str, b: B, e: NetError| {
@@ -174,61 +174,61 @@ fn main(_args: Args) -> i32 {
     b.n = 11;
     add("11 bytes", b, NetError::Short);
     let mut b = B::new();
-    b.head(ID ^ 1, OK, 1, 0).question("router.desoos");
+    b.head(ID ^ 1, OK, 1, 0).question("router.deso");
     add("another id", b, NetError::Unsupported);
     let mut b = B::new();
-    b.head(ID, 0x0100, 1, 0).question("router.desoos");
+    b.head(ID, 0x0100, 1, 0).question("router.deso");
     add("a query, not an answer", b, NetError::Unsupported);
     let mut b = B::new();
-    b.head(ID, OK | 0x0800, 1, 0).question("router.desoos");
+    b.head(ID, OK | 0x0800, 1, 0).question("router.deso");
     add("opcode 1", b, NetError::Unsupported);
     let mut b = B::new();
-    b.head(ID, OK | 0x0200, 1, 0).question("router.desoos");
+    b.head(ID, OK | 0x0200, 1, 0).question("router.deso");
     add("truncated (TC)", b, NetError::Truncated);
     let mut b = B::new();
     b.head(ID, OK, 0, 0);
     add("no question", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 2, 0).question("router.desoos").question("router.desoos");
+    b.head(ID, OK, 2, 0).question("router.deso").question("router.deso");
     add("two questions", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("evil.desoos").put(&PTR_Q).a(300, [6, 6, 6, 6]);
+    b.head(ID, OK, 1, 1).question("evil.deso").put(&PTR_Q).a(300, [6, 6, 6, 6]);
     add("answer to another question", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 0).name("router.desoos").u16(28).u16(CLASS_IN);
+    b.head(ID, OK, 1, 0).name("router.deso").u16(28).u16(CLASS_IN);
     add("question for AAAA", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos");
+    b.head(ID, OK, 1, 1).question("router.deso");
     let at = b.n as u8;
     b.put(&[0xC0, at]).a(300, [6, 6, 6, 6]);
     add("pointer to itself", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos");
+    b.head(ID, OK, 1, 1).question("router.deso");
     let at = b.n as u8 + 2 + 10 + 4;
     b.put(&[0xC0, at]).a(300, [6, 6, 6, 6]).put(&[1, b'x', 0]);
     add("forward pointer", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&[0xC3, 0xFF]).a(300, [6, 6, 6, 6]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&[0xC3, 0xFF]).a(300, [6, 6, 6, 6]);
     add("pointer past the end", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&[0x40, b'x', 0]).a(300, [6, 6, 6, 6]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&[0x40, b'x', 0]).a(300, [6, 6, 6, 6]);
     add("label type 01 (64+)", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&[3, b'w', b'.', b'x', 0]).a(300, [6, 6, 6, 6]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&[3, b'w', b'.', b'x', 0]).a(300, [6, 6, 6, 6]);
     add("dot inside a label", b, NetError::BadHeader);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&PTR_Q).u16(TYPE_A).u16(CLASS_IN).u32(1).u16(200).put(&[10, 0, 2, 2]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&PTR_Q).u16(TYPE_A).u16(CLASS_IN).u32(1).u16(200).put(&[10, 0, 2, 2]);
     add("record length past the end", b, NetError::Short);
     let mut b = B::new();
-    b.head(ID, OK, 1, 3).question("router.desoos").put(&PTR_Q).a(300, [10, 0, 2, 2]);
+    b.head(ID, OK, 1, 3).question("router.deso").put(&PTR_Q).a(300, [10, 0, 2, 2]);
     add("more answers announced than sent", b, NetError::Short);
     let mut b = B::new();
-    b.head(ID, OK, 1, 1).question("router.desoos").put(&PTR_Q).u16(TYPE_A).u16(CLASS_IN).u32(1).u16(5).put(&[10, 0, 2, 2, 2]);
+    b.head(ID, OK, 1, 1).question("router.deso").put(&PTR_Q).u16(TYPE_A).u16(CLASS_IN).u32(1).u16(5).put(&[10, 0, 2, 2, 2]);
     add("A record of 5 bytes", b, NetError::BadHeader);
     // A name of 4 × 63 characters through pointers: 255 > 253.
     // The name pieces sit in the data of an unknown record type (skipped).
     let mut b = B::new();
-    b.head(ID, OK, 1, 2).question("router.desoos").put(&PTR_Q).u16(99).u16(CLASS_IN).u32(1).u16(2 * 129 + 1);
+    b.head(ID, OK, 1, 2).question("router.deso").put(&PTR_Q).u16(99).u16(CLASS_IN).u32(1).u16(2 * 129 + 1);
     let l1 = b.n;
     b.put(&[63]).put(&[b'a'; 63]).put(&[63]).put(&[b'b'; 63]).put(&[0]);
     let l2 = b.n;
@@ -237,7 +237,7 @@ fn main(_args: Args) -> i32 {
     add("name longer than 253 through pointers", b, NetError::BadHeader);
     // CNAME chain of 9 links.
     let mut b = B::new();
-    b.head(ID, OK, 1, 9).question("router.desoos");
+    b.head(ID, OK, 1, 9).question("router.deso");
     let mut owner = 12usize;
     for i in 0..9u8 {
         b.put(&[0xC0 | (owner >> 8) as u8, owner as u8]).u16(TYPE_CNAME).u16(CLASS_IN).u32(60).u16(3).put(&[1, b'a' + i, 0]);
@@ -255,27 +255,27 @@ fn main(_args: Args) -> i32 {
     let a = parse_response(simple().bytes(), ID, &q).unwrap_or_else(|_| exit(90));
     c.put(&q, &a, t);
     check!(n, matches!(c.get(&q, t + 299_999), Some(x) if x.n == 1 && x.addrs[0] == [10, 0, 2, 2]) && c.get(&q, t + 300_000).is_none(), "TTL 300 s");
-    check!(n, c.get(&name("ROUTER.desoos"), t).is_some() && c.get(&name("other.desoos"), t).is_none(), "lookup by name");
+    check!(n, c.get(&name("ROUTER.deso"), t).is_some() && c.get(&name("other.deso"), t).is_none(), "lookup by name");
     let mut zero = a;
     zero.ttl = 0;
-    let z = name("zero.desoos");
+    let z = name("zero.deso");
     c.put(&z, &zero, t);
     check!(n, c.get(&z, t).is_none(), "TTL 0 cached");
     let mut long = a;
     long.ttl = 7 * 86400;
-    let l = name("long.desoos");
+    let l = name("long.deso");
     c.put(&l, &long, t);
     check!(n, c.get(&l, t + TTL_MAX_S as u64 * 1000 - 1).is_some() && c.get(&l, t + TTL_MAX_S as u64 * 1000).is_none(), "TTL capped at {} s", TTL_MAX_S);
     let nx = Answer { rcode: RCODE_NXDOMAIN, addrs: [[0; 4]; ADDRS_MAX], n: 0, ttl: 0, cname: Name::EMPTY };
-    let nn = name("nx.desoos");
+    let nn = name("nx.deso");
     c.put(&nn, &nx, t);
     check!(n, matches!(c.get(&nn, t + 29_000), Some(x) if x.rcode == RCODE_NXDOMAIN && x.n == 0) && c.get(&nn, t + 30_000).is_none(), "no such name remembered 30 s");
     let sf = Answer { rcode: RCODE_SERVFAIL, ..nx };
-    let sn = name("fail.desoos");
+    let sn = name("fail.deso");
     c.put(&sn, &sf, t);
     check!(n, c.get(&sn, t).is_none(), "server failure cached");
     // Full: 16 more names push out the one expiring first; the cache stays 16.
-    let mut namebuf = *b"host00.desoos";
+    let mut namebuf = *b"host00.deso";
     for i in 0..CACHE as u8 {
         namebuf[4] = b'a' + i / 10;
         namebuf[5] = b'0' + i % 10;
@@ -290,7 +290,7 @@ fn main(_args: Args) -> i32 {
 
     // 6. Mutations of valid answers.
     let samples = [simple(), chain()];
-    let names = [q, name("www.desoos")];
+    let names = [q, name("www.deso")];
     let mut x = 0x646E_7374_6573_7431u64;
     let mut rnd = |m: usize| {
         x ^= x << 13;

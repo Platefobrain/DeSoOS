@@ -4,23 +4,23 @@
 //   `pass()` is reachable only if no `check!` failed
 //   (every failure ends the suite early).  `finish()` compares the counters.
 // * Automatic mode (./test.sh): QEMU gets the fw_cfg file
-//   `opt/desoos/autotest` and the `isa-debug-exit` device (port 0xf4).
+//   `opt/deso/autotest` and the `isa-debug-exit` device (port 0xf4).
 //   After the tests (or on a panic / critical exception) the kernel shuts
 //   QEMU down itself with an exit code: PASS -> 33, FAIL -> 35 ((value << 1) | 1).
 //   Without that file (plain ./run-qemu.sh, real hardware) nothing
 //   changes – the shell starts after the tests.
 // * Restart phase: tests/test.sh starts QEMU a second time on the same test disk with
-//   the fw_cfg file `opt/desoos/phase` = "restart"; then only RESTART TEST part 2 runs
+//   the fw_cfg file `opt/deso/phase` = "restart"; then only RESTART TEST part 2 runs
 //   (DeSoFS written in the first start must be there, mounted at /disk by itself).
-// * One-stick phases: `opt/desoos/phase` = "onestick1" / "onestick2 [TAG]" – QEMU started from an
+// * One-stick phases: `opt/deso/phase` = "onestick1" / "onestick2 [TAG]" – QEMU started from an
 //   image made by tools/mkusb.py (make-usb.sh --with-disk), nothing else attached (ONE STICK TEST).
-// * USB restart phase: a third start, `opt/desoos/phase` = "usbrestart", QEMU without the virtio
+// * USB restart phase: a third start, `opt/deso/phase` = "usbrestart", QEMU without the virtio
 //   and NVMe disks – only USB RESTART TEST (the writable stick of the first start becomes /disk
 //   by itself, with the last known good time and a file the first start left on it).
-// * Soak phase (tests/soak.sh): `opt/desoos/phase` = "soak <seconds> <seed> [ram]"; the boot
+// * Soak phase (tests/soak.sh): `opt/deso/phase` = "soak <seconds> <seed> [ram]"; the boot
 //   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
-// * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/desoos/loop`
+// * Loop mode (`LOOP=nobkl:400 tests/test.sh`): the fw_cfg file `opt/deso/loop`
 //   holds "suite:rounds".  The suites up to SMP start run once (the system needs
 //   them), then only the named suite runs, round after round, until a round fails;
 //   the others are skipped.  Result: "[RESULT-LOOP] suite=… rounds=… passed=… …".
@@ -88,7 +88,7 @@ pub fn finish() -> bool {
     let passed = PASSED.load(Ordering::SeqCst);
     let ok = started > 0 && started == passed;
     serial_println!(
-        "[DeSoOS] Self-tests: {}/{} suites passed - {}",
+        "[DeSo OS] Self-tests: {}/{} suites passed - {}",
         passed,
         started,
         if ok { "ALL PASSED" } else { "FAILED" }
@@ -104,10 +104,10 @@ const FW_CFG_SELECTOR: u16 = 0x510;
 const FW_CFG_DATA: u16 = 0x511;
 const FW_CFG_SIGNATURE: u16 = 0x0000;
 const FW_CFG_FILE_DIR: u16 = 0x0019;
-const AUTOTEST_FILE: &[u8] = b"opt/desoos/autotest";
-const LOOP_FILE: &[u8] = b"opt/desoos/loop";
+const AUTOTEST_FILE: &[u8] = b"opt/deso/autotest";
+const LOOP_FILE: &[u8] = b"opt/deso/loop";
 /// "restart": the second start of tests/test.sh – only RESTART TEST part 2 runs.
-const PHASE_FILE: &[u8] = b"opt/desoos/phase";
+const PHASE_FILE: &[u8] = b"opt/deso/phase";
 
 const DEBUG_EXIT_PORT: u16 = 0xf4;
 const EXIT_PASS: u8 = 0x10; // QEMU exits with code 33
@@ -167,7 +167,7 @@ struct LoopSpec {
 
 static mut LOOP: Option<LoopSpec> = None;
 
-/// Reads `opt/desoos/loop` ("suite:rounds") – once, at startup, on one CPU.
+/// Reads `opt/deso/loop` ("suite:rounds") – once, at startup, on one CPU.
 fn detect_loop() {
     let Some((size, select)) = fw_cfg_find(LOOP_FILE) else { return };
     let mut buf = [0u8; 32];
@@ -261,7 +261,7 @@ pub fn detect_autotest() {
     }
 }
 
-/// Reads `opt/desoos/phase` – "restart" = the second start (tests/test.sh), "soak <seconds>
+/// Reads `opt/deso/phase` – "restart" = the second start (tests/test.sh), "soak <seconds>
 /// <seed>" = the long test (tests/soak.sh).
 fn detect_phase() {
     let Some((size, select)) = fw_cfg_find(PHASE_FILE) else { return };

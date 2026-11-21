@@ -3,9 +3,9 @@ name = "nts-server"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Test server for DeSoOS NTS / TLS exporter tests (host only, not part of the OS image)"
+description = "Test server for DeSo OS NTS / TLS exporter tests (host only, not part of the OS image)"
 
-# Standalone: not a member of the DeSoOS package above.
+# Standalone: not a member of the DeSo OS package above.
 [workspace]
 
 [dependencies]

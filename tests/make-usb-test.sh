@@ -6,7 +6,7 @@
 #   ACCEL=kvm tests/make-usb-test.sh
 #
 # 1. Refusals: make-usb.sh --with-disk --dry-run against a fake /sys, /proc, lsblk and findmnt
-#    (DESOOS_SYS / DESOOS_PROC, PATH): not USB, not removable, a partition instead of a disk,
+#    (DESO_SYS / DESO_PROC, PATH): not USB, not removable, a partition instead of a disk,
 #    a loop device, a mounted partition, swap on a partition, holders on the disk and on a
 #    partition, larger than 256 GiB, 4096-byte sectors, a system disk, a wrong answer, the
 #    device replaced between the question and the write, no serial number; and one that passes.
@@ -19,7 +19,7 @@
 #    partition 2 never over 64 GiB.
 # 3. The update: an image with build "v1" (self-test kernel) → start 1 (ONE STICK TEST part 1:
 #    a file and the LKG written on /disk) → the ESP gets build "v2" (tools/mkusb.py --update-esp,
-#    what `make-usb.sh /media/.../DESOOS` does on a mounted stick) → partition 2 the same byte
+#    what `make-usb.sh /media/.../DESO` does on a mounted stick) → partition 2 the same byte
 #    for byte → start 2 from the same image: `ver` = v2, the file and the LKG of start 1 there.
 #    Two builds – so it is not part of every tests/test.sh run.  Ends with a plain
 #    ./build.sh --selftest (no build tag).
@@ -92,7 +92,7 @@ fake_reset() {
 dry() {
   local answer="${1:-/dev/sdz}" dev="${2:-/dev/sdz}"
   rm -f "$F/state/serial.calls"
-  printf '%s\n' "$answer" | FAKE="$F/state" DESOOS_SYS="$F/sys" DESOOS_PROC="$F/proc" PATH="$F/bin:$PATH" ./make-usb.sh --with-disk "$dev" --dry-run > "$W/out" 2>&1
+  printf '%s\n' "$answer" | FAKE="$F/state" DESO_SYS="$F/sys" DESO_PROC="$F/proc" PATH="$F/bin:$PATH" ./make-usb.sh --with-disk "$dev" --dry-run > "$W/out" 2>&1
 }
 refused() { # $1 = what, $2 = text the refusal must contain
   if dry "${3:-/dev/sdz}" "${4:-/dev/sdz}"; then bad "$1: not refused"; cat "$W/out" >> "$LOG"
@@ -104,7 +104,7 @@ fake_reset; echo sata > "$F/state/TRAN"; refused "not USB" "not attached via USB
 fake_reset; echo 0 > "$F/sys/block/sdz/removable"; refused "not removable" "not a removable disk"
 fake_reset; echo part > "$F/state/TYPE"; refused "a partition instead of the disk" "not a whole disk" /dev/sdz1 /dev/sdz1
 fake_reset; refused "a loop device" "not a physical disk" /dev/loop0 /dev/loop0
-fake_reset; printf '\n/media/u/DESOOS\n' > "$F/state/MOUNTPOINTS"; refused "a mounted partition" "is mounted"
+fake_reset; printf '\n/media/u/DESO\n' > "$F/state/MOUNTPOINTS"; refused "a mounted partition" "is mounted"
 fake_reset; printf '/dev/sdz2 partition 1048572 0 -2\n' >> "$F/proc/swaps"; refused "swap on a partition" "swap area"
 fake_reset; touch "$F/sys/block/sdz/holders/dm-0"; refused "a holder on the disk" "held by"
 fake_reset; touch "$F/sys/block/sdz/sdz2/holders/dm-1"; refused "a holder on a partition (dm-crypt)" "held by"
@@ -114,7 +114,7 @@ fake_reset; echo /dev/sdz1 > "$F/state/root_source"; refused "the system disk" "
 fake_reset; refused "a wrong answer" "aborted - nothing changed" sdz
 fake_reset; echo "OTHER99" > "$F/state/SERIAL.2"; refused "the device replaced between the question and the write" "changed since the question"
 fake_reset; printf "c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n1a0e2e7d-de32-4c13-9442-9fcb2649ca02\n" > "$F/state/PARTTYPE"
-dry && grep -q "YOUR DeSoOS DATA" "$W/out" && ok "an existing DeSoOS system partition is named before the question" || bad "no warning about an existing DeSoOS system partition"
+dry && grep -q "YOUR DeSo OS DATA" "$W/out" && ok "an existing DeSo system partition is named before the question" || bad "no warning about an existing DeSo system partition"
 
 fake_reset; : > "$F/state/SERIAL"; refused "a device without a serial number" "no serial number"
 
@@ -184,7 +184,7 @@ if mk "$W/nonew.img"; then bad "mkdesofs.py: a new image without --blocks accept
 
 # ------------------------------------------------------------------ 2. the image
 echo "[MAKE-USB TEST] building the self-test kernel, build v1..." | tee -a "$LOG"
-DESOOS_BUILD_TAG=v1 ./build.sh --selftest > "$W/build1.log" 2>&1 || { tail -n 20 "$W/build1.log"; bad "build v1"; exit 1; }
+DESO_BUILD_TAG=v1 ./build.sh --selftest > "$W/build1.log" 2>&1 || { tail -n 20 "$W/build1.log"; bad "build v1"; exit 1; }
 cp build/EFI/BOOT/BOOTX64.EFI "$W/v1.efi"
 IMG="$W/stick.img"
 if ./make-usb.sh --with-disk --image "$IMG" 256 --efi "$W/v1.efi" >> "$LOG" 2>&1 && python3 tools/mkusb.py --verify "$IMG" --efi "$W/v1.efi" >> "$LOG" 2>&1; then
@@ -200,11 +200,11 @@ else
 fi
 for small in 150; do
   if ./make-usb.sh --with-disk --image "$W/small.img" "$small" --efi "$W/v1.efi" > "$W/out" 2>&1; then bad "a $small MiB image accepted"
-  else ok "a $small MiB image refused (ESP 128 MiB + DeSoOS system 64 MiB)"; fi
+  else ok "a $small MiB image refused (ESP 128 MiB + DeSo system 64 MiB)"; fi
 done
 
 # A 70000 MiB stick (a sparse file): partition 2 exactly 64 GiB, the rest unallocated and said so.
-if ./make-usb.sh --with-disk --image "$W/big.img" 70000 --efi "$W/v1.efi" > "$W/out" 2>&1 && grep -q "DeSoOS system 65536 MiB" "$W/out" && grep -q "left unallocated" "$W/out"; then
+if ./make-usb.sh --with-disk --image "$W/big.img" 70000 --efi "$W/v1.efi" > "$W/out" 2>&1 && grep -q "DeSo system 65536 MiB" "$W/out" && grep -q "left unallocated" "$W/out"; then
   ok "a 70000 MiB stick: partition 2 = 64 GiB, the rest unallocated (reported)"
 else
   bad "a 70000 MiB stick: $(grep mkusb "$W/out" | head -n 2 | tr '\n' ' ')"
@@ -219,8 +219,8 @@ qemu_start() { # $1 = phase, $2 = log
     -drive if=none,id=stick,format=raw,file="$IMG" \
     -device usb-storage,bus=xhci.0,port=1,drive=stick,bootindex=0 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -fw_cfg name=opt/desoos/autotest,string=1 \
-    -fw_cfg "name=opt/desoos/phase,string=$1" \
+    -fw_cfg name=opt/deso/autotest,string=1 \
+    -fw_cfg "name=opt/deso/phase,string=$1" \
     -serial stdio -display none -no-reboot < /dev/null > "$2" 2>&1
 }
 p2_sum() { python3 - "$IMG" <<'EOF'
@@ -240,7 +240,7 @@ if [ "$c" = 33 ]; then ok "start 1 from the image (build v1): /usb0 ESP read-onl
 else bad "start 1 from the image: QEMU code $c"; tail -n 15 "$W/start1.log" >> "$LOG"; fi
 P2_BEFORE=$(p2_sum)
 echo "[MAKE-USB TEST] building the self-test kernel, build v2..." | tee -a "$LOG"
-DESOOS_BUILD_TAG=v2 ./build.sh --selftest > "$W/build2.log" 2>&1 || { tail -n 20 "$W/build2.log"; bad "build v2"; exit 1; }
+DESO_BUILD_TAG=v2 ./build.sh --selftest > "$W/build2.log" 2>&1 || { tail -n 20 "$W/build2.log"; bad "build v2"; exit 1; }
 cp build/EFI/BOOT/BOOTX64.EFI "$W/v2.efi"
 cmp -s "$W/v1.efi" "$W/v2.efi" && bad "builds v1 and v2 are the same file"
 if python3 tools/mkusb.py --update-esp "$IMG" --efi "$W/v2.efi" >> "$LOG" 2>&1 && [ "$(p2_sum)" = "$P2_BEFORE" ]; then

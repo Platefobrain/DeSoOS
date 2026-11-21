@@ -17,9 +17,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
@@ -46,12 +46,12 @@ static mut ABUF: [u8; 64 * 1024] = [0; 64 * 1024];
 fn speed(mut f: impl FnMut(&[u8])) -> u64 {
     // SAFETY: single-threaded program; BUF is only read here.
     let buf: &[u8] = unsafe { &*core::ptr::addr_of!(BUF) };
-    let start = desoos::uptime_ms();
+    let start = deso::uptime_ms();
     let mut kib = 0u64;
     loop {
         f(buf);
         kib += 64;
-        let ms = desoos::uptime_ms() - start;
+        let ms = deso::uptime_ms() - start;
         if ms >= 200 {
             return kib * 1000 / ms;
         }
@@ -77,7 +77,7 @@ fn xmm_round(pat: &[u8; 256], back: &mut [u8; 256]) {
             "movdqu [{b} + 192], xmm12", "movdqu [{b} + 208], xmm13", "movdqu [{b} + 224], xmm14", "movdqu [{b} + 240], xmm15",
             p = in(reg) pat.as_ptr(),
             b = in(reg) back.as_mut_ptr(),
-            inout("rax") desoos::SYS_YIELD => _,
+            inout("rax") deso::SYS_YIELD => _,
             out("rcx") _,
             out("r11") _,
             options(nostack)
@@ -101,9 +101,9 @@ fn xmm_test(seed: u64, run_ms: u64) -> i32 {
         Err(_) => return 1,
     };
     let hw = AesGcm::new(&key);
-    let start = desoos::uptime_ms();
+    let start = deso::uptime_ms();
     let mut rounds = 0u64;
-    while desoos::uptime_ms() - start < run_ms || rounds < 20 {
+    while deso::uptime_ms() - start < run_ms || rounds < 20 {
         let mut pat = [0u8; 256];
         for (i, b) in pat.iter_mut().enumerate() {
             *b = (i as u64).wrapping_mul(0x9e37).wrapping_add(seed * 977 + rounds * 13) as u8;
@@ -121,7 +121,7 @@ fn xmm_test(seed: u64, run_ms: u64) -> i32 {
             println!("cryptotest xmm: FAIL round {}: the hardware AES-GCM result differs from the software one", rounds);
             return 1;
         }
-        desoos::syscall3(desoos::SYS_YIELD, 0, 0, 0);
+        deso::syscall3(deso::SYS_YIELD, 0, 0, 0);
         rounds += 1;
     }
     let f = hw.features();
@@ -129,7 +129,7 @@ fn xmm_test(seed: u64, run_ms: u64) -> i32 {
     0
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     if args.get(1) == Some("xmm") {
         let seed = args.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
         let run_ms = args.get(3).and_then(|s| s.parse::<u64>().ok()).map(|s| s.min(3600) * 1000).unwrap_or(400);
@@ -160,7 +160,7 @@ fn main(args: desoos::Args) -> i32 {
         let _ = desocrypto::aead::seal(&key, &nonce, b"", buf);
     });
     // X25519: shared secrets per second (at least 200 ms).
-    let start = desoos::uptime_ms();
+    let start = deso::uptime_ms();
     let mut k = [9u8; 32];
     let mut ops = 0u64;
     let x25519_ops = loop {
@@ -170,7 +170,7 @@ fn main(args: desoos::Args) -> i32 {
             k = r;
         }
         ops += 1;
-        let ms = desoos::uptime_ms() - start;
+        let ms = deso::uptime_ms() - start;
         if ms >= 200 {
             break ops * 1000 / ms;
         }
@@ -213,7 +213,7 @@ fn main(args: desoos::Args) -> i32 {
     // Signature checks per second (one stored signature each, at least 200 ms).
     let mut per_s = [0u64; 3];
     for (kind, out) in per_s.iter_mut().enumerate() {
-        let start = desoos::uptime_ms();
+        let start = deso::uptime_ms();
         let mut ops = 0u64;
         *out = loop {
             if !desocrypto_tests::sig_bench(kind as u8, 4) {
@@ -221,7 +221,7 @@ fn main(args: desoos::Args) -> i32 {
                 return 1;
             }
             ops += 4;
-            let ms = desoos::uptime_ms() - start;
+            let ms = deso::uptime_ms() - start;
             if ms >= 200 {
                 break ops * 1000 / ms;
             }

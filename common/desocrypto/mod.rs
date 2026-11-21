@@ -1,4 +1,4 @@
-// DeSoCrypto – the DeSoOS cryptographic library (version: VERSION below).
+// DeSoCrypto – the DeSo OS cryptographic library (version: VERSION below).
 //
 // Plain code, no system behind it: no syscalls, no heap, no `std` – only `core`.
 // Every result goes into memory the caller owns (an array returned by value or a

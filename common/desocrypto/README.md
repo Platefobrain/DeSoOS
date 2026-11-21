@@ -1,6 +1,6 @@
 # DeSoCrypto v0.7.0
 
-DeSoOS's own cryptographic library, used only inside DeSoOS – by the kernel and by user programs. Plain Rust with
+DeSo OS's own cryptographic library, used only inside DeSo OS – by the kernel and by user programs. Plain Rust with
 `core` only: no heap, no syscalls, no outside code.
 
 | File | What |
@@ -38,7 +38,7 @@ let digest = desocrypto::sha256::sha256(b"abc");
 Users: DeSoTLS (`common/desotls` – certificate signatures), the kernel (DeSoFS block checksums, the random number generator `kernel/random.rs`, CRYPTO TEST),
 `netd` (its own generator keyed from `getrandom`), `/bin/sha256sum`, `/bin/cryptotest`.
 
-Signatures: only verification – DeSoOS checks signatures made by others (certificates, TLS); it does not sign
+Signatures: only verification – DeSo OS checks signatures made by others (certificates, TLS); it does not sign
 and has no RSA decryption. `bignum`, `rsa` and `ecdsa` are not constant time on purpose: they only ever see public
 keys, public signatures and public data. The cost of each check is bounded (at most 4096-bit numbers, e < 2^32, a
 fixed curve), so no input can make it run long. They must not be used for anything secret.

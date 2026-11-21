@@ -6,7 +6,7 @@
 //     protection, no registration, probe (and its late reply), rw, the first and the second
 //     lock each alone, 64 KiB pieces and a failed piece, a write timeout, format sessions,
 //     generations and the counters that never wrap.
-// 2/3 real usbd and the writable QEMU stick (GPT: ESP + "DeSoOS system", tests/mkgpt.py):
+// 2/3 real usbd and the writable QEMU stick (GPT: ESP + "DeSo system", tests/mkgpt.py):
 //     probe with a real SYNCHRONIZE CACHE, write / read back / flush, the ESP never changes,
 //     the third lock (usbd) alone, a stale generation, usbd's errors reaching the kernel, a
 //     held probe reply, read-only sticks refused.
@@ -54,18 +54,18 @@ fn is_ver(ver: u8, lba: u64, sector: &[u8]) -> bool {
     sector.iter().enumerate().all(|(i, &b)| b == vpat(ver, lba, i))
 }
 
-/// The partitions of USB disk `disk`: (ESP, "DeSoOS system") block numbers, if both exist.
+/// The partitions of USB disk `disk`: (ESP, "DeSo system") block numbers, if both exist.
 fn parts(disk: usize) -> Option<(usize, usize)> {
     let ps = block::partitions_of(disk);
     let esp = ps.iter().copied().find(|&p| block::partition_kind(p) == Some("EFI System"))?;
-    let sys = ps.iter().copied().find(|&p| block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME))?;
+    let sys = ps.iter().copied().find(|&p| block::partition_kind(p) == Some(crate::gpt::DESO_SYSTEM_NAME))?;
     Some((esp, sys))
 }
 
-/// (start, length) of the "DeSoOS system" partition of `disk` in device blocks (512 B here).
+/// (start, length) of the "DeSo system" partition of `disk` in device blocks (512 B here).
 fn sys_range(disk: usize) -> Option<(u64, u64)> {
     let ps = crate::gpt::read(disk).ok()??;
-    let p = ps.iter().find(|p| p.kind == crate::gpt::DESOOS_SYSTEM_NAME)?;
+    let p = ps.iter().find(|p| p.kind == crate::gpt::DESO_SYSTEM_NAME)?;
     Some((p.first_sector, p.sectors))
 }
 
@@ -94,7 +94,7 @@ fn fake_test() -> Result<String, String> {
     let (sa, sb) = (find("blkwtest").unwrap(), find("blkwtest-wp").unwrap());
     let (a, b) = (sa.index.load(Ordering::SeqCst), sb.index.load(Ordering::SeqCst));
     let pp = parts(a);
-    ck!(pp.is_some(), "blkwtest disk {}: no ESP + DeSoOS system partitions", a);
+    ck!(pp.is_some(), "blkwtest disk {}: no ESP + DeSo system partitions", a);
     let (p1, p2) = pp.unwrap();
     let (ga, gb) = (generation(a), generation(b));
     ck!(ga != 0 && gb != 0 && ga != gb, "generations {} / {}", ga, gb);
@@ -371,7 +371,7 @@ fn real_test() -> Result<(String, String), String> {
             }
         };
     }
-    ck!(wait_for(30_000, || writable().is_some()), "writable test stick (GPT: ESP + DeSoOS system) not found");
+    ck!(wait_for(30_000, || writable().is_some()), "writable test stick (GPT: ESP + DeSo system) not found");
     let (d, p1, p2, s, l) = writable().unwrap();
     let sh = super::ublk::list().into_iter().find(|x| x.index.load(Ordering::SeqCst) == d).unwrap();
     // The read-only sticks report write protection and get nothing.
@@ -525,9 +525,9 @@ fn real_test() -> Result<(String, String), String> {
     Ok((line2, line3))
 }
 
-/// The ESP marker of tests/mkgpt.py ("DESOOS-ESP" in every sector).
+/// The ESP marker of tests/mkgpt.py ("DESO-ESP" in every sector).
 fn is_ver_esp(buf: &[u8]) -> bool {
-    buf.chunks(512).all(|s| &s[..10] == b"DESOOS-ESP")
+    buf.chunks(512).all(|s| &s[..8] == b"DESO-ESP")
 }
 
 pub fn self_test() {

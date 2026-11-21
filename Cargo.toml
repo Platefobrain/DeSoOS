@@ -1,5 +1,5 @@
 [package]
-name = "desoos-boot"
+name = "deso-boot"
 version = "0.80.1"
 edition = "2024"
 license = "GPL-3.0-or-later AND OFL-1.1"

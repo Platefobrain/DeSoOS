@@ -17,16 +17,16 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
 mod desotls;
 
 use alloc::vec::Vec;
-use desoos::*;
+use deso::*;
 use desotls::roots::{AnchorList, Anchors, Roots};
 use desotls::{name, pem, verify, x509};
 

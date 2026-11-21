@@ -1,10 +1,25 @@
-# DeSoOS Changelog
+# DeSo OS Changelog
 
 Format: newest on top. Dates in Central European time.
 
 ## v0.81.0 — in progress (ABI + SDK)
 
 Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
+
+### Stage A2 – the names: "deso"
+- **The project's name in text is "DeSo OS"** (like DeSoFS, DeSoCrypto, DeSoTLS): `ver`, kernel and program messages,
+  the README, the documentation. File and folder names keep no space.
+- **Every name in the system says "deso"**: the program library `user/lib/deso.rs` (`mod deso`, `deso_main`; the
+  `libdeso` crate in stage B), the protected system directory `/.deso` and the last known good time in
+  `/disk/.deso/lkg`, the build variables `DESO_*` (`DESO_AUTOSOAK`, `DESO_AUTOSTRESS`, `DESO_TRUST_CPU`,
+  `DESO_BUILD_TAG`, …), `build/deso.efi`, the boot crate `deso-boot`, the stick's ESP label `DESO`, the partition
+  name "DeSo system" (its type GUID `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` is unchanged – DeSo OS finds the partition by
+  the GUID, so an older stick still works), and in the tests the QEMU fw_cfg names `opt/deso/…`, the host names
+  `*.deso` (test certificates made again), the markers `DESO.TST` / `DESO-ESP`.
+- No migration: an older stick's `/disk/.desoos` is an ordinary directory now and its last known good time is not
+  read – make the stick again with `make-usb.sh --with-disk`.
+- `tests/test.sh` refuses the old name anywhere in the tree except the history (old CHANGELOG / RELEASE entries).
+- ABI 1.0 is unchanged (no entry had the old name) – its lock still passes.
 
 ### Stage A – the ABI description and its guard
 - **`abi/abi.toml` – the one source of truth** for what a program may rely on, written from the code as it is:
@@ -22,7 +37,7 @@ Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
   kernel's half of the test), guards the locks with a diff in plain words (`ABI BREAK: SYS_READ argument 1: lock
   'buf:ptr_out', now 'len:len'`, `ABI ADD WITHOUT VERSION: …`).
 - **`ERROR_ABI` (-200)** is in ABI 1.0 from the start (exec of a program built for a newer ABI – the ELF note comes in
-  stage B); DeSoOS-only error codes start at -200.
+  stage B); DeSo-only error codes start at -200.
 - **The load range is part of ABI 1.0**: a program's segments must lie in [0x100000, 0xFFF80000000] – below its
   largest heap (1 GiB above the image) and a 1 GiB gap before the `mmap` area. Before, the loader accepted segments up
   to just below the stack, where a program's heap or the `mmap` area could reach them; every program is linked at
@@ -30,7 +45,7 @@ Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
 - Tests: `tests/test.sh` runs `python3 tools/abigen.py --test` on the host before building (`logs/test-abi.log`) – the
   locks, the description (no holes, typed arguments, handle arguments = rights rows, errors are `ERROR_*`, every stable
   entry tested), the generator (deterministic, = the files in the tree), the code against the description (the
-  kernel's syscall numbers and the argument registers each dispatch arm reads; every constant of `desoos.rs`) and 18
+  kernel's syscall numbers and the argument registers each dispatch arm reads; every constant of `deso.rs`) and 18
   mutations, all caught. **ABI TEST** in QEMU: the kernel's rights table byte for byte, the table's size, the reserved
   numbers, 174 syscall numbers and constants through their kernel paths; `/bin/abiprobe` (raw syscalls on the
   generated constants, 111 probes): every rights-table row with a handle that does not exist, a handle without rights,

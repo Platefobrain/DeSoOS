@@ -9,13 +9,13 @@
 #                              suites: smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
-# opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
+# opt/deso/phase=restart): DeSoFS written by the first start must be mounted at /disk
 # by itself and hold the same data (RESTART TEST part 2, [RESULT-FS]).  Then a third start
-# without the virtio and NVMe disks (opt/desoos/phase=usbrestart): the writable USB stick the
+# without the virtio and NVMe disks (opt/deso/phase=usbrestart): the writable USB stick the
 # first start formatted must become /disk by itself, with its last known good time (USB RESTART
 # TEST, logs/test-usbrestart.log).  Then two starts from an image made by tools/mkusb.py – the
 # code of make-usb.sh --with-disk – with nothing else attached (phases onestick1 / onestick2):
-# UEFI boots BOOTX64.EFI from the image's ESP, /usb0 = its ESP read-only, /disk = its "DeSoOS
+# UEFI boots BOOTX64.EFI from the image's ESP, /usb0 = its ESP read-only, /disk = its "DeSo OS
 # system" partition read-write; the second start finds the first one's file and LKG, and the ESP
 # is the same byte for byte afterwards (ONE STICK TEST, logs/test-onestick.log).  Not in loop mode.
 # Then a short soak (2 min, tests/soak.sh on a RAM disk – all workers at once, checkpoints): the soak
@@ -84,6 +84,16 @@ if ! python3 tools/abigen.py --test > "$LOG_ABI" 2>&1; then
   echo "FAIL - ABI host test (logs/test-abi.log)"
   exit 1
 fi
+# The names (V081 stage A2): "deso" in every name, "DeSo OS" for the project – the old name stays only
+# in the history (CHANGELOG.md, docs/RELEASE.md), in lines marked "fixed test data" (bytes signed long ago)
+# and in local files that are not part of the tree.
+OLD_NAME=$(find . \( -path ./build -o -path ./logs -o -path ./ab -o -path ./drivers -o -path ./.git -o -name target \) -prune \
+  -o -type f ! -name CHANGELOG.md ! -name RELEASE.md ! -name ab-usb.sh ! -name .build-local.sh ! -name .run-local.sh \
+  ! -name '*.img' -print0 | xargs -0 grep -IiH "deso[o]s" 2>/dev/null | grep -v "fixed test data" | cut -d: -f1 | sort -u || true)
+if [ -n "$OLD_NAME" ]; then
+  echo "FAIL - the old name is still used in: $OLD_NAME"
+  exit 1
+fi
 ABI_HOST=$(grep -ac "^\[ABI HOST TEST\] [0-9]/5 .* PASS" "$LOG_ABI" || true)
 
 if [ "$BUILD" = 1 ]; then
@@ -108,8 +118,8 @@ TEST_USB="$ROOT/build-test-usb.img"
 rm -f "$TEST_USB"
 command -v python3 >/dev/null 2>&1 || { echo "python3 not found (needed for the test USB stick image)"; exit 3; }
 python3 "$T/mkfat32.py" "$TEST_USB" "$ROOT/build/user/sh" "$ROOT/build/user/usbd" "$ROOT/build/user/cat" || { echo "ERROR: mkfat32.py"; exit 3; }
-# Writable test USB stick (USB WRITE TEST): GPT with an ESP and a "DeSoOS system" partition,
-# the only kind of partition DeSoOS ever writes on a USB disk.  A fresh one every run; a
+# Writable test USB stick (USB WRITE TEST): GPT with an ESP and a "DeSo system" partition,
+# the only kind of partition DeSo OS ever writes on a USB disk.  A fresh one every run; a
 # -blockdev node (not -drive) so that it survives device_del and can be plugged back;
 # share-rw: a stick unplugged in the middle of a write may keep its node for a moment.
 TEST_USBW="$ROOT/build-test-usbw.img"
@@ -126,13 +136,13 @@ mkdir -p "$ROOT/logs"
 LOG="$ROOT/logs/test.log"
 # QEMU monitor for hot-plugging (USB TEST 6/6): qemu-hotplug.py
 # sends it the "[HOTPLUG] …" lines from the log (a hub with a mouse and the test USB stick).
-MON="${TMPDIR:-/tmp}/desoos-monitor-$$.sock"
+MON="${TMPDIR:-/tmp}/deso-monitor-$$.sock"
 rm -f "$MON"
 START=$(date +%s)
 
 # -cpu max / host: NX, SMEP, RDTSCP etc. as on a modern processor (needed by the tests).
 # -smp $SMP (default 4): several cores (SMP tests).
-# fw_cfg opt/desoos/autotest = the kernel powers QEMU off by itself after the tests
+# fw_cfg opt/deso/autotest = the kernel powers QEMU off by itself after the tests
 # via isa-debug-exit (port 0xf4): PASS -> 33, FAIL -> 35.
 QEMU=(qemu-system-x86_64
   -machine q35 -m 512M -smp "$SMP"
@@ -155,16 +165,16 @@ QEMU=(qemu-system-x86_64
   -drive file="$TEST_DISK",format=raw,if=none,id=vd0
   -device virtio-blk-pci,drive=vd0
   -drive file="$TEST_NVME",format=raw,if=none,id=nv0
-  -device nvme,serial=desoos-test,drive=nv0
+  -device nvme,serial=deso-test,drive=nv0
   -device edu,addr=06
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
-  -fw_cfg name=opt/desoos/autotest,string=1
+  -fw_cfg name=opt/deso/autotest,string=1
   -serial stdio -display none -no-reboot)
 if [ -n "$LOOP" ]; then
   case "$LOOP" in
     *[!a-z0-9:]*|"") echo "LOOP: suite:rounds, e.g. LOOP=nobkl:400 (got: $LOOP)"; exit 3 ;;
   esac
-  QEMU+=(-fw_cfg name=opt/desoos/loop,string="$LOOP")
+  QEMU+=(-fw_cfg name=opt/deso/loop,string="$LOOP")
 fi
 
 : > "$LOG"
@@ -174,7 +184,7 @@ STUB_READY=$(mktemp -d)
 export STUB_READY
 python3 "$T/qemu-hotplug.py" "$LOG" "$MON" &
 HOTPLUG_PID=$!
-# DNS server for NET TEST (names under .desoos; the guest asks 10.0.2.2:53530).
+# DNS server for NET TEST (names under .deso; the guest asks 10.0.2.2:53530).
 python3 "$T/dns-stub.py" 53530 &
 DNS_PID=$!
 # HTTP server for NET TEST (TCP; the guest connects to 10.0.2.2:58080).
@@ -183,10 +193,10 @@ HTTP_PID=$!
 # UDP echo server for NET TEST (the guest sends to 10.0.2.2:58090).
 python3 "$T/udp-stub.py" 58090 &
 UDP_PID=$!
-# NTP servers for NTP TEST (ntp.desoos = 10.0.2.2, ports 58123-58154).
+# NTP servers for NTP TEST (ntp.deso = 10.0.2.2, ports 58123-58154).
 python3 "$T/ntp-stub.py" 58123 &
 NTP_PID=$!
-# HTTPS servers for TLS TEST (tls.desoos = 10.0.2.2, ports 58443-58470; tests/tls/).
+# HTTPS servers for TLS TEST (tls.deso = 10.0.2.2, ports 58443-58470; tests/tls/).
 python3 "$T/tls-stub.py" 58443 &
 TLS_PID=$!
 # rustls test server for TLS TEST (exporter and ALPN against an independent TLS 1.3;
@@ -257,7 +267,7 @@ TIME2=0
 if [ "$CODE" = 33 ] && [ -z "$LOOP" ]; then
   echo "Restarting QEMU on the same test disk (RESTART TEST part 2)..."
   START2=$(date +%s)
-  QEMU+=(-fw_cfg name=opt/desoos/phase,string=restart)
+  QEMU+=(-fw_cfg name=opt/deso/phase,string=restart)
   if [ "$VERBOSE" = 1 ]; then
     timeout "$TIMEOUT" "${QEMU[@]}" < /dev/null 2>&1 | tee "$LOG2"
     CODE2=${PIPESTATUS[0]}
@@ -287,7 +297,7 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ -z "$LOOP" ]; then
     esac
     QEMU3+=("$a")
   done
-  QEMU3+=(-fw_cfg name=opt/desoos/phase,string=usbrestart)
+  QEMU3+=(-fw_cfg name=opt/deso/phase,string=usbrestart)
   if [ "$VERBOSE" = 1 ]; then
     timeout "$TIMEOUT" "${QEMU3[@]}" < /dev/null 2>&1 | tee "$LOG4"
     CODE4=${PIPESTATUS[0]}
@@ -324,8 +334,8 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ];
       -drive if=none,id=onestick,format=raw,file="$ONE_IMG"
       -device usb-storage,bus=xhci.0,port=1,drive=onestick,bootindex=0
       -device isa-debug-exit,iobase=0xf4,iosize=0x04
-      -fw_cfg name=opt/desoos/autotest,string=1
-      -fw_cfg name=opt/desoos/phase,string=$phase
+      -fw_cfg name=opt/deso/autotest,string=1
+      -fw_cfg name=opt/deso/phase,string=$phase
       -serial stdio -display none -no-reboot)
     if [ "$VERBOSE" = 1 ]; then
       timeout "$TIMEOUT" "${QEMU5[@]}" < /dev/null 2>&1 | tee -a "$LOG5"
@@ -336,7 +346,7 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ -z "$LOOP" ];
     fi
   done
   if [ "$CODE5" = 33 ] && [ "$(esp_sum)" != "$ESP_BEFORE" ]; then
-    echo "[ONE STICK TEST] FAIL: the ESP of the image changed (DeSoOS must never write it)" >> "$LOG5"
+    echo "[ONE STICK TEST] FAIL: the ESP of the image changed (DeSo OS must never write it)" >> "$LOG5"
     CODE5=35
   fi
   rm -f "$ONE_IMG"

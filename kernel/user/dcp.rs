@@ -1,6 +1,6 @@
-// DCP – DeSoOS Capability Permissions: the `dcp` command.
+// DCP – DeSo OS Capability Permissions: the `dcp` command.
 //
-// In DeSoOS a process has no user identity; what it may do is exactly the set
+// In DeSo OS a process has no user identity; what it may do is exactly the set
 // of handles (capabilities) it holds, with their rights, plus the file sandbox
 // flag.  This module shows that model and keeps a log of refusals:
 //

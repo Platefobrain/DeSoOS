@@ -1,6 +1,6 @@
 // timetest – LKG TEST from a program (the kernel's LKG TEST runs it).
 //
-//   timetest protect <root>   <root> is a DeSoFS volume holding <root>/.desoos/lkg (the last
+//   timetest protect <root>   <root> is a DeSoFS volume holding <root>/.deso/lkg (the last
 //                             known good time).  Tries to change it every way a program can –
 //                             open for writing / truncate / create / append, unlink of the file
 //                             and the directory, mkdir and create inside, relative paths, "."
@@ -42,14 +42,14 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -76,8 +76,8 @@ fn read_file(path: &str) -> Result<Vec<u8>, i64> {
 }
 
 fn protect(root: &str) -> i32 {
-    let dir = format!("{}/.desoos", root);
-    let file = format!("{}/.desoos/lkg", root);
+    let dir = format!("{}/.deso", root);
+    let file = format!("{}/.deso/lkg", root);
     let before = match read_file(&file) {
         Ok(d) => d,
         Err(e) => {
@@ -107,27 +107,27 @@ fn protect(root: &str) -> i32 {
     fail("open append", open(&file, O_WRITE | O_APPEND));
     // Removing the file and the directory; new entries inside.
     fail("unlink lkg", unlink(&file));
-    fail("unlink .desoos", unlink(&dir));
-    fail("mkdir .desoos/x", mkdir(&format!("{}/x", dir)));
-    fail("create .desoos/extra", open(&format!("{}/extra", dir), O_WRITE | O_CREATE));
-    fail("create .desoos/lkg.new", open(&format!("{}/lkg.new", dir), O_WRITE | O_CREATE));
-    fail("mkdir .desoos (exists)", mkdir(&dir));
+    fail("unlink .deso", unlink(&dir));
+    fail("mkdir .deso/x", mkdir(&format!("{}/x", dir)));
+    fail("create .deso/extra", open(&format!("{}/extra", dir), O_WRITE | O_CREATE));
+    fail("create .deso/lkg.new", open(&format!("{}/lkg.new", dir), O_WRITE | O_CREATE));
+    fail("mkdir .deso (exists)", mkdir(&dir));
     // Other spellings of the same node: ".", "..", doubled slashes, relative paths.
-    fail("open ./.desoos/./lkg", open(&format!("{}/./.desoos/./lkg", root), O_WRITE));
-    fail("unlink //.desoos//lkg", unlink(&format!("{}//.desoos//lkg", root)));
+    fail("open ./.deso/./lkg", open(&format!("{}/./.deso/./lkg", root), O_WRITE));
+    fail("unlink //.deso//lkg", unlink(&format!("{}//.deso//lkg", root)));
     let sub = format!("{}/timetest-sub", root);
     let _ = mkdir(&sub);
-    fail("open sub/../.desoos/lkg", open(&format!("{}/../.desoos/lkg", sub), O_WRITE | O_TRUNC));
+    fail("open sub/../.deso/lkg", open(&format!("{}/../.deso/lkg", sub), O_WRITE | O_TRUNC));
     let _ = chdir(&dir);
     fail("relative unlink lkg", unlink("lkg"));
     fail("relative open lkg write", open("lkg", O_WRITE | O_TRUNC));
     fail("relative create here", open("new", O_WRITE | O_CREATE));
     let _ = chdir(&sub);
-    fail("unlink ../.desoos/lkg", unlink("../.desoos/lkg"));
-    fail("open ../.desoos/lkg write", open("../.desoos/lkg", O_WRITE));
+    fail("unlink ../.deso/lkg", unlink("../.deso/lkg"));
+    fail("open ../.deso/lkg write", open("../.deso/lkg", O_WRITE));
     let _ = chdir(root);
-    fail("relative unlink .desoos/lkg", unlink(".desoos/lkg"));
-    fail("relative mkdir .desoos/y", mkdir(".desoos/y"));
+    fail("relative unlink .deso/lkg", unlink(".deso/lkg"));
+    fail("relative mkdir .deso/y", mkdir(".deso/y"));
     let _ = chdir("/");
     // Through directory handles.
     let d = dir_open(&dir, O_READ | O_WRITE);
@@ -146,10 +146,10 @@ fn protect(root: &str) -> i32 {
         println!("timetest: FAIL dir_open {}: {}", root, error_name(r));
         return 1;
     }
-    fail("unlinkat .desoos/lkg from the root", unlinkat(r as u64, ".desoos/lkg"));
-    fail("unlinkat .desoos from the root", unlinkat(r as u64, ".desoos"));
-    fail("openat .desoos/lkg write from the root", openat(r as u64, ".desoos/lkg", O_WRITE));
-    fail("mkdirat .desoos/z from the root", mkdirat(r as u64, ".desoos/z"));
+    fail("unlinkat .deso/lkg from the root", unlinkat(r as u64, ".deso/lkg"));
+    fail("unlinkat .deso from the root", unlinkat(r as u64, ".deso"));
+    fail("openat .deso/lkg write from the root", openat(r as u64, ".deso/lkg", O_WRITE));
+    fail("mkdirat .deso/z from the root", mkdirat(r as u64, ".deso/z"));
     close(r as u64);
     // Still readable and the same.
     let after = match read_file(&file) {
@@ -165,8 +165,8 @@ fn protect(root: &str) -> i32 {
     }
     // The protection is not wider than it should be: the rest of the volume is writable,
     // also names that only start like it.
-    for p in [format!("{}/timetest-ok", root), format!("{}/.desoosx", root), format!("{}/.desoos", sub)] {
-        let is_dir = p.ends_with("/.desoos");
+    for p in [format!("{}/timetest-ok", root), format!("{}/.desox", root), format!("{}/.deso", sub)] {
+        let is_dir = p.ends_with("/.deso");
         let made = if is_dir {
             mkdir(&p)
         } else {

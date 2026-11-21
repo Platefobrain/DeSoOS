@@ -802,7 +802,7 @@ pub fn self_test() {
     serial_println!("[NVME TEST] 7/9 write protection: block layer + driver + mkfs refuse, reads work PASS");
 
     // 8. GPT: EFI System partition -> disk nvme0n1p1 -> FAT32 -> /esp.
-    let (first, len) = match crate::gpt::write_test_gpt(disk, crate::gpt::ESP, "DESOOS ESP") {
+    let (first, len) = match crate::gpt::write_test_gpt(disk, crate::gpt::ESP, "DESO ESP") {
         Ok(v) => v,
         Err(e) => {
             check!(false, "write GPT: {}", e);
@@ -815,12 +815,12 @@ pub fn self_test() {
     let part = part.unwrap();
     check!(block::partition_kind(part) == Some("EFI System"), "kind {:?}", block::partition_kind(part));
     check!(block::with_device(part, |d| d.sector_count()).unwrap() == len, "partition length");
-    check!(crate::fs::fat32::mkfs(part, "DESOOSESP", true).is_ok(), "mkfs on the partition");
+    check!(crate::fs::fat32::mkfs(part, "DESOESP", true).is_ok(), "mkfs on the partition");
     let mut bs0 = [0u8; SECTOR_SIZE];
     check!(block::read(disk, first, &mut bs0).is_ok() && bs0[510] == 0x55 && bs0[511] == 0xAA, "FAT boot sector not at partition start");
     check!(crate::fs::mount_esp() == Some(part), "/esp not mounted");
-    check!(crate::fs::write_file("/esp/hello.txt", b"from DeSoOS\n").is_ok(), "write /esp/hello.txt");
-    check!(crate::fs::read_file("/esp/hello.txt").ok().as_deref() == Some(b"from DeSoOS\n".as_slice()), "read /esp/hello.txt");
+    check!(crate::fs::write_file("/esp/hello.txt", b"from DeSo OS\n").is_ok(), "write /esp/hello.txt");
+    check!(crate::fs::read_file("/esp/hello.txt").ok().as_deref() == Some(b"from DeSo OS\n".as_slice()), "read /esp/hello.txt");
     serial_println!("[NVME TEST] 8/9 GPT -> nvme0n1p1 (EFI System, {} MiB) -> FAT32 -> /esp PASS", len / 2048);
 
     // 9. The same partition with write protection: reads, does not write.

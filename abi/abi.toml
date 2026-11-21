@@ -1,4 +1,4 @@
-# DeSoOS ABI – the one source of truth for what a program may rely on (V081 plan, rules R1–R6).
+# DeSo OS ABI – the one source of truth for what a program may rely on (V081 plan, rules R1–R6).
 # Edited by hand; tools/abigen.py checks it and generates docs/abi/SYSCALLS.md, user/lib/abi_generated.rs and
 # kernel/user/abi_generated.rs from it.  Rules (docs/abi/README.md): within one major version only ADD – never renumber,
 # change or remove; a new entry gets since = the next minor, and that minor its own abi/abi-X.Y.lock.

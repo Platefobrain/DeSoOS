@@ -21,7 +21,7 @@ if [ ! -f "$DISK" ]; then
   truncate -s "$DISK_SIZE" "$DISK"
 fi
 
-# NVMe disk (QEMU's emulated controller – the only NVMe that DeSoOS
+# NVMe disk (QEMU's emulated controller – the only NVMe that DeSo OS
 # writes to; real SSDs are read-only).
 NVME="$ROOT/nvme.img"
 if [ ! -f "$NVME" ]; then
@@ -52,7 +52,7 @@ SMP="${SMP:-4}"
 
 # Network: QEMU's user network (DHCP, DNS, NAT to the host's internet).
 # HOSTFWD=port (default 18080): the host's 127.0.0.1:port reaches port 8080 of
-# DeSoOS – e.g. `netweb 8080 < /index.html` in DeSoOS, `curl http://127.0.0.1:18080/`
+# DeSo OS – e.g. `netweb 8080 < /index.html` in DeSo OS, `curl http://127.0.0.1:18080/`
 # on the host.  HOSTFWD=0 – no forwarding (if the port is taken).
 HOSTFWD="${HOSTFWD:-18080}"
 NETDEV="user,id=net0"
@@ -97,6 +97,6 @@ exec qemu-system-x86_64 \
   -drive file="$DISK",format=raw,if=none,id=vd0 \
   -device virtio-blk-pci,drive=vd0 \
   -drive file="$NVME",format=raw,if=none,id=nv0 \
-  -device nvme,serial=desoos,drive=nv0 \
+  -device nvme,serial=deso,drive=nv0 \
   -device edu,addr=06 \
   -serial stdio

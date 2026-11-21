@@ -4,7 +4,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::desoos::{O_CREATE, O_READ, O_TRUNC, O_WRITE, close, open, read, stat, strerror, write};
+use crate::deso::{O_CREATE, O_READ, O_TRUNC, O_WRITE, close, open, read, stat, strerror, write};
 
 /// Copy target: directory -> directory/<source name>.
 pub fn target(src: &str, dst: &str) -> String {

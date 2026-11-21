@@ -7,15 +7,15 @@
 // Terminus Font: Copyright (c) 2020 Dimitar Toshkov Zhekov,
 // with Reserved Font Name "Terminus Font".
 //
-// NOTE – a different license than the rest of DeSoOS: the glyph data in this file is
+// NOTE – a different license than the rest of DeSo OS: the glyph data in this file is
 // a modified version (subset, different format) of the Terminus font and is subject
 // solely to the SIL Open Font License 1.1, not the GPL.  This version is not called
 // "Terminus Font".  The full license text is below – OFL allows it as a human-readable
-// header of the font file.  When distributing DeSoOS (including a built BOOTX64.EFI),
+// header of the font file.  When distributing DeSo OS (including a built BOOTX64.EFI),
 // include this license text.
 //
 // ---------------------------------------------------------------------------------
-// The DeSoOS console font (kernel/drivers/font.rs) is derived from Terminus Font.
+// The DeSo OS console font (kernel/drivers/font.rs) is derived from Terminus Font.
 //
 // Copyright (c) 2020 Dimitar Toshkov Zhekov,
 // with Reserved Font Name "Terminus Font".

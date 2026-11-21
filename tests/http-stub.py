@@ -29,7 +29,7 @@ BIG_BODY = None  # built at the first request, not at start (the guest boots mea
 
 class Handler(socketserver.BaseRequestHandler):
     def send_page(self, body, status="200 OK", length=True):
-        head = "HTTP/1.0 %s\r\nServer: desoos-test\r\n" % status
+        head = "HTTP/1.0 %s\r\nServer: deso-test\r\n" % status
         if length:
             head += "Content-Length: %d\r\n" % len(body)
         self.request.sendall(head.encode() + b"\r\n" + body)
@@ -95,11 +95,11 @@ class Handler(socketserver.BaseRequestHandler):
                 s.close()  # a RST now – socketserver would send a FIN (shutdown) first
             elif path.startswith("/connect?"):
                 # From the host into the guest: connect to 127.0.0.1:<port> (QEMU
-                # forwards it to a server in DeSoOS), GET <path>, return what came.
+                # forwards it to a server in DeSo OS), GET <path>, return what came.
                 q = dict(kv.split("=", 1) for kv in path.split("?", 1)[1].split("&") if "=" in kv)
                 try:
                     c = socket.create_connection(("127.0.0.1", int(q.get("port", "0"))), timeout=5)
-                    c.sendall(("GET %s HTTP/1.0\r\nHost: desoos\r\n\r\n" % q.get("path", "/")).encode())
+                    c.sendall(("GET %s HTTP/1.0\r\nHost: deso\r\n\r\n" % q.get("path", "/")).encode())
                     got = b""
                     while True:
                         chunk = c.recv(65536)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Builds `roots` – the trusted CA store of DeSoOS (/etc/certs/roots at boot) – from Mozilla's
+# Builds `roots` – the trusted CA store of DeSo OS (/etc/certs/roots at boot) – from Mozilla's
 # root store (NSS certdata.txt).
 #
 #   gen-roots.py <certdata.txt> <out>

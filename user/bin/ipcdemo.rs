@@ -6,11 +6,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -59,7 +59,7 @@ fn main(args: Args) -> i32 {
     }
     close(c);
     println!("[parent] started child {} with 3 handles (channel, memory, console)", pid);
-    chan_send(p, b"czesc z DeSoOS", 0);
+    chan_send(p, b"czesc z DeSo OS", 0);
     let mut buf = [0u8; 64];
     let mut info = RecvInfo::default();
     let n = chan_recv(p, &mut buf, 0, &mut info);

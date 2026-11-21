@@ -1,5 +1,5 @@
 // RSA signature VERIFICATION (RFC 8017) – PKCS#1 v1.5 and PSS.  No signing, no decryption:
-// DeSoOS only checks signatures made by others (certificates, TLS CertificateVerify).
+// DeSo OS only checks signatures made by others (certificates, TLS CertificateVerify).
 //
 //   let key = PublicKey::new(n_be, e_be)?;                        // n 2048-4096 bits
 //   key.verify_pkcs1(HashAlg::Sha256, msg, sig)?;                  // RSASSA-PKCS1-v1_5

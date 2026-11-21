@@ -1,6 +1,6 @@
 # DeSoTLS
 
-DeSoOS's own TLS library (`common/desotls/`, v0.3.0), over DeSoCrypto and like it a library: `core` only, no heap,
+DeSo OS's own TLS library (`common/desotls/`, v0.3.0), over DeSoCrypto and like it a library: `core` only, no heap,
 no syscalls, included by the programs that use it. Client only. The rule above all: **either the server is fully
 authenticated – certificate chain, CertificateVerify, Finished – or no application data is sent** – no "insecure"
 switch, no fallback to an older version.
@@ -39,7 +39,7 @@ Tests: TLS TEST (3 steps: the library without a network, `netget https://` again
 man in the middle, the clock; `[RESULT-TLS]`), CERT TEST (6 steps: certificates in the kernel and in user space, the
 installed store, the seal, the clock, `certcheck`; `[RESULT-CERTS]`); on the host x509-limbo, fuzzing and mutations.
 
-| | Linux | Windows | RedoxOS | DeSoOS |
+| | Linux | Windows | RedoxOS | DeSo OS |
 |---|---|---|---|---|
 | TLS library | OpenSSL, GnuTLS, rustls in the program | Schannel (LSASS) | rustls in the program | DeSoTLS in the program |
 | versions | TLS 1.2 and 1.3 | TLS 1.2 and 1.3 | TLS 1.2 and 1.3 | TLS 1.3 only |

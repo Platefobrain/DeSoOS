@@ -1,4 +1,4 @@
-# DeSoOS ABI
+# DeSo OS ABI
 
 What a program may rely on, written down once and guarded by tests, so that a program built today keeps working on
 later systems without being rebuilt (programs live on `/disk/bin` since v0.80; packages come later).
@@ -22,7 +22,7 @@ Never edit a generated file – change `abi/abi.toml` and run `python3 tools/abi
 - **The rights gate**: every handle argument is checked before the call runs – a handle that does not exist or is of
   the wrong kind gives `ERROR_INVALID_HANDLE`, a missing right `ERROR_ACCESS_DENIED`. Which arguments are handles, of
   which kinds, and which rights they need is part of the ABI (the `handles` of each call).
-- **Errors**: the `ERROR_*` values, the same in the kernel and in programs (Unix numbers, DeSoOS names; DeSoOS-only codes
+- **Errors**: the `ERROR_*` values, the same in the kernel and in programs (Unix numbers, DeSo OS names; DeSo-only codes
   from -200: `ERROR_ABI` – the program needs an ABI the system does not give). The errors listed for a call are the
   ones ABI 1.0 documents; a program treats any other negative value as a failure too.
 - **Handles**: the kinds (`KIND_*`, what `handle_info` returns in bits 32–63) and the rights (`R_*`, bits 0–31).
@@ -46,7 +46,7 @@ note that says which ABI a program was built for comes in stage B.
    becomes `status = "deprecated"` and keeps working until the next major version.
 2. **Every addition is a new minor version.** The new entry gets `since = "1.1"` (the next minor), `[abi] version`
    becomes `"1.1"`, and `python3 tools/abigen.py --new-lock` writes `abi/abi-1.1.lock`. The ABI version is not the
-   DeSoOS version.
+   DeSo OS version.
 3. **Locks are never rewritten.** `--new-lock` refuses an existing lock and refuses to write a new one while an older
    lock fails – a lock update can never approve a break. Every lock is checked on every test run.
 4. **Every stable entry is tested** or names where it is checked: `test_class` – `normal` (a known result), `stateful`
@@ -71,7 +71,7 @@ ABI 1.0 lock: FAILED (1 changes)
 2. `abi/abi.toml`: a `[[syscall]]` with `since = "1.1"`, its arguments, errors, `handles` (the same as the row),
    `test_class` and `test`; `[abi] version = "1.1"`.
 3. `python3 tools/abigen.py` (the generated files), `python3 tools/abigen.py --new-lock` (`abi/abi-1.1.lock`).
-4. The library wrapper in `user/lib/desoos.rs` and a probe in `user/bin/abiprobe.rs`.
+4. The library wrapper in `user/lib/deso.rs` and a probe in `user/bin/abiprobe.rs`.
 5. `tests/test.sh` – the host checks and ABI TEST must pass.
 
 ## Tests
@@ -83,7 +83,7 @@ ABI 1.0 lock: FAILED (1 changes)
 | 1 locks | every `abi/abi-*.lock` is intact (each line's SHA-256 and the total) and matches the description – the human diff above on any difference |
 | 2 description | `abi.toml` is complete: no holes in the numbers, every argument typed, handle arguments match the rights rows, errors are `ERROR_*` constants, every stable entry has a test, no value outside its type |
 | 3 generator | two runs give the same bytes, and they are the files in the tree |
-| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; every constant of `user/lib/desoos.rs` has the description's type and value, and every library constant of the description is there |
+| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; every constant of `user/lib/deso.rs` has the description's type and value, and every library constant of the description is there |
 | 5 mutations | 18 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a lock line edited / removed, a generated file edited, a library constant changed / not described, the kernel renumbered, the kernel reading another argument |
 
 ABI TEST in QEMU is the kernel's half: `1/2` the kernel's rights table (`sysinfo rights`) byte for byte, the table's size,
@@ -100,4 +100,4 @@ a child that exits with 7.
 | Linux | the system calls ("we do not break user space") + glibc | review; per-architecture syscall tables; glibc symbol versions |
 | Windows | the Win32 libraries; system call numbers change between builds | the libraries are the contract |
 | Redox | relibc; the kernel's ABI still moves | – |
-| **DeSoOS** | system calls, handles and rights, constants, loader limits (ABI 1.0) | one description, generated files, locks with SHA-256, mutations, the kernel and a program tested against the description |
+| **DeSo OS** | system calls, handles and rights, constants, loader limits (ABI 1.0) | one description, generated files, locks with SHA-256, mutations, the kernel and a program tested against the description |

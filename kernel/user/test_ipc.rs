@@ -94,7 +94,7 @@ pub fn self_test() {
     check!(r.is_some(), "ipcdemo did not finish");
     let (kind, demo) = r.unwrap();
     check!(
-        kind == ExitKind::Exit(0) && demo.contains("CZESC Z DESOOS") && demo.contains("we wspolnej pamieci"),
+        kind == ExitKind::Exit(0) && demo.contains("CZESC Z DESO") && demo.contains("we wspolnej pamieci"),
         "ipcdemo: {:?} {:?}",
         kind,
         demo.trim()

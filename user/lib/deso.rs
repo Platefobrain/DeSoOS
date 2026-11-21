@@ -1,11 +1,11 @@
-// Small library for DeSoOS user programs (the libc counterpart).
+// Small library for DeSo OS user programs (the libc counterpart).
 //
 // A program pulls it in with:
-//     #[path = "../lib/desoos.rs"]
+//     #[path = "../lib/deso.rs"]
 //     #[macro_use]
-//     mod desoos;
-//     desoos::entry!(main);
-//     fn main(args: desoos::Args) -> i32 { println!("..."); 0 }
+//     mod deso;
+//     deso::entry!(main);
+//     fn main(args: deso::Args) -> i32 { println!("..."); 0 }
 //
 // _start (the kernel jumps here with RSP pointing at argc, argv[], NULL, envp
 // NULL, auxv AT_NULL – the SysV layout) -> main(args) -> exit(code).
@@ -189,8 +189,8 @@ pub const WNOHANG: u64 = 1;
 pub const STATUS_SIGNALED: u64 = 0x100;
 
 
-/// DeSoOS errors – the same numbers in the kernel and in programs (negative
-/// results of syscalls; the numbers are the Unix ones, the names are DeSoOS's).
+/// DeSo OS errors – the same numbers in the kernel and in programs (negative
+/// results of syscalls; the numbers are the Unix ones, the names are DeSo OS's).
 /// `strerror` gives the text, `error_name` the name.
 pub const ERROR_NOT_PERMITTED: i64 = -1;
 pub const ERROR_NOT_FOUND: i64 = -2;
@@ -221,7 +221,7 @@ pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
 pub const ERROR_NOT_EMPTY: i64 = -39;
 pub const ERROR_MESSAGE_TOO_LARGE: i64 = -90;
 pub const ERROR_TIMED_OUT: i64 = -110;
-/// exec: the program needs a DeSoOS ABI this system does not give (its ELF ABI note).
+/// exec: the program needs a DeSo OS ABI this system does not give (its ELF ABI note).
 pub const ERROR_ABI: i64 = -200;
 
 /// Parent descriptors the child will get as 0, 1, 2.
@@ -1416,7 +1416,7 @@ impl Drop for Out {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        let _ = core::fmt::Write::write_fmt(&mut $crate::desoos::Out::new(1), format_args!($($arg)*));
+        let _ = core::fmt::Write::write_fmt(&mut $crate::deso::Out::new(1), format_args!($($arg)*));
     }};
 }
 
@@ -1424,7 +1424,7 @@ macro_rules! print {
 macro_rules! println {
     () => { $crate::print!("\n") };
     ($($arg:tt)*) => {{
-        let mut o = $crate::desoos::Out::new(1);
+        let mut o = $crate::deso::Out::new(1);
         let _ = core::fmt::Write::write_fmt(&mut o, format_args!($($arg)*));
         let _ = core::fmt::Write::write_str(&mut o, "\n");
     }};
@@ -1433,7 +1433,7 @@ macro_rules! println {
 #[macro_export]
 macro_rules! eprintln {
     ($($arg:tt)*) => {{
-        let mut o = $crate::desoos::Out::new(2);
+        let mut o = $crate::deso::Out::new(2);
         let _ = core::fmt::Write::write_fmt(&mut o, format_args!($($arg)*));
         let _ = core::fmt::Write::write_str(&mut o, "\n");
     }};
@@ -1479,18 +1479,18 @@ global_asm!(r#"
         xor ebp, ebp
         mov rdi, rsp
         and rsp, -16
-        call desoos_start
+        call deso_start
         ud2
 "#);
 
 unsafe extern "Rust" {
-    fn desoos_main(args: Args) -> i32;
+    fn deso_main(args: Args) -> i32;
 }
 
 #[unsafe(no_mangle)]
-extern "sysv64" fn desoos_start(sp: *const u64) -> ! {
+extern "sysv64" fn deso_start(sp: *const u64) -> ! {
     let args = unsafe { Args { argc: *sp as usize, argv: sp.add(1) as *const *const u8 } };
-    let code = unsafe { desoos_main(args) };
+    let code = unsafe { deso_main(args) };
     exit(code)
 }
 
@@ -1499,7 +1499,7 @@ extern "sysv64" fn desoos_start(sp: *const u64) -> ! {
 macro_rules! entry {
     ($main:path) => {
         #[unsafe(no_mangle)]
-        pub fn desoos_main(args: $crate::desoos::Args) -> i32 {
+        pub fn deso_main(args: $crate::deso::Args) -> i32 {
             $main(args)
         }
     };

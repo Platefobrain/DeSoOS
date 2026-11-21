@@ -4,14 +4,14 @@ The detailed description of what DeSoTLS (`common/desotls/`, certificates since 
 profile, path building, every refusal, the trusted CA store file, the wall clock, and how it was tested. What the
 library is: `README.md` in this folder; how it fits into the system: `../ARCHITECTURE.md`, section "DeSoTLS".
 
-DeSoOS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
+DeSo OS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
 programs that use it; the TLS 1.3 connection that uses these checks is in `HANDSHAKE.md`. Client only. The rule
 above all: **either the certificate is fully checked and the connection is safe, or no application data is sent** –
 no "insecure" switch, no fallback, nothing that turns a check off.
 
 ## Compared with other systems
 
-| | Linux | Windows | RedoxOS | DeSoOS |
+| | Linux | Windows | RedoxOS | DeSo OS |
 |---|---|---|---|---|
 | TLS | a library in the program (OpenSSL, GnuTLS, rustls); kTLS for records | Schannel in LSASS | rustls in the program | `common/desotls` in the program; the kernel has no TLS |
 | CA store | shared files `/etc/ssl/certs` (Mozilla), root-only | system store + Windows Update | webpki-roots compiled into each program | one shared file `/etc/certs/roots` (Mozilla), sealed in ramfs |
@@ -162,7 +162,7 @@ SHA-256 checked), keeps the certificates trusted for server authentication (`CKT
 + DER per anchor) – NSS_3_133_RTM: 118 anchors, 117 usable (one P-521 root), 128 KiB. `build.sh` puts it into the
 image; the kernel writes it to `/etc/certs/roots` at boot and seals it (`../ARCHITECTURE.md`, section "Files"). `Roots::parse` walks the whole
 file once – a damaged store is refused as a whole, never trusted in part. Updating it = a new `certdata.txt` and the
-script, no code change – but still a new image (DeSoOS has no live updates; loading a newer store from disk later).
+script, no code change – but still a new image (DeSo OS has no live updates; loading a newer store from disk later).
 
 The file, numbers big-endian:
 
@@ -190,7 +190,7 @@ stable readings, every field in range (29 February only in leap years) and a tim
 on purpose (Linux distributions do, for reproducible builds), otherwise the build time (as Android: the most recent
 date possible, the strongest floor); no git, so it never depends on a repository; `build.sh` prints which,
 `date` / `sysinfo date` show it. Linux (systemd) has three layers – the build date, the last known time saved on
-disk, NTP; DeSoOS has the build date and, from v0.79, the last known good time on the system volume
+disk, NTP; DeSo OS has the build date and, from v0.79, the last known good time on the system volume
 (`../time/LKG.md`: a clock below it is refused – reason 7, and an unreadable LKG file is reason 8); NTS
 (`../time/NTS.md`) reads an authenticated time, and the time service (`../time/TIMEKEEPER.md`) corrects the wall clock
 and raises the LKG with it – after that the RTC's own reasons no longer count. It is a heuristic, not proof: it refuses a lost battery, a

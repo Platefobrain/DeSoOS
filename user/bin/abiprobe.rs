@@ -16,14 +16,14 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 #[path = "../lib/abi_generated.rs"]
 mod abi;
 
-use desoos::{syscall6, Args};
+use deso::{syscall6, Args};
 
 entry!(main);
 
@@ -48,16 +48,16 @@ impl Probe {
         self.ran += 1;
         if !ok {
             self.failed += 1;
-            println!("abiprobe: FAIL {}: got {} ({}), want {}", what, got, desoos::error_name(got), expect);
+            println!("abiprobe: FAIL {}: got {} ({}), want {}", what, got, deso::error_name(got), expect);
         }
     }
     fn err(&mut self, what: &str, got: i64, e: i64) {
         if e < 0 {
-            self.want(what, got, got == e, desoos::error_name(e));
+            self.want(what, got, got == e, deso::error_name(e));
         } else if got != e {
             self.ran += 1;
             self.failed += 1;
-            println!("abiprobe: FAIL {}: got {} ({}), want {}", what, got, desoos::error_name(got), e);
+            println!("abiprobe: FAIL {}: got {} ({}), want {}", what, got, deso::error_name(got), e);
         } else {
             self.ran += 1;
         }

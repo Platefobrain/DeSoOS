@@ -2,7 +2,7 @@
 
 The only program that may set the wall clock and raise the last known good time (v0.79 stage D). It is init's `time`
 service (`user/etc/services/time.svc`): it asks NTS servers of three different operators, and when at least two of
-them agree it gives the kernel the time with `SYS_TIME_SET`. Everything else in DeSoOS only reads the time.
+them agree it gives the kernel the time with `SYS_TIME_SET`. Everything else in DeSo OS only reads the time.
 
 ## The servers
 
@@ -161,4 +161,4 @@ list exists only in the self-test image (`timekeeper test:<case>`).
 | Windows (w32time) | no NTS | w32time | – | Secure Time Seeding (TLS timestamps) |
 | Android | NITZ / GNSS / NTP | system server | – | the build time |
 | RedoxOS | – | – | – | – |
-| **DeSoOS** | NTS only | the time service, with a kernel right; the kernel checks the numbers and the LKG | two of three operators, envelope | the LKG / build date as the bound, then the full check of the same chain over T ± U |
+| **DeSo OS** | NTS only | the time service, with a kernel right; the kernel checks the numbers and the LKG | two of three operators, envelope | the LKG / build date as the bound, then the full check of the same chain over T ± U |

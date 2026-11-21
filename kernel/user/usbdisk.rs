@@ -1,11 +1,11 @@
-// A USB stick's "DeSoOS system" partition as /disk (v0.80 stage B; rules D2 and E of the V080
+// A USB stick's "DeSo system" partition as /disk (v0.80 stage B; rules D2 and E of the V080
 // plan, docs/ARCHITECTURE.md "A USB stick as /disk").  Called by the usb-disks task (ublk.rs)
 // after every change of the USB disks, once they settled.
 //
-// A CANDIDATE is a (USB disk instance, partition) pair: a GPT partition of type "DeSoOS system"
+// A CANDIDATE is a (USB disk instance, partition) pair: a GPT partition of type "DeSo system"
 // with a DeSoFS marker in one of its superblocks.  Who gets /disk:
 //   1. the internal disk (block::internal – the first PCI disk, by identity) keeps /disk when it
-//      holds a recognised DeSoFS (a marker in either superblock, or a "DeSoOS system"
+//      holds a recognised DeSoFS (a marker in either superblock, or a "DeSo system"
 //      partition) – rw or ro, damaged or not – and no USB candidate ever takes it;
 //   2. otherwise, and only while /disk is really free (nothing mounted there – e.g. FAT32 from the
 //      internal disk stays), EXACTLY ONE candidate gets /disk; two or more – none does;
@@ -30,7 +30,7 @@ use crate::block::{self, BlockError, Control};
 use crate::fs::DiskMount;
 use crate::serial_println;
 
-/// The largest "DeSoOS system" partition that gets rw (the format-1 limit of this DeSoFS).
+/// The largest "DeSo system" partition that gets rw (the format-1 limit of this DeSoFS).
 pub const MAX_RW_BYTES: u64 = 64 << 30;
 /// No /disk decision until the USB disks were quiet this long (two sticks plugged in at boot
 /// are both seen before anything is decided).
@@ -66,7 +66,7 @@ fn candidates() -> Vec<Cand> {
         }
         let disk = sh.index.load(Ordering::SeqCst);
         for p in block::partitions_of(disk) {
-            if !sh.user_off(p) && block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME) && crate::fs::desofs::has_marker(p) {
+            if !sh.user_off(p) && block::partition_kind(p) == Some(crate::gpt::DESO_SYSTEM_NAME) && crate::fs::desofs::has_marker(p) {
                 v.push(Cand { sh: sh.clone(), disk, part: p });
             }
         }
@@ -77,7 +77,7 @@ fn candidates() -> Vec<Cand> {
 /// Rule E1: the internal disk holds a recognised DeSoFS.
 pub fn internal_reserves() -> bool {
     let Some(i) = block::internal() else { return false };
-    crate::fs::desofs::has_marker(i) || block::partitions_of(i).iter().any(|&p| block::partition_kind(p) == Some(crate::gpt::DESOOS_SYSTEM_NAME))
+    crate::fs::desofs::has_marker(i) || block::partitions_of(i).iter().any(|&p| block::partition_kind(p) == Some(crate::gpt::DESO_SYSTEM_NAME))
 }
 
 fn disk_taken() -> bool {
@@ -153,9 +153,9 @@ pub fn evaluate() {
         } else if taken {
             "/disk is in use"
         } else {
-            "more than one DeSoOS system partition - remove one"
+            "more than one DeSo system partition - remove one"
         };
-        serial_println!("[USB] /disk not given to a USB stick: {}; DeSoOS system partitions only read-only", why);
+        serial_println!("[USB] /disk not given to a USB stick: {}; DeSo system partitions only read-only", why);
     }
     if let Some(t) = target {
         let c = &cands[t];
@@ -190,7 +190,7 @@ pub fn evaluate() {
 /// stick frees one and is a change by itself).
 fn ro_mount(c: &Cand) -> bool {
     let Some(path) = ublk::free_mount_point() else {
-        serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted: no free /usbN", c.sh.name, c.part);
+        serial_println!("[USB] {}: DeSo system partition (disk {}) not mounted: no free /usbN", c.sh.name, c.part);
         return false;
     };
     match crate::fs::mount_disk(c.part, &path) {
@@ -203,7 +203,7 @@ fn ro_mount(c: &Cand) -> bool {
         other => {
             let _ = crate::fs::remove(&path);
             let n = c.sh.note_ro_fail(c.part);
-            serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted (attempt {}/{}): {:?}", c.sh.name, c.part, n, ublk::RO_TRIES, other);
+            serial_println!("[USB] {}: DeSo system partition (disk {}) not mounted (attempt {}/{}): {:?}", c.sh.name, c.part, n, ublk::RO_TRIES, other);
             n < ublk::RO_TRIES
         }
     }
@@ -261,7 +261,7 @@ fn to_disk(c: &Cand) {
                 let _ = block::control(c.disk, Control::Withdraw);
                 let _ = block::set_grant(c.part, None);
             }
-            serial_println!("[USB] {}: DeSoOS system partition (disk {}) not mounted at /disk: {:?}", c.sh.name, c.part, m);
+            serial_println!("[USB] {}: DeSo system partition (disk {}) not mounted at /disk: {:?}", c.sh.name, c.part, m);
             return;
         }
     }
@@ -274,8 +274,8 @@ pub fn format_session<R>(index: usize, run: impl FnOnce() -> Result<R, String>) 
     let parent = block::with_device(index, |d| d.parent()).ok().flatten()?;
     let generation = block::control(parent, Control::Generation).ok()?;
     Some((|| {
-        if block::partition_kind(index) != Some(crate::gpt::DESOOS_SYSTEM_NAME) {
-            return Err(String::from("on a USB disk only a \"DeSoOS system\" partition can be formatted - nothing changed"));
+        if block::partition_kind(index) != Some(crate::gpt::DESO_SYSTEM_NAME) {
+            return Err(String::from("on a USB disk only a \"DeSo system\" partition can be formatted - nothing changed"));
         }
         let (_, start, len) = block::partition_blocks(index).ok_or_else(|| String::from("partition range unknown - nothing changed"))?;
         let bs = block::with_device(parent, |d| d.logical_block_size()).unwrap_or(512) as u64;

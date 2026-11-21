@@ -1,6 +1,6 @@
 # NTS – Network Time Security (RFC 8915)
 
-DeSoOS's NTS client: `user/lib/nts.rs` (no input / output – records, fields, checks), `user/lib/ntske.rs` (NTS-KE over
+DeSo OS's NTS client: `user/lib/nts.rs` (no input / output – records, fields, checks), `user/lib/ntske.rs` (NTS-KE over
 a netd TCP connection, shared), `user/bin/nettime.rs` (`--nts`) and the time service `user/bin/timekeeper.rs`, DeSoTLS
 0.3 (ALPN, exporter, the kept chain) and DeSoCrypto 0.7 (AES-SIV-CMAC-256) underneath. `nettime --nts` is **read
 only** – it shows an authenticated time and changes nothing. Only the time service raises the last known good time and

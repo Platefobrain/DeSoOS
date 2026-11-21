@@ -4,7 +4,7 @@
 //                 KeyUpdate, HelloRetryRequest, changed server messages – no network:
 //                 "tlstest: N checks OK (DeSoTLS x.y.z)"
 //   tlstest net   (through `init test`, net0 running) /bin/netget https:// against
-//                 tests/tls-stub.py on the host (tls.desoos = 10.0.2.2, names from
+//                 tests/tls-stub.py on the host (tls.deso = 10.0.2.2, names from
 //                 tests/dns-stub.py): every case below must end with its exit code, the
 //                 pages must arrive whole, and a refused handshake must not let the request
 //                 reach the server (tls-stub's /seen counter); HTTP/1.1 answers from
@@ -19,9 +19,9 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
@@ -29,7 +29,7 @@ mod desotls;
 #[path = "../../common/desotls/tls_tests.rs"]
 mod tls_tests;
 
-use desoos::*;
+use deso::*;
 use desotls::client::{self, Client, Config, Random, Transport};
 use desotls::record::Suite;
 use desotls::roots::AnchorList;
@@ -187,7 +187,7 @@ fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
     random.client_random.copy_from_slice(&rnd[..32]);
     random.session_id.copy_from_slice(&rnd[32..64]);
     random.x25519_secret.copy_from_slice(&rnd[64..]);
-    let cfg = Config { host: "tls.desoos", anchors: &anchors, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn, bootstrap: None };
+    let cfg = Config { host: "tls.deso", anchors: &anchors, now, suites: &[Suite::Aes128Gcm, Suite::Chacha20Poly1305], alpn, bootstrap: None };
     let cl = unsafe { &mut *core::ptr::addr_of_mut!(XCLIENT) };
     let mut t = Chan { c, pos: 0, len: 0 };
     let info = match cl.connect(&mut t, &cfg, &random) {
@@ -277,7 +277,7 @@ fn read_out() -> &'static [u8] {
 fn seen(port: u16) -> Option<u64> {
     let mut url = [0u8; 64];
     let mut n = 0;
-    for p in [b"http://tls.desoos:58470/seen?port=".as_slice()] {
+    for p in [b"http://tls.deso:58470/seen?port=".as_slice()] {
         url[n..n + p.len()].copy_from_slice(p);
         n += p.len();
     }
@@ -302,7 +302,7 @@ fn url(port: u16, path: &str, out: &mut [u8; 96]) -> usize {
         out[n..n + b.len()].copy_from_slice(b);
         n += b.len();
     };
-    put(b"https://tls.desoos:");
+    put(b"https://tls.deso:");
     let mut d = [0u8; 5];
     let mut v = port;
     for i in (0..5).rev() {
@@ -314,7 +314,7 @@ fn url(port: u16, path: &str, out: &mut [u8; 96]) -> usize {
     n
 }
 
-/// netget https://tls.desoos:<port><path> with --anchor and the extra options; its code.
+/// netget https://tls.deso:<port><path> with --anchor and the extra options; its code.
 fn get(port: u16, path: &str, extra: &[&str]) -> u64 {
     get_to(port, path, extra, 1)
 }
@@ -566,7 +566,7 @@ fn net() -> i32 {
     // Refusals: exit 5, and the request never reached the server.
     let before = seen(58443);
     // Without --anchor: the system store does not know the test CA.
-    let code = netget(&["netget", "-o", OUT, "https://tls.desoos:58443/hello"]);
+    let code = netget(&["netget", "-o", OUT, "https://tls.deso:58443/hello"]);
     if code != 5 {
         fail!("unknown CA: exit {} (expected 5)", code);
     }

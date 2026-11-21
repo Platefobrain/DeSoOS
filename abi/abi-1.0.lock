@@ -1,4 +1,4 @@
-# DeSoOS ABI 1.0 lock – written once by tools/abigen.py --new-lock, never edited.
+# DeSo OS ABI 1.0 lock – written once by tools/abigen.py --new-lock, never edited.
 # One line per entry + the SHA-256 of the line; TOTAL = SHA-256 of all entry lines.
 SYS_BLK_ATTACH number=50 args=(blk:handle, chan:handle, buf:handle, info:ptr_in) returns=value rights=[blk BLK need WRITE; chan CHANNEL need SEND|RECV|TRANSFER; buf SHM need MAP_READ] path=no status=stable  sha256=5bdda7f2ed424f1eda390672f34fe990b07debffb8adca4b3aec53f3647336c6
 SYS_BRK number=26 args=(addr:u64) returns=value rights=[] path=no status=stable  sha256=79a2cd9fae5d505cbcb5b648581bdc47616fdb7f247ed770b4adee815f84ad74

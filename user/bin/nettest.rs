@@ -34,11 +34,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -519,43 +519,43 @@ fn main(args: Args) -> i32 {
     // DNS against the test server (tests/dns-stub.py on the host, 10.0.2.2:53530).
     let r = ask("dns 10.0.2.2:53530");
     check!(n, r.starts_with("DNS server 10.0.2.2:53530 (set by hand)"), "dns set: {:?}", r.trim());
-    let r = ask("resolve router.desoos");
-    check!(n, r.starts_with("router.desoos is 10.0.2.2 (DNS 10.0.2.2:53530, "), "resolve: {:?} (is tests/dns-stub.py running?)", r.trim());
-    let r = ask("resolve ROUTER.desoos.");
-    check!(n, r.starts_with("router.desoos is 10.0.2.2 (cached)"), "second resolve (cache, case, final dot): {:?}", r.trim());
-    let r = ask("resolve alias.desoos");
-    check!(n, r.starts_with("alias.desoos is 10.0.2.2 (DNS"), "CNAME: {:?}", r.trim());
-    let r = ask("resolve multi.desoos");
-    check!(n, r.starts_with("multi.desoos is 10.0.2.2, 10.0.2.77 (DNS"), "two addresses: {:?}", r.trim());
-    let r = ask("resolve big.desoos");
-    check!(n, r.starts_with("big.desoos is 10.0.3.1, 10.0.3.2, 10.0.3.3, 10.0.3.4 (DNS"), "six addresses (four kept): {:?}", r.trim());
-    let r = ask("resolve nx.desoos");
-    check!(n, r.trim() == "nx.desoos: no such name", "no such name: {:?}", r.trim());
-    let r = ask("resolve noaddr.desoos");
-    check!(n, r.trim() == "noaddr.desoos: has no IPv4 address", "no address: {:?}", r.trim());
-    let r = ask("resolve fail.desoos");
+    let r = ask("resolve router.deso");
+    check!(n, r.starts_with("router.deso is 10.0.2.2 (DNS 10.0.2.2:53530, "), "resolve: {:?} (is tests/dns-stub.py running?)", r.trim());
+    let r = ask("resolve ROUTER.deso.");
+    check!(n, r.starts_with("router.deso is 10.0.2.2 (cached)"), "second resolve (cache, case, final dot): {:?}", r.trim());
+    let r = ask("resolve alias.deso");
+    check!(n, r.starts_with("alias.deso is 10.0.2.2 (DNS"), "CNAME: {:?}", r.trim());
+    let r = ask("resolve multi.deso");
+    check!(n, r.starts_with("multi.deso is 10.0.2.2, 10.0.2.77 (DNS"), "two addresses: {:?}", r.trim());
+    let r = ask("resolve big.deso");
+    check!(n, r.starts_with("big.deso is 10.0.3.1, 10.0.3.2, 10.0.3.3, 10.0.3.4 (DNS"), "six addresses (four kept): {:?}", r.trim());
+    let r = ask("resolve nx.deso");
+    check!(n, r.trim() == "nx.deso: no such name", "no such name: {:?}", r.trim());
+    let r = ask("resolve noaddr.deso");
+    check!(n, r.trim() == "noaddr.deso: has no IPv4 address", "no address: {:?}", r.trim());
+    let r = ask("resolve fail.deso");
     check!(n, r.contains("SERVFAIL"), "server failure: {:?}", r.trim());
-    let r = ask("resolve trunc.desoos");
+    let r = ask("resolve trunc.deso");
     check!(n, r.contains("would need TCP"), "truncated answer: {:?}", r.trim());
     let before = num(ask("status"), "dnsbad");
-    let r = ask("resolve loop.desoos");
+    let r = ask("resolve loop.deso");
     check!(n, r.contains("malformed answer"), "pointer loop in the answer: {:?}", r.trim());
-    let r = ask("resolve spoof.desoos");
-    check!(n, r.starts_with("spoof.desoos is 10.0.2.2 (DNS"), "forged answer (wrong id) must be ignored: {:?}", r.trim());
+    let r = ask("resolve spoof.deso");
+    check!(n, r.starts_with("spoof.deso is 10.0.2.2 (DNS"), "forged answer (wrong id) must be ignored: {:?}", r.trim());
     check!(n, num(ask("status"), "dnsbad") == before + 2, "bad answers not counted");
-    ask("resolve ttl0.desoos");
-    let r = ask("resolve ttl0.desoos");
-    check!(n, r.starts_with("ttl0.desoos is 10.0.2.2 (DNS"), "TTL 0 must not be cached: {:?}", r.trim());
+    ask("resolve ttl0.deso");
+    let r = ask("resolve ttl0.deso");
+    check!(n, r.starts_with("ttl0.deso is 10.0.2.2 (DNS"), "TTL 0 must not be cached: {:?}", r.trim());
     let t = uptime_ms();
-    let r = ask("resolve silent.desoos");
+    let r = ask("resolve silent.deso");
     let waited = uptime_ms() - t;
     check!(n, r.contains("no answer from DNS server 10.0.2.2:53530") && (3500..8000).contains(&waited), "silent server: {:?} after {} ms", r.trim(), waited);
     let r = ask("resolve bad..name");
     check!(n, r.contains("not a valid name"), "invalid name: {:?}", r.trim());
-    let p = ask_stream("ping router.desoos 2");
-    check!(n, p.starts_with("router.desoos is 10.0.2.2 (cached)") && p.contains("2 sent, 2 received"), "ping by name: {:?}", p.trim());
-    let p = ask_stream("ping nx.desoos");
-    check!(n, p.contains("ping: nx.desoos: no such name") && p.ends_with("ping-end\n"), "ping to an unknown name: {:?}", p.trim());
+    let p = ask_stream("ping router.deso 2");
+    check!(n, p.starts_with("router.deso is 10.0.2.2 (cached)") && p.contains("2 sent, 2 received"), "ping by name: {:?}", p.trim());
+    let p = ask_stream("ping nx.deso");
+    check!(n, p.contains("ping: nx.deso: no such name") && p.ends_with("ping-end\n"), "ping to an unknown name: {:?}", p.trim());
 
     // Nothing blocks: while a 3 s ping runs, status answers at once; two pings at
     // the same time take 3 s, not 6; a program that leaves mid-ping is forgotten.
@@ -572,8 +572,8 @@ fn main(args: Args) -> i32 {
     check!(n, pa.contains("3 sent, 3 received") && pb.contains("3 sent, 3 received") && both < 4500, "two pings at once: {} ms, {:?} / {:?}", both, pa.lines().last(), pb.lines().last());
     let st = ask("status");
     check!(n, num(st, "conns") == 1, "connections left behind: {:?}", field(st, "conns"));
-    // TCP against tests/http-stub.py (10.0.2.2:58080, as router.desoos via DNS).
-    let g = tcp_get("router.desoos", "58080", "/hello", 0);
+    // TCP against tests/http-stub.py (10.0.2.2:58080, as router.deso via DNS).
+    let g = tcp_get("router.deso", "58080", "/hello", 0);
     check!(n, matches!(&g, Ok(g) if g.status == 200 && g.body == 20 && &g.head[..20] == b"Hello from the host\n"), "GET /hello: {:?}", g.as_ref().map(|g| (g.status, g.body)));
     let g = tcp_get("10.0.2.2", "58080", "/big", 0);
     let (big_ms, big_ok) = match &g {
@@ -600,7 +600,7 @@ fn main(args: Args) -> i32 {
     check!(n, matches!(g, Err(e) if e.contains("connection refused")), "closed port: {:?}", g.err());
     let g = tcp_get("10.0.2.77", "80", "/", 0);
     check!(n, matches!(g, Err(e) if e.contains("host unreachable")), "unreachable host: {:?}", g.err());
-    let g = tcp_get("nx.desoos", "80", "/", 0);
+    let g = tcp_get("nx.deso", "80", "/", 0);
     check!(n, matches!(g, Err(e) if e.contains("no such name")), "unknown name: {:?}", g.err());
     let g = tcp_get("10.0.2.2", "0", "/", 0);
     check!(n, matches!(g, Err(e) if e.contains("port 1-65535")), "port 0: {:?}", g.err());
@@ -616,7 +616,7 @@ fn main(args: Args) -> i32 {
     check!(n, num(st, "tcp") == 0 && num(st, "tcpmade") == 9, "connections left after the downloads: {:?} (made {:?})", field(st, "tcp"), field(st, "tcpmade"));
     // The netget tool: a file, an error status, a page cut short.
     unlink("/netget.out");
-    let code = run_netget(&["netget", "-o", "/netget.out", "http://router.desoos:58080/hello"]);
+    let code = run_netget(&["netget", "-o", "/netget.out", "http://router.deso:58080/hello"]);
     let mut fb = [0u8; 64];
     let fd = open("/netget.out", O_READ);
     let k = if fd >= 0 { read(fd as u64, &mut fb) } else { -1 };
@@ -779,7 +779,7 @@ fn main(args: Args) -> i32 {
     // the listen right, its page through stdin; reached over loopback and from
     // the host (tests/http-stub.py connects to 127.0.0.1:58082, which QEMU
     // forwards to port 8081 of this machine).
-    const PAGE: &[u8] = b"<h1>DeSoOS sandboxed netweb</h1>\n";
+    const PAGE: &[u8] = b"<h1>DeSo OS sandboxed netweb</h1>\n";
     let h = svc_narrow("net listen").unwrap_or(0);
     let (pr, pw) = pipe().unwrap_or((0, 0));
     write(pw, PAGE);
@@ -795,7 +795,7 @@ fn main(args: Args) -> i32 {
     let g = tcp_get("127.0.0.1", "8081", "/", 0);
     check!(n, matches!(&g, Ok(g) if g.status == 200 && g.body == PAGE.len() as u64 && g.head[..] == PAGE[..32]), "sandboxed netweb over loopback: {:?}", g.as_ref().map(|g| (g.status, g.body)));
     let g = tcp_get("10.0.2.2", "58080", "/connect?port=58082&path=/", 0);
-    check!(n, matches!(&g, Ok(g) if g.status == 200 && g.head.starts_with(b"HTTP/1.0 200 OK")), "from the host into DeSoOS (hostfwd 58082 -> 8081): {:?}", g.as_ref().map(|g| (g.status, g.body, core::str::from_utf8(&g.head).unwrap_or("?"))));
+    check!(n, matches!(&g, Ok(g) if g.status == 200 && g.head.starts_with(b"HTTP/1.0 200 OK")), "from the host into DeSo OS (hostfwd 58082 -> 8081): {:?}", g.as_ref().map(|g| (g.status, g.body, core::str::from_utf8(&g.head).unwrap_or("?"))));
     let code = wait(pid as u64, 0).map(|(_, c)| c).unwrap_or(999);
     check!(n, code == 0, "netweb exit code {}", code);
 
@@ -856,7 +856,7 @@ fn main(args: Args) -> i32 {
     // An address by hand without a DNS server: a name lookup says so (not "DHCP gave none").
     let r = ask("set 10.0.2.20/16 gw 10.0.2.2");
     check!(n, r.starts_with("address 10.0.2.20/16 set by hand"), "set without DNS: {:?}", r.trim());
-    let r = ask("resolve nodns.desoos");
+    let r = ask("resolve nodns.deso");
     check!(n, r.contains("no DNS server (the address was set by hand without one)"), "resolve with no DNS server set by hand: {:?}", r.trim());
     let narrowed = svc_narrow("net").unwrap_or(0);
     let r = ask_via(narrowed, "set 10.0.2.21/24");
@@ -870,7 +870,7 @@ fn main(args: Args) -> i32 {
     // window must say "no address yet (waiting for DHCP)", never "no DNS server (DHCP gave
     // none)".  The window is short – when the lease is already back, the lookup goes to
     // QEMU's DNS (10.0.2.3) and any answer of it counts, only "no DNS server" never does.
-    let r = ask("resolve nodns.desoos");
+    let r = ask("resolve nodns.deso");
     check!(n, !r.is_empty() && !r.contains("no DNS server"), "resolve right after going back to DHCP: {:?}", r.trim());
     let u = u_dhcp.unwrap_or(0);
     let ue = socket_end(u);

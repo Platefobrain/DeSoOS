@@ -103,7 +103,7 @@ class Key:
         return self.k.sign(data, padding.PSS(padding.MGF1(alg[1]), alg[2]), alg[1])
 
 def name(cn):
-    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn), x509.NameAttribute(NameOID.ORGANIZATION_NAME, "DeSoOS test")])
+    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn), x509.NameAttribute(NameOID.ORGANIZATION_NAME, "DeSo OS test")])
 
 def build(subject, issuer, key, issuer_key, *, ca=False, path_len=None, san=None, ku=None, eku=None, nc=None,
           extra=(), nb=T0, na=T1, bc=True, bc_critical=True, alg=None, serial=None):

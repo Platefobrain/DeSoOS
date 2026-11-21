@@ -72,13 +72,13 @@ pub extern "sysv64" fn kernel_main(
     drivers::serial::init();
 
     if boot.magic != bootinfo::BOOTINFO_MAGIC {
-        serial_println!("[DeSoOS] FATAL: BootInfo magic mismatch - DSB and kernel are from different builds");
+        serial_println!("[DeSo OS] FATAL: BootInfo magic mismatch - DSB and kernel are from different builds");
         loop {
             unsafe { asm!("cli; hlt") };
         }
     }
     serial_println!(
-        "[DeSoOS] Higher-half kernel at {:#x}, stack top {:#x}",
+        "[DeSo OS] Higher-half kernel at {:#x}, stack top {:#x}",
         boot.kernel_virt_base,
         boot.stack_top
     );
@@ -206,7 +206,7 @@ pub extern "sysv64" fn kernel_main(
 
     // VFS – ramfs at "/", disk 0 at "/disk" (DeSoFS or FAT32).
     fs::init();
-    // The last known good time from the system volume (/disk/.desoos/lkg) – read again here
+    // The last known good time from the system volume (/disk/.deso/lkg) – read again here
     // so that "no system volume" is known too; the clock's verdict uses it from now on.
     time_lkg::load();
     serial_println!("[TIME] {}", time_lkg::describe());
@@ -332,7 +332,7 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::usbw_self_test();
     }
-    // A USB stick's "DeSoOS system" partition as /disk – rules D2 / E / D / F (v0.80 stage B).
+    // A USB stick's "DeSo system" partition as /disk – rules D2 / E / D / F (v0.80 stage B).
     #[cfg(selftest)]
     if !selftest::looping() {
         user::usbdisk_self_test();
@@ -352,7 +352,7 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::ntp_self_test();
     }
-    // The last known good time – time_lkg.rs, /.desoos protected, power loss.
+    // The last known good time – time_lkg.rs, /.deso protected, power loss.
     #[cfg(selftest)]
     if !selftest::looping() {
         user::time_self_test();
@@ -373,14 +373,14 @@ pub extern "sysv64" fn kernel_main(
         if !selftest::looping() {
             fs::desofs::restart::prepare();
         }
-        serial_println!("[DeSoOS] Self-tests finished");
+        serial_println!("[DeSo OS] Self-tests finished");
         selftest::check_loop_name();
         let ok = selftest::finish();
         selftest::exit_if_autotest(ok);
     }
-    serial_println!("[DeSoOS] Kernel ready");
+    serial_println!("[DeSo OS] Kernel ready");
     if !keyboard {
-        serial_println!("[DeSoOS] No PS/2 keyboard - type in the serial terminal");
+        serial_println!("[DeSo OS] No PS/2 keyboard - type in the serial terminal");
     }
 
     // No serial port (laptop) – status bar in the screen corner
@@ -389,11 +389,11 @@ pub extern "sysv64" fn kernel_main(
         drivers::keyboard::start_status_bar();
     }
 
-    // Automatic stress test after boot (build with DESOOS_AUTOSTRESS=s,
+    // Automatic stress test after boot (build with DESO_AUTOSTRESS=s,
     // e.g. on a laptop without a working keyboard) – result on screen.
     user::stress::start_auto_from_build();
 
-    // Automatic soak test (build with DESOOS_AUTOSOAK=s, real hardware): it runs before
+    // Automatic soak test (build with DESO_AUTOSOAK=s, real hardware): it runs before
     // init on a RAM disk, the result stays on screen, then the system starts as usual.
     user::soak::run_auto_from_build();
 
@@ -436,7 +436,7 @@ fn panic(
     // Stop the other CPUs (IPI) before we start the report.
     arch::x86_64::smp::halt_others();
     serial_println!(
-        "[DeSoOS] PANIC: {}",
+        "[DeSo OS] PANIC: {}",
         info
     );
     #[cfg(selftest)]

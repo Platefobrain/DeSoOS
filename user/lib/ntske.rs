@@ -14,7 +14,7 @@
 // (the time service after the first of several failures in a row).
 
 use super::desocrypto;
-use super::desoos::*;
+use super::deso::*;
 use super::desotls::chain::PeerChain;
 use super::desotls::client::{Client, Config, Random, Transport};
 use super::nts;

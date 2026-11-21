@@ -51,7 +51,7 @@ pub enum FsError {
     InUse(usize),
     /// A sealed node (the trusted CA store): nothing may change, remove, rename or cover it.
     Immutable,
-    /// `/.desoos` of a DeSoFS volume (the last known good time): only the kernel writes there.
+    /// `/.deso` of a DeSoFS volume (the last known good time): only the kernel writes there.
     Reserved,
 }
 
@@ -85,7 +85,7 @@ impl core::fmt::Display for FsError {
             FsError::BadCursor => f.write_str("invalid directory position"),
             FsError::InUse(n) => write!(f, "in use ({} open file{} / director{})", n, if *n == 1 { "" } else { "s" }, if *n == 1 { "y" } else { "ies" }),
             FsError::Immutable => f.write_str("protected (sealed) - cannot be changed"),
-            FsError::Reserved => f.write_str("reserved for the system (/.desoos) - only the kernel writes there"),
+            FsError::Reserved => f.write_str("reserved for the system (/.deso) - only the kernel writes there"),
         }
     }
 }
@@ -567,7 +567,7 @@ fn with_fs<R>(
     with_fs_guard(path, false, conc, excl)
 }
 
-/// `with_fs` for an operation that changes something: `/.desoos` of a DeSoFS volume is
+/// `with_fs` for an operation that changes something: `/.deso` of a DeSoFS volume is
 /// refused under the same lock that picks the volume and runs the operation – the mount
 /// table cannot change in between (a volume mounted at /disk right after a check made
 /// outside the lock would get the write).
@@ -630,7 +630,7 @@ fn protects_locked(path: &str) -> bool {
     }
 }
 
-/// The system's own directory on a DeSoFS volume: `/.desoos` and everything under it (the
+/// The system's own directory on a DeSoFS volume: `/.deso` and everything under it (the
 /// last known good time, time_lkg.rs).  Decided on the resolved object – the volume the
 /// normalized path lands on and the node's path inside it – never on the text a program
 /// gave: "..", ".", relative paths and directory handles all end here, and DeSoFS has no
@@ -646,7 +646,7 @@ fn reserved_locked(path: &str) -> bool {
 
 /// Mount `i`, path `rel` inside it (from `find_mount`, under FS_LOCK): the reserved node?
 fn is_reserved_rel(i: usize, rel: &str) -> bool {
-    mounts()[i].fs.kind() == "desofs" && (rel == "/.desoos" || rel.starts_with("/.desoos/"))
+    mounts()[i].fs.kind() == "desofs" && (rel == "/.deso" || rel.starts_with("/.deso/"))
 }
 
 /// The self-test's way into the gap a check outside the lock would leave: runs once, at the
@@ -665,7 +665,7 @@ fn race_hook() {
     }
 }
 
-/// `path` is in a DeSoFS volume's `/.desoos` (see `reserved_locked`).
+/// `path` is in a DeSoFS volume's `/.deso` (see `reserved_locked`).
 pub fn is_reserved(path: &str) -> bool {
     let path = normalize("/", path);
     let _g = FS_LOCK.read();
@@ -684,7 +684,7 @@ pub fn mount(path: &str, fs: Box<dyn FileSystem>) -> Result<()> {
     if path != "/" && protects_locked(&path) {
         return Err(FsError::Immutable);
     }
-    // Nothing is mounted on /.desoos or inside it (it would hide or replace the file).
+    // Nothing is mounted on /.deso or inside it (it would hide or replace the file).
     if path != "/" && reserved_locked(&path) {
         return Err(FsError::Reserved);
     }
@@ -804,7 +804,7 @@ pub fn with_mounted_desofs(disk: usize, f: &mut dyn FnMut(&mut desofs::vol::Volu
 }
 
 /// Runs `f` on the DeSoFS volume mounted exactly at `path` (not a snapshot view), under
-/// FS_LOCK for writing.  The kernel's own way to /.desoos (time_lkg.rs).  false – no such
+/// FS_LOCK for writing.  The kernel's own way to /.deso (time_lkg.rs).  false – no such
 /// mount.
 pub fn with_desofs_at(path: &str, f: &mut dyn FnMut(&mut desofs::vol::Volume)) -> bool {
     let _g = FsWrite::lock();
@@ -843,7 +843,7 @@ fn resolve<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>
     f(mounts()[i].fs.as_mut(), &rel)
 }
 
-/// `resolve` for a change: `/.desoos` refused under the same write lock.
+/// `resolve` for a change: `/.deso` refused under the same write lock.
 fn resolve_change<R>(path: &str, f: impl FnOnce(&mut dyn FileSystem, &str) -> Result<R>) -> Result<R> {
     let _g = FsWrite::lock();
     let (i, rel) = find_mount(path)?;
@@ -976,7 +976,7 @@ pub fn rename(from: &str, to: &str) -> Result<()> {
     if protects_locked(&from) || protects_locked(&to) || sealed_parent(&from) || sealed_parent(&to) {
         return Err(FsError::Immutable);
     }
-    // Nothing leaves /.desoos, nothing goes into it (also not /.desoos itself).
+    // Nothing leaves /.deso, nothing goes into it (also not /.deso itself).
     if reserved_locked(&from) || reserved_locked(&to) {
         return Err(FsError::Reserved);
     }
@@ -1017,7 +1017,7 @@ fn try_concurrent<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Resu
     mounts()[i].fs.concurrent().map(|c| f(c, &rel))
 }
 
-/// `try_concurrent` for a change: `/.desoos` refused under the same lock.
+/// `try_concurrent` for a change: `/.deso` refused under the same lock.
 fn try_concurrent_change<R>(path: &str, f: impl FnOnce(&dyn ConcurrentFs, &str) -> Result<R>) -> Option<Result<R>> {
     #[cfg(selftest)]
     race_hook();

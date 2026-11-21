@@ -21,13 +21,13 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 use alloc::format;
 use alloc::string::String;
-use desoos::*;
+use deso::*;
 
 entry!(main);
 

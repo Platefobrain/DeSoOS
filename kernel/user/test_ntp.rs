@@ -76,7 +76,7 @@ pub fn self_test() {
     //    anything is sent (the way out is the time service, v0.79 stage D).
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
-    let r = exec("/bin/nettime", &["nettime", "--nts", "tls.desoos:58510"], "/", &opts).ok().and_then(|id| wait_exit(id, 30_000));
+    let r = exec("/bin/nettime", &["nettime", "--nts", "tls.deso:58510"], "/", &opts).ok().and_then(|id| wait_exit(id, 30_000));
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(false, core::sync::atomic::Ordering::Release);
     check!(r.is_some(), "nettime --nts did not finish");
     let (kind, out) = r.unwrap();

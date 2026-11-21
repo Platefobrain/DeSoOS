@@ -24,9 +24,9 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
@@ -38,7 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 use desocrypto::sha256::Sha256;
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -50,7 +50,7 @@ fn disk() -> u64 {
     VOL_DISK.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Real hardware (DESOOS_AUTOSOAK): the network and USB checks take what is there.
+/// Real hardware (DESO_AUTOSOAK): the network and USB checks take what is there.
 static HW: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn hw() -> bool {
@@ -998,7 +998,7 @@ impl SvcNet {
             if s.net.is_some() && (s.gw.is_empty() || s.gw == "0.0.0.0") {
                 s.gw = s.gateway();
                 // QEMU's test server; on real hardware only if it answers (it does not
-                // when a DESOOS_AUTOSOAK build runs in plain QEMU without tests/soak.sh).
+                // when a DESO_AUTOSOAK build runs in plain QEMU without tests/soak.sh).
                 s.downloads = s.gw == HOST && (!hw() || s.download().is_ok());
             }
             if s.usb.is_none() {
@@ -2032,7 +2032,7 @@ impl Ctl {
 
 fn controller(spec: &str) -> i32 {
     // <seconds>:<seed>, or <seconds>:<seed>:ram – on a RAM disk instead of the virtio disk 0,
-    // or <seconds>:<seed>:hw – a RAM disk on real hardware (DESOOS_AUTOSOAK): no test server
+    // or <seconds>:<seed>:hw – a RAM disk on real hardware (DESO_AUTOSOAK): no test server
     // and no test stick expected (downloads only if the host's test server answers).
     let mut parts = spec.split(':');
     let (secs, seed) = (parts.next().and_then(|s| s.parse::<u64>().ok()), parts.next().and_then(|s| s.parse::<u64>().ok()));
@@ -2055,7 +2055,7 @@ fn controller(spec: &str) -> i32 {
     // Only where the kernel started it for this: init's channels and the SYSCTL handle.
     let sys = 4;
     if handle_info(sys).map(|(k, _)| k) != Ok(KIND_SYSCTL) || handle_info(SVC).map(|(k, _)| k) != Ok(KIND_CHANNEL) {
-        eprintln!("soak: needs the SYSCTL handle and the service channel (tests/soak.sh or a DESOOS_AUTOSOAK build starts it)");
+        eprintln!("soak: needs the SYSCTL handle and the service channel (tests/soak.sh or a DESO_AUTOSOAK build starts it)");
         return 1;
     }
     println!("[SOAK] {}", info_text("ver").trim());

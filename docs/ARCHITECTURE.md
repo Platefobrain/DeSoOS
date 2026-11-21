@@ -1,11 +1,11 @@
-# DeSoOS Architecture
+# DeSo OS Architecture
 
 How the system is built and how it works. Change history lives in `CHANGELOG.md`, test results and current limitations
 in `docs/RELEASE.md`.
 
 ## Overview
 
-DeSoOS is an x86_64 kernel written in Rust. It boots from UEFI (its own bootloader, DSB) and runs on
+DeSo OS is an x86_64 kernel written in Rust. It boots from UEFI (its own bootloader, DSB) and runs on
 multiple cores (up to 16). It targets ordinary PCs and laptops as well as QEMU.
 
 **A modular monolith now, a hybrid as the goal. Priority: speed.**
@@ -27,7 +27,7 @@ system.
 ## Layers
 
 ```
-                                 DeSoOS
+                                 DeSo OS
                                     │
         ┌───────────────────────────┴───────────────────────────┐
      KERNEL                                                 USER SPACE
@@ -201,7 +201,7 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
     `Process` onto the slow heap path. A compile-time assertion keeps `Process` ≤ 2 KiB with alignment ≤ 16.
   - A waiting parent sleeps in one of 64 wait queues; the wake condition is its own `child_gen` counter.
 - **Ctrl+C** ends the process on top of the foreground stack, not the shell.
-- **Programs** – static ELF64 written in Rust (`user/bin/*.rs`, library `user/lib/desoos.rs`), built into the
+- **Programs** – static ELF64 written in Rust (`user/bin/*.rs`, library `user/lib/deso.rs`), built into the
   kernel image (initrd) and unpacked into ramfs as `/bin/<name>`. Loader: lower half only, from 1 MiB, W^X, a
   System V-style stack (argc, argv). The library allocator uses `brk` (small blocks) and `mmap` (large).
 - Shell: pipelines `a | b | c`, `>`, `>>`, `<`, quotes, history, `&`.
@@ -245,13 +245,13 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 60 | `time_set(SETTIME, t_ms, u_ms, servers)` – the time service gives T ± U agreed by 2–3 operators: the LKG raised / repaired, the wall clock set (`time/TIMEKEEPER.md`) |
 | 61 | `time_bound(out, len)` – 40 bytes: the bootstrap bound, the LKG in memory, the build date, the LKG's source and file state, flags; no right needed |
 
-The syscall profiler (`prof.rs`) tracks all 62 numbers (0–61). Error numbers are the Linux ones, with DeSoOS names (below).
+The syscall profiler (`prof.rs`) tracks all 62 numbers (0–61). Error numbers are the Linux ones, with DeSo OS names (below).
 
 ### Errors
 
-One set of error names for the kernel and for programs (`kernel/user/syscalls.rs`, `user/lib/desoos.rs`;
+One set of error names for the kernel and for programs (`kernel/user/syscalls.rs`, `user/lib/deso.rs`;
 `strerror` gives the text, `error_name` the name). A syscall returns the negative number. The numbers are the
-Unix ones, so a future Linux compatibility layer needs no translation; the names are DeSoOS's – readable, with
+Unix ones, so a future Linux compatibility layer needs no translation; the names are DeSo OS's – readable, with
 one prefix, `ERROR_`.
 
 | Name | No. | Text | Typical cause |
@@ -361,7 +361,7 @@ directory itself (a node number) with the native file system.
 Test: FILE TEST 8/8 (`/bin/dirtest`: seven ways out refused, read-only / write-only rights, a sandboxed child with
 only a read-only directory) and 3/8 (`nofiles --dir` in the shell).
 
-**DCP (DeSoOS Capability Permissions)** is the name of this model, and `dcp` the command that shows it:
+**DCP (DeSo OS Capability Permissions)** is the name of this model, and `dcp` the command that shows it:
 `dcp` (every visible process: devices, system powers, file access), `dcp inspect <pid>` (every capability with
 its rights and a detail such as the PCI device, MSI vector, shared memory size, or who holds the other end of a
 channel / pipe) and `dcp audit` (the last 64
@@ -477,7 +477,7 @@ I/O APIC + MSI: device interrupts     IPI: resched, TLB shootdown, halt (panic)
   `SeqCst`) plus a final check with IF = 0 right before `hlt` guarantee no wake-up is lost. The spin window
   adapts per CPU (like Linux `haltpoll`): if work arrived within the window after sleeping, the window doubles
   (minimum 10 µs); after a longer sleep it halves down to 0, so an idle system does not spin (battery). Upper
-  bound: `DESOOS_IDLE_POLL_US` (default 200 µs; 0 = `hlt` immediately); `DESOOS_IDLE_POLL_ADAPT=0` gives a fixed
+  bound: `DESO_IDLE_POLL_US` (default 200 µs; 0 = `hlt` immediately); `DESO_IDLE_POLL_ADAPT=0` gives a fixed
   window. Why: on real hardware `hlt` puts the core into a deep sleep state and waking takes tens of µs, which
   lengthens every task hand-off.
 - **`yield_now` hands the BKL over.** Kernel tasks run under the BKL; the switch releases it, but when nothing
@@ -569,7 +569,7 @@ execute `hlt`.
   slow pendrive blocks only that filesystem. `kind` / `source` / `read_only` are copied at mount time (so `mount`
   and `open` do not wait for the disk); `df` (`mount_stats`) goes through the concurrent path. Mount and unmount
   (write side) wait for in-flight reads – at most the ublk timeout (5 s).
-- **FAT32:** long file names (including Polish characters), cluster-leak check; `fat32::mkfs` is used only by tests (the shell command was removed in v0.64.1 – DeSoOS formats only as DeSoFS). **Volume bounds:** on an MBR
+- **FAT32:** long file names (including Polish characters), cluster-leak check; `fat32::mkfs` is used only by tests (the shell command was removed in v0.64.1 – DeSo OS formats only as DeSoFS). **Volume bounds:** on an MBR
   partition the length comes from the partition table; a BPB claiming more sectors than the partition (or the
   disk) does not mount (`file system corrupt`), and every sector read or written is checked against the volume –
   a lying or damaged FAT32 never reaches the next partition. A volume with more clusters than FAT32 can number
@@ -955,8 +955,8 @@ BUFFER, ...).
 
 ### Writing to a USB disk (v0.80)
 
-Only one kind of place on a USB stick is ever written: a GPT partition of type **"DeSoOS system"**
-(`1A0E2E7D-DE32-4C13-9442-9FCB2649CA02`, `gpt::DESOOS_SYSTEM`) on a stick that is known not to be write-protected.
+Only one kind of place on a USB stick is ever written: a GPT partition of type **"DeSo system"**
+(`1A0E2E7D-DE32-4C13-9442-9FCB2649CA02`, `gpt::DESO_SYSTEM`) on a stick that is known not to be write-protected.
 The ESP next to it, every other partition, FAT32 sticks and the whole disk stay read-only. (Which partition gets
 `/disk` and when – stage B of the V080 plan; this section is the mechanism under it.)
 
@@ -1001,9 +1001,9 @@ busy or quarantined slot or in the stale list (16 – then the disk is declared 
 after the 32-bit counter wraps those ids are skipped. Every sector is
 then the old or the new version (USB WRITE TEST 3/3).
 
-| | Linux | Windows | DeSoOS |
+| | Linux | Windows | DeSo OS |
 |---|---|---|---|
-| Who may write a USB disk | any opener with permission | any process with access | only the kernel, only a "DeSoOS system" partition with a registration |
+| Who may write a USB disk | any opener with permission | any process with access | only the kernel, only a "DeSo system" partition with a registration |
 | Write-protect switch | MODE SENSE → read-only | the same | the same, and "unknown" = read-only |
 | FLUSH not supported | sd: skipped when the device reports no write cache | the same | probe at mount: refused = never writable |
 | Writes outside the partition | the block layer's partition range | the same | three locks: partition, ublk, usbd |
@@ -1013,11 +1013,11 @@ then the old or the new version (USB WRITE TEST 3/3).
 `kernel/user/usbdisk.rs`, run by the `usb-disks` task after every change of the USB disks, once they were quiet for
 1.5 s (two sticks plugged in at boot are both seen before anything is decided); each change is decided once.
 
-**Who gets /disk** (a *candidate* = a USB disk instance + a "DeSoOS system" partition with a DeSoFS marker in either
+**Who gets /disk** (a *candidate* = a USB disk instance + a "DeSo system" partition with a DeSoFS marker in either
 superblock):
 1. the **internal disk** – the first disk registered before the file systems start (PCI: virtio-blk, then NVMe),
    remembered by its identity, never by number (a USB disk that later gets number 0 is never it) – keeps /disk when it
-   holds a recognised DeSoFS (a marker in either superblock, even with a bad checksum, or a "DeSoOS system"
+   holds a recognised DeSoFS (a marker in either superblock, even with a bad checksum, or a "DeSo system"
    partition); no USB candidate takes it, damaged or not;
 2. otherwise, and only while /disk is really free (whatever is mounted there – e.g. FAT32 from the internal disk –
    stays), **exactly one** candidate gets /disk; two or more – none (also two partitions on one stick), with one
@@ -1047,7 +1047,7 @@ Any step that fails: /disk read-only, the reason in the log, no registration lef
 older than the time in memory, the save is marked pending (`DIRTY`) – the next accepted time writes max(memory, its
 own); a stick lost during the save reports nothing saved and is written once it is back.
 
-**`desofs format` on a USB partition** (rule F): only a "DeSoOS system" partition, ≤ 64 GiB, not mounted, write
+**`desofs format` on a USB partition** (rule F): only a "DeSo system" partition, ≤ 64 GiB, not mounted, write
 protection off, a probe first; then a format session (its identifier, the grant) only for the time of the format –
 ended on every way out before the result goes back to the shell. Synchronous: Ctrl+C does not interrupt it.
 
@@ -1092,10 +1092,10 @@ same code writes an image file (`--image FILE SIZE_MIB`, no sudo), which `tests/
 
 | | Partition 1 | Partition 2 | Rest |
 |---|---|---|---|
-| Type | EFI System | "DeSoOS system" `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` | unallocated |
+| Type | EFI System | "DeSo system" `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` | unallocated |
 | Size | 128 MiB from 1 MiB | the rest, 1 MiB aligned, 64 MiB – 64 GiB | what is over 64 GiB (reported) |
-| Content | FAT32 `DESOOS`, `EFI/BOOT/BOOTX64.EFI` (built in Python: 512 B clusters, FSInfo, backup boot sector) | an empty DeSoFS (`tools/mkdesofs.py`: random uuid, the current time) | – |
-| In DeSoOS | `/usb0`, never written | `/disk` read-write (rules D2 / E) | – |
+| Content | FAT32 `DESO`, `EFI/BOOT/BOOTX64.EFI` (built in Python: 512 B clusters, FSInfo, backup boot sector) | an empty DeSoFS (`tools/mkdesofs.py`: random uuid, the current time) | – |
+| In DeSo OS | `/usb0`, never written | `/disk` read-write (rules D2 / E) | – |
 
 Order of the writes: the old table areas (sectors 0–2047 and the last 33) cleared → the ESP → DeSoFS (the kernel's
 order, flushed) → the GPT and the protective MBR last – an interrupted run leaves no table pointing at half-written
@@ -1108,7 +1108,7 @@ the tests start is made by the very code that writes a stick (`fsck.vfat -n` che
 Safety (`make-usb.sh`, every unclear answer stops): a whole disk (not a partition, loop, dm or md), removable
 (`/sys/block/X/removable`), USB (`TRAN`), 200 MiB – 256 GiB, 512-byte sectors, not a system disk (`/`, `/boot`,
 `/boot/efi`), nothing mounted on it, no swap on it or its partitions (`/proc/swaps`), no holders (LVM / RAID /
-dm-crypt); model, size, serial and partitions shown, a "DeSoOS system" partition already there named ("your DeSoOS data
+dm-crypt); model, size, serial and partitions shown, a "DeSo system" partition already there named ("your DeSo OS data
 will be lost"), the device name retyped; then, after the build, **every check again** and the same major:minor, serial
 and size – otherwise nothing is written (a stick without a serial number is refused); `tools/mkusb.py` opens the device
 with `O_EXCL` (Linux refuses while anything on it is mounted or held), then checks the open descriptor: major:minor,
@@ -1117,9 +1117,9 @@ the device number alone), and only then writes. `--dry-run` stops before the bui
 formats image files only – a device, or a link to one, is refused also with `--force` (`mkfs.ext4` on Linux formats a
 device after a warning, `-F` forces it; here a device is reached only through `make-usb.sh`).
 
-**Update**: `./make-usb.sh /media/$USER/DESOOS` (the ESP mounted by the desktop) – the same install as for a FAT32
+**Update**: `./make-usb.sh /media/$USER/DESO` (the ESP mounted by the desktop) – the same install as for a FAT32
 stick: only `BOOTX64.EFI` is replaced; partition 2 is not touched. `tests/make-usb-test.sh` checks it: build `v1`
-(`DESOOS_BUILD_TAG`, shown by `ver`) → ONE STICK TEST part 1 (a file and the LKG on `/disk`) → the ESP rebuilt with
+(`DESO_BUILD_TAG`, shown by `ver`) → ONE STICK TEST part 1 (a file and the LKG on `/disk`) → the ESP rebuilt with
 build `v2` (`tools/mkusb.py --update-esp`) → partition 2 the same byte for byte → part 2 from the same image: the
 kernel is `v2`, the file and the LKG are there.
 
@@ -1247,7 +1247,7 @@ panics; every case ends in an error or a valid result within limits.
 - The test image has a deliberately wrong primary FSInfo (the backup in sector 7 is correct).
 - **USB WRITE TEST** (v0.80): a writable fake stick (`/bin/blkwtest`) for the kernel side – no registration,
   probe, rw, format sessions, each of the first two locks alone, a failed 64 KiB piece, late replies, counters that
-  never wrap; then real usbd and a writable QEMU stick (`tests/mkgpt.py`: ESP + "DeSoOS system") – a real
+  never wrap; then real usbd and a writable QEMU stick (`tests/mkgpt.py`: ESP + "DeSo system") – a real
   SYNCHRONIZE CACHE, the ESP never changes, usbd's lock alone (self-test flags: the kernel's checks off, a stale
   generation, a failed WRITE / FLUSH, a held FLUSH reply), and the stick unplugged / usbd killed during writes.
   Mutations caught (10): a partition reaching its parent by number only (the old partition wrote to the new
@@ -1391,7 +1391,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 - Tests: `/bin/dnstest` (NET TEST 3/5): names, the query byte for byte, valid answers (CNAME chain through
   pointers, other types / classes skipped, six addresses → four), 19 malicious answers with the expected error,
   the cache, 20 000 mutations. `tests/dns-stub.py` – a DNS server started by `tests/test.sh` on the host
-  (127.0.0.1:53530, reached from the guest as 10.0.2.2:53530) with fixed names under `.desoos`: correct,
+  (127.0.0.1:53530, reached from the guest as 10.0.2.2:53530) with fixed names under `.deso`: correct,
   CNAME, several addresses, no such name, no address, server failure, truncated, a pointer loop, a forged answer
   with the wrong id before the real one, TTL 0, silence. nettest checks each, ping by name and the concurrency
   above – no internet needed.
@@ -1457,7 +1457,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   | Linux (curl) | 1.1 / 2 / 3 | yes | Transfer-Encoding wins |
   | Windows (WinHTTP) | 1.1 / 2 / 3 | yes | Transfer-Encoding wins |
   | RedoxOS (curl, reqwest) | 1.1 / 2 | yes | Transfer-Encoding wins |
-  | DeSoOS (netget) | 1.1 | yes | refused (RFC 9112 §6.3) |
+  | DeSo OS (netget) | 1.1 | yes | refused (RFC 9112 §6.3) |
 - Tests: `/bin/httptest` (NET TEST 5/7) – the HTTP parser on 66 answers and a 40 000-byte chunked body, every split
   of the stream giving the same result, 4800 mutations. `/bin/tcptest` (NET TEST 4/7) – 77 checks against a simulated peer: handshake, refused, SYN resend times,
   windows, window scaling, RTO and fast retransmit, zero-window probe, receiving in/out of order and overlapping, a full buffer,
@@ -1511,14 +1511,14 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   | Linux | sockets stay; a TCP connection on a removed address times out (or gets a RST when the peer answers) – the program learns late |
   | Windows | similar; apps are told by the network-change notification (NLM) and reconnect themselves |
   | RedoxOS | no special handling (smoltcp sockets keep the address they were opened with) |
-  | **DeSoOS** | sockets on the old address end at once: UDP closed, TCP aborted without a RST – the program learns immediately |
+  | **DeSo OS** | sockets on the old address end at once: UDP closed, TCP aborted without a RST – the program learns immediately |
 
   | | API | Connected socket filters the sender | Local port | Right |
   |---|---|---|---|---|
   | Linux | BSD sockets (`connect`, `send`) | yes | random 32768–60999 | none (ports < 1024 aside) |
   | Windows | Winsock | yes | random 49152–65535 | none (firewall) |
   | RedoxOS | `udp:` scheme in smolnetd | yes (address in the path) | random | access to the scheme |
-  | DeSoOS | channel to netd = socket, message = datagram | yes (connected only) | uniform 49152–65535 | `udp` from DCP |
+  | DeSo OS | channel to netd = socket, message = datagram | yes (connected only) | uniform 49152–65535 | `udp` from DCP |
 - **Loopback:** frames to 127.0.0.1 or to our own address never reach the card – `send` puts them into a 32-frame
   queue that the event loop feeds back into the receive path (127.x is accepted only from that queue, never from
   the cable). Connections to 127.0.0.1 use 127.0.0.1 as their own address. Ping to ourselves is answered the
@@ -1526,7 +1526,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
 - **`netweb [-n count] port < page`**: a minimal server – the page from stdin (≤ 64 KiB), GET `/` or `/index.html`,
   else 404, one request at a time with 5 s to send it. `nofiles --listen netweb 8080 < /index.html` runs it with no
   file access at all.
-- **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 of DeSoOS (`HOSTFWD=port`,
+- **From the host:** `run-qemu.sh` forwards the host's 127.0.0.1:18080 to port 8080 of DeSo OS (`HOSTFWD=port`,
   `HOSTFWD=0` – off); `tests/test.sh` forwards 127.0.0.1:58082 to port 8081.
 - Tests: `/bin/udptest` (started by nettest, against `tests/udp-stub.py` at 10.0.2.2:58090): echo of text, all
   byte values and an empty datagram, by name; 1472 B both ways, 1473 B refused by the library and – sent straight
@@ -1541,7 +1541,7 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   other service, no widening), listening + loopback to 127.0.0.1 and to our address (200 KiB and 100 KiB both
   ways, the close seen by the server, a refused port), ping to ourselves, and a sandboxed `netweb` reached over
   loopback and **from the host**: `tests/http-stub.py /connect?port=58082` connects from the host through QEMU's
-  forwarding into DeSoOS and returns what netweb answered.
+  forwarding into DeSo OS and returns what netweb answered.
 
 - The test laptop also has an **AMD IOMMU** (00:00.2) – a future way to confine the DMA of usbd and netd to their own
   buffers (Future).
@@ -1583,7 +1583,7 @@ which only the time service has, so this is a property of the design, not of the
 | Linux (chrony) | full NTP | yes | NTS optional | vendor zone |
 | Windows (w32time) | NTP / SNTP | yes | no (MS-SNTP inside a domain) | `time.windows.com` |
 | RedoxOS | none found in the base system | – | – | – |
-| **DeSoOS** | SNTP, one shot (`nettime`) | **no** – information only | no, hence read only; NTS in v0.79 | `time.cloudflare.com` |
+| **DeSo OS** | SNTP, one shot (`nettime`) | **no** – information only | no, hence read only; NTS in v0.79 | `time.cloudflare.com` |
 
 **NTS** (v0.79 stage B, `nettime --nts`, `user/lib/nts.rs`): NTS-KE over TLS 1.3 (ALPN `ntske/1`, keys from the TLS
 exporter), then NTP with the NTS fields (Unique Identifier, single-use cookies, Authenticator with AES-SIV); an answer
@@ -1597,12 +1597,12 @@ query byte for byte and counts packets and repeated Transmit values – and `net
 
 ### The last known good time (v0.79 stage C)
 
-`kernel/time_lkg.rs`: a lower bound for the wall clock that survives a restart – `/.desoos/lkg` on the system volume
+`kernel/time_lkg.rs`: a lower bound for the wall clock that survives a restart – `/.deso/lkg` on the system volume
 (the DeSoFS volume mounted read-write at `/disk`; none – in memory only, from the build date). A 56-byte record
 (`DESOLKG1`, version, source, time, SHA-256), written atomically (a temporary file, read back, `rename` – each DeSoFS
 operation is one transaction, so after a power loss there is the old record or the new one) and read at boot and at
 every mount of `/disk`. The clock's verdict gains two reasons, in the order 1–4, 6 → **8** (the file unreadable – never
-a quiet reset to the build date) → 5 → **7** (earlier than the LKG, margin 0 s). The VFS reserves `/.desoos` of
+a quiet reset to the build date) → 5 → **7** (earlier than the LKG, margin 0 s). The VFS reserves `/.deso` of
 every DeSoFS volume for the kernel (`fs::is_reserved`, on the resolved volume and node; `FsError::Reserved` →
 ERROR_NOT_PERMITTED); the kernel writes it only through the volume (`fs::with_desofs_at`). Only the time service raises
 it (below). Details, threats and tests: `time/LKG.md`. LKG TEST is suite 38; RESTART TEST: the first start damages
@@ -1633,7 +1633,7 @@ Details: `time/TIMEKEEPER.md`. NTS TEST is suite 39.
 | Linux (chrony + NTS) | chronyd as root | source selection | `nocerttimecheck` – the certificate time check skipped until the first sync |
 | Windows | w32time | – | Secure Time Seeding (TLS timestamps, known to jump the clock) |
 | RedoxOS | – | – | – |
-| **DeSoOS** | the time service with a kernel right; the kernel checks the numbers and the LKG | two of three operators, envelope | a bound from the kernel, then the full check of the same chain over T ± U |
+| **DeSo OS** | the time service with a kernel right; the kernel checks the numbers and the LKG | two of three operators, envelope | a bound from the kernel, then the full check of the same chain over T ± U |
 
 ### Network access is a capability
 
@@ -1642,7 +1642,7 @@ and it gets one only through init's service channel (`SVC`, slot 3). As built in
 
 - **The shell's programs** get the **program channel** in their slot 3: init gives the shell two service channels –
   its own (slot 3, everything) and the program channel (slot 5: every service, network connections and servers, but
-  no network administration; the name is about programs, not user accounts, which DeSoOS does not have).
+  no network administration; the name is about programs, not user accounts, which DeSo OS does not have).
   `svc_connect("net0")` through the program channel reaches netd as `net0 client
   listen udp`. Only **`netconfig`** gets the shell's own channel and reaches netd as `net0 admin listen udp`: the
   administrator requests (address, DNS server, DHCP on / renew, receive-ring restart). A shell started from the
@@ -1756,7 +1756,7 @@ needed):
 
 ## DeSoFS (`kernel/fs/desofs/`)
 
-DeSoOS's own file system, format 1 – the full specification is `docs/desofs/FORMAT.md` (closed; changes only as
+DeSo OS's own file system, format 1 – the full specification is `docs/desofs/FORMAT.md` (closed; changes only as
 numbered errata until stage 4). In short: copy-on-write, two superblocks written alternately (the next commit goes to
 the one with the older generation), every pointer carries the SHA-256 of the block it points to (a Merkle tree), fixed
 fan-out trees of 84 pointers, 256-byte nodes with permanent numbers, directories as blocks of entries like ext2. There
@@ -1976,7 +1976,7 @@ has `dir_for_listing` (a new READ handle, or the sandbox's one) and `readdir_par
 run). The last step of the first start (RESTART TEST part 1, `restart.rs`; only in the automatic test mode and only
 on an empty disk 0) formats disk 0, mounts it as at start and writes a fixed set: files of 0 B to 1 MiB with a hole,
 three directory levels, a 300-entry directory with ten removed, a rename replacing a file, a removed file. The
-second start (fw_cfg `opt/desoos/phase=restart`) skips every other self-test and checks: `/disk` mounted as DeSoFS
+second start (fw_cfg `opt/deso/phase=restart`) skips every other self-test and checks: `/disk` mounted as DeSoFS
 read-write by the kernel itself; every file and directory byte for byte, nothing removed came back, the big
 directory read in parts by byte position; `/bin/sha256sum` and `/bin/ls` (`readdir_part`) on `/disk`; a new file
 written and read; then `[RESULT-FS]` – 8 MiB written in 64 KiB pieces and read, 1000 files of 100 B created and read,
@@ -1998,7 +1998,7 @@ cursor that skips an entry, no cursor validation – each makes the suite fail.
 
 ## Cryptography – DeSoCrypto (`common/desocrypto/`)
 
-DeSoOS's own cryptographic library, written for DeSoOS only (no Cargo crate, no outside code). It is a library,
+DeSo OS's own cryptographic library, written for DeSo OS only (no Cargo crate, no outside code). It is a library,
 not a service and not a kernel module: whoever needs a hash includes the code (`#[path]`) and calls it directly – no
 syscall per operation, and a mistake in it can only hurt the program that uses it. **Full description: `desocrypto/`
 (`README.md`, `ALGORITHMS.md` – every module, the rules of the code, the CPU paths, the tests, speed).**
@@ -2023,7 +2023,7 @@ Used by DeSoTLS (certificate signatures), DeSoFS (block checksums), the random n
 
 The kernel's generator: a pool of entropy, a ChaCha20 generator with fast key erasure (`desocrypto::rng`) and the
 `getrandom` syscall (58). Programs that need many random numbers (`netd`) key their own `KeyErasureRng` from
-`getrandom` and reseed it from it every minute; DeSoOS has no `fork`, so a generator's state is never copied into
+`getrandom` and reseed it from it every minute; DeSo OS has no `fork`, so a generator's state is never copied into
 a second process.
 
 **Sources.** Everything is mixed into the pool (SHA-256); only declared entropy counts. The declared values are a
@@ -2038,8 +2038,8 @@ a second process.
 | interrupt times – the TSC at every IRQ / MSI, per-CPU mixing words | yes | 1 bit per 64 events whose time difference is not 0 and not the previous one |
 | RTC, HPET, CPUID, NVMe serial numbers | yes | 0 |
 
-**Trust policy** (build time, like Linux `random.trust_cpu` / `random.trust_bootloader`): `DESOOS_TRUST_CPU=0` –
-RDSEED counts 0; `DESOOS_TRUST_BOOTLOADER=0` – the firmware's RAW bytes count 0. A source not trusted is still mixed
+**Trust policy** (build time, like Linux `random.trust_cpu` / `random.trust_bootloader`): `DESO_TRUST_CPU=0` –
+RDSEED counts 0; `DESO_TRUST_BOOTLOADER=0` – the firmware's RAW bytes count 0. A source not trusted is still mixed
 into the pool and health-checked; the classes do not change (UEFI RAW and RDSEED stay one, max). With both off only
 the timing class counts (the test laptop: jitter 64 of 64 windows – a fraction of a second; KVM: about 16 s of
 interrupt times). Shown in `[RNG] ready … trust: cpu on|off, bootloader on|off`, `[RESULT-RNG]` and `sysinfo
@@ -2081,12 +2081,12 @@ times and 4 fresh RDSEED/RDRAND words go into the pool; a new key = SHA-256(key 
 least 128 newly counted bits – smaller reseeds would let someone who stole the state guess each addition ("catastrophic
 reseeding", Fortuna). Otherwise the pool keeps collecting.
 
-**Users:** `getrandom` (`desoos::getrandom` in programs: any length, 4096-byte syscalls), DeSoFS volume uuids,
+**Users:** `getrandom` (`deso::getrandom` in programs: any length, 4096-byte syscalls), DeSoFS volume uuids,
 `netd` (TCP sequence numbers and ports, DNS ids and ports, ping ids; DHCP transaction ids are seeded from it – they
 travel in broadcast frames anyway), `/bin/random`. `sysinfo counters`: `rng_reseeds`, `rng_bytes_out`,
 `rng_sources_disabled`.
 
-| | Linux | Windows | RedoxOS | Fuchsia | DeSoOS |
+| | Linux | Windows | RedoxOS | Fuchsia | DeSo OS |
 |---|---|---|---|---|---|
 | where | kernel | kernel + a generator in every process | `randd` (user space) | kernel | kernel; programs may key their own from it |
 | generator | ChaCha20, fast key erasure | AES-CTR-DRBG | ChaCha | ChaCha20 | ChaCha20, fast key erasure |
@@ -2100,14 +2100,14 @@ at once through `/bin/rngtest`), the first bytes of the two starts in `tests/tes
 
 ## DeSoTLS (`common/desotls/`, v0.74.0 certificates, v0.75.0 TLS 1.3)
 
-DeSoOS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
+DeSo OS's own TLS library, over DeSoCrypto and like it a library (`core` only, no heap, no syscalls) included by the
 programs that use it: a TLS 1.3 client and the check of server certificate chains. The rule above all: **either the
 server is fully authenticated – certificate chain, CertificateVerify, Finished – or no application data is sent** –
 no "insecure" switch, no fallback to an older version, nothing that turns a check off. **Full description:
 `desotls/` (`README.md`; `HANDSHAKE.md` – the handshake, records, KeyUpdate, every refusal, netget https://;
 `CERTIFICATES.md` – the profile, the order of the checks, path building, the store format, the clock).**
 
-| | Linux | Windows | RedoxOS | DeSoOS |
+| | Linux | Windows | RedoxOS | DeSo OS |
 |---|---|---|---|---|
 | TLS | a library in the program (OpenSSL, GnuTLS, rustls); kTLS for records | Schannel in LSASS | rustls in the program | `common/desotls` in the program; the kernel has no TLS |
 | CA store | shared files `/etc/ssl/certs` (Mozilla), root-only | system store + Windows Update | webpki-roots compiled into each program | one shared file `/etc/certs/roots` (Mozilla), sealed in ramfs |
@@ -2164,7 +2164,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
 
 - **Self-tests:** `tests/test.sh` – 34 self-test suites, a restart phase and a short soak (288 tests) in QEMU (TCG
   or `ACCEL=kvm`, 1–4 CPUs);
-  loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/desoos/loop`, `selftest::suite`) until a round fails:
+  loop mode `LOOP=suite:rounds` repeats one suite (fw_cfg `opt/deso/loop`, `selftest::suite`) until a round fails:
   exceptions, memory, scheduler, ring 3, FPU, devices, FS, syscalls, ELF, processes, SMP, locks, TLB, allocators,
   files, IPC, the rights table, cryptography, the random number generator, DeSoFS, services, USB, network, stress. Every security fix has a test that fails without it. Scheduler tests include: tasks querying
   `with_process` / `task_exists` in a loop during spawn / exit / reap (a marker in the task checked on read – a freed
@@ -2176,7 +2176,7 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   8 bytes per 4 KiB), named `ramN`, registered like any disk. 1–1024 MiB, at most 4, refused when less than a
   quarter of the free memory (and at least 64 MiB) would stay free. Not removable – its frames come back at the next
   start. Meant for real hardware, where every disk is read-only: DeSoFS and the soak test run there.
-- **Soak on real hardware** (v0.68.0, `kernel/user/soak.rs`): a build with `DESOOS_AUTOSOAK=S` runs the soak before
+- **Soak on real hardware** (v0.68.0, `kernel/user/soak.rs`): a build with `DESO_AUTOSOAK=S` runs the soak before
   init with `<S>:<seed>:hw` – a RAM disk (256 MiB with ≥ 1.5 GiB free, else 96 MiB), the services killed are those
   init runs (network cards, USB controllers, `echo`; not `edu`), the network check is a ping of netd's gateway (a
   download only when QEMU's test server answers), a service may take 60 s to come back (real DHCP), the USB check
@@ -2225,10 +2225,10 @@ Limits are global (there are no users yet). Test: `/bin/limtest`.
   is killed after 4 s, which also exercises cleanup of a process in the middle of a syscall. Requirement: the kernel
   survives, and no frames leak.
 - **Descriptor fuzzing:** `/bin/usbparse` (see USB).
-- **Autostress** (`DESOOS_AUTOSTRESS=60`) – shell scripts, prime counting, IPC jobs (process pairs: shared memory +
+- **Autostress** (`DESO_AUTOSTRESS=60`) – shell scripts, prime counting, IPC jobs (process pairs: shared memory +
   channel, child killed while waiting), USB reads (`usb-stress`: the largest file ≤ 64 MiB on the first `/usbN`,
   checksums compared between passes), on all CPUs. Compare mode (default) and full-load mode
-  (`DESOOS_STRESS_POOL=P`). Report: locks per call site, CPU-time profile of kernel entries (`prof.rs`), spinlock
+  (`DESO_STRESS_POOL=P`). Report: locks per call site, CPU-time profile of kernel entries (`prof.rs`), spinlock
   spinning, idle polling statistics, leaks.
 - The last line, **`[RESULT]`**, is for automatic comparison of builds (humans read the screen, programs read this
   line): `ver mode idlepoll cpus ms scripts primes ipc idle pingpong_ns chan_msgs chan_mbs chan16_ms shm16_ms usb: …
@@ -2242,8 +2242,8 @@ Long-term vision: a system in which an agent helps maintain and develop software
 Three layers:
 
 ```
-DeSoOS Core     kernel + drivers           changed only by a human (after reviewing the diff)
-DeSoOS Apps     .eso applications          installed with a manifest, sandboxed by handles
+DeSo OS Core     kernel + drivers           changed only by a human (after reviewing the diff)
+DeSo OS Apps     .eso applications          installed with a manifest, sandboxed by handles
 Agent network   a DeSo AI agent on every   exchange of fixes and applications between computers
                 computer
 ```

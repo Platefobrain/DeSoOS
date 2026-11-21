@@ -1,7 +1,7 @@
 // User-space shell (ring 3).  Started by init.
 //
-//   desoos:/disk$ ls /bin
-//   desoos:/$ primes 100 > /disk/p.txt &
+//   deso:/disk$ ls /bin
+//   deso:/$ primes 100 > /disk/p.txt &
 //
 // * Line editing: ←/→, Home/End, Backspace/Delete, history ↑/↓, Tab =
 //   command name completion, Ctrl+C = drop the line, Ctrl+U = clear,
@@ -28,16 +28,16 @@
 
 extern crate alloc;
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use desoos::{
+use deso::{
     ERROR_NO_CHILD, ERROR_NOT_FOUND, ERROR_BUFFER_TOO_SMALL, Key, O_APPEND, O_CREATE, O_READ, O_TRUNC, O_WRITE, SPAWN_FOREGROUND, WAIT_ANY, WNOHANG,
     close, describe_status, fds, open, readkey, spawn, strerror, wait, write,
 };
@@ -131,10 +131,10 @@ impl LineEditor {
         }
     }
 
-    /// "desoos:/disk$ " – '$' distinguishes the process shell from the kernel shell ('>').
+    /// "deso:/disk$ " – '$' distinguishes the process shell from the kernel shell ('>').
     fn set_prompt(&mut self, cwd: &str) {
-        self.prompt = format!("\x1b[1;32mdesoos\x1b[0m:\x1b[1;34m{}\x1b[0m$ ", cwd);
-        self.prompt_width = "desoos:".len() + cwd.chars().count() + 2;
+        self.prompt = format!("\x1b[1;32mdeso\x1b[0m:\x1b[1;34m{}\x1b[0m$ ", cwd);
+        self.prompt_width = "deso:".len() + cwd.chars().count() + 2;
     }
 
     /// How many characters of the line fit after the prompt, one column left for the cursor.
@@ -329,7 +329,7 @@ impl LineEditor {
 /// The screen console's width from the kernel (80 when it does not say).
 fn terminal_columns() -> usize {
     let mut buf = [0u8; 16];
-    match desoos::sysinfo("columns", &mut buf) {
+    match deso::sysinfo("columns", &mut buf) {
         Ok(n) => core::str::from_utf8(&buf[..n]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(DEFAULT_COLUMNS),
         Err(_) => DEFAULT_COLUMNS,
     }
@@ -484,7 +484,7 @@ fn disk_programs() -> Vec<String> {
 fn dir_programs(dir: &str) -> Vec<String> {
     let mut buf = vec![0u8; 4096];
     loop {
-        let n = desoos::readdir(dir, &mut buf);
+        let n = deso::readdir(dir, &mut buf);
         if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
             buf.resize(buf.len() * 2, 0);
             continue;
@@ -553,7 +553,7 @@ fn system_name(name: &str) -> bool {
     BUILTINS.iter().any(|(n, _)| *n == name)
         || INFO_COMMANDS.contains(&name)
         || KERNEL_ONLY.contains(&name)
-        || matches!(desoos::stat(&format!("/bin/{}", name)), Ok(_))
+        || matches!(deso::stat(&format!("/bin/{}", name)), Ok(_))
 }
 
 /// Program path: with '/' – as given (the kernel resolves it relative to cwd),
@@ -567,14 +567,14 @@ fn find_program(name: &str) -> Option<String> {
         return None;
     }
     let path = format!("/bin/{}", name);
-    if let Ok(s) = desoos::stat(&path) {
+    if let Ok(s) = deso::stat(&path) {
         return if s.is_dir { None } else { Some(path) };
     }
     if system_name(name) {
         return None;
     }
     let path = format!("{}/{}", DISK_BIN, name);
-    match desoos::stat(&path) {
+    match deso::stat(&path) {
         Ok(s) if !s.is_dir => Some(path),
         _ => None,
     }
@@ -630,29 +630,29 @@ fn desofs_action(words: &[String]) -> Option<(u64, u64, Option<String>)> {
     let w: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
     let disk = |s: &str| s.parse::<u32>().ok().map(u64::from);
     let named = |op: u64, d: &str, n: &str, yes: bool| -> Option<(u64, u64, Option<String>)> {
-        Some((op, disk(d)? | if yes { desoos::SYSCTL_YES } else { 0 }, Some(String::from(n))))
+        Some((op, disk(d)? | if yes { deso::SYSCTL_YES } else { 0 }, Some(String::from(n))))
     };
     match w.as_slice() {
-        ["snapshot", "list", d] => return Some((desoos::SYSCTL_SNAPSHOT_LIST, disk(d)?, None)),
-        ["snapshot", "create", d, n] => return named(desoos::SYSCTL_SNAPSHOT_CREATE, d, n, false),
-        ["snapshot", "mount", d, n] => return named(desoos::SYSCTL_SNAPSHOT_MOUNT, d, n, false),
-        ["snapshot", "delete", d, n] => return named(desoos::SYSCTL_SNAPSHOT_DELETE, d, n, false),
-        ["snapshot", "delete", d, n, "yes"] => return named(desoos::SYSCTL_SNAPSHOT_DELETE, d, n, true),
-        ["snapshot", "restore", d, n] => return named(desoos::SYSCTL_SNAPSHOT_RESTORE, d, n, false),
-        ["snapshot", "restore", d, n, "yes"] => return named(desoos::SYSCTL_SNAPSHOT_RESTORE, d, n, true),
+        ["snapshot", "list", d] => return Some((deso::SYSCTL_SNAPSHOT_LIST, disk(d)?, None)),
+        ["snapshot", "create", d, n] => return named(deso::SYSCTL_SNAPSHOT_CREATE, d, n, false),
+        ["snapshot", "mount", d, n] => return named(deso::SYSCTL_SNAPSHOT_MOUNT, d, n, false),
+        ["snapshot", "delete", d, n] => return named(deso::SYSCTL_SNAPSHOT_DELETE, d, n, false),
+        ["snapshot", "delete", d, n, "yes"] => return named(deso::SYSCTL_SNAPSHOT_DELETE, d, n, true),
+        ["snapshot", "restore", d, n] => return named(deso::SYSCTL_SNAPSHOT_RESTORE, d, n, false),
+        ["snapshot", "restore", d, n, "yes"] => return named(deso::SYSCTL_SNAPSHOT_RESTORE, d, n, true),
         ["snapshot", ..] => return None,
         _ => {}
     }
     Some(match w.as_slice() {
-        ["unmount"] => (desoos::SYSCTL_DESOFS_UNMOUNT, 0),
-        ["ramdisk", m] => (desoos::SYSCTL_RAMDISK, m.parse::<u64>().ok().filter(|m| (1..=1024).contains(m))?),
-        ["info", d] => (desoos::SYSCTL_DESOFS_INFO, disk(d)?),
-        ["mount", d] => (desoos::SYSCTL_DESOFS_MOUNT, disk(d)?),
-        ["check", d] => (desoos::SYSCTL_DESOFS_CHECK, disk(d)?),
-        ["format", d] => (desoos::SYSCTL_DESOFS_FORMAT, disk(d)?),
-        ["format", d, "yes"] => (desoos::SYSCTL_DESOFS_FORMAT, disk(d)? | desoos::SYSCTL_YES),
-        ["repair", d] => (desoos::SYSCTL_DESOFS_REPAIR, disk(d)?),
-        ["repair", d, "yes"] => (desoos::SYSCTL_DESOFS_REPAIR, disk(d)? | desoos::SYSCTL_YES),
+        ["unmount"] => (deso::SYSCTL_DESOFS_UNMOUNT, 0),
+        ["ramdisk", m] => (deso::SYSCTL_RAMDISK, m.parse::<u64>().ok().filter(|m| (1..=1024).contains(m))?),
+        ["info", d] => (deso::SYSCTL_DESOFS_INFO, disk(d)?),
+        ["mount", d] => (deso::SYSCTL_DESOFS_MOUNT, disk(d)?),
+        ["check", d] => (deso::SYSCTL_DESOFS_CHECK, disk(d)?),
+        ["format", d] => (deso::SYSCTL_DESOFS_FORMAT, disk(d)?),
+        ["format", d, "yes"] => (deso::SYSCTL_DESOFS_FORMAT, disk(d)? | deso::SYSCTL_YES),
+        ["repair", d] => (deso::SYSCTL_DESOFS_REPAIR, disk(d)?),
+        ["repair", d, "yes"] => (deso::SYSCTL_DESOFS_REPAIR, disk(d)? | deso::SYSCTL_YES),
         _ => return None,
     })
     .map(|(op, arg)| (op, arg, None))
@@ -663,15 +663,15 @@ static SYSCTL_SLOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 
 fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i64 {
     // A sandboxed program gets only its stdio – no service channel either.
-    if flags & desoos::SPAWN_NO_FILES != 0 {
-        return desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2)], flags);
+    if flags & deso::SPAWN_NO_FILES != 0 {
+        return deso::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2)], flags);
     }
     if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
         // Network administration only for /bin/netconfig itself – not for any file of that
         // name (a copy on /disk or a path ending in "netconfig" gets the program channel).
         let admin = path == "/bin/netconfig";
-        let svc = if !admin && PROG_SLOT.load(core::sync::atomic::Ordering::Relaxed) { desoos::PROG_SVC } else { desoos::SVC };
-        desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (svc, desoos::SVC)], flags)
+        let svc = if !admin && PROG_SLOT.load(core::sync::atomic::Ordering::Relaxed) { deso::PROG_SVC } else { deso::SVC };
+        deso::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (svc, deso::SVC)], flags)
     } else {
         spawn(path, args, flags, fds(fin, fout, 2))
     }
@@ -687,7 +687,7 @@ struct Shell {
 impl Shell {
     fn refresh_cwd(&mut self) {
         let mut buf = [0u8; 256];
-        self.cwd = String::from(desoos::getcwd(&mut buf));
+        self.cwd = String::from(deso::getcwd(&mut buf));
     }
 
     /// Finished background programs (reported before the prompt, as in bash).
@@ -703,7 +703,7 @@ impl Shell {
     fn report_done(&mut self, pid: u64, status: u64) {
         if let Some(i) = self.background.iter().position(|(p, _)| *p == pid) {
             let (_, name) = self.background.remove(i);
-            if status & desoos::STATUS_SIGNALED == 0 && status != 0 {
+            if status & deso::STATUS_SIGNALED == 0 && status != 0 {
                 println!("[{}] {} exited (code {})", pid, name, status);
             } else {
                 println!("[{}] {} {}", pid, name, describe_status(status));
@@ -775,7 +775,7 @@ impl Shell {
             let dirh = match &dir {
                 None => None,
                 Some((d, rw)) => {
-                    let r = desoos::dir_open(d, if *rw { O_READ | O_WRITE } else { O_READ });
+                    let r = deso::dir_open(d, if *rw { O_READ | O_WRITE } else { O_READ });
                     if r < 0 {
                         eprintln!("sh: nofiles: {}: {}", d, strerror(r));
                         return;
@@ -790,7 +790,7 @@ impl Shell {
                         eprintln!("sh: nofiles ({}): no service manager (start the shell from init)", tokens);
                         return;
                     }
-                    match desoos::svc_narrow(tokens) {
+                    match deso::svc_narrow(tokens) {
                         Ok(h) => Some(h),
                         Err(e) => {
                             eprintln!("sh: nofiles: init refused a network channel: {}", strerror(e));
@@ -850,16 +850,16 @@ impl Shell {
             }
         };
         let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
-        let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { desoos::SPAWN_NO_FILES } else { 0 };
+        let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { deso::SPAWN_NO_FILES } else { 0 };
         let pid = if svc.is_some() || dir.is_some() {
             let mut map: Vec<(u64, u64)> = alloc::vec![(fin, 0), (fout, 1), (2, 2)];
             if let Some(h) = svc {
-                map.push((h, desoos::SVC));
+                map.push((h, deso::SVC));
             }
             if let Some(h) = dir {
                 map.push((h, 4));
             }
-            desoos::spawn_ex(path, &args, &map, flags)
+            deso::spawn_ex(path, &args, &map, flags)
         } else {
             spawn_child(path, &args, flags, fin, fout)
         };
@@ -876,7 +876,7 @@ impl Shell {
         }
         match wait(pid, 0) {
             Ok((_, status)) => {
-                if status == desoos::STATUS_SIGNALED | 9 {
+                if status == deso::STATUS_SIGNALED | 9 {
                     // Ctrl+C (or kill from elsewhere) – as in a normal shell.
                     out("^C\n");
                 }
@@ -911,7 +911,7 @@ impl Shell {
         let n = cmds.len();
         let mut pipes: Vec<(u64, u64)> = Vec::new();
         for _ in 1..n {
-            match desoos::pipe() {
+            match deso::pipe() {
                 Ok(p) => pipes.push(p),
                 Err(e) => {
                     eprintln!("sh: pipe: {}", strerror(e));
@@ -989,7 +989,7 @@ impl Shell {
         let mut interrupted = false;
         for (pid, _) in pids {
             if let Ok((_, status)) = wait(pid, 0) {
-                interrupted |= status == desoos::STATUS_SIGNALED | 9;
+                interrupted |= status == deso::STATUS_SIGNALED | 9;
             }
         }
         if interrupted {
@@ -999,7 +999,7 @@ impl Shell {
 
     /// Built-in commands that only write (also in a pipeline).
     fn print_builtin(&self, cmd: &Command, fout: u64) {
-        let mut o = desoos::Out::new(fout);
+        let mut o = deso::Out::new(fout);
         use core::fmt::Write;
         match cmd.args[0].as_str() {
             "pwd" => {
@@ -1051,7 +1051,7 @@ impl Shell {
         };
         let mut buf = vec![0u8; 16 * 1024];
         let r = loop {
-            match desoos::sysinfo(&line, &mut buf) {
+            match deso::sysinfo(&line, &mut buf) {
                 Err(ERROR_BUFFER_TOO_SMALL) if buf.len() < 1024 * 1024 => buf.resize(buf.len() * 4, 0),
                 r => break r,
             }
@@ -1078,9 +1078,9 @@ impl Shell {
         }
         let mut snap_name: Option<String> = None;
         let (op, arg) = match name {
-            "sync" => (desoos::SYSCTL_SYNC, 0),
-            "reboot" => (desoos::SYSCTL_REBOOT, 0),
-            "halt" => (desoos::SYSCTL_HALT, 0),
+            "sync" => (deso::SYSCTL_SYNC, 0),
+            "reboot" => (deso::SYSCTL_REBOOT, 0),
+            "halt" => (deso::SYSCTL_HALT, 0),
             "desofs" => match desofs_action(&cmd.args[1..]) {
                 Some((op, arg, n)) => {
                     snap_name = n;
@@ -1096,8 +1096,8 @@ impl Shell {
                 }
             },
             _ => match cmd.args.get(1).map(|a| a.parse::<u64>()) {
-                None => (desoos::SYSCTL_STRESS, 0),
-                Some(Ok(s)) if (1..=600).contains(&s) => (desoos::SYSCTL_STRESS, s),
+                None => (deso::SYSCTL_STRESS, 0),
+                Some(Ok(s)) if (1..=600).contains(&s) => (deso::SYSCTL_STRESS, s),
                 _ => {
                     eprintln!("usage: stress [seconds]  (1..600)");
                     return;
@@ -1105,10 +1105,10 @@ impl Shell {
             },
         };
         let r = match &snap_name {
-            Some(n) => desoos::sysctl_name(desoos::SYSCTL, op, arg, fout, n),
-            None => desoos::sysctl(desoos::SYSCTL, op, arg, fout),
+            Some(n) => deso::sysctl_name(deso::SYSCTL, op, arg, fout, n),
+            None => deso::sysctl(deso::SYSCTL, op, arg, fout),
         };
-        if r == desoos::ERROR_INVALID_ARGUMENT && snap_name.is_some() {
+        if r == deso::ERROR_INVALID_ARGUMENT && snap_name.is_some() {
             eprintln!("desofs: a snapshot name has 1-24 bytes, no '/', spaces or control characters, and is not '.' or '..'");
         } else if r < 0 {
             eprintln!("{}: {}", name, strerror(r));
@@ -1126,14 +1126,14 @@ impl Shell {
         }
         for a in cmd.args.iter().skip(1) {
             if let Ok(pid) = a.parse::<u64>() {
-                let r = desoos::kill(pid);
+                let r = deso::kill(pid);
                 if r < 0 {
-                    let why = if r == desoos::ERROR_ACCESS_DENIED { " (not started from this shell - a service? use its name)" } else { "" };
+                    let why = if r == deso::ERROR_ACCESS_DENIED { " (not started from this shell - a service? use its name)" } else { "" };
                     eprintln!("kill: {}: {}{}", pid, strerror(r), why);
                 }
             } else if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
                 let mut buf = [0u8; 128];
-                match desoos::svc_kill(a, &mut buf) {
+                match deso::svc_kill(a, &mut buf) {
                     Ok(t) if t.starts_with("killed") => {}
                     Ok(t) => eprintln!("kill: {}: {}", a, t),
                     Err(e) => eprintln!("kill: {}: {}", a, strerror(e)),
@@ -1153,12 +1153,12 @@ impl Shell {
                 return;
             }
         };
-        let mut o = desoos::Out::new(fout);
+        let mut o = deso::Out::new(fout);
         use core::fmt::Write;
         match name {
             "cd" => {
                 let target = cmd.args.get(1).map(|s| s.as_str()).unwrap_or("/");
-                let r = desoos::chdir(target);
+                let r = deso::chdir(target);
                 if r < 0 {
                     eprintln!("cd: {}: {}", target, strerror(r));
                 }
@@ -1256,15 +1256,15 @@ impl Shell {
     }
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     // Slot 3 is checked at startup – later a redirection file could take it.
-    if desoos::handle_info(desoos::SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
+    if deso::handle_info(deso::SVC).map(|(k, _)| k) == Ok(deso::KIND_CHANNEL) {
         SVC_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
-    if desoos::handle_info(desoos::PROG_SVC).map(|(k, _)| k) == Ok(desoos::KIND_CHANNEL) {
+    if deso::handle_info(deso::PROG_SVC).map(|(k, _)| k) == Ok(deso::KIND_CHANNEL) {
         PROG_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
-    if desoos::handle_info(desoos::SYSCTL).map(|(k, _)| k) == Ok(desoos::KIND_SYSCTL) {
+    if deso::handle_info(deso::SYSCTL).map(|(k, _)| k) == Ok(deso::KIND_SYSCTL) {
         SYSCTL_SLOT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
     let mut sh = Shell { editor: LineEditor::new(), cwd: String::from("/"), background: Vec::new(), exit: None };
@@ -1275,7 +1275,7 @@ fn main(args: desoos::Args) -> i32 {
         sh.run_line(&line.join(" "));
         return sh.exit.unwrap_or(0);
     }
-    println!("\x1b[1;36mDeSoOS\x1b[0m user-space shell (pid {}) - type 'help'", desoos::getpid());
+    println!("\x1b[1;36mDeSo OS\x1b[0m user-space shell (pid {}) - type 'help'", deso::getpid());
     while sh.exit.is_none() {
         sh.reap_background();
         sh.read_and_run();

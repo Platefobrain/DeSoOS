@@ -24,7 +24,7 @@ After a passing run QEMU starts a second time on the same test disk (RESTART TES
 restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by
 itself, with its last known good time; `logs/test-usbrestart.log`), twice from an image made by `tools/mkusb.py` – the
 code of `make-usb.sh --with-disk` – with nothing else attached (ONE STICK TEST: UEFI boots the image's ESP, `/usb0` is
-that ESP read-only, `/disk` its "DeSoOS system" partition read-write; the second start finds the first one's file and
+that ESP read-only, `/disk` its "DeSo system" partition read-write; the second start finds the first one's file and
 last known good time, and the ESP is unchanged byte for byte; `logs/test-onestick.log`), then a short soak runs (2 minutes, `soak.sh` on a RAM disk). The end of the output has the summary and the `[RESULT-…]`
 lines (services, USB, rights, crypto, random numbers, certificates, TLS, DeSoFS, soak) copied into `docs/RELEASE.md`. Logs: `logs/test.log`,
 `logs/test-restart.log`, `logs/test-soak.log`. Exit code: 0 PASS, 1 FAIL, 2 timeout, 3 QEMU stopped otherwise or a host test server could not get its ports.
@@ -39,10 +39,10 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `test.sh` | the test run (above) |
 | `soak.sh` | the long soak test (above) |
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
-| `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESOOS_SYS`, `DESOOS_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESOOS_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
+| `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESO_SYS`, `DESO_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESO_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests; `--format` = `tools/mkdesofs.py` (the production formatter) with a fixed uuid / time |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
-| `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSoOS system" partition, primary and backup GPT |
+| `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSo system" partition, primary and backup GPT |
 | `dns-stub.py`, `http-stub.py` | small DNS and HTTP servers on the host for the network tests and the soak |
 | `udp-stub.py` | a UDP echo server on the host for NET TEST (`/bin/udptest`, nettest's address-change checks) and the soak: echo, 1472-byte answer, bursts, an answer from a foreign port, silence, a per-sender count |
 | `ntp-stub.py` | 32 NTP servers on the host (one per port) for NTP TEST (`/bin/ntptest net`): correct, shifted, silent, Kiss-o'-Death, forged, late and malformed answers, servers in 1960 and 2040; checks every query byte for byte, counts packets and repeated Transmit values |

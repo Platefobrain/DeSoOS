@@ -3,9 +3,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
 entry!(main);
 
@@ -37,7 +37,7 @@ fn is_prime(n: u64) -> bool {
     true
 }
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     let limit = match args.get(1) {
         None => 100_000,
         Some(s) => match parse(s) {
@@ -48,8 +48,8 @@ fn main(args: desoos::Args) -> i32 {
             }
         },
     };
-    let t0 = desoos::uptime_ms();
+    let t0 = deso::uptime_ms();
     let count = (0..limit).filter(|&n| is_prime(n)).count();
-    println!("{} primes below {} ({} ms)", count, limit, desoos::uptime_ms() - t0);
+    println!("{} primes below {} ({} ms)", count, limit, deso::uptime_ms() - t0);
     0
 }

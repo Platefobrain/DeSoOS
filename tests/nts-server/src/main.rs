@@ -1,11 +1,11 @@
-// nts-server – a test server on the host for DeSoOS (tests/test.sh builds and starts it).
+// nts-server – a test server on the host for DeSo OS (tests/test.sh builds and starts it).
 // Built on rustls (TLS 1.3 independent of DeSoTLS) and RustCrypto's aes-siv (independent
 // of DeSoCrypto), so the guest's TLS exporter, ALPN, NTS-KE and NTS are checked against a
 // real other side, not against a copy of our own code.
 //
 //   nts-server <dir with tests/tls> <base port>     (default base 58500)
 //
-// Certificate: tests/tls/rsa.pem ("tls.desoos").  Ports (base + n):
+// Certificate: tests/tls/rsa.pem ("tls.deso").  Ports (base + n):
 //
 // TLS exporter (TLS TEST):
 //   +0  ALPN "ntske/1": after the handshake the server sends the 64 bytes of NTS keys it
@@ -22,7 +22,7 @@
 //    record (type 50)         12 an unknown non-critical record (accepted)
 //    13 Next Protocol with an empty body                          14 a response of exactly
 //    65 536 bytes (accepted)  15 65 537 bytes                     16 no cookie
-//    17 nine cookies (8 kept) 18 Server Negotiation "ntp.desoos" + Port Negotiation (NTP
+//    17 nine cookies (8 kept) 18 Server Negotiation "ntp.deso" + Port Negotiation (NTP
 //    through the name)        19 a record cut short, then close_notify
 //    20 only cookies of 98 bytes (not divisible by 4)             21 one cookie of 300
 //    bytes (fewer placeholders)                                   22 no ALPN (TLS level)
@@ -51,7 +51,7 @@
 //    0, 2 nts-good.pem, the host's time     1 nts-good, +400 ms     3 nts-good, +1800 ms
 //    4 nts-good, +30 s     5 nts-good, +3 s     6 nts-good, +6 s
 //    7 future.pem (valid from 2040), the host's time      8 expired.pem (2020-2021)
-//    9 wrongname.pem (other.desoos)     10 rsa.pem (test CA, until 2045), the time is
+//    9 wrongname.pem (other.deso)     10 rsa.pem (test CA, until 2045), the time is
 //      2046-01-01 00:00:00      11 nts-intshort.pem (its intermediate ends 2030-01-01
 //      00:00:00), the time is exactly 2030-01-01 00:00:00.000     12 nts-intshort, the time
 //      is 2031-01-01     13 nts-good, NTP goes to j 0's server     14 rsa.pem, the host's time
@@ -238,7 +238,7 @@ fn ke_response(sh: &Shared, k: u16, c2s: &[u8], s2c: &[u8]) -> (Vec<u8>, bool) {
         }
         16 => out = [next, aead, port, end].concat(),
         17 => out = [next, aead, port, cookies(9), end].concat(),
-        18 => out = [next, aead, rec(6, false, b"ntp.desoos"), port, cookies(8), end].concat(),
+        18 => out = [next, aead, rec(6, false, b"ntp.deso"), port, cookies(8), end].concat(),
         19 => {
             let full = [next, aead, port, cookies(8), end].concat();
             out = full[..full.len() - 30].to_vec();

@@ -9,92 +9,92 @@ cd "$ROOT"
 # ./build.sh --autostress=60 -> 5 s after boot runs a stress test on its own
 #                               (60 s) and prints the result, `cpus` and `mem` on
 #                               the screen - e.g. a laptop without a working keyboard.
-#                               Same thing: DESOOS_AUTOSTRESS=60 ./make-usb.sh ...
+#                               Same thing: DESO_AUTOSTRESS=60 ./make-usb.sh ...
 # ./build.sh --autosoak=3600  -> before init runs the soak test (3600 s) on a RAM disk
 #                               (real hardware; the computer's disks are not touched),
 #                               the result on the screen, then the system starts as usual.
-#                               Same thing: DESOOS_AUTOSOAK=3600 ./make-usb.sh ...
+#                               Same thing: DESO_AUTOSOAK=3600 ./make-usb.sh ...
 SELFTEST_CFG=()
 MODE="normal"
 for arg in "$@"; do
   case "$arg" in
     --selftest) SELFTEST_CFG=(--cfg selftest); MODE="selftest" ;;
-    --autostress) DESOOS_AUTOSTRESS=60 ;;
-    --autostress=*) DESOOS_AUTOSTRESS="${arg#--autostress=}" ;;
-    --autosoak=*) DESOOS_AUTOSOAK="${arg#--autosoak=}" ;;
+    --autostress) DESO_AUTOSTRESS=60 ;;
+    --autostress=*) DESO_AUTOSTRESS="${arg#--autostress=}" ;;
+    --autosoak=*) DESO_AUTOSOAK="${arg#--autosoak=}" ;;
     -h|--help) sed -n '7,16p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (use --selftest, --autostress=S or --autosoak=S)"; exit 1 ;;
   esac
 done
-export DESOOS_AUTOSTRESS="${DESOOS_AUTOSTRESS:-0}"
-case "$DESOOS_AUTOSTRESS" in
-  ''|*[!0-9]*) echo "--autostress: give a number of seconds (got: $DESOOS_AUTOSTRESS)"; exit 1 ;;
+export DESO_AUTOSTRESS="${DESO_AUTOSTRESS:-0}"
+case "$DESO_AUTOSTRESS" in
+  ''|*[!0-9]*) echo "--autostress: give a number of seconds (got: $DESO_AUTOSTRESS)"; exit 1 ;;
 esac
-export DESOOS_AUTOSOAK="${DESOOS_AUTOSOAK:-0}"
-case "$DESOOS_AUTOSOAK" in
-  ''|*[!0-9]*) echo "--autosoak: give a number of seconds (got: $DESOOS_AUTOSOAK)"; exit 1 ;;
+export DESO_AUTOSOAK="${DESO_AUTOSOAK:-0}"
+case "$DESO_AUTOSOAK" in
+  ''|*[!0-9]*) echo "--autosoak: give a number of seconds (got: $DESO_AUTOSOAK)"; exit 1 ;;
 esac
-if [ "$DESOOS_AUTOSOAK" != 0 ] && [ "$DESOOS_AUTOSOAK" -lt 60 ]; then
-  echo "--autosoak: at least 60 seconds (got: $DESOOS_AUTOSOAK)"; exit 1
+if [ "$DESO_AUTOSOAK" != 0 ] && [ "$DESO_AUTOSOAK" -lt 60 ]; then
+  echo "--autosoak: at least 60 seconds (got: $DESO_AUTOSOAK)"; exit 1
 fi
-if [ "$DESOOS_AUTOSOAK" != 0 ] && [ "$DESOOS_AUTOSTRESS" != 0 ]; then
+if [ "$DESO_AUTOSOAK" != 0 ] && [ "$DESO_AUTOSTRESS" != 0 ]; then
   echo "--autosoak and --autostress together: choose one"; exit 1
 fi
 # The random number generator's trust policy (kernel/random.rs): 0 = the source is still
-# mixed into the pool, but its entropy is not counted.  DESOOS_TRUST_CPU – RDSEED;
-# DESOOS_TRUST_BOOTLOADER – the firmware's RNG (RAW algorithm).  Default 1 (counted).
-export DESOOS_TRUST_CPU="${DESOOS_TRUST_CPU:-1}"
-export DESOOS_TRUST_BOOTLOADER="${DESOOS_TRUST_BOOTLOADER:-1}"
-case "$DESOOS_TRUST_CPU$DESOOS_TRUST_BOOTLOADER" in
+# mixed into the pool, but its entropy is not counted.  DESO_TRUST_CPU – RDSEED;
+# DESO_TRUST_BOOTLOADER – the firmware's RNG (RAW algorithm).  Default 1 (counted).
+export DESO_TRUST_CPU="${DESO_TRUST_CPU:-1}"
+export DESO_TRUST_BOOTLOADER="${DESO_TRUST_BOOTLOADER:-1}"
+case "$DESO_TRUST_CPU$DESO_TRUST_BOOTLOADER" in
   00|01|10|11) ;;
-  *) echo "DESOOS_TRUST_CPU / DESOOS_TRUST_BOOTLOADER: 0 or 1 (got: $DESOOS_TRUST_CPU / $DESOOS_TRUST_BOOTLOADER)"; exit 1 ;;
+  *) echo "DESO_TRUST_CPU / DESO_TRUST_BOOTLOADER: 0 or 1 (got: $DESO_TRUST_CPU / $DESO_TRUST_BOOTLOADER)"; exit 1 ;;
 esac
-if [ "$DESOOS_TRUST_CPU$DESOOS_TRUST_BOOTLOADER" != 11 ]; then
-  echo "Random numbers: RDSEED counted: $DESOOS_TRUST_CPU, firmware RNG counted: $DESOOS_TRUST_BOOTLOADER"
+if [ "$DESO_TRUST_CPU$DESO_TRUST_BOOTLOADER" != 11 ]; then
+  echo "Random numbers: RDSEED counted: $DESO_TRUST_CPU, firmware RNG counted: $DESO_TRUST_BOOTLOADER"
 fi
-# DESOOS_BUILD_TAG=NAME – the build's own name, shown by `ver` (up to 8 letters / digits;
+# DESO_BUILD_TAG=NAME – the build's own name, shown by `ver` (up to 8 letters / digits;
 # tests/make-usb-test.sh tells two builds apart with it).  Unset – no name.
-if [ -n "${DESOOS_BUILD_TAG:-}" ]; then
-  case "$DESOOS_BUILD_TAG" in
-    *[!A-Za-z0-9]*) echo "DESOOS_BUILD_TAG: letters and digits only (got: $DESOOS_BUILD_TAG)"; exit 1 ;;
+if [ -n "${DESO_BUILD_TAG:-}" ]; then
+  case "$DESO_BUILD_TAG" in
+    *[!A-Za-z0-9]*) echo "DESO_BUILD_TAG: letters and digits only (got: $DESO_BUILD_TAG)"; exit 1 ;;
   esac
-  [ "${#DESOOS_BUILD_TAG}" -le 8 ] || { echo "DESOOS_BUILD_TAG: at most 8 characters (got: $DESOOS_BUILD_TAG)"; exit 1; }
-  export DESOOS_BUILD_TAG
-  echo "Build tag: $DESOOS_BUILD_TAG"
+  [ "${#DESO_BUILD_TAG}" -le 8 ] || { echo "DESO_BUILD_TAG: at most 8 characters (got: $DESO_BUILD_TAG)"; exit 1; }
+  export DESO_BUILD_TAG
+  echo "Build tag: $DESO_BUILD_TAG"
 fi
-# DESOOS_STRESS_POOL=P – stress with P processes per CPU (full load);
+# DESO_STRESS_POOL=P – stress with P processes per CPU (full load);
 # unset / 0 = comparison mode (3 per CPU, at most 48 – the default).
-export DESOOS_STRESS_POOL="${DESOOS_STRESS_POOL:-0}"
-case "$DESOOS_STRESS_POOL" in
-  ''|*[!0-9]*) echo "DESOOS_STRESS_POOL: give a number of processes per CPU (got: $DESOOS_STRESS_POOL)"; exit 1 ;;
+export DESO_STRESS_POOL="${DESO_STRESS_POOL:-0}"
+case "$DESO_STRESS_POOL" in
+  ''|*[!0-9]*) echo "DESO_STRESS_POOL: give a number of processes per CPU (got: $DESO_STRESS_POOL)"; exit 1 ;;
 esac
-if [ "$DESOOS_AUTOSTRESS" != 0 ]; then
-  if [ "$DESOOS_STRESS_POOL" != 0 ]; then
-    echo "Build: $MODE + stress ${DESOOS_AUTOSTRESS} s after boot, FULL load (${DESOOS_STRESS_POOL} processes per CPU)"
+if [ "$DESO_AUTOSTRESS" != 0 ]; then
+  if [ "$DESO_STRESS_POOL" != 0 ]; then
+    echo "Build: $MODE + stress ${DESO_AUTOSTRESS} s after boot, FULL load (${DESO_STRESS_POOL} processes per CPU)"
   else
-    echo "Build: $MODE + automatic stress test ${DESOOS_AUTOSTRESS} s after boot (comparison mode)"
+    echo "Build: $MODE + automatic stress test ${DESO_AUTOSTRESS} s after boot (comparison mode)"
   fi
-elif [ "$DESOOS_AUTOSOAK" != 0 ]; then
-  echo "Build: $MODE + soak test ${DESOOS_AUTOSOAK} s on a RAM disk before init"
+elif [ "$DESO_AUTOSOAK" != 0 ]; then
+  echo "Build: $MODE + soak test ${DESO_AUTOSOAK} s on a RAM disk before init"
 else
   echo "Build: $MODE"
 fi
 
 # Spin the idle CPU before `hlt` (faster wake-up).
-# DESOOS_IDLE_POLL_US=N – upper bound of the window in µs (0 = hlt immediately), default 200;
-# DESOOS_IDLE_POLL_ADAPT=1 – the window adapts per CPU on its own (default), 0 – fixed N.
-export DESOOS_IDLE_POLL_US="${DESOOS_IDLE_POLL_US:-200}"
-export DESOOS_IDLE_POLL_ADAPT="${DESOOS_IDLE_POLL_ADAPT:-1}"
-case "$DESOOS_IDLE_POLL_US$DESOOS_IDLE_POLL_ADAPT" in
-  ''|*[!0-9]*) echo "DESOOS_IDLE_POLL_US / DESOOS_IDLE_POLL_ADAPT: give numbers"; exit 1 ;;
+# DESO_IDLE_POLL_US=N – upper bound of the window in µs (0 = hlt immediately), default 200;
+# DESO_IDLE_POLL_ADAPT=1 – the window adapts per CPU on its own (default), 0 – fixed N.
+export DESO_IDLE_POLL_US="${DESO_IDLE_POLL_US:-200}"
+export DESO_IDLE_POLL_ADAPT="${DESO_IDLE_POLL_ADAPT:-1}"
+case "$DESO_IDLE_POLL_US$DESO_IDLE_POLL_ADAPT" in
+  ''|*[!0-9]*) echo "DESO_IDLE_POLL_US / DESO_IDLE_POLL_ADAPT: give numbers"; exit 1 ;;
 esac
-if [ "$DESOOS_IDLE_POLL_US" != 200 ] || [ "$DESOOS_IDLE_POLL_ADAPT" != 1 ]; then
-  echo "Idle: spin before hlt up to ${DESOOS_IDLE_POLL_US} us, $([ "$DESOOS_IDLE_POLL_ADAPT" = 1 ] && echo adaptive || echo fixed)"
+if [ "$DESO_IDLE_POLL_US" != 200 ] || [ "$DESO_IDLE_POLL_ADAPT" != 1 ]; then
+  echo "Idle: spin before hlt up to ${DESO_IDLE_POLL_US} us, $([ "$DESO_IDLE_POLL_ADAPT" = 1 ] && echo adaptive || echo fixed)"
 fi
 
 # Version from Cargo.toml -> kernel (the 'ver' command, shell banner).
-DESOOS_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-export DESOOS_VERSION
+DESO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+export DESO_VERSION
 
 command -v rustc >/dev/null 2>&1 || { echo "rustc not found. Install Rust."; exit 1; }
 command -v cargo >/dev/null 2>&1 || { echo "cargo not found. Install Rust."; exit 1; }
@@ -188,12 +188,12 @@ mv "$INITRD" build/user/initrd.rs
 # repository or on where the sources came from.
 if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
   case "$SOURCE_DATE_EPOCH" in *[!0-9]*) echo "SOURCE_DATE_EPOCH is not a number of seconds."; exit 1 ;; esac
-  DESOOS_BUILD_EPOCH="$SOURCE_DATE_EPOCH"; DESOOS_BUILD_EPOCH_SOURCE="SOURCE_DATE_EPOCH"
+  DESO_BUILD_EPOCH="$SOURCE_DATE_EPOCH"; DESO_BUILD_EPOCH_SOURCE="SOURCE_DATE_EPOCH"
 else
-  DESOOS_BUILD_EPOCH="$(date +%s)"; DESOOS_BUILD_EPOCH_SOURCE="build time"
+  DESO_BUILD_EPOCH="$(date +%s)"; DESO_BUILD_EPOCH_SOURCE="build time"
 fi
-export DESOOS_BUILD_EPOCH DESOOS_BUILD_EPOCH_SOURCE
-echo "Build date: $(date -u -d "@$DESOOS_BUILD_EPOCH" '+%Y-%m-%d %H:%M:%S UTC') (from $DESOOS_BUILD_EPOCH_SOURCE)"
+export DESO_BUILD_EPOCH DESO_BUILD_EPOCH_SOURCE
+echo "Build date: $(date -u -d "@$DESO_BUILD_EPOCH" '+%Y-%m-%d %H:%M:%S UTC') (from $DESO_BUILD_EPOCH_SOURCE)"
 
 # The kernel: --cfg desocrypto_no_simd – no AES-NI / PCLMULQDQ code in it at all (its own
 # code runs with CR0.TS = 1 and never saves XMM for itself; kernel/arch/x86_64/fpu.rs).
@@ -233,9 +233,9 @@ echo "kernel.elf: entry $ENTRY, in-memory image $(( (KERNEL_END - KERNEL_START) 
 
 cargo build --release --target x86_64-unknown-uefi
 
-cp target/x86_64-unknown-uefi/release/dsb.efi build/desoos.efi
-cp build/desoos.efi build/EFI/BOOT/BOOTX64.EFI
+cp target/x86_64-unknown-uefi/release/dsb.efi build/deso.efi
+cp build/deso.efi build/EFI/BOOT/BOOTX64.EFI
 
 echo
 echo "Done ($MODE):"
-ls -lh build/kernel.elf build/kernel.boot.elf build/desoos.efi build/EFI/BOOT/BOOTX64.EFI
+ls -lh build/kernel.elf build/kernel.boot.elf build/deso.efi build/EFI/BOOT/BOOTX64.EFI

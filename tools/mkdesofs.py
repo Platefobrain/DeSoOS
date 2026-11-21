@@ -161,7 +161,7 @@ def main():
     ap.add_argument("target", help="an image file (a new one, or an existing one with --force)")
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--blocks", type=int)
-    ap.add_argument("--label", default="DESOOS")
+    ap.add_argument("--label", default="DESO")
     ap.add_argument("--uuid")
     ap.add_argument("--time", type=int)
     ap.add_argument("--force", action="store_true", help="overwrite an existing non-empty image file (never a device, never past 64 GiB)")

@@ -286,7 +286,7 @@ pub fn self_test() {
     let bound_line = r.map(|r| String::from(r.1.trim())).unwrap_or_default();
     let r = run("/bin/timekeeper", &["timekeeper"], false, 30_000);
     check!(r.as_ref().is_some_and(|r| ok(r, 2) && r.1.contains("no SETTIME handle")), "timekeeper without SETTIME: {:?}", r);
-    let r = run("/bin/timekeeper", &["timekeeper", "tls.desoos:58600"], true, 30_000);
+    let r = run("/bin/timekeeper", &["timekeeper", "tls.deso:58600"], true, 30_000);
     check!(r.as_ref().is_some_and(|r| ok(r, 2) && r.1.contains("takes no arguments")), "timekeeper with a server as an argument: {:?}", r);
     let r = keeper("two", false);
     check!(ok(&r, 2) && r.1.contains("no SETTIME handle"), "init test timekeeper without SETTIME: {:?}", r);

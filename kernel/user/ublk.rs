@@ -1037,7 +1037,7 @@ fn monitor(_: usize) {
                 super::usbdisk::changed();
             }
         }
-        // A "DeSoOS system" partition as /disk (rules D2 / E) once the USB disks settled.
+        // A "DeSo system" partition as /disk (rules D2 / E) once the USB disks settled.
         super::usbdisk::evaluate();
         // usbd closing the channel does not wake this task – while disks are
         // present we check every 200 ms.

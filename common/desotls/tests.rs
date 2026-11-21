@@ -218,7 +218,7 @@ fn time_checks(c: &mut Checks) -> Result<(), Failure> {
 
 fn host_checks(c: &mut Checks) -> Result<(), Failure> {
     c.group("host names");
-    for good in ["example.com", "a.b.c.example.com", "localhost", "xn--bcher-kva.example", "a-b.example", "1a.example", "test.desoos"] {
+    for good in ["example.com", "a.b.c.example.com", "localhost", "xn--bcher-kva.example", "a-b.example", "1a.example", "test.deso"] {
         c.check(name::check_host(good).is_ok())?;
     }
     for bad in ["", "-a.example", "a-.example", "a..example", ".example", "example.", "exa mple.com", "ex_ample.com", "*.example.com", "é.example"] {
@@ -387,7 +387,7 @@ fn window_checks(c: &mut Checks) -> Result<(), Failure> {
         Ok(verify::server_when(&chain[..n], &anchors, host, when).map(|_| ()))
     };
     use verify::When::{At, Bootstrap, Over};
-    let host = "tls.desoos";
+    let host = "tls.deso";
     // An ordinary check.
     c.check(run(NTS_GOOD, At(Y2026), host)? == Ok(()))?;
     c.check(run(NTS_GOOD, At(Y2025 - 1), host)? == Err(Error::NotYetValid))?;
@@ -401,7 +401,7 @@ fn window_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(run(EXPIRED, Bootstrap(Y2026), host)? == Err(Error::Expired))?;
     c.check(run(NTS_INTSHORT, Bootstrap(Y2030), host)? == Ok(()))?;
     c.check(run(NTS_INTSHORT, Bootstrap(Y2030 + 1), host)? == Err(Error::Expired))?; // the intermediate
-    c.check(run(NTS_GOOD, Bootstrap(Y2026), "other.desoos")? == Err(Error::NameMismatch))?;
+    c.check(run(NTS_GOOD, Bootstrap(Y2026), "other.deso")? == Err(Error::NameMismatch))?;
     c.check(run(NTS_GOOD, Bootstrap(Y2045 + 1), host)? == Ok(()))?;
     // Over: valid over the whole span.
     c.check(run(NTS_GOOD, Over(Y2026, Y2026 + 3), host)? == Ok(()))?;
@@ -414,7 +414,7 @@ fn window_checks(c: &mut Checks) -> Result<(), Failure> {
     c.check(run(NTS_INTSHORT, Over(Y2030 - 2, Y2030), host)? == Ok(()))?;
     c.check(run(NTS_INTSHORT, Over(Y2030 - 1, Y2030 + 1), host)? == Err(Error::Expired))?;
     c.check(run(NTS_INTSHORT, Over(Y2030 + 365 * 86_400, Y2030 + 365 * 86_400 + 2), host)? == Err(Error::Expired))?;
-    c.check(run(NTS_GOOD, Over(Y2026, Y2026 + 3), "other.desoos")? == Err(Error::NameMismatch))?;
+    c.check(run(NTS_GOOD, Over(Y2026, Y2026 + 3), "other.deso")? == Err(Error::NameMismatch))?;
     // A span the wrong way round is refused.
     let mut der = [0u8; 4096];
     let mut sp = [(0usize, 0usize); 4];

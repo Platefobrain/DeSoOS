@@ -5,7 +5,7 @@
 //   HashAlg::digest   one slice -> Output (up to 64 bytes, `as_bytes()` the real length)
 //   Hasher            streaming with a HashAlg chosen at run time
 //
-// SHA-1 and SHA-224 are not here on purpose: nothing in DeSoOS may use them.
+// SHA-1 and SHA-224 are not here on purpose: nothing in DeSo OS may use them.
 
 use super::Error;
 use super::sha256::{self, Sha256};

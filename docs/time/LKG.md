@@ -20,8 +20,8 @@ memory) – the repair write (`TIMEKEEPER.md`).
 
 ## Where it is kept
 
-`/.desoos/lkg` on the **system volume** – the DeSoFS volume mounted read-write at `/disk` (so `/disk/.desoos/lkg` in
-the VFS). Without such a volume (no disk, FAT32, a read-only disk – a real SSD in DeSoOS today) the LKG lives in memory
+`/.deso/lkg` on the **system volume** – the DeSoFS volume mounted read-write at `/disk` (so `/disk/.deso/lkg` in
+the VFS). Without such a volume (no disk, FAT32, a read-only disk – a real SSD in DeSo OS today) the LKG lives in memory
 only, from the build date on; `date` says "kept in memory only".
 
 The record is 56 bytes (little-endian):
@@ -36,7 +36,7 @@ The record is 56 bytes (little-endian):
 | 24 | SHA-256 over bytes 0–23 |
 
 The checksum protects against an **accident** (a torn write, a bad sector). It does not protect against someone who
-changes the file outside DeSoOS and computes the sum again – see "Threats".
+changes the file outside DeSo OS and computes the sum again – see "Threats".
 
 ## Reading (at boot, and whenever a volume is mounted at /disk)
 
@@ -51,11 +51,11 @@ higher time).
 
 ## Writing – atomic and durable
 
-1. `/.desoos` created if missing; a temporary file left by an interrupted save is removed;
-2. the whole record into `/.desoos/lkg.new`;
+1. `/.deso` created if missing; a temporary file left by an interrupted save is removed;
+2. the whole record into `/.deso/lkg.new`;
 3. read back and compared byte for byte;
 4. `sync`;
-5. `rename` onto `/.desoos/lkg`;
+5. `rename` onto `/.deso/lkg`;
 6. `sync`.
 
 Every DeSoFS operation is its own transaction (copy-on-write, flushed, one new superblock – `../desofs/FORMAT.md`), so
@@ -81,15 +81,15 @@ RTC itself is the first reason.
 
 The RTC is never written and the clock is never changed here: a clock below the LKG is refused, not "fixed".
 
-## /.desoos is the kernel's
+## /.deso is the kernel's
 
-The VFS refuses every change under `/.desoos` of a DeSoFS volume to everybody but the kernel's own LKG code – programs
+The VFS refuses every change under `/.deso` of a DeSoFS volume to everybody but the kernel's own LKG code – programs
 and the kernel's own file functions (the shell's `rm`, `mv`, `write` included):
 
 - opening for writing, `O_TRUNC`, `O_CREATE`, `O_APPEND`; `write`, `truncate`;
 - `unlink` of the file and of the directory; `mkdir` and new files inside;
 - `rename` out of it, onto it, into it, of the directory, and a directory onto it;
-- mounting on `/.desoos` or inside it;
+- mounting on `/.deso` or inside it;
 - through directory handles (`openat`, `unlinkat`, `mkdirat`) and every spelling (`.`, `..`, `//`, relative paths).
 
 The check is made on the **resolved object**: the volume the normalized path lands on and the node's path inside it –
@@ -98,10 +98,10 @@ It is made **under the same lock** that picks the volume and runs the operation 
 `try_concurrent_change`, inside `remove` and `rename` – after `rename` lets the lock go, again under the next one): a
 volume mounted at `/disk` between a check and the write cannot get the write. An open file keeps a **path**, not a
 reference to a file system, so every write through it picks the volume again under that lock – a handle opened on
-ramfs before a DeSoFS volume is mounted over `/disk` writes nothing into `/.desoos`. (Opening for writing is also
+ramfs before a DeSoFS volume is mounted over `/disk` writes nothing into `/.deso`. (Opening for writing is also
 refused at once – an early answer, not the protection itself.)
-Reading stays allowed. Only `/.desoos` at the root of a DeSoFS volume is reserved (`/disk/a/.desoos`, `/disk/.desoosx`
-and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through the volume itself
+Reading stays allowed. Only `/.deso` at the root of a DeSoFS volume is reserved (`/disk/a/.deso`, `/disk/.desox`
+and a `/.deso` on ramfs are ordinary). The kernel writes the file only through the volume itself
 (`fs::with_desofs_at`).
 
 ## Threats
@@ -112,7 +112,7 @@ and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through
 | a program changing, removing or replacing the file | refused by the VFS |
 | a program raising the LKG (a time far ahead would block TLS) | impossible – only `SYS_TIME_SET`, which needs the SETTIME handle (init gives it only to the time service; it cannot be sent in a message) |
 | the time service itself wrong or taken over | the kernel checks the numbers and never lowers the LKG, but cannot check that the time came from NTS or two operators – a wrong time within those rules (`TIMEKEEPER.md`) |
-| a change to the file outside DeSoOS (another system, the sum computed again) | **not covered** |
+| a change to the file outside DeSo OS (another system, the sum computed again) | **not covered** |
 | an old disk image put back (rollback of the LKG), or `desofs snapshot restore` from the shell | **not covered** – later a TPM NV index or another hardware monotonic counter |
 | `desofs format` of the system disk from the shell | the LKG goes with the volume (the bound in memory stays until the restart) |
 
@@ -127,7 +127,7 @@ and a `/.desoos` on ramfs are ordinary). The kernel writes the file only through
 5. the live system on a RAM volume at `/disk`: no file → the build date; raised and saved; never lower; equal to the
    clock → plausible; ahead → reason 7 and netget https refused before sending; read back the same; damaged →
    reason 8, refused; repaired by the next LKG; no volume → in memory, "NOT SAVED", saved by the next raise;
-6. `/.desoos` protected: 20 kernel calls and 30 program attempts (`/bin/timetest protect`) refused; the file readable
+6. `/.deso` protected: 20 kernel calls and 30 program attempts (`/bin/timetest protect`) refused; the file readable
    and the same; other names writable;
 7. checked under the operation's lock: a volume is mounted at `/disk` in the gap before each changing call takes the
    VFS lock (a self-test hook, `fs::RACE_HOOK`) – write, truncate, create, mkdir, remove, rename out / over / into,
@@ -153,4 +153,4 @@ truncate path, in `remove`, in `rename`, in `write_file` / `append_file`.
 | Windows (Secure Time Seeding) | – | timestamps from TLS handshakes | yes – known to jump the clock |
 | Android | the build time | NITZ, GNSS, NTP | yes |
 | RedoxOS | – | – | – |
-| **DeSoOS** | the build date + the LKG on the system volume | only NTS through the time service (two of three operators) | the time service sets the wall clock to max(T, LKG); a clock below the LKG is otherwise refused, not changed |
+| **DeSo OS** | the build date + the LKG on the system volume | only NTS through the time service (two of three operators) | the time service sets the wall clock to max(T, LKG); a clock below the LKG is otherwise refused, not changed |

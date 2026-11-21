@@ -5,7 +5,7 @@
 // (blk_attach – plain shared memory instead of a DMA buffer, 1 s timeout) and serves the
 // kernel's requests from a 4 MiB medium in memory with a GPT on it:
 //   partition 1 "EFI System"     blocks   40 – 2047
-//   partition 2 "DeSoOS system"  blocks 2048 – 7999 (blocks 8000 – 8191: outside every partition)
+//   partition 2 "DeSo system"  blocks 2048 – 7999 (blocks 8000 – 8191: outside every partition)
 // It accepts every WRITE / FLUSH inside the medium – it is NOT a lock: the kernel's own two
 // locks (the partition, ublk) are what is tested; the medium shows what got through.  It
 // does check that what the kernel sends is well formed: a probe without a range and with
@@ -23,11 +23,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::*;
+use deso::*;
 
 entry!(main);
 
@@ -103,7 +103,7 @@ fn write_gpt(m: &mut [u8]) {
     m[510] = 0x55;
     m[511] = 0xAA;
     let t = 2 * 512;
-    for (i, (g, (lo, hi), name)) in [(guid("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"), P1, "EFI"), (guid("1A0E2E7D-DE32-4C13-9442-9FCB2649CA02"), P2, "DeSoOS system")].iter().enumerate() {
+    for (i, (g, (lo, hi), name)) in [(guid("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"), P1, "EFI"), (guid("1A0E2E7D-DE32-4C13-9442-9FCB2649CA02"), P2, "DeSo system")].iter().enumerate() {
         let e = t + i * 128;
         m[e..e + 16].copy_from_slice(g);
         m[e + 16..e + 32].copy_from_slice(&[0x40 + i as u8; 16]);

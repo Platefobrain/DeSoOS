@@ -5,8 +5,8 @@
 //
 // * tests/soak.sh (QEMU): the fw_cfg phase "soak …" – `test_soak.rs` calls `run` instead of
 //   the self-tests.
-// * Real hardware: a build with `DESOOS_AUTOSOAK=<seconds>` (`./build.sh --autosoak=S`,
-//   `DESOOS_AUTOSOAK=3600 ./make-usb.sh …`) runs it before init, always on a RAM disk – the
+// * Real hardware: a build with `DESO_AUTOSOAK=<seconds>` (`./build.sh --autosoak=S`,
+//   `DESO_AUTOSOAK=3600 ./make-usb.sh …`) runs it before init, always on a RAM disk – the
 //   computer's own disks are not touched; then the system starts as usual and the result
 //   stays on the screen.
 
@@ -53,15 +53,15 @@ fn run_mode(secs: u64, seed: u64, mode: &str) -> bool {
     true
 }
 
-/// Seconds from the build (`DESOOS_AUTOSOAK`); 0 = off.  At most a week.
+/// Seconds from the build (`DESO_AUTOSOAK`); 0 = off.  At most a week.
 pub fn auto_seconds() -> u64 {
-    match option_env!("DESOOS_AUTOSOAK") {
+    match option_env!("DESO_AUTOSOAK") {
         Some(s) => s.trim().parse::<u64>().unwrap_or(0).min(7 * 24 * 3600),
         None => 0,
     }
 }
 
-/// A `DESOOS_AUTOSOAK` build: the soak on a RAM disk before init (the seed from the
+/// A `DESO_AUTOSOAK` build: the soak on a RAM disk before init (the seed from the
 /// clock, printed by the soak), the verdict in colour at the end; then boot goes on.
 pub fn run_auto_from_build() {
     let secs = auto_seconds();

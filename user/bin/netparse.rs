@@ -14,13 +14,13 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../lib/netproto.rs"]
 mod netproto;
 
-use desoos::*;
+use deso::*;
 use netproto::*;
 
 entry!(main);

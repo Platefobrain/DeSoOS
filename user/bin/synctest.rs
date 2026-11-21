@@ -13,9 +13,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
@@ -25,7 +25,7 @@ mod ntp;
 #[path = "../lib/timesync.rs"]
 mod timesync;
 
-use desoos::*;
+use deso::*;
 use desotls::chain::{self, PeerChain};
 use timesync::{Backoff, Quorum, Sample};
 

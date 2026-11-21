@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# DeSoOS on a USB flash drive (UEFI) – SAFELY.
+# DeSo OS on a USB flash drive (UEFI) – SAFELY.
 #
 #   ./make-usb.sh --list                 show USB flash drives attached to the computer
-#   ./make-usb.sh /media/${USER:-$(id -un)}/NAME     install DeSoOS onto a mounted FAT32 flash drive
+#   ./make-usb.sh /media/${USER:-$(id -un)}/NAME     install DeSo OS onto a mounted FAT32 flash drive
 #   ./make-usb.sh --format /dev/sdX      (optional) format the flash drive as FAT32 – ERASES it
 #   ./make-usb.sh --with-disk /dev/sdX   a flash drive with a disk – ERASES it: partition 1 = ESP
-#                                        (FAT32 "DESOOS", BOOTX64.EFI, read-only in DeSoOS),
-#                                        partition 2 = "DeSoOS system" (an empty DeSoFS, at most
-#                                        64 GiB) = /disk in DeSoOS, where your files and the
+#                                        (FAT32 "DESO", BOOTX64.EFI, read-only in DeSo OS),
+#                                        partition 2 = "DeSo system" (an empty DeSoFS, at most
+#                                        64 GiB) = /disk in DeSo OS, where your files and the
 #                                        last known good time stay.  Add --dry-run to only check.
 #   ./make-usb.sh --with-disk --image FILE SIZE_MIB [--efi BOOTX64.EFI]
 #                                        the same layout into an image file (no sudo; the tests
 #                                        use it – the same code, tools/mkusb.py)
-#   DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/...   the kernel, 5 s after boot,
+#   DESO_AUTOSTRESS=60 ./make-usb.sh /media/...   the kernel, 5 s after boot,
 #                                        runs a 60 s stress test by itself and shows the result
-#   DESOOS_AUTOSOAK=3600 ./make-usb.sh /media/...   the kernel runs a 1-hour soak test on a
+#   DESO_AUTOSOAK=3600 ./make-usb.sh /media/...   the kernel runs a 1-hour soak test on a
 #                                        RAM disk before init and shows the result
 #
 # What installing does: builds the regular kernel (./build.sh, without self-tests)
@@ -35,7 +35,7 @@
 #     everything checked AGAIN right before writing (the same major:minor, serial and size –
 #     else nothing is written), and tools/mkusb.py opens it exclusively (O_EXCL) and checks the
 #     major:minor and size once more.  Any unclear answer = stop.
-# Updating a flash drive made with --with-disk: ./make-usb.sh /media/$USER/DESOOS – only
+# Updating a flash drive made with --with-disk: ./make-usb.sh /media/$USER/DESO – only
 # BOOTX64.EFI on the ESP is replaced; the DeSoFS partition (your files) is not touched.
 set -euo pipefail
 
@@ -46,9 +46,9 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 # tests/make-usb-test.sh runs the checks against a fake /sys and /proc (and fake lsblk /
 # findmnt in PATH); the real ones otherwise.
-SYS="${DESOOS_SYS:-/sys}"
-PROC="${DESOOS_PROC:-/proc}"
-DESOOS_SYSTEM_GUID="1a0e2e7d-de32-4c13-9442-9fcb2649ca02"
+SYS="${DESO_SYS:-/sys}"
+PROC="${DESO_PROC:-/proc}"
+DESO_SYSTEM_GUID="1a0e2e7d-de32-4c13-9442-9fcb2649ca02"
 
 # Disk (e.g. sdb) for a device or partition (e.g. /dev/sdb1).
 parent_disk() {
@@ -103,9 +103,9 @@ format_usb() {
   local part
   part="$(lsblk -lnpo NAME,TYPE "$dev" | awk '$2=="part"{print $1; exit}')"
   [ -n "$part" ] || die "no new partition found on $dev"
-  sudo mkfs.vfat -F 32 -n DESOOS "$part" >/dev/null
-  echo "Done: $part = FAT32 'DESOOS'. Unplug and replug the flash drive (it will mount itself), then:"
-  echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
+  sudo mkfs.vfat -F 32 -n DESO "$part" >/dev/null
+  echo "Done: $part = FAT32 'DESO'. Unplug and replug the flash drive (it will mount itself), then:"
+  echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESO"
 }
 
 # --with-disk: every check on device $1.  Sets DEV, NAME, MAJMIN, SERIAL, BYTES, MODEL; dies
@@ -113,7 +113,7 @@ format_usb() {
 check_device() {
   local dev name t tran rm ssz bytes mnt p sw swdev hold
   dev="$(readlink -f -- "$1")" || die "cannot resolve $1"
-  if [ -z "${DESOOS_SYS:-}" ]; then
+  if [ -z "${DESO_SYS:-}" ]; then
     [ -b "$dev" ] || die "$dev is not a block device"
   fi
   case "$dev" in
@@ -128,11 +128,11 @@ check_device() {
   rm="$(cat "$SYS/block/$name/removable" 2>/dev/null || true)"
   [ "$rm" = "1" ] || die "$dev is not a removable disk (removable='$rm') - refusing"
   ssz="$(cat "$SYS/block/$name/queue/logical_block_size" 2>/dev/null || true)"
-  [ "$ssz" = "512" ] || die "$dev has ${ssz:-unknown}-byte sectors - DeSoOS reads 512-byte sectors only"
+  [ "$ssz" = "512" ] || die "$dev has ${ssz:-unknown}-byte sectors - DeSo OS reads 512-byte sectors only"
   bytes="$(lsblk -dbno SIZE "$dev" 2>/dev/null | tr -d ' ')"
   case "$bytes" in ''|*[!0-9]*) die "size of $dev unknown" ;; esac
   [ "$bytes" -le $((256 << 30)) ] || die "$dev is larger than 256 GiB - not a flash drive? refusing"
-  [ "$bytes" -ge $((200 << 20)) ] || die "$dev is smaller than 200 MiB (ESP 128 MiB + DeSoOS system 64 MiB)"
+  [ "$bytes" -ge $((200 << 20)) ] || die "$dev is smaller than 200 MiB (ESP 128 MiB + DeSo system 64 MiB)"
   is_system_disk "$name" && die "$dev is a system disk - refusing"
   mnt="$(lsblk -nro MOUNTPOINTS "$dev" 2>/dev/null | tr -d '[:space:]')"
   [ -z "$mnt" ] || die "something on $dev is mounted - unmount it (e.g. Eject in the file manager) and try again"
@@ -166,14 +166,14 @@ with_disk_device() {
   local dry="$1" d1 m1 s1 b1
   check_device "$2"
   d1="$DEV"; m1="$MAJMIN"; s1="$SERIAL"; b1="$BYTES"
-  echo "WARNING: this will ERASE EVERYTHING on $DEV and make it a DeSoOS flash drive with a disk:"
+  echo "WARNING: this will ERASE EVERYTHING on $DEV and make it a DeSo OS flash drive with a disk:"
   echo "  model: ${MODEL:-?}   size: $((BYTES >> 20)) MiB   serial: ${SERIAL:-none}   device: $MAJMIN"
   lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTTYPENAME "$DEV" 2>/dev/null || true
-  if lsblk -nro PARTTYPE "$DEV" 2>/dev/null | grep -qi "$DESOOS_SYSTEM_GUID"; then
+  if lsblk -nro PARTTYPE "$DEV" 2>/dev/null | grep -qi "$DESO_SYSTEM_GUID"; then
     echo
-    echo "NOTE: it already has a \"DeSoOS system\" partition - YOUR DeSoOS DATA (files, the last known"
-    echo "good time) WILL BE LOST.  To update DeSoOS only, mount the flash drive and run:"
-    echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
+    echo "NOTE: it already has a \"DeSo system\" partition - YOUR DeSo OS DATA (files, the last known"
+    echo "good time) WILL BE LOST.  To update DeSo OS only, mount the flash drive and run:"
+    echo "  ./make-usb.sh /media/${USER:-$(id -un)}/DESO"
   fi
   echo
   read -r -p "Type exactly '$DEV' to continue: " answer
@@ -192,9 +192,9 @@ with_disk_device() {
   sudo python3 tools/mkusb.py --device "$DEV" --expect-rdev "$MAJMIN" --expect-bytes "$BYTES" --expect-serial "$SERIAL" --efi build/EFI/BOOT/BOOTX64.EFI || die "writing the flash drive failed - see above (make it again before using it)"
   sudo partprobe "$DEV" 2>/dev/null || true
   echo
-  echo "Done: $DEV = ESP 'DESOOS' (BOOTX64.EFI) + \"DeSoOS system\" (DeSoFS, /disk in DeSoOS)."
+  echo "Done: $DEV = ESP 'DESO' (BOOTX64.EFI) + \"DeSo system\" (DeSoFS, /disk in DeSo OS)."
   echo "Now: unplug the flash drive, restart the computer, open the boot menu (usually F12, F11, F9 or Esc)"
-  echo "-> choose the flash drive (EFI USB Device).  To update DeSoOS later: ./make-usb.sh /media/${USER:-$(id -un)}/DESOOS"
+  echo "-> choose the flash drive (EFI USB Device).  To update DeSo OS later: ./make-usb.sh /media/${USER:-$(id -un)}/DESO"
 }
 
 with_disk_image() {
@@ -228,15 +228,15 @@ install_to() {
 
   local target="$mnt/EFI/BOOT/BOOTX64.EFI"
   if [ -f "$target" ] && [ "$overwrite" != 1 ]; then
-    if ! grep -aq "DeSoOS" "$target"; then
+    if ! grep -aq "DeSo OS" "$target"; then
       die "the flash drive already has another bootloader ($target) - e.g. an installer. Use an empty flash drive or add --overwrite"
     fi
   fi
 
-  if [ "${DESOOS_AUTOSTRESS:-0}" != 0 ]; then
-    echo "Building the regular kernel + automatic stress test ${DESOOS_AUTOSTRESS} s after boot..."
-  elif [ "${DESOOS_AUTOSOAK:-0}" != 0 ]; then
-    echo "Building the regular kernel + soak test ${DESOOS_AUTOSOAK} s on a RAM disk before init..."
+  if [ "${DESO_AUTOSTRESS:-0}" != 0 ]; then
+    echo "Building the regular kernel + automatic stress test ${DESO_AUTOSTRESS} s after boot..."
+  elif [ "${DESO_AUTOSOAK:-0}" != 0 ]; then
+    echo "Building the regular kernel + soak test ${DESO_AUTOSOAK} s on a RAM disk before init..."
   else
     echo "Building the regular kernel (no self-tests)..."
   fi

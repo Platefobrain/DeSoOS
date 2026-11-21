@@ -51,17 +51,17 @@ const fn guid(s: &[u8; 36]) -> [u8; 16] {
 }
 
 pub const ESP: [u8; 16] = guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
-/// "DeSoOS system" – the only partition type a USB disk may ever be written in (v0.80, the
+/// "DeSo system" – the only partition type a USB disk may ever be written in (v0.80, the
 /// write rules: docs/ARCHITECTURE.md, "Writing to a USB disk").  The same GUID is in make-usb.sh
 /// and tests/mkgpt.py.
-pub const DESOOS_SYSTEM: [u8; 16] = guid(b"1A0E2E7D-DE32-4C13-9442-9FCB2649CA02");
+pub const DESO_SYSTEM: [u8; 16] = guid(b"1A0E2E7D-DE32-4C13-9442-9FCB2649CA02");
 /// Its name in `kind` (compared by the write rules).
-pub const DESOOS_SYSTEM_NAME: &str = "DeSoOS system";
+pub const DESO_SYSTEM_NAME: &str = "DeSo system";
 
 /// Known partition types: (GUID, name).
 pub const KINDS: &[([u8; 16], &str)] = &[
     (ESP, "EFI System"),
-    (DESOOS_SYSTEM, DESOOS_SYSTEM_NAME),
+    (DESO_SYSTEM, DESO_SYSTEM_NAME),
     (guid(b"0FC63DAF-8483-4772-8E79-3D69D8477DE4"), "Linux filesystem"),
     (guid(b"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F"), "Linux swap"),
     (guid(b"E6D6D379-F507-44C2-A23C-238F2A3DF928"), "Linux LVM"),

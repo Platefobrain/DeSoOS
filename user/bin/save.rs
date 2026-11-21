@@ -2,15 +2,15 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 
-use desoos::{O_CREATE, O_TRUNC, O_WRITE, close, open, strerror, write};
+use deso::{O_CREATE, O_TRUNC, O_WRITE, close, open, strerror, write};
 
 entry!(main);
 
-fn main(args: desoos::Args) -> i32 {
+fn main(args: deso::Args) -> i32 {
     let Some(path) = args.get(1) else {
         eprintln!("usage: save <file> <words...>");
         return 2;

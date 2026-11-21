@@ -26,9 +26,9 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/desoos.rs"]
+#[path = "../lib/deso.rs"]
 #[macro_use]
-mod desoos;
+mod deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]
@@ -36,7 +36,7 @@ mod desotls;
 #[path = "../lib/http.rs"]
 mod http;
 
-use desoos::*;
+use deso::*;
 use desotls::client::{self, Client, Config, Random, TlsError, Transport};
 use desotls::record::Suite;
 use desotls::roots::{AnchorList, Anchors, Roots};
@@ -448,7 +448,7 @@ fn fetch(u: &Url<'_>, card: &str, out_fd: u64, verbose: bool, anchors: &dyn Anch
         put(b":", msg, &mut n);
         put(port_s, msg, &mut n);
     }
-    put(b"\r\nUser-Agent: DeSoOS-netget\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", msg, &mut n);
+    put(b"\r\nUser-Agent: DeSo-netget\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", msg, &mut n);
     let sent = if u.tls {
         let mut req = [0u8; 1400];
         req[..n].copy_from_slice(&msg[..n]);
