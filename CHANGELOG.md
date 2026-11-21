@@ -2,11 +2,20 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.80.0 — in progress (one USB stick: start + DeSoFS; programs from the disk)
+## v0.80.0 — 2026-11-20 (one USB stick: start + DeSoFS; programs from the disk)
 
 Plan: V080 ver 10 (accepted). One stick prepared on Linux by `make-usb.sh --with-disk`: partition 1 the ESP (DeSoOS
 only reads it), partition 2 "DeSoOS system" with DeSoFS – the only place DeSoOS ever writes on a USB disk. Four
-stages, each with its own gate.
+stages, each with its own gate; on the Legion (stage C gate) the last known good time and a file written on the stick
+were there after a restart, and pulling the stick out did not stop the system.
+
+### Release
+- Version 0.80.0 (`Cargo.toml`, `Cargo.lock`, the README badge); `docs/RELEASE.md` – the v0.80.0 report.
+- Fix (the first TCG run of the release build): PANIC "memory allocation of 65536 bytes failed" in DESOFS TEST again
+  – a test RAM disk's 64 KiB content block not found on the 64 MiB kernel heap after the earlier suites had fragmented
+  it (DESOFS TEST holds several disks of up to 16 MiB plus image copies at once). Test RAM disks (`block::RamDisk`)
+  now keep their contents in 4 KiB physical frames like `desofs ramdisk` – nothing but the frame list on the heap –
+  and give them back when removed; USB DISK TEST removes its two RAM disks (its frame check caught them).
 
 ### Stage A – writing to a USB stick (usbd, ublk, the block layer)
 - **The partition type "DeSoOS system"** `1A0E2E7D-DE32-4C13-9442-9FCB2649CA02` (`gpt::DESOOS_SYSTEM`).
@@ -118,6 +127,30 @@ stages, each with its own gate.
   image (`fsck.vfat`); an update from build `v1` to `v2` started in QEMU – partition 2 unchanged, `ver` = v2, the file and
   the LKG kept. 331 tests (the count tests/test.sh prints).
 - Review of the stage B fix: a working read-only mount clears the partition's earlier failures (`ro_fail`).
+
+### Stage D – programs from the disk
+- **The shell runs programs from `/disk/bin`**: a name that is neither a built-in, a `/bin` program, an information
+  command nor a kernel-only command is looked up in `/disk/bin` – copy a program there (`cp /usb1/prog /disk/bin/`)
+  and type its name. A program on the disk never hides a name of the system; `help` lists them separately and Tab
+  completes them. A path with `/` works as before.
+- **Same rights as a `/bin` program**: stdio and the program channel – the shell's SYSCTL, SETTIME and HW_ROOT handles
+  are never passed on. The network administration channel now goes to `/bin/netconfig` only, not to any file named
+  `netconfig` (before, `/disk/x/netconfig` would have got it – found while writing this stage).
+- **Pulling the stick out while a program from it runs** is safe: exec reads the whole file first; the program runs to
+  its end, the next start says "command not found".
+- **`/bin/privtest`** (new): prints the kinds of the handles it got and tries SYSCTL and SYS_TIME_SET (both must be
+  refused).
+- Tests – USB DISK TEST 1/2: programs copied to `/disk/bin` with the shell's `cp` and run by name; copies named
+  `primes`, `mem`, `echo`, `run` never run instead of the system's; `/bin/privtest`, `/disk/bin/privd` and
+  `/disk/x/netconfig` started by a shell holding SYSCTL, SETTIME and HW_ROOT get the same handles and are refused both
+  calls; a program from the stick keeps running after the stick is pulled (2.5 s), then "command not found". Mutations caught (3):
+  `/disk/bin` searched before `/bin`, a system name looked up on the disk, the shell's SYSCTL passed on. Not covered by a
+  test: the `/bin/netconfig` rule (the test shell has no service channels to tell the two apart).
+- tlstest: the TCP connection of an exporter case is tried up to three times (a connection to the same host port right
+  after the previous one was refused twice in hundreds of runs – "exporter without ALPN offered: no connection"); the
+  failure now says netd's answer. The TLS part is never retried.
+- `docs/RELEASE.md` "Current limitations": USB writes, the FLUSH guarantee of a stick, `desofs check` at mount,
+  programs from the disk.
 
 ## v0.79.0 — 2026-11-15 (NTS + the last known good time + the time service)
 

@@ -723,35 +723,49 @@ pub fn create_ram_disk(mib: u64) -> Result<usize, String> {
 
 // ------------------------------------------------------------
 
-/// Contents in 64 KiB pieces, not one block: a 16 MiB test disk is then 256 small heap
-/// blocks instead of one 16 MiB block, which a fragmented heap (e.g. right after the heap
-/// reserve test filled it) may not have.
-#[cfg(selftest)]
-const RAM_CHUNK: usize = 64 * 1024;
-
+/// A test RAM disk: its contents in 4 KiB physical frames, like `desofs ramdisk` – none of it
+/// on the kernel heap.  (Until v0.80 the contents were 64 KiB heap blocks; DESOFS TEST holds
+/// several disks of up to 16 MiB plus image copies at once, and after the earlier suites
+/// fragmented the 64 MiB heap a 64 KiB block was now and then not found – "memory allocation
+/// of 65536 bytes failed", twice in TCG runs.)  Only the frame list is on the heap.
 #[cfg(selftest)]
 pub struct RamDisk {
     name: String,
     sectors: u64,
-    chunks: Vec<Vec<u8>>,
+    frames: Vec<u64>,
 }
 
 #[cfg(selftest)]
 impl RamDisk {
     pub fn new(name: &str, sectors: u64) -> Self {
-        let bytes = sectors as usize * SECTOR_SIZE;
-        let chunks = (0..bytes.div_ceil(RAM_CHUNK)).map(|k| alloc::vec![0u8; RAM_CHUNK.min(bytes - k * RAM_CHUNK)]).collect();
-        RamDisk { name: String::from(name), sectors, chunks }
+        let pages = (sectors as usize * SECTOR_SIZE).div_ceil(4096);
+        let mut frames = Vec::with_capacity(pages);
+        for _ in 0..pages {
+            let f = crate::memory::alloc_frame().expect("test RAM disk: out of physical memory");
+            unsafe { core::ptr::write_bytes(crate::memory::phys_to_virt(f) as *mut u8, 0, 4096) };
+            frames.push(f);
+        }
+        RamDisk { name: String::from(name), sectors, frames }
     }
 
-    /// Copies between `buf` and the disk at byte `off`, piece by piece.
+    /// Copies between `buf` and the disk at byte `off`, page by page.
     fn each(&mut self, off: usize, len: usize, mut f: impl FnMut(&mut [u8], core::ops::Range<usize>)) {
         let mut done = 0;
         while done < len {
-            let (k, o) = ((off + done) / RAM_CHUNK, (off + done) % RAM_CHUNK);
-            let n = (RAM_CHUNK - o).min(len - done);
-            f(&mut self.chunks[k][o..o + n], done..done + n);
+            let (k, o) = ((off + done) / 4096, (off + done) % 4096);
+            let n = (4096 - o).min(len - done);
+            let page = unsafe { core::slice::from_raw_parts_mut(crate::memory::phys_to_virt(self.frames[k]) as *mut u8, 4096) };
+            f(&mut page[o..o + n], done..done + n);
             done += n;
+        }
+    }
+}
+
+#[cfg(selftest)]
+impl Drop for RamDisk {
+    fn drop(&mut self) {
+        for &f in &self.frames {
+            crate::memory::free_frame(f);
         }
     }
 }

@@ -1,4 +1,4 @@
-# desoOS <img src="https://img.shields.io/badge/version-0.79.0-1f6feb?style=for-the-badge" alt="Version 0.79.0">
+# desoOS <img src="https://img.shields.io/badge/version-0.80.0-1f6feb?style=for-the-badge" alt="Version 0.80.0">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
@@ -64,7 +64,7 @@ More documentation:
 - Storage: virtio-blk, NVMe (read-only on real hardware), GPT partitions, block layer with
   read-only enforcement.
 - USB: xHCI driver in a user-space service (`usbd`) with keyboard, mouse, mass storage (read-only; writing only
-  inside a "DeSoOS system" partition the kernel registered – v0.80, in progress)
+  inside a "DeSoOS system" partition the kernel registered; a stick made by `make-usb.sh --with-disk`)
   and hubs (nested up to 5 levels).
 - Network: a user-space service (`netd`, one per card) with drivers for Intel e1000/e1000e (QEMU) and
   Realtek RTL8111/8168 (real hardware), ARP, IPv4, ICMP, UDP (also for programs – connected client sockets), DHCP, DNS, TCP client and server, loopback;
@@ -99,7 +99,7 @@ More documentation:
   authenticated or nothing is sent; `netget https://` downloads over it (HTTP/1.1, chunked answers, strict framing, its own exit
   code for a refused connection); tested byte for byte against RFC 8448 and against OpenSSL with a man in the middle.
 - File systems: VFS with ramfs (`/`), DeSoFS or FAT32 at `/disk` (recognised at start; without an internal DeSoFS
-  disk, a USB stick's "DeSoOS system" partition becomes `/disk` – v0.80, in progress), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
+  disk, a USB stick's "DeSoOS system" partition becomes `/disk`; programs copied to `/disk/bin` run by name), FAT32 on `/usb0` and the EFI partition at `/esp`; DeSoFS, DeSoOS's own
   copy-on-write file system with SHA-256 over every block, is being built – format 1 is specified
   (`docs/desofs/FORMAT.md`); volumes can be formatted, mounted with files and directories, fully checked (every block's
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
@@ -312,6 +312,11 @@ swap and no LVM / RAID / dm-crypt on it, never a system disk; it shows model, si
 partitions, asks you to retype the device name, checks everything again right before writing and
 reads the result back. `--dry-run` only checks. Update DeSoOS on such a stick as before:
 `./make-usb.sh /media/$USER/DESOOS` replaces `BOOTX64.EFI` only – `/disk` is not touched.
+
+**Programs from the disk**: copy a program to `/disk/bin` (e.g. `cp /usb1/prog /disk/bin/prog` from another FAT32
+stick) and type its name in the shell. It is looked up after everything of the system – it can never replace a
+built-in, a `/bin` program or an information command – and it gets what any program typed by hand gets: no system
+actions (`sysctl`), no clock setting, no network administration. No signatures yet (packages come later).
 
 To run a stress test without a keyboard: `DESOOS_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
 (see [Stress test on real hardware](#stress-test-on-real-hardware)). A plain `./make-usb.sh`

@@ -16,6 +16,11 @@
 // * Other names: the program /bin/<name> or a path (containing '/'), and if there is none –
 //   information from the kernel (sysinfo syscall, read-only: mem, lspci,
 //   cpus, disk...).  Writing to disk and run – only in the kernel's emergency shell.
+// * Programs from the disk (v0.80): a name found nowhere above is looked up in /disk/bin –
+//   copy a program there (`cp /usb1/prog /disk/bin/prog`) and type its name.  It never hides a
+//   name of the system: a built-in, a /bin program, an information command or a kernel-only
+//   command always wins.  It gets what a /bin program typed by hand gets (stdio and the
+//   program channel) – no SYSCTL, no SETTIME, no administration channel (only /bin/netconfig).
 // * Ctrl+C while a program runs ends the program (not the shell) – the kernel knows
 //   the foreground process (spawn with SPAWN_FOREGROUND).
 #![no_std]
@@ -468,9 +473,18 @@ fn parse_words(words: &[Word]) -> Result<Option<Command>, &'static str> {
 
 /// File names in /bin.
 fn bin_programs() -> Vec<String> {
+    dir_programs("/bin")
+}
+
+/// Programs from the disk: /disk/bin names that hide nothing of the system.
+fn disk_programs() -> Vec<String> {
+    dir_programs(DISK_BIN).into_iter().filter(|n| !system_name(n)).collect()
+}
+
+fn dir_programs(dir: &str) -> Vec<String> {
     let mut buf = vec![0u8; 4096];
     loop {
-        let n = desoos::readdir("/bin", &mut buf);
+        let n = desoos::readdir(dir, &mut buf);
         if n == ERROR_BUFFER_TOO_SMALL && buf.len() < 64 * 1024 {
             buf.resize(buf.len() * 2, 0);
             continue;
@@ -496,6 +510,11 @@ fn command_names() -> Vec<String> {
     let mut names: Vec<String> = BUILTINS.iter().map(|(n, _)| String::from(*n)).collect();
     names.extend(bin_programs());
     names.extend(INFO_COMMANDS.iter().map(|n| String::from(*n)));
+    for n in disk_programs() {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
     names
 }
 
@@ -526,13 +545,35 @@ fn suggest(name: &str) -> Option<String> {
         .map(|(_, n)| n)
 }
 
+/// Where programs copied to the disk live (v0.80).
+const DISK_BIN: &str = "/disk/bin";
+
+/// A name the system already uses – a /disk/bin program of that name is never run by name.
+fn system_name(name: &str) -> bool {
+    BUILTINS.iter().any(|(n, _)| *n == name)
+        || INFO_COMMANDS.contains(&name)
+        || KERNEL_ONLY.contains(&name)
+        || matches!(desoos::stat(&format!("/bin/{}", name)), Ok(_))
+}
+
 /// Program path: with '/' – as given (the kernel resolves it relative to cwd),
-/// otherwise /bin/<name>, if it exists.
+/// otherwise /bin/<name>, if it exists, otherwise /disk/bin/<name> – but only for a name the
+/// system does not use (a program on the disk never hides one of the system's).
 fn find_program(name: &str) -> Option<String> {
     if name.contains('/') {
         return Some(String::from(name));
     }
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
     let path = format!("/bin/{}", name);
+    if let Ok(s) = desoos::stat(&path) {
+        return if s.is_dir { None } else { Some(path) };
+    }
+    if system_name(name) {
+        return None;
+    }
+    let path = format!("{}/{}", DISK_BIN, name);
     match desoos::stat(&path) {
         Ok(s) if !s.is_dir => Some(path),
         _ => None,
@@ -626,8 +667,9 @@ fn spawn_child(path: &str, args: &[&str], flags: u64, fin: u64, fout: u64) -> i6
         return desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2)], flags);
     }
     if SVC_SLOT.load(core::sync::atomic::Ordering::Relaxed) {
-        // Network administration only for netconfig; the rest gets the program channel.
-        let admin = path.rsplit('/').next() == Some("netconfig");
+        // Network administration only for /bin/netconfig itself – not for any file of that
+        // name (a copy on /disk or a path ending in "netconfig" gets the program channel).
+        let admin = path == "/bin/netconfig";
         let svc = if !admin && PROG_SLOT.load(core::sync::atomic::Ordering::Relaxed) { desoos::PROG_SVC } else { desoos::SVC };
         desoos::spawn_ex(path, args, &[(fin, 0), (fout, 1), (2, 2), (svc, desoos::SVC)], flags)
     } else {
@@ -759,7 +801,7 @@ impl Shell {
             };
             match find_program(&name) {
                 Some(path) => self.external_svc(&path, &cmd, true, svc, dirh),
-                None => eprintln!("sh: nofiles: {}: no such program in /bin", name),
+                None => eprintln!("sh: nofiles: {}: no such program in /bin or /disk/bin", name),
             }
             if let Some(h) = svc {
                 close(h);
@@ -975,6 +1017,12 @@ impl Shell {
                 bin.sort();
                 let _ = writeln!(o, "Programs in /bin:");
                 let _ = writeln!(o, "  {}", bin.join("  "));
+                let mut disk = disk_programs();
+                if !disk.is_empty() {
+                    disk.sort();
+                    let _ = writeln!(o, "Programs from the disk ({}; never instead of a system name):", DISK_BIN);
+                    let _ = writeln!(o, "  {}", disk.join("  "));
+                }
                 let _ = writeln!(o, "System information (read-only, from the kernel):");
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));
                 let _ = writeln!(o, "File sandbox: nofiles <program> [args] - no file access by path, only < > redirections");

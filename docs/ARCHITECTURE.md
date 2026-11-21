@@ -1062,6 +1062,21 @@ skipped; the probe skipped; the format session left open; any USB partition form
 counted with no free `/usbN`; the owner taken from the record, not the mount table; the registration left after
 `desofs unmount /disk`; a partition the user unmounted mounted again by itself.
 
+### Programs from the disk (v0.80)
+
+The user shell (`user/bin/sh.rs`, `find_program`) resolves a command name in this order: built-ins → `/bin/<name>` →
+information commands (`mem`, `lspci`, …) and kernel-only names → **`/disk/bin/<name>`**. A name the system uses is never
+looked up on the disk, so a copy called `primes`, `mem`, `echo` or `run` in `/disk/bin` is never run by name (by path
+it is, like any file). A program from the disk is started like a `/bin` program typed by hand – stdio and the program
+channel (slot 3); the shell's SYSCTL (slot 4), SETTIME (slot 7) and HW_ROOT are never passed on (DCP: the rights come
+from the handles, not from where the file lies). The network administration channel goes to exactly `/bin/netconfig`
+(before v0.80 to any path ending in `netconfig`). exec reads the whole ELF into memory (`fs::read_file`, at most 8 MiB)
+before the program starts, so pulling the stick out does not disturb a running program; the next start finds nothing.
+No signatures or versions yet – packages (PKG) come later; until then a program in `/disk/bin` is as trusted as a
+command typed by hand. Linux: `PATH` with `/usr/local/bin` before `/usr/bin` lets a local copy hide a system command –
+here the order is fixed the other way; Windows: the current directory used to come first in the search order (DLL /
+EXE planting) – not here. Tested in USB DISK TEST 1/2 (`/bin/privtest` compares the handles).
+
 ### A stick with a disk: `make-usb.sh --with-disk` (v0.80)
 
 `./make-usb.sh --with-disk /dev/sdX` (on Linux) erases a USB stick and lays it out with **`tools/mkusb.py`** – the

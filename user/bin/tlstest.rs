@@ -17,6 +17,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[path = "../lib/desoos.rs"]
 #[macro_use]
 mod desoos;
@@ -112,7 +114,8 @@ impl Transport for Chan {
 /// sent, they equal what DeSoTLS exports).
 enum Exported {
     Refused(client::TlsError),
-    NoConnection,
+    /// The TCP connection was not made (netd's answer, when there was one).
+    NoConnection(alloc::string::String),
     Done { alpn: bool, got: usize, equal: bool },
 }
 
@@ -120,7 +123,7 @@ impl core::fmt::Display for Exported {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Exported::Refused(e) => write!(f, "handshake refused: {}", e),
-            Exported::NoConnection => write!(f, "no connection"),
+            Exported::NoConnection(why) => write!(f, "no connection ({})", why),
             Exported::Done { alpn, got, equal } => write!(f, "alpn {} got {} bytes equal {}", alpn, got, equal),
         }
     }
@@ -128,8 +131,24 @@ impl core::fmt::Display for Exported {
 
 /// One TLS connection to tests/nts-server: handshake (ALPN optional), read what rustls
 /// exported, export the same here, compare.
+/// `exporter_case`, with the TCP connection tried up to three times: a connection to the same
+/// host port right after the previous one was refused now and then (seen twice in hundreds
+/// of runs – the host's side of the previous connection still closing); the TLS part is never
+/// retried.
+fn exporter(port: u16, alpn: Option<&[u8]>) -> Exported {
+    let mut r = exporter_case(port, alpn);
+    for _ in 0..2 {
+        if !matches!(r, Exported::NoConnection(_)) {
+            break;
+        }
+        sleep_ms(300);
+        r = exporter_case(port, alpn);
+    }
+    r
+}
+
 fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
-    let Ok(c) = svc_connect("net0") else { return Exported::NoConnection };
+    let Ok(c) = svc_connect("net0") else { return Exported::NoConnection(alloc::string::String::from("no net0 service")) };
     let mut req = [0u8; 32];
     let head = b"tcp 10.0.2.2 ";
     req[..head.len()].copy_from_slice(head);
@@ -147,13 +166,14 @@ fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
     let r = if chan_send(c, &req[..n], 0) == 0 { chan_recv(c, buf, 0, &mut info) } else { -1 };
     if r <= 0 || !buf.starts_with(b"connected ") {
         close(c);
-        return Exported::NoConnection;
+        let why = if r <= 0 { alloc::format!("error {}", r) } else { alloc::string::String::from_utf8_lossy(&buf[..(r as usize).min(60)]).into_owned() };
+        return Exported::NoConnection(why);
     }
     let mut der = [0u8; 2048];
     let mut spans = [(0usize, 0usize); 1];
     if !matches!(desotls::pem::certificates(TEST_CA, &mut der, &mut spans), Ok(1)) {
         close(c);
-        return Exported::NoConnection;
+        return Exported::NoConnection(alloc::string::String::from("test CA"));
     }
     let one: [&[u8]; 1] = [&der[spans[0].0..spans[0].0 + spans[0].1]];
     let anchors = AnchorList(&one);
@@ -161,7 +181,7 @@ fn exporter_case(port: u16, alpn: Option<&[u8]>) -> Exported {
     let mut rnd = [0u8; 96];
     if getrandom(&mut rnd).is_err() {
         close(c);
-        return Exported::NoConnection;
+        return Exported::NoConnection(alloc::string::String::from("getrandom"));
     }
     let mut random = Random { client_random: [0; 32], session_id: [0; 32], x25519_secret: [0; 32] };
     random.client_random.copy_from_slice(&rnd[..32]);
@@ -587,25 +607,25 @@ fn net() -> i32 {
 
     // The TLS exporter and ALPN against rustls (tests/nts-server).
     let ntske: &[u8] = b"ntske/1";
-    match exporter_case(RUSTLS_BASE, Some(ntske)) {
+    match exporter(RUSTLS_BASE, Some(ntske)) {
         Exported::Done { alpn: true, got: 64, equal: true } => {}
         Exported::Done { alpn, got, equal } => fail!("exporter vs rustls: alpn {} got {} equal {}", alpn, got, equal),
         Exported::Refused(e) => fail!("exporter vs rustls: refused: {}", e),
-        Exported::NoConnection => fail!("exporter vs rustls: no connection to 10.0.2.2:{}", RUSTLS_BASE),
+        Exported::NoConnection(why) => fail!("exporter vs rustls: no connection to 10.0.2.2:{} ({})", RUSTLS_BASE, why),
     }
     cases += 1;
-    match exporter_case(RUSTLS_BASE + 2, Some(ntske)) {
+    match exporter(RUSTLS_BASE + 2, Some(ntske)) {
         Exported::Done { alpn: true, got: 32, equal: true } => {}
         other => fail!("exporter vs rustls (label test, context abc): {}", other),
     }
     cases += 1;
-    match exporter_case(RUSTLS_BASE + 1, Some(ntske)) {
+    match exporter(RUSTLS_BASE + 1, Some(ntske)) {
         Exported::Refused(e) if e.kind == client::Kind::Local(client::ALERT_NO_APPLICATION_PROTOCOL) => {}
         Exported::Refused(e) => fail!("server without ALPN: refused with the wrong error: {}", e),
         _ => fail!("server without ALPN: the handshake must fail (no_application_protocol)"),
     }
     cases += 1;
-    match exporter_case(RUSTLS_BASE, None) {
+    match exporter(RUSTLS_BASE, None) {
         Exported::Done { alpn: false, got: 64, equal: true } => {}
         other => fail!("exporter without ALPN offered: {}", other),
     }

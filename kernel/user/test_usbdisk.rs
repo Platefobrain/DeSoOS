@@ -253,6 +253,9 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     ck!(wait_for(8_000, || find("blkd-1").is_some() && usb_desofs_mounts() == 1), "stick 1 not mounted read-only while the internal disk reserves /disk ({})", usb_desofs_mounts());
     ck!(mounted("/disk").is_none(), "a USB stick took /disk from the internal disk");
     block::test_restore_internal(old);
+    // The test RAM disks hold physical frames (block::RamDisk): given back, or the frame
+    // check at the end of this test counts them as a leak.
+    block::remove(ram);
     let _ = block::test_set_internal(None);
     // /disk in use (anything mounted there) is never replaced.
     let ram2 = block::register(alloc::boxed::Box::new(block::RamDisk::new("busy", 4096))).unwrap_or(usize::MAX);
@@ -267,6 +270,7 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     ck!(wait_for(8_000, || usb_desofs_mounts() == 1), "stick 1 not read-only while /disk is in use");
     ck!(mounted("/disk").is_some_and(|m| !m.contains("blkd") && find("blkd-1").is_some_and(|s| s.disk_part().is_none())), "a USB stick replaced the volume at /disk");
     ck!(crate::fs::unmount("/disk").is_ok(), "unmount the RAM disk");
+    block::remove(ram2);
     let _ = crate::fs::remove("/disk");
     // Free again – stick 1 gets /disk once something changes.
     super::usbdisk::changed();
@@ -348,6 +352,51 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     super::usbdisk::changed();
     ck!(wait_for(8_000, || s1.disk_part() == Some(p1) && mounted("/disk").is_some()), "/disk unmounted some other way not given again (stale owner?)");
     ck!(!crate::fs::is_read_only("/disk/x"), "/disk given again is read-only");
+    // Stage D – programs from the disk.  A shell holding SYSCTL, SETTIME and HW_ROOT (like the
+    // one init starts) copies programs to /disk/bin and runs them by name: found after
+    // everything of the system, never instead of it, and given exactly what a /bin program gets.
+    let sh_opts = |script: &[u8]| SpawnOptions { stdin: Some(script.to_vec()), capture: true, hw_root: true, sysctl: true, settime: true, ..SpawnOptions::default() };
+    let run_sh = |script: &[u8], ms: u64| -> Result<(String, u64), String> {
+        let id = exec("/bin/sh", &["sh"], "/", &sh_opts(script)).map_err(|_| String::from("cannot start /bin/sh"))?;
+        let t0 = ticks();
+        if !wait_for(ms, || sched::task_info(id).is_none()) {
+            let _ = sched::request_exit(id);
+            return Err(String::from("the shell did not finish"));
+        }
+        Ok((String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned(), ticks() - t0))
+    };
+    let (out, _) = run_sh(
+        b"mkdir /disk/bin\ncp /bin/hello /disk/bin/hellod\ncp /bin/hello /disk/bin/primes\ncp /bin/hello /disk/bin/mem\n\
+cp /bin/hello /disk/bin/echo\ncp /bin/hello /disk/bin/run\ncp /bin/privtest /disk/bin/privd\ncp /bin/sleep /disk/bin/napd\n\
+mkdir /disk/x\ncp /bin/privtest /disk/x/netconfig\nhellod\nprimes 30\nmem\necho shadow-test\nrun\nprivtest\nprivd\n/disk/x/netconfig\nhelp\n",
+        20_000,
+    )?;
+    ck!(out.matches("Hello from an ELF program").count() == 1, "a /disk/bin program ran instead of a system name, or not at all ({} runs of the copied hello): {:?}", out.matches("Hello from an ELF program").count(), out);
+    ck!(out.contains("10 primes below 30"), "/disk/bin/primes hid /bin/primes: {:?}", out);
+    ck!(out.contains("shadow-test\n") && out.contains("only in the kernel emergency shell"), "a /disk/bin program hid a built-in / a kernel-only name: {:?}", out);
+    let priv_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("privtest:")).collect();
+    ck!(priv_lines.len() == 3 && priv_lines.iter().all(|l| *l == priv_lines[0]), "/bin/privtest, /disk/bin/privd and /disk/x/netconfig got different handles: {:?}", priv_lines);
+    ck!(priv_lines[0].contains("sysctl refused") && priv_lines[0].contains("time_set refused") && !priv_lines[0].contains(" 4:") && !priv_lines[0].contains(" 7:"), "a program got SYSCTL / SETTIME: {:?}", priv_lines[0]);
+    ck!(out.contains("Programs from the disk") && out.contains("hellod") && out.contains("privd"), "help does not list the /disk/bin programs: {:?}", out);
+    // Removing the stick while a program from it runs: exec read the whole file first, so it
+    // goes on; the next start finds nothing.  Stick 2 keeps a USB disk around (it brings stick
+    // 1 back afterwards).
+    ck!(flag(&s1, 0x200), "attach stick 2");
+    ck!(wait_for(8_000, || find("blkd-2").is_some() && usb_desofs_mounts() == 2), "stick 2 not mounted read-only");
+    let s2 = find("blkd-2").unwrap();
+    let id = exec("/bin/sh", &["sh"], "/", &sh_opts(b"napd 2500\necho after-nap\nnapd 1\n")).map_err(|_| String::from("cannot start /bin/sh"))?;
+    let t0 = ticks();
+    ck!(wait_for(3_000, || sched::tasks().iter().any(|t| t.name == "napd")), "napd from /disk/bin did not start");
+    ck!(flag(&s1, 0x20), "detach stick 1");
+    ck!(wait_for(8_000, || mounted("/disk").is_none()), "/disk left after the stick went");
+    ck!(wait_for(15_000, || sched::task_info(id).is_none()), "the shell with napd did not finish");
+    let took = ticks() - t0;
+    let out = String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned();
+    ck!(out.contains("after-nap") && took >= 2_400, "the program from the removed stick did not run to its end ({} ms): {:?}", took, out);
+    ck!(out.contains("napd: command not found"), "the program started again with the stick gone: {:?}", out);
+    ck!(flag(&s2, 0x800), "attach stick 1");
+    ck!(flag(&s2, 0x20), "detach stick 2");
+    ck!(wait_for(10_000, || find("blkd-2").is_none() && find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "stick 1 not back at /disk");
     // Power loss at every write of an operation: the old or the new version, never anything
     // else, and the volume passes `desofs check` (it comes back read-write).
     let mut losses = 0;
@@ -502,7 +551,7 @@ pub fn self_test() {
     crate::selftest::begin();
     match fake_test() {
         Ok(l) => serial_println!(
-            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), a working mount clears earlier failures, the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again, {} PASS",
+            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), a working mount clears earlier failures, the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again; programs from /disk/bin: run by name, never instead of a built-in / /bin / info / kernel-only name, the same handles as a /bin program (no SYSCTL, SETTIME or administration channel), still running after the stick is pulled, then not found; {} PASS",
             l
         ),
         Err(e) => {

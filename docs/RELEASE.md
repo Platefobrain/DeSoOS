@@ -38,6 +38,9 @@ timings move by ±15% from run to run on the same build).
 - directory handles hold a path, not the directory: a directory removed and created again under the same name is
   reached through the old handle; the shell's `cd` and unsandboxed programs still use global paths
 - IPC: no futex and no ring buffers in the library
+- programs from the disk (`/disk/bin`, v0.80): no signatures, versions or installer yet (PKG, v0.82) – a program
+  copied there is as trusted as a command typed by hand: it gets what a `/bin` program gets (stdio and the program
+  channel), never SYSCTL, SETTIME or the network administration channel, and never runs instead of a system name
 - ELF: only static ET_EXEC, envp and auxv empty
 - programs from `/bin` built into the kernel image (initrd); the asm test programs too (only from the kernel's emergency shell: `run <name>`)
 - limits are global, not per user: 1024 processes, kernel memory reserve, 16 MiB of IPC buffers, 24 MiB ramfs; kernel heap 64 MiB
@@ -188,7 +191,14 @@ timings move by ±15% from run to run on the same build).
 - without a serial port, logs only on screen (status bar in the top-right corner: time, keyboard)
 - USB keyboard only via usbd (user space): a dead usbd = no keyboard until init restarts it
 - USB keyboard and mouse only in boot protocol (no multimedia keys); the test laptop's touchpad is unsupported
-- USB stick read-only (deliberately), 512 / 4096 B blocks, ≤ 2 TiB, LUN 0, no UAS
+- USB disks read-only (deliberately) except one GPT partition of the type "DeSoOS system" made by
+  `make-usb.sh --with-disk` (≤ 64 GiB – the format-1 limit of this DeSoFS; a larger stick keeps the rest unallocated);
+  512 / 4096 B blocks, ≤ 2 TiB, LUN 0, no UAS; `make-usb.sh --with-disk` and `/disk` on a stick: 512-byte sectors only
+- the guarantee "the old or the new version" after a power cut on a stick is as good as the stick's SYNCHRONIZE CACHE:
+  a refused FLUSH makes `/disk` read-only, but a cheap stick that answers FLUSH without writing cannot be detected
+- `desofs check` runs at every read-write mount of a stick's volume (DeSoFS has no "dirty" flag) – fast on an
+  almost empty 7 GiB volume on the Legion; not yet measured on a full one
+- a partition the user unmounted (`desofs unmount`) comes back only when the stick is plugged in again
 - hubs: single TT only (no Multi-TT), no port power management (suspend / LPM), TT tested only on
   real hardware (QEMU has a full-speed hub – no TT)
 - FAT32 reads cluster by cluster (USB stick with 512 B clusters: a few hundred KiB/s in QEMU)
@@ -221,6 +231,92 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.80.0 — 2026-11-20
+
+**Status: stable on QEMU (TCG and KVM); on the Legion DeSoOS writes to real hardware for the first time – only into
+the "DeSoOS system" partition of its own stick (`make-usb.sh --with-disk`), which becomes `/disk`: the last known good
+time and files survive a restart; programs can be copied to `/disk/bin` and run by name; 41 suites, 331 tests.**
+
+### What is new (details: `CHANGELOG.md`, `docs/ARCHITECTURE.md` "A USB stick as /disk", "A stick with a disk",
+"Programs from the disk")
+
+- **Stage A** – writing to a USB stick: SCSI WRITE(10) / SYNCHRONIZE CACHE(10) / MODE SENSE(6) in usbd, the ublk write
+  protocol, three independent locks (the partition object, ublk, usbd), generations of a stick, probe / rw / format
+  registrations; disks tied to their object (`uid`), never to a reused number.
+- **Stage B** – a stick's "DeSoOS system" partition as `/disk`: who gets `/disk` (the internal disk first, exactly one
+  USB candidate), the way to read-write (write protection, probe FLUSH, `desofs check`), the last known good time on
+  the stick (pending save when the file is missing or older), `desofs format` only in a session; after the review: who
+  holds `/disk` read from the mount table, `desofs unmount` leaves a partition alone until the stick is replugged.
+- **Stage C** – `make-usb.sh --with-disk`: the stick laid out by `tools/mkusb.py` (GPT, FAT32 ESP, DeSoFS – the same
+  code writes the test images), checks before writing and again right before it, `--dry-run`, update by replacing
+  `BOOTX64.EFI` only.
+- **Stage D** – programs from `/disk/bin`: looked up after everything of the system, never instead of it, the rights of
+  a program typed by hand; the network administration channel only for `/bin/netconfig`.
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 41/41 suites + restart 1/1 + USB restart 1/1 + one stick 2/2 + short soak (RAM disk), 331 tests PASS | 481 s (restart 25 s, USB restart 6 s, one stick 9 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | the same, 331 tests PASS | 395 s (restart 13 s, USB restart 4 s, one stick 8 s, soak 126 s) |
+| host | `tests/make-usb-test.sh` (stage C gate, TCG) | 22 checks PASS: 15 refusals / checks on a fake `/sys`, the image, `fsck.vfat`, 64 GiB cap, update v1 → v2 started in QEMU | – |
+
+The runs of the release build (`ver=0.80.0`, after the RAM-disk fix below); the stage D gate before the version bump
+gave the same (TCG 481 s, KVM 400 s, 331 PASS). New: USB WRITE TEST (40th suite), USB DISK TEST (41st), the
+USB RESTART phase (a third QEMU start without virtio / NVMe) and ONE STICK TEST (a fourth and fifth start from a
+`make-usb.sh --with-disk` image only). Tests 317 → 331. Mutations caught: stage A 8 (10 after the `uid` fix), stage B 9 +
+4 (the review fix), stage C 2, stage D 3. Found on the way: the DeSoFS block-cache tests never removed their RAM disks
+(~20 MiB of heap per round – the rare TCG panic "memory allocation of 65536 bytes failed", fixed in stage B); a
+read-only device's volume was mounted read-write (fixed in stage B); the network administration channel went to any
+file named `netconfig` (fixed in stage D); tlstest's exporter connection was refused twice in hundreds of runs (the
+TCP connection now tried up to three times). The first TCG run of the release build stopped with "memory allocation of 65536 bytes
+failed" in DESOFS TEST (a test RAM disk's content on a fragmented kernel heap – the same message as the stage B panic,
+another cause); test RAM disks now use physical frames, not the heap.
+
+### Real hardware (Legion laptop, stage C gate, 2026-11-18)
+
+- The stick: 7.4 GB "Wilk", made with `./make-usb.sh --with-disk /dev/sda` (dry run first): ESP 128 MiB, "DeSoOS
+  system" 7430 MiB (1 902 080 DeSoFS blocks), read back OK.
+- Start 1: `/usb0` = FAT32 `DESOOS` (sda1), `/disk` = DeSoFS (sda2, generation 1) read-write; the time service set the
+  clock from 3 operators (±1028 ms) and saved the last known good time in `/disk/.desoos/lkg`; `touch /disk/proba`
+  worked, `touch /usb0/proba` → read-only.
+- Start 2 (restart): `date` before the network – "last known good 2026-11-18 20:05:39 UTC (NTS; /disk/.desoos/lkg)",
+  read at boot; `proba` still there; the clock set and the LKG saved again.
+- The stick pulled out while working: "sda: removed, /usb0 /disk unmounted"; the shell and `date` kept working ("kept
+  in memory only").
+- `/disk` was mounted before the DHCP lease (15.7 s) – `desofs check` of an almost empty 7 GiB volume is fast; no exact
+  figure (the log has no timestamps).
+
+### Real hardware (Legion, the release image, 2026-11-21)
+
+- **An old-style stick (FAT32 only, no "DeSoOS system" partition)**: boots, `ver` v0.80.0, `/usb0` read-only, no
+  `/disk`; `date` "kept in memory only"; `mkdir /disk/bin` / `cp … /disk/bin/…` → not found (nothing to write to);
+  pulled out and plugged back: "removed, /usb0 unmounted", then generation 2 and `/usb0` again – the system kept working.
+- **The same stick made again with `make-usb.sh --with-disk`** (ESP 128 MiB with the release `BOOTX64.EFI`, DeSoFS
+  7430 MiB): `ver` v0.80.0; `/usb0` FAT32 + `/disk` DeSoFS (disk 5); `mkdir /disk/bin`, `cp /bin/hello
+  /disk/bin/witaj` → **`witaj` runs from the disk** ("Hello from an ELF program!"); `cp /bin/hello /disk/bin/primes`
+  → `primes 30` still runs the system's ("10 primes below 30"); `help` lists "Programs from the disk (/disk/bin; never
+  instead of a system name): witaj" – `primes` left out, as it hides nothing. After a restart: `ls /disk/bin` – `primes`
+  and `witaj` (16.4 KiB each) are there and `witaj` runs again.
+
+### Performance against the previous release (v0.79.0 → v0.80.0, same machine)
+
+| | TCG v0.79.0 | TCG v0.80.0 | KVM v0.79.0 | KVM v0.80.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 92 / 4 740 | 94 / 4 248 | 55 / 5 626 | 50 / 5 885 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 230 / 12 208 | 7 117 / 11 175 | 18 875 / 54 613 | 17 541 / 53 894 |
+| DeSoFS 1000 small files create / read (ms) | 13 651 / 3 639 | 13 431 / 3 743 | 7 453 / 822 | 8 187 / 831 |
+| short soak: file operations in 2 min | 6 140 | 6 286 | 27 932 | 28 064 |
+| short soak: network MiB | 851 | 889 | 912 | 907 |
+
+Verdict: no regression beyond the usual spread. DeSoFS on virtio now does every block I/O through the disk's `uid`
+(`read_as` / `write_as` / `flush_as`, stage B) – a lookup per request; over the v0.80 gates KVM small-file creation
+moved between 7 346 and 9 535 ms and the 8 MiB write between 14 840 and 17 102 KiB/s, so the differences above sit
+inside the spread. Soak: leaks 0, errors 0, longest recovery 930 ms (TCG) / 895 ms (KVM). The whole run is ~90 s
+longer than v0.79.0 (two new suites and three more QEMU starts).
 
 ---
 

@@ -10,11 +10,11 @@ handles, errors).
 | Path | What |
 |---|---|
 | `bin/init.rs` | the first process and the service manager (services from `etc/services/`) |
-| `bin/sh.rs` | the user shell |
+| `bin/sh.rs` | the user shell (programs by name from `/bin`, then – never instead of a system name – from `/disk/bin`) |
 | `bin/netd.rs`, `bin/usbd.rs`, `bin/edud.rs`, `bin/echod.rs` | services: network card driver + TCP/IP, xHCI USB driver, the QEMU `edu` device, an echo test service |
 | tools | `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `touch`, `stat`, `ps`, `sleep`, `sha256sum`, `random`, `certcheck`, `services`, `usblist`, `netconfig`, `netget` (http / https), `udpsend`, `nettime` (NTP, read only), `netweb`, `ping`, `host`, `netarp`, ... |
 | `bin/timekeeper.rs` | the time service (init's `time`): NTS from three operators of a built-in list, the quorum, `SYS_TIME_SET` – the only program that sets the clock (`docs/time/TIMEKEEPER.md`) |
-| `bin/*test.rs`, `ipcbench`, `svcbench`, `sysfuzz` | test and benchmark programs run by the kernel self-tests (`blktest` / `blkwtest` / `blkdtest` – fake USB sticks for the ublk protocol: reading, writing, /disk with a write cache and power loss; `timetest protect` – a program trying every way to change `/.desoos`, LKG TEST; `timetest set / bound / clock` and `synctest` – the time service's syscalls and arithmetic, NTS TEST) |
+| `bin/*test.rs`, `ipcbench`, `svcbench`, `sysfuzz` | test and benchmark programs run by the kernel self-tests (`blktest` / `blkwtest` / `blkdtest` – fake USB sticks for the ublk protocol: reading, writing, /disk with a write cache and power loss; `timetest protect` – a program trying every way to change `/.desoos`, LKG TEST; `timetest set / bound / clock` and `synctest` – the time service's syscalls and arithmetic, NTS TEST; `privtest` – the handles a program got, SYSCTL and SYS_TIME_SET refused, USB DISK TEST) |
 | `bin/soak.rs` | the soak test (`tests/soak.sh`): a controller and its workers – files and snapshots, services, network, processes – with checkpoints |
 | `lib/desoos.rs` | the library every program includes: syscalls, handles, errors, output |
 | `lib/*.rs` | shared pure code: TCP, DHCP, DNS, packet parsing (`netproto.rs`), HTTP/1.1 answers (`http.rs` – netget's parser, chunked, trailers), NTP (`ntp.rs` – nettime's query, checks and arithmetic), NTS (`nts.rs` – NTS-KE records, the NTS fields, cookies; `ntske.rs` – NTS-KE over a netd connection, shared by nettime and the time service), the time service's arithmetic (`timesync.rs` – intervals, quorum, envelope, backoff), USB descriptors, file copying, the `edu` protocol |
