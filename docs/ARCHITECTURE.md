@@ -1070,7 +1070,9 @@ looked up on the disk, so a copy called `primes`, `mem`, `echo` or `run` in `/di
 it is, like any file). A program from the disk is started like a `/bin` program typed by hand – stdio and the program
 channel (slot 3); the shell's SYSCTL (slot 4), SETTIME (slot 7) and HW_ROOT are never passed on (DCP: the rights come
 from the handles, not from where the file lies). The network administration channel goes to exactly `/bin/netconfig`
-(before v0.80 to any path ending in `netconfig`). exec reads the whole ELF into memory (`fs::read_file`, at most 8 MiB)
+(before v0.80 to any path ending in `netconfig`; since v0.80.1 tested on the handles the processes really get: a shell
+with an administration and a program channel, `/bin/netconfig`'s request on the first only, every disk program with
+"netconfig" in its name or path on the second only). exec reads the whole ELF into memory (`fs::read_file`, at most 8 MiB)
 before the program starts, so pulling the stick out does not disturb a running program; the next start finds nothing.
 No signatures or versions yet – packages (PKG) come later; until then a program in `/disk/bin` is as trusted as a
 command typed by hand. Linux: `PATH` with `/usr/local/bin` before `/usr/bin` lets a local copy hide a system command –
@@ -1103,8 +1105,12 @@ Safety (`make-usb.sh`, every unclear answer stops): a whole disk (not a partitio
 `/boot/efi`), nothing mounted on it, no swap on it or its partitions (`/proc/swaps`), no holders (LVM / RAID /
 dm-crypt); model, size, serial and partitions shown, a "DeSoOS system" partition already there named ("your DeSoOS data
 will be lost"), the device name retyped; then, after the build, **every check again** and the same major:minor, serial
-and size – otherwise nothing is written; `tools/mkusb.py` opens the device with `O_EXCL` (Linux refuses while anything
-on it is mounted or held) and checks major:minor and size once more. `--dry-run` stops before the build.
+and size – otherwise nothing is written (a stick without a serial number is refused); `tools/mkusb.py` opens the device
+with `O_EXCL` (Linux refuses while anything on it is mounted or held), then checks the open descriptor: major:minor,
+size and the serial number from the udev record of that major:minor (v0.80.1; missing, empty or doubled – refused, never
+the device number alone), and only then writes. `--dry-run` stops before the build. `tools/mkdesofs.py` on its own
+formats image files only – a device, or a link to one, is refused also with `--force` (`mkfs.ext4` on Linux formats a
+device after a warning, `-F` forces it; here a device is reached only through `make-usb.sh`).
 
 **Update**: `./make-usb.sh /media/$USER/DESOOS` (the ESP mounted by the desktop) – the same install as for a FAT32
 stick: only `BOOTX64.EFI` is replaced; partition 2 is not touched. `tests/make-usb-test.sh` checks it: build `v1`

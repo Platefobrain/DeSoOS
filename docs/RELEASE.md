@@ -234,6 +234,32 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.80.1 — 2026-11-21
+
+**Status: stable on QEMU (TCG and KVM); fixes after the review of v0.80.0 – the `/bin/netconfig` rule tested on real
+handles, `tools/mkusb.py` checks the opened device's serial number, `tools/mkdesofs.py` formats image files only.
+The production kernel is unchanged (only test code and the host tools).**
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 41/41 + restart + USB restart + one stick 2/2 + short soak, 331 tests PASS (`ver=0.80.1`) | 479 s (restart 23 s, USB restart 5 s, one stick 9 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | the same, 331 tests PASS | 394 s (restart 12 s, USB restart 5 s, one stick 8 s, soak 125 s) |
+| host | `tests/make-usb-test.sh` (with the Wilk stick attached) | 42 checks PASS: 16 refusals, 11 identity cases, **this computer's `/dev/sda`: the udev serial = lsblk's (070B5B95F520B036)**, 8 `mkdesofs.py` cases (the block device: `/dev/loop0`), the image, `fsck.vfat`, the 64 GiB cap, update v1 → v2 in QEMU | – |
+
+Performance as in v0.80.0 (TCG / KVM: TLS 96 / 55 ms, 1 MiB 4 762 / 5 752 KiB/s; DeSoFS 8 MiB write 7 831 / 20 029 KiB/s,
+small files 12 281 / 7 701 ms; soak leaks 0, errors 0) – nothing in the measured paths changed.
+
+The real stick (Wilk, 7.4 GB) made again with v0.80.1: `make-usb.sh --with-disk /dev/sda` named the existing "DeSoOS
+system" partition before the question ("your DeSoOS data will be lost"), `tools/mkusb.py` passed its check of the opened
+device (8:0, 7 927 234 560 B, serial 070B5B95F520B036) and wrote ESP 128 MiB + DeSoFS 7430 MiB, read back OK.
+
+Mutations caught: the old netconfig rule (USB DISK TEST), the serial comparison skipped and the regular-file check
+skipped (`tests/make-usb-test.sh`). Not needed on the Legion (no driver or kernel change).
+
+---
+
 ## v0.80.0 — 2026-11-20
 
 **Status: stable on QEMU (TCG and KVM); on the Legion DeSoOS writes to real hardware for the first time – only into

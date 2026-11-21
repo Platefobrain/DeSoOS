@@ -9,7 +9,11 @@
 #    (DESOOS_SYS / DESOOS_PROC, PATH): not USB, not removable, a partition instead of a disk,
 #    a loop device, a mounted partition, swap on a partition, holders on the disk and on a
 #    partition, larger than 256 GiB, 4096-byte sectors, a system disk, a wrong answer, the
-#    device replaced between the question and the write; and one that passes (dry run).
+#    device replaced between the question and the write, no serial number; and one that passes.
+#    1b (v0.80.1): tools/mkusb.py's identity check of the opened device on a fake udev
+#    directory (same, other serial, swapped, other size, no record / field, empty, twice), this
+#    computer's USB disks (udev serial = lsblk's), and tools/mkdesofs.py – image files only
+#    (new, non-empty without / with --force, a character / block device, a link to one, 65 GiB).
 # 2. The image: make-usb.sh --with-disk --image (the code a real flash drive gets: tools/mkusb.py)
 #    – GPT, the ESP checked by fsck.vfat when installed, BOOTX64.EFI read back; too small refused,
 #    partition 2 never over 64 GiB.
@@ -111,6 +115,72 @@ fake_reset; refused "a wrong answer" "aborted - nothing changed" sdz
 fake_reset; echo "OTHER99" > "$F/state/SERIAL.2"; refused "the device replaced between the question and the write" "changed since the question"
 fake_reset; printf "c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n1a0e2e7d-de32-4c13-9442-9fcb2649ca02\n" > "$F/state/PARTTYPE"
 dry && grep -q "YOUR DeSoOS DATA" "$W/out" && ok "an existing DeSoOS system partition is named before the question" || bad "no warning about an existing DeSoOS system partition"
+
+fake_reset; : > "$F/state/SERIAL"; refused "a device without a serial number" "no serial number"
+
+# ------------------------------------------------------------------ 1b. the writer's own checks (v0.80.1)
+# tools/mkusb.py: the identity of the OPENED device – major:minor of the descriptor, size, and
+# the serial number from the udev record of that major:minor (a fake udev directory here).
+U="$W/udev"; mkdir -p "$U"
+ident() { # $1 = what, $2 = expected result (ok / refused), $3.. = python arguments
+  local what="$1" want="$2"; shift 2
+  if python3 -c "
+import os, sys
+sys.path.insert(0, 'tools')
+import mkusb
+rdev, size, xr, xb, xs = sys.argv[1:6]
+maj, mi = map(int, rdev.split(':'))
+try:
+    mkusb.check_identity(os.makedev(maj, mi), int(size), '$U', xr, int(xb), xs)
+except mkusb.Fail as e:
+    print(e); sys.exit(1)
+" "$@" > "$W/out" 2>&1; then got=ok; else got=refused; fi
+  if [ "$got" = "$want" ]; then ok "mkusb.py identity: $what -> $want"; else bad "mkusb.py identity: $what -> $got ($(cat "$W/out"))"; fi
+}
+printf 'S:disk/by-id/usb-Wilk\nE:ID_SERIAL_SHORT=SN1234\nE:ID_BUS=usb\n' > "$U/b8:208"
+ident "the same device" ok 8:208 4294967296 8:208 4294967296 SN1234
+ident "another stick with the same major:minor and size (other serial)" refused 8:208 4294967296 8:208 4294967296 SN9999
+ident "the device number changed (swapped)" refused 8:224 4294967296 8:208 4294967296 SN1234
+ident "another size" refused 8:208 4227858432 8:208 4294967296 SN1234
+ident "no udev record" refused 8:240 4294967296 8:240 4294967296 SN1234
+printf 'E:ID_BUS=usb\n' > "$U/b8:209"; ident "no serial field" refused 8:209 1 8:209 1 SN1234
+printf 'E:ID_SERIAL_SHORT=\n' > "$U/b8:210"; ident "an empty serial" refused 8:210 1 8:210 1 SN1234
+printf 'E:ID_SERIAL_SHORT=SN1234\nE:ID_SERIAL_SHORT=SN1234\n' > "$U/b8:211"; ident "the serial given twice" refused 8:211 1 8:211 1 SN1234
+printf 'E:ID_SCSI_SERIAL=SCSI77\nE:ID_SERIAL_SHORT=SN1234\n' > "$U/b8:212"; ident "ID_SCSI_SERIAL first (as lsblk)" ok 8:212 1 8:212 1 SCSI77
+ident "no expected serial" refused 8:208 4294967296 8:208 4294967296 ""
+# This computer's USB disks: the serial mkusb.py reads must be the one lsblk (make-usb.sh) shows.
+n=0
+while read -r name tran; do
+  [ "$tran" = "usb" ] || continue
+  mm="$(lsblk -dno MAJ:MIN "/dev/$name" | tr -d ' ')"; ls_serial="$(lsblk -dno SERIAL "/dev/$name" | tr -d ' ')"
+  [ -n "$ls_serial" ] || continue
+  mine="$(python3 -c "import sys; sys.path.insert(0,'tools'); import mkusb; m,i=map(int,'$mm'.split(':')); print(mkusb.udev_serial(m,i))" 2>&1)"
+  if [ "$mine" = "$ls_serial" ]; then ok "this computer: /dev/$name - the udev serial = lsblk's ($ls_serial)"; else bad "this computer: /dev/$name - udev gives '$mine', lsblk '$ls_serial'"; fi
+  n=$((n + 1))
+done < <(lsblk -dno NAME,TRAN 2>/dev/null)
+[ "$n" -gt 0 ] || echo "[MAKE-USB TEST] no USB disk with a serial number attached - the udev / lsblk comparison skipped" | tee -a "$LOG"
+
+# tools/mkdesofs.py: image files only.
+M="$W/m.img"
+mk() { python3 tools/mkdesofs.py "$@" > "$W/out" 2>&1; }
+if mk "$M" --blocks 64; then ok "mkdesofs.py: a new image file"; else bad "mkdesofs.py: a new image: $(cat "$W/out")"; fi
+before=$(sha256sum "$M" | cut -d' ' -f1)
+if mk "$M"; then bad "mkdesofs.py: a non-empty image overwritten without --force"; elif [ "$(sha256sum "$M" | cut -d' ' -f1)" = "$before" ] && grep -q "add --force" "$W/out"; then ok "mkdesofs.py: a non-empty image refused without --force (unchanged)"; else bad "mkdesofs.py: refused, but the image changed / other reason: $(cat "$W/out")"; fi
+if mk "$M" --force; then ok "mkdesofs.py: a non-empty image with --force"; else bad "mkdesofs.py: --force: $(cat "$W/out")"; fi
+if mk /dev/null --force; then bad "mkdesofs.py: /dev/null (a character device) accepted"; elif grep -q "not a regular file" "$W/out"; then ok "mkdesofs.py: a character device refused (also with --force)"; else bad "mkdesofs.py: /dev/null: $(cat "$W/out")"; fi
+ln -s /dev/null "$W/dev-link"
+if mk "$W/dev-link" --force; then bad "mkdesofs.py: a link to a device accepted"; elif grep -q "not a regular file" "$W/out"; then ok "mkdesofs.py: a symbolic link to a device refused"; else bad "mkdesofs.py: link: $(cat "$W/out")"; fi
+blk=""
+for d in /dev/loop0 /dev/sda /dev/nvme0n1 /dev/vda; do [ -b "$d" ] && { blk="$d"; break; }; done
+if [ -n "$blk" ]; then
+  if mk "$blk" --force --blocks 64; then bad "mkdesofs.py: the block device $blk accepted"; elif grep -q "not a regular file" "$W/out"; then ok "mkdesofs.py: a block device ($blk) refused, also with --force - nothing opened for writing"; else bad "mkdesofs.py: $blk: $(cat "$W/out")"; fi
+else
+  echo "[MAKE-USB TEST] no block device found - the block device refusal skipped" | tee -a "$LOG"
+fi
+truncate -s 65G "$W/big65.img"
+if mk "$W/big65.img" --force; then bad "mkdesofs.py: a 65 GiB volume accepted with --force"; elif grep -q "larger than 64 GiB" "$W/out" && [ -z "$(head -c 65536 "$W/big65.img" | tr -d '\0' | head -c1)" ]; then ok "mkdesofs.py: 65 GiB refused also with --force, nothing written"; else bad "mkdesofs.py: 65 GiB: $(cat "$W/out")"; fi
+rm -f "$W/big65.img"
+if mk "$W/nonew.img"; then bad "mkdesofs.py: a new image without --blocks accepted"; elif [ ! -e "$W/nonew.img" ]; then ok "mkdesofs.py: a new image without --blocks refused, no file left"; else bad "mkdesofs.py: a refused new image left a file"; fi
 
 # ------------------------------------------------------------------ 2. the image
 echo "[MAKE-USB TEST] building the self-test kernel, build v1..." | tee -a "$LOG"

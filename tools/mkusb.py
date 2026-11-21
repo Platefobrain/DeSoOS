@@ -12,7 +12,8 @@
 #   the rest     unallocated (reported)
 #
 #   python3 tools/mkusb.py --image FILE --size-mib N --efi BOOTX64.EFI
-#   python3 tools/mkusb.py --device /dev/sdX --expect-rdev MAJ:MIN --expect-bytes N --efi ...
+#   python3 tools/mkusb.py --device /dev/sdX --expect-rdev MAJ:MIN --expect-bytes N
+#                          --expect-serial S --efi ...
 #   python3 tools/mkusb.py --update-esp FILE --efi BOOTX64.EFI    (tests: a new BOOTX64.EFI,
 #                                                                  partition 2 untouched)
 #   python3 tools/mkusb.py --verify FILE --efi BOOTX64.EFI
@@ -25,8 +26,10 @@
 # superblocks.  Any mismatch – an error.  Only the regions above are written.
 #
 # --device: the device is opened with O_EXCL (Linux refuses while anything on it is mounted or
-# held) and must still be the device make-usb.sh asked about – the same major:minor and size;
-# 512-byte logical sectors only (what DeSoOS reads).
+# held) and must still be the device make-usb.sh asked about – the same major:minor (of the
+# open descriptor), size and serial number (the udev record of that major:minor – what lsblk
+# shows; missing, empty or unclear = refused, never just the device number); 512-byte logical
+# sectors only (what DeSoOS reads).
 import argparse
 import fcntl
 import os
@@ -292,7 +295,51 @@ class Target:
             fcntl.ioctl(self.fd, BLKFLSBUF, 0)
 
 
-def open_device(path, rdev, nbytes):
+UDEV_DATA = "/run/udev/data"
+
+
+def udev_serial(major, minor, udev_dir=UDEV_DATA):
+    """The serial number of block device major:minor, as lsblk shows it: udev's
+    ID_SCSI_SERIAL, else ID_SERIAL_SHORT, from the udev record of THAT device number (never
+    looked up by a /dev name).  Missing record, missing or empty field, or a field given
+    twice – Fail (no fallback to the device number alone)."""
+    rec = os.path.join(udev_dir, "b%d:%d" % (major, minor))
+    try:
+        with open(rec, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        raise Fail("no udev record for device %d:%d (%s) - its serial number is unknown; nothing written" % (major, minor, rec))
+    for key in ("ID_SCSI_SERIAL", "ID_SERIAL_SHORT"):
+        vals = [l[len("E:" + key + "="):] for l in lines if l.startswith("E:" + key + "=")]
+        if len(vals) > 1:
+            raise Fail("device %d:%d: %s given %d times - serial number unclear; nothing written" % (major, minor, key, len(vals)))
+        if vals:
+            if not vals[0].strip():
+                raise Fail("device %d:%d: empty %s - serial number unknown; nothing written" % (major, minor, key))
+            return vals[0].strip()
+    raise Fail("device %d:%d has no serial number in udev - refusing (the device cannot be told apart); nothing written" % (major, minor))
+
+
+def check_identity(st_rdev, size, udev_dir, expect_rdev, expect_bytes, expect_serial):
+    """The opened device is the one make-usb.sh asked about: the same major:minor (from the
+    OPEN descriptor), size and serial number (udev record of that major:minor).  Fail
+    otherwise – before anything is written."""
+    major, minor = os.major(st_rdev), os.minor(st_rdev)
+    if "%d:%d" % (major, minor) != expect_rdev:
+        raise Fail("the device is now %d:%d, not %s - it changed; nothing written" % (major, minor, expect_rdev))
+    if size != expect_bytes:
+        raise Fail("the device has %d bytes, not %d - it changed; nothing written" % (size, expect_bytes))
+    if not expect_serial:
+        raise Fail("no expected serial number given - refusing")
+    serial = udev_serial(major, minor, udev_dir)
+    if serial != expect_serial:
+        raise Fail("the device's serial number is now %r, not %r - another stick; nothing written" % (serial, expect_serial))
+
+
+def open_device(path, rdev, nbytes, serial):
+    # 1. Exclusively (Linux refuses while anything on it is mounted or held), 2. what the
+    # descriptor really is, 3. major:minor + size + serial against the expected, 4. only then
+    # any write.
     try:
         fd = os.open(path, os.O_RDWR | os.O_EXCL | os.O_CLOEXEC)
     except OSError as e:
@@ -300,11 +347,8 @@ def open_device(path, rdev, nbytes):
     st = os.fstat(fd)
     if not stat.S_ISBLK(st.st_mode):
         raise Fail("%s is not a block device" % path)
-    if "%d:%d" % (os.major(st.st_rdev), os.minor(st.st_rdev)) != rdev:
-        raise Fail("%s is now %d:%d, not %s - the device changed; nothing written" % (path, os.major(st.st_rdev), os.minor(st.st_rdev), rdev))
     size = os.lseek(fd, 0, os.SEEK_END)
-    if size != nbytes:
-        raise Fail("%s has %d bytes, not %d - the device changed; nothing written" % (path, size, nbytes))
+    check_identity(st.st_rdev, size, UDEV_DATA, rdev, nbytes, serial)
     ssz = struct.unpack("<I", fcntl.ioctl(fd, BLKSSZGET, b"\0" * 4))[0]
     if ssz != SECTOR:
         raise Fail("%s has %d-byte sectors - DeSoOS reads 512-byte sectors only" % (path, ssz))
@@ -395,6 +439,7 @@ def main():
     ap.add_argument("--size-mib", type=int)
     ap.add_argument("--expect-rdev")
     ap.add_argument("--expect-bytes", type=int)
+    ap.add_argument("--expect-serial")
     ap.add_argument("--efi", required=True)
     ap.add_argument("--label", default="DESOOS")
     a = ap.parse_args()
@@ -408,9 +453,9 @@ def main():
                 raise Fail("--image needs --size-mib")
             t = open_image(a.image, a.size_mib, True)
         elif a.device:
-            if not a.expect_rdev or a.expect_bytes is None:
-                raise Fail("--device needs --expect-rdev and --expect-bytes")
-            t = open_device(a.device, a.expect_rdev, a.expect_bytes)
+            if not a.expect_rdev or a.expect_bytes is None or not a.expect_serial:
+                raise Fail("--device needs --expect-rdev, --expect-bytes and --expect-serial")
+            t = open_device(a.device, a.expect_rdev, a.expect_bytes, a.expect_serial)
         elif a.update_esp:
             t = open_image(a.update_esp, 0, False)
             update_esp(t, efi)

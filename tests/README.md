@@ -33,7 +33,7 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `test.sh` | the test run (above) |
 | `soak.sh` | the long soak test (above) |
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
-| `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 15 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESOOS_SYS`, `DESOOS_PROC`); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESOOS_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
+| `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESOOS_SYS`, `DESOOS_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESOOS_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests; `--format` = `tools/mkdesofs.py` (the production formatter) with a fixed uuid / time |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
 | `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSoOS system" partition, primary and backup GPT |

@@ -149,6 +149,7 @@ check_device() {
   done
   [ -z "$hold" ] || die "$dev or one of its partitions is held by $hold (LVM / RAID / dm-crypt) - refusing"
   SERIAL="$(lsblk -dno SERIAL "$dev" 2>/dev/null | tr -d ' ')"
+  [ -n "$SERIAL" ] || die "$dev reports no serial number - it cannot be told apart from another stick; refusing"
   MAJMIN="$(lsblk -dno MAJ:MIN "$dev" 2>/dev/null | tr -d ' ')"
   case "$MAJMIN" in *:*) ;; *) die "major:minor of $dev unknown" ;; esac
   MODEL="$(lsblk -dno MODEL "$dev" 2>/dev/null | xargs || true)"
@@ -188,7 +189,7 @@ with_disk_device() {
   # Everything again, right before writing: the same disk, nothing mounted meanwhile.
   same_device "$d1" "$m1" "$s1" "$b1"
   echo "Writing $DEV (sudo)..."
-  sudo python3 tools/mkusb.py --device "$DEV" --expect-rdev "$MAJMIN" --expect-bytes "$BYTES" --efi build/EFI/BOOT/BOOTX64.EFI || die "writing the flash drive failed - see above (make it again before using it)"
+  sudo python3 tools/mkusb.py --device "$DEV" --expect-rdev "$MAJMIN" --expect-bytes "$BYTES" --expect-serial "$SERIAL" --efi build/EFI/BOOT/BOOTX64.EFI || die "writing the flash drive failed - see above (make it again before using it)"
   sudo partprobe "$DEV" 2>/dev/null || true
   echo
   echo "Done: $DEV = ESP 'DESOOS' (BOOTX64.EFI) + \"DeSoOS system\" (DeSoFS, /disk in DeSoOS)."

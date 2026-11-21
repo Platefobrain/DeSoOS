@@ -214,11 +214,15 @@ pub struct SpawnOptions {
     pub blk: bool,
     /// SETTIME handle after BLK (slot 7 in init) – only /bin/init and kernel tests.
     pub settime: bool,
+    /// Kernel tests: channel ends put into the given slots (after everything above) – e.g. a
+    /// shell given an administration channel in slot 3 and a program channel in slot 5, as
+    /// init gives them.
+    pub chans: Vec<(usize, alloc::sync::Arc<channel::ChanEnd>)>,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
-        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false, input: false, blk: false, settime: false }
+        SpawnOptions { data: 0, stdin: None, capture: false, code_at: USER_CODE, entry_offset: 0, foreground: false, hw_root: false, sysctl: false, input: false, blk: false, settime: false, chans: Vec::new() }
     }
 }
 
@@ -297,6 +301,9 @@ pub fn spawn_elf(
     if opts.settime {
         // The only place where SETTIME is created (slot 7 in init).
         process.fds.push(Some(process::Handle::new(process::Fd::SetTime)));
+    }
+    for (slot, end) in &opts.chans {
+        let _ = process.fds.set(*slot, Some(process::Handle::new(process::Fd::Channel(end.clone()))));
     }
     apply_test_io(&mut process, opts);
     sched::spawn_user(name, user_task_entry, loaded.entry as usize, process, false)

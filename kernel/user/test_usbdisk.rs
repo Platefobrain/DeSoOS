@@ -397,6 +397,57 @@ mkdir /disk/x\ncp /bin/privtest /disk/x/netconfig\nhellod\nprimes 30\nmem\necho 
     ck!(flag(&s2, 0x800), "attach stick 1");
     ck!(flag(&s2, 0x20), "detach stick 2");
     ck!(wait_for(10_000, || find("blkd-2").is_none() && find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "stick 1 not back at /disk");
+    // v0.80.1 – the network administration channel goes to /bin/netconfig only, checked on
+    // the handles the processes really get: a shell given an administration channel (A, slot
+    // 3) and a program channel (B, slot 5), as init gives them; where each program's message
+    // arrives says which one it got.
+    let chan_sh = |script: &[u8]| -> Result<(usize, usize, String), String> {
+        let (a_sh, a_peer) = super::channel::new();
+        let (b_sh, b_peer) = super::channel::new();
+        let opts = SpawnOptions { stdin: Some(script.to_vec()), capture: true, chans: alloc::vec![(3, a_sh), (5, b_sh)], ..SpawnOptions::default() };
+        let id = exec("/bin/sh", &["sh"], "/", &opts).map_err(|_| String::from("cannot start /bin/sh"))?;
+        let (mut na, mut nb) = (0usize, 0usize);
+        let mut peers = Some((a_peer, b_peer));
+        let t0 = ticks();
+        while sched::task_info(id).is_some() {
+            if let Some((ap, bp)) = &peers {
+                while ap.recv_timeout(10).is_ok() {
+                    na += 1;
+                }
+                while bp.recv_timeout(10).is_ok() {
+                    nb += 1;
+                }
+                // /bin/netconfig waits for the service manager's answer: closing our ends
+                // ends it (no service).
+                if ticks() - t0 > 3_000 {
+                    peers = None;
+                }
+            } else {
+                crate::time::sleep_ms(20);
+            }
+            if ticks() - t0 > 15_000 {
+                let _ = sched::request_exit(id);
+                return Err(String::from("the shell with the two channels did not finish"));
+            }
+        }
+        if let Some((ap, bp)) = &peers {
+            while ap.recv_timeout(1).is_ok() {
+                na += 1;
+            }
+            while bp.recv_timeout(1).is_ok() {
+                nb += 1;
+            }
+        }
+        Ok((na, nb, String::from_utf8_lossy(&captured_output(id).unwrap_or_default()).into_owned()))
+    };
+    let (out, _) = run_sh(b"mkdir /disk/netconfig\ncp /bin/privtest /disk/netconfig/privtest\ncp /bin/privtest /disk/bin/mynetconfig\n", 10_000)?;
+    ck!(!out.contains("not found") && !out.contains("denied"), "copies for the netconfig check: {:?}", out);
+    let (na, nb, out) = chan_sh(b"/bin/netconfig\n")?;
+    ck!(na >= 1 && nb == 0, "/bin/netconfig did not get exactly the administration channel ({} messages on it, {} on the program channel): {:?}", na, nb, out);
+    let (na, nb, out) = chan_sh(b"/disk/x/netconfig send\n")?;
+    ck!(na == 0 && nb == 1 && out.contains("sent"), "/disk/x/netconfig got the administration channel ({} on it, {} on the program channel): {:?}", na, nb, out);
+    let (na, nb, out) = chan_sh(b"privtest send\nmynetconfig send\n/disk/netconfig/privtest send\n/disk/bin/mynetconfig send\n")?;
+    ck!(na == 0 && nb == 4 && out.matches("sent").count() == 4, "a program with \"netconfig\" in its name or path got the administration channel ({} on it, {} on the program channel): {:?}", na, nb, out);
     // Power loss at every write of an operation: the old or the new version, never anything
     // else, and the volume passes `desofs check` (it comes back read-write).
     let mut losses = 0;
@@ -551,7 +602,7 @@ pub fn self_test() {
     crate::selftest::begin();
     match fake_test() {
         Ok(l) => serial_println!(
-            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), a working mount clears earlier failures, the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again; programs from /disk/bin: run by name, never instead of a built-in / /bin / info / kernel-only name, the same handles as a /bin program (no SYSCTL, SETTIME or administration channel), still running after the stick is pulled, then not found; {} PASS",
+            "[USB DISK TEST] 1/2 fake sticks: disk identities never wrap, format only in a session (ESP refused, session counter used up -> nothing written), the only candidate -> /disk read-write (probe, desofs check), LKG: older file / no file -> the time in memory written, stick lost during the save -> not saved, written later; /disk never taken away, 3 candidates -> none, the remaining one -> from /usbN to /disk, 2 partitions on one stick -> none, the internal disk keeps /disk (also damaged), /disk in use kept, no free /usbN -> not counted (used once freed), a working mount clears earlier failures, the user unmounts /usbN or /disk -> left alone until replugged (registration withdrawn at once), unmounted some other way -> record dropped, mounted again; programs from /disk/bin: run by name, never instead of a built-in / /bin / info / kernel-only name, the same handles as a /bin program (no SYSCTL, SETTIME or administration channel), still running after the stick is pulled, then not found; the administration channel only to /bin/netconfig (real handles: /disk/x/netconfig, mynetconfig, /disk/netconfig/... get the program channel); {} PASS",
             l
         ),
         Err(e) => {

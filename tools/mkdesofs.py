@@ -3,12 +3,15 @@
 # DeSoFS volume, the same bytes `desofs format` writes in the kernel (DESOFS TEST compares them
 # byte for byte through tests/mkdesofs.py --format).
 #
-#   python3 tools/mkdesofs.py TARGET [--offset BYTES] [--blocks N] [--label TEXT]
-#                                    [--uuid 32-HEX] [--time UNIX-SECONDS]
+#   python3 tools/mkdesofs.py IMAGE [--blocks N] [--offset BYTES] [--label TEXT]
+#                                   [--uuid 32-HEX] [--time UNIX-SECONDS] [--force]
 #
-# TARGET is an image file or a block device; the volume starts --offset bytes into it (a
-# partition, e.g. from tools/mkusb.py) and is --blocks 4 KiB blocks long (default: to the end
-# of TARGET).  A random uuid and the current time unless given (tests give fixed ones).
+# IMAGE is an image FILE: a new one (--blocks N needed) or an existing one – non-empty only
+# with --force.  A device (a disk, a USB stick, a link to one) is refused, also with --force:
+# a stick gets its DeSoFS from ./make-usb.sh --with-disk (tools/mkusb.py calls format_fd here
+# after all its checks).  --force never lifts the 64 GiB limit or the size checks.  The volume
+# starts --offset bytes into the file and is --blocks 4 KiB blocks long (default: to its end).
+# A random uuid and the current time unless given (tests give fixed ones).
 #
 # Writes ONLY the blocks of the format, in the kernel's order, each step flushed: blocks
 # 0-15 zeroed (an older volume's superblocks gone first), the node block (16), the node-table
@@ -19,6 +22,7 @@
 import argparse
 import hashlib
 import os
+import stat
 import struct
 import sys
 import time as _time
@@ -104,14 +108,48 @@ def format_fd(fd, offset, blocks, uuid, now, label):
 
 
 def format_image(path, blocks, uuid, now, label):
-    """A new image file holding just the volume (tests/mkdesofs.py --format)."""
-    with open(path, "wb") as f:
-        f.truncate(blocks * BLOCK)
-    fd = os.open(path, os.O_WRONLY)
+    """A new image file holding just the volume (tests/mkdesofs.py --format; build.sh) –
+    replaces a regular file of that name, never anything else."""
+    if os.path.lexists(path):
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise ValueError("%s is not a regular file - nothing written" % path)
+        os.unlink(path)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o644)
     try:
+        check_size(blocks)
+        os.ftruncate(fd, blocks * BLOCK)
         format_fd(fd, 0, blocks, uuid, now, label)
     finally:
         os.close(fd)
+
+
+def open_image(path, force):
+    """The command line's target – an image FILE only.  Returns (fd, created).
+    The object is checked on an O_PATH descriptor (no read or write needed, a symbolic link
+    followed to what it names) BEFORE it is opened for writing, and the write descriptor is
+    checked to be the same file: a block or character device, a directory, a FIFO or a link
+    to one is refused – with or without --force.  An existing non-empty file only with
+    --force.  A new file is created with O_EXCL and nothing is cut or written yet."""
+    try:
+        probe = os.open(path, os.O_PATH | os.O_CLOEXEC)
+    except FileNotFoundError:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o644)
+        return fd, True
+    try:
+        st = os.fstat(probe)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("%s is not a regular file (a device?) - this tool formats image files only; "
+                             "for a USB stick use ./make-usb.sh --with-disk" % path)
+        if st.st_size > 0 and not force:
+            raise ValueError("%s is not empty (%d bytes) - add --force to overwrite it" % (path, st.st_size))
+        fd = os.open("/proc/self/fd/%d" % probe, os.O_RDWR | os.O_CLOEXEC)
+    finally:
+        os.close(probe)
+    st2 = os.fstat(fd)
+    if not stat.S_ISREG(st2.st_mode) or (st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino):
+        os.close(fd)
+        raise ValueError("%s changed while being opened - nothing written" % path)
+    return fd, False
 
 
 def target_size(fd):
@@ -119,30 +157,45 @@ def target_size(fd):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="An empty DeSoFS volume (format 1).")
-    ap.add_argument("target")
+    ap = argparse.ArgumentParser(description="An empty DeSoFS volume (format 1) in an image file.")
+    ap.add_argument("target", help="an image file (a new one, or an existing one with --force)")
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--blocks", type=int)
     ap.add_argument("--label", default="DESOOS")
     ap.add_argument("--uuid")
     ap.add_argument("--time", type=int)
+    ap.add_argument("--force", action="store_true", help="overwrite an existing non-empty image file (never a device, never past 64 GiB)")
     a = ap.parse_args()
     uuid = bytes.fromhex(a.uuid) if a.uuid else os.urandom(16)
     now = a.time if a.time is not None else int(_time.time())
     if a.offset < 0 or a.offset % 512:
         raise SystemExit("mkdesofs: --offset must be a multiple of 512")
-    fd = os.open(a.target, os.O_RDWR)
     try:
-        room = (target_size(fd) - a.offset) // BLOCK
-        blocks = a.blocks if a.blocks is not None else room
-        if blocks > room:
-            raise SystemExit("mkdesofs: %d blocks do not fit (room for %d)" % (blocks, room))
-        try:
-            format_fd(fd, a.offset, blocks, uuid, now, a.label)
-        except ValueError as e:
-            raise SystemExit("mkdesofs: %s" % e)
+        fd, created = open_image(a.target, a.force)
+    except (ValueError, OSError) as e:
+        raise SystemExit("mkdesofs: %s" % e)
+    ok = False
+    try:
+        if created:
+            if a.blocks is None:
+                raise ValueError("a new image needs --blocks N (4 KiB blocks)")
+            blocks = a.blocks
+            check_size(blocks)
+            os.ftruncate(fd, a.offset + blocks * BLOCK)
+        else:
+            room = (target_size(fd) - a.offset) // BLOCK
+            blocks = a.blocks if a.blocks is not None else room
+            check_size(blocks)
+            if blocks > room:
+                raise ValueError("%d blocks do not fit (room for %d)" % (blocks, room))
+        format_fd(fd, a.offset, blocks, uuid, now, a.label)
+        ok = True
+    except ValueError as e:
+        raise SystemExit("mkdesofs: %s" % e)
     finally:
         os.close(fd)
+        if created and not ok:
+            os.unlink(a.target)
     print("mkdesofs: %s: DeSoFS, %d blocks (%d MiB), uuid %s, label %r" % (a.target, blocks, blocks * BLOCK >> 20, uuid.hex(), a.label))
 
 

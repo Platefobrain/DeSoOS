@@ -2,6 +2,30 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.80.1 — 2026-11-21 (fixes after the review of v0.80.0)
+
+Plan: V0801 ver 2 (accepted). Three fixes, no change to the architecture or the production kernel.
+- **The `/bin/netconfig` rule tested on real handles**: USB DISK TEST gives a shell an administration channel (slot 3)
+  and a program channel (slot 5), as init does (`SpawnOptions::chans`, kernel tests); `/bin/netconfig`'s request
+  arrives on the administration channel only, while `/disk/x/netconfig`, `/disk/bin/mynetconfig`,
+  `/disk/netconfig/privtest` and `privtest` (`privtest send`) send on the program channel only. Mutation caught: the
+  old rule (any path ending in `netconfig`).
+- **`tools/mkusb.py` checks the serial number of the opened device**: open (`O_EXCL`) → `fstat` → major:minor of the
+  descriptor, size, and the serial from the udev record of that major:minor (`ID_SCSI_SERIAL`, else `ID_SERIAL_SHORT`
+  – what lsblk shows) against `--expect-serial` → only then any write. A missing record, a missing, empty or doubled
+  field – refused, never the device number alone. `make-usb.sh` passes the serial and refuses a stick without one.
+- **`tools/mkdesofs.py` formats image files only**: the target is checked on an `O_PATH` descriptor (a link followed
+  to what it names) before it is opened for writing, and the write descriptor must be the same file; a block or
+  character device, or a link to one, is refused – also with `--force`, which only allows overwriting a non-empty
+  image file and never lifts the 64 GiB limit or the size checks. A new image needs `--blocks` and is created with
+  `O_EXCL`; nothing is cut or written before the checks; a refused new image leaves no file. A stick's DeSoFS comes
+  only from `make-usb.sh --with-disk` (`tools/mkusb.py` calls the library function after all its checks).
+- Tests – `tests/make-usb-test.sh`: 11 identity cases on a fake udev directory (same, other serial, swapped device
+  number, other size, no record / field, empty, twice, `ID_SCSI_SERIAL` first, no expected serial), this computer's
+  USB disks (the udev serial = lsblk's), 8 `mkdesofs.py` cases (new, non-empty without / with `--force`, a character
+  device, a link to it, a block device, 65 GiB with `--force`, a new image without `--blocks`), a stick without a
+  serial refused. Mutations caught: the serial comparison skipped, the regular-file check skipped.
+
 ## v0.80.0 — 2026-11-20 (one USB stick: start + DeSoFS; programs from the disk)
 
 Plan: V080 ver 10 (accepted). One stick prepared on Linux by `make-usb.sh --with-disk`: partition 1 the ESP (DeSoOS
