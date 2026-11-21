@@ -67,9 +67,9 @@ mod test_ipc;
 // The syscall rights table.
 #[cfg(selftest)]
 mod test_rights;
-// The ABI description (abi/abi.toml) against the kernel and /bin/abiprobe.
-#[cfg(selftest)]
-mod abi_generated;
+// The ABI description (abi/abi.toml): the ABI version the loader gives, the rights table and
+// constants ABI TEST compares with the kernel.
+pub mod abi_generated;
 #[cfg(selftest)]
 mod test_abi;
 // DeSoCrypto (common/desocrypto) in the kernel and in user space.
@@ -347,6 +347,7 @@ impl core::fmt::Display for ExecError {
             ExecError::Fs(e) => write!(f, "{}", e),
             ExecError::TooBig => write!(f, "file too big (max 8 MiB)"),
             ExecError::TooManyProcesses => write!(f, "too many processes"),
+            ExecError::Load(elf_loader::LoadError::Abi(a)) => write!(f, "{}", a),
             ExecError::Load(e) => write!(f, "{}", e.as_str()),
         }
     }

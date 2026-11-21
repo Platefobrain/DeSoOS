@@ -84,7 +84,7 @@ if ! python3 tools/abigen.py --test > "$LOG_ABI" 2>&1; then
   echo "FAIL - ABI host test (logs/test-abi.log)"
   exit 1
 fi
-# The names (V081 stage A2): "deso" in every name, "DeSo OS" for the project – the old name stays only
+# The names: "deso" in every name, "DeSo OS" for the project – the old name stays only
 # in the history (CHANGELOG.md, docs/RELEASE.md), in lines marked "fixed test data" (bytes signed long ago)
 # and in local files that are not part of the tree.
 OLD_NAME=$(find . \( -path ./build -o -path ./logs -o -path ./ab -o -path ./drivers -o -path ./.git -o -name target \) -prune \

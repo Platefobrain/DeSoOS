@@ -110,7 +110,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (42 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 338 tests), stress tests and a long soak test
+- Built-in self-tests (42 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 339 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -167,7 +167,7 @@ kernel is located physically.
 
 User programs live in `user/bin/*.rs` and are embedded in the kernel image as `/bin/<name>`.
 To add one, create `user/bin/<name>.rs` (see `user/bin/hello.rs`) and run `./build.sh`. The
-user library `user/lib/deso.rs` provides `println!`, files, directories, `spawn`/`wait`/`kill`,
+program library `libdeso` (`sdk/libdeso`) provides `println!`, files, directories, `spawn`/`wait`/`kill`,
 `sleep_ms`, `readkey`, arguments, and `Vec`/`String` via `extern crate alloc;`.
 
 ## Running in QEMU
@@ -520,7 +520,9 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `boot/` - DSB, the UEFI boot loader (`dsb.rs`).
 - `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
   syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
-- `user/` - user-space programs (`bin/`), library (`lib/deso.rs`) and linker script.
+- `user/` - user-space programs (`bin/`) and the code they share (`lib/`).
+- `sdk/libdeso/` - the program library `libdeso` (ABI 1.0: system calls, handles, files, channels, services, time,
+  output) and the linker script with the ABI note; every program links to it.
 - `common/` - code shared by different parts of DeSo OS: ELF parsing (boot loader, kernel), DeSoCrypto
   (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
 - `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
@@ -539,9 +541,5 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 DeSo OS is licensed under the GNU General Public License v3 or later (`GPL-3.0-or-later`); full
 text in `LICENSE`.
 
-Exception: `kernel/drivers/font.rs` is a modified subset of Terminus Font (Copyright (c) 2020
-Dimitar Toshkov Zhekov), licensed solely under the SIL Open Font License 1.1 (`OFL-1.1`); the full license text is
-in the header of that file.
-
-When distributing DeSo OS (including `BOOTX64.EFI`), include `LICENSE` and the font license from
-`kernel/drivers/font.rs`.
+The console font, DeSo Console (`kernel/drivers/DeSoConsole-Regular.ttf`, and `kernel/drivers/font.rs` generated
+from it), is part of DeSo OS under the same license.

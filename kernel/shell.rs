@@ -371,7 +371,14 @@ fn cmd_echo(args: &str, out: &mut dyn Write, _: &mut Context) {
 }
 
 fn cmd_ver(_: &str, out: &mut dyn Write, _: &mut Context) {
-    let _ = writeln!(out, "DeSo OS v{} (x86_64, UEFI){}", VERSION, BUILD_TAG.filter(|t| !t.is_empty()).map(|t| alloc::format!(", build {}", t)).unwrap_or_default());
+    let _ = writeln!(
+        out,
+        "DeSo OS v{} (x86_64, UEFI, ABI {}.{}){}",
+        VERSION,
+        crate::user::elf_loader::ABI_MAJOR,
+        crate::user::elf_loader::ABI_MINOR,
+        BUILD_TAG.filter(|t| !t.is_empty()).map(|t| alloc::format!(", build {}", t)).unwrap_or_default()
+    );
 }
 
 fn cmd_uptime(_: &str, out: &mut dyn Write, _: &mut Context) {

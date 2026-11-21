@@ -1,5 +1,5 @@
-// abiprobe – the ABI description against the running kernel (ABI TEST, test 5 of the V081
-// plan): every number and every error code it uses comes from user/lib/abi_generated.rs,
+// abiprobe – the ABI description against the running kernel (ABI TEST 2/3):
+// every number and every error code it uses comes from sdk/libdeso/src/abi.rs (libdeso::abi),
 // which tools/abigen.py generates from abi/abi.toml – the chain abi.toml -> generator ->
 // constants -> program -> kernel in one run.
 //
@@ -16,12 +16,14 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/deso.rs"]
 #[macro_use]
-mod deso;
+#[allow(unused_imports)]
+extern crate libdeso;
+#[allow(unused_imports)]
+use libdeso as deso;
 
-#[path = "../lib/abi_generated.rs"]
-mod abi;
+use libdeso::abi;
+use libdeso::abi::table;
 
 use deso::{syscall6, Args};
 
@@ -78,7 +80,7 @@ fn main(args: Args) -> i32 {
     let mut p = Probe { ran: 0, failed: 0 };
 
     // 1. The gate: every row of the rights table, a handle that does not exist.
-    for &(nr, reg, name) in abi::HANDLE_ARGS.iter() {
+    for &(nr, reg, name) in table::HANDLE_ARGS.iter() {
         let mut a = [0u64; 6];
         a[reg] = NO_HANDLE;
         p.err(name, sys(nr, a), abi::ERROR_INVALID_HANDLE);
@@ -100,10 +102,10 @@ fn main(args: Args) -> i32 {
     }
 
     // 2. Numbers without a call.
-    for &r in abi::RESERVED.iter() {
+    for &r in table::RESERVED.iter() {
         p.err("reserved number", sys(r, [0; 6]), abi::ERROR_NOT_IMPLEMENTED);
     }
-    p.err("first number past the table", sys(abi::SYSCALL_COUNT, [0; 6]), abi::ERROR_NOT_IMPLEMENTED);
+    p.err("first number past the table", sys(table::SYSCALL_COUNT, [0; 6]), abi::ERROR_NOT_IMPLEMENTED);
     p.err("number 0xFFFF", sys(0xFFFF, [0; 6]), abi::ERROR_NOT_IMPLEMENTED);
 
     // 3. Bad pointers: never a crash, ERROR_INVALID_ADDRESS.
@@ -225,7 +227,7 @@ fn main(args: Args) -> i32 {
         abi::ABI_MINOR,
         p.ran,
         gate,
-        abi::RESERVED.len(),
+        table::RESERVED.len(),
         p.failed
     );
     if p.failed == 0 { 0 } else { 1 }

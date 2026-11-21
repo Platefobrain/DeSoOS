@@ -201,9 +201,12 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
     `Process` onto the slow heap path. A compile-time assertion keeps `Process` ≤ 2 KiB with alignment ≤ 16.
   - A waiting parent sleeps in one of 64 wait queues; the wake condition is its own `child_gen` counter.
 - **Ctrl+C** ends the process on top of the foreground stack, not the shell.
-- **Programs** – static ELF64 written in Rust (`user/bin/*.rs`, library `user/lib/deso.rs`), built into the
-  kernel image (initrd) and unpacked into ramfs as `/bin/<name>`. Loader: lower half only, from 1 MiB, W^X, a
-  System V-style stack (argc, argv). The library allocator uses `brk` (small blocks) and `mmap` (large).
+- **Programs** – static ELF64 written in Rust (`user/bin/*.rs`, library `libdeso` in `sdk/libdeso`, linked with
+  `sdk/libdeso/link.ld`), built into the kernel image (initrd) and unpacked into ramfs as `/bin/<name>`. Loader:
+  segments only in the ABI 1.0 load range, not overlapping, W^X, a System V-style stack (argc, argv); before
+  anything is mapped it reads the program's ABI note (a `DeSo` note of type 1 in its own PT_NOTE: major, minor,
+  flags) – no note = 1.0, a newer minor, another major, unknown flags, a damaged or doubled note = `ERROR_ABI`
+  (`abi/README.md`). The library allocator uses `brk` (small blocks) and `mmap` (large).
 - Shell: pipelines `a | b | c`, `>`, `>>`, `<`, quotes, history, `&`.
 
 ## Syscalls and handles
@@ -249,7 +252,7 @@ The syscall profiler (`prof.rs`) tracks all 62 numbers (0–61). Error numbers a
 
 ### Errors
 
-One set of error names for the kernel and for programs (`kernel/user/syscalls.rs`, `user/lib/deso.rs`;
+One set of error names for the kernel and for programs (`kernel/user/syscalls.rs`, `libdeso` from `abi/abi.toml`;
 `strerror` gives the text, `error_name` the name). A syscall returns the negative number. The numbers are the
 Unix ones, so a future Linux compatibility layer needs no translation; the names are DeSo OS's – readable, with
 one prefix, `ERROR_`.

@@ -6,6 +6,43 @@ Format: newest on top. Dates in Central European time.
 
 Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
 
+### The console font: DeSo Console
+- The framebuffer console draws with **DeSo Console**, an 8x16 pixel font of DeSo OS in the style of Orbitron (wide,
+  square letters with cut corners, caps 9 pixels tall), instead of Terminus. The same 234 characters (ASCII, Latin-1,
+  the Polish letters, €, box drawing, arrows, blocks). The source is the TTF `kernel/drivers/DeSoConsole-Regular.ttf`;
+  `tools/fontgen.py` turns it into `kernel/drivers/font.rs` pixel for pixel (and refuses a glyph off the pixel grid),
+  `--check` compares. Å fixed in the TTF: its ring was one row too high (the top wrapped to the bottom of the
+  cell as a stray dot) – now a ring on rows 0–2. The font is under the project's license (GPL-3.0-or-later) – the OFL exception for Terminus is
+  gone from README and the file header.
+
+### Stage B – libdeso as a crate, the ABI note in every program
+- **`libdeso` (`sdk/libdeso`)**: the program library is one crate now, built once by `build.sh`
+  (`build/user/liblibdeso.rlib`), and all 82 programs link to it (`#[macro_use] extern crate libdeso; use libdeso as
+  deso;` – no `#[path]` copy of the library left). Modules `sys`, `errors`, `handles`, `fs`, `chan`, `svc`, `net`,
+  `time`, `dev`, everything also at the crate root; `abi.rs` – the constants, generated from `abi/abi.toml` (the
+  library's hand-written copies are gone; the host test refuses a constant defined by hand); `unstable` behind
+  `--cfg feature="unstable"`, empty. `user/lib/deso.rs` and `user/lib/abi_generated.rs` are gone.
+- **The ABI note**: libdeso puts a `DeSo` note of type 1 (u16 major, u16 minor, u32 flags = 1.0, 0) into every
+  program; `sdk/libdeso/link.ld` (was `user/user.ld`) gives it its own `PT_NOTE` in the read-only segment. `build.sh`
+  refuses a program without it.
+- **The loader reads it before mapping anything** (`elf_loader::abi_of`): no note = a program from before ABI 1.0 =
+  1.0; a newer minor, another major, flags ≠ 0, the note twice, a damaged note (also another owner's), a `PT_NOTE`
+  outside the file / overflowing / misaligned / over 4 KiB / on the headers / overlapping another one, more than 4 →
+  `ERROR_ABI` ("needs DeSo OS ABI 1.1, this system 1.0"). It also refuses overlapping `PT_LOAD` segments. `ver` shows
+  the ABI ("DeSo OS v0.80.1 (x86_64, UEFI, ABI 1.0)"). `kernel/user/abi_generated.rs` is in every build now (the loader
+  takes its ABI version from it).
+- Tests: ABI TEST 3/3 – every `/bin` program carries ABI 1.0, 26 hand-built ELF files (every rule above, the note at
+  the end of the file and before the code, between valid foreign notes), overlapping segments, and through exec (1.0
+  and no note run, 1.1 refused with `ERROR_ABI` and the reason). Host test: 19 mutations (a constant copied by hand,
+  a constant not described, the library not re-exporting `abi`). Six loader mutations, each caught by ABI
+  TEST 3/3: the note ignored, a damaged note taken as none, a second note accepted, a newer minor accepted, flags
+  accepted, a program without a note refused. Migration check: the same 82 programs before and after;
+  sizes move by whole 4 KiB pages at most (8 programs over 10 %: `dmatest`, `shmtest`, `sleep`, `sysfuzz` one page
+  more; `rngtest`, `synctest` one page less; `sh` −16 KiB, `soak` −28 KiB – library code a program does not use is no
+  longer compiled into it); all outputs the suites compare (hello, args, privtest, ls, cat, primes, netconfig, ver) pass.
+- Docs: `docs/abi/README.md` (the library, the note format and the loader's table), `sdk/README.md`, ARCHITECTURE,
+  README, `user/`, `kernel/`, `tools/`, `tests/` READMEs.
+
 ### Stage A2 – the names: "deso"
 - **The project's name in text is "DeSo OS"** (like DeSoFS, DeSoCrypto, DeSoTLS): `ver`, kernel and program messages,
   the README, the documentation. File and folder names keep no space.

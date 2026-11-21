@@ -9,9 +9,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/deso.rs"]
 #[macro_use]
-mod deso;
+#[allow(unused_imports)]
+extern crate libdeso;
+#[allow(unused_imports)]
+use libdeso as deso;
 #[path = "../lib/edu_proto.rs"]
 mod edu_proto;
 

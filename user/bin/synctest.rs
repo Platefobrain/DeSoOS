@@ -13,9 +13,11 @@
 #![no_std]
 #![no_main]
 
-#[path = "../lib/deso.rs"]
 #[macro_use]
-mod deso;
+#[allow(unused_imports)]
+extern crate libdeso;
+#[allow(unused_imports)]
+use libdeso as deso;
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/desotls/mod.rs"]

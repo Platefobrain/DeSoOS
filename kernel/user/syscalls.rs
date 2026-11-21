@@ -364,7 +364,7 @@ pub const O_TRUNC: u64 = 8;
 pub const O_APPEND: u64 = 16;
 
 // DeSo OS errors – negative syscall results, the same names and numbers in
-// programs (user/lib/deso.rs).  The numbers are the Unix ones (a future Linux
+// programs (libdeso, generated from abi/abi.toml).  The numbers are the Unix ones (a future Linux
 // compatibility layer needs no translation); the names are DeSo OS's.
 pub const ERROR_NOT_PERMITTED: i64 = -1;
 pub const ERROR_NOT_FOUND: i64 = -2;
@@ -1193,7 +1193,7 @@ fn user_path(p: &mut Process, ptr: u64, len: u64) -> Result<String, i64> {
     Ok(fs::normalize(&p.cwd, name))
 }
 
-fn exec_error(e: super::ExecError) -> i64 {
+pub(super) fn exec_error(e: super::ExecError) -> i64 {
     use super::elf_loader::LoadError;
     match e {
         super::ExecError::Fs(e) => fs_error(e),
@@ -1201,6 +1201,7 @@ fn exec_error(e: super::ExecError) -> i64 {
         super::ExecError::TooManyProcesses => ERROR_WOULD_BLOCK,
         super::ExecError::Load(LoadError::NoMemory) => ERROR_OUT_OF_MEMORY,
         super::ExecError::Load(LoadError::TooManyArgs) => ERROR_TOO_MANY_ARGUMENTS,
+        super::ExecError::Load(LoadError::Abi(_)) => ERROR_ABI,
         super::ExecError::Load(_) => ERROR_NOT_EXECUTABLE,
     }
 }

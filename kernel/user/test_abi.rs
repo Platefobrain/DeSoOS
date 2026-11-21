@@ -1,9 +1,12 @@
-// ABI TEST – the kernel against the ABI description (abi/abi.toml, docs/abi/README.md; tests 4
-// and 5 of the V081 plan).  tools/abigen.py generates kernel/user/abi_generated.rs from the
+// ABI TEST – the kernel against the ABI description (abi/abi.toml, docs/abi/README.md).
+// tools/abigen.py generates kernel/user/abi_generated.rs from the
 // description: the rights table as text and every constant with its kernel path.
-//   1/2 the kernel = the description: sysrights::text() byte for byte, the table's size, the
+//   1/3 the kernel = the description: sysrights::text() byte for byte, the table's size, the
 //       reserved numbers without a row, every syscall number and constant value
-//   2/2 /bin/abiprobe: the constants generated for programs, through real syscalls
+//   2/3 /bin/abiprobe: the constants generated for programs, through real syscalls
+//   3/3 the ELF ABI note: every /bin program carries the 1.0 note; the loader's note rules on
+//       hand-built ELF files (versions, flags, every length, twice, outside the file, overflow,
+//       overlap, alignment, foreign notes, order in the file) and through exec
 
 use alloc::string::String;
 
@@ -55,7 +58,7 @@ pub fn self_test() {
         }
     };
     let rows = TABLE.iter().flatten().count();
-    serial_println!("[ABI TEST] 1/2 kernel = description: ABI {}.{}, rights table ({} rows, {} numbers, {} reserved) byte for byte, {} syscall numbers and constants equal PASS",
+    serial_println!("[ABI TEST] 1/3 kernel = description: ABI {}.{}, rights table ({} rows, {} numbers, {} reserved) byte for byte, {} syscall numbers and constants equal PASS",
         abi::ABI_MAJOR, abi::ABI_MINOR, rows, abi::SYSCALL_COUNT, abi::RESERVED.len(), n);
 
     // 2. abiprobe – the program side of the same description.
@@ -80,6 +83,209 @@ pub fn self_test() {
         }
         check!(false, "abiprobe: {:?}", kind);
     }
-    serial_println!("[ABI TEST] 2/2 {} PASS", last);
+    serial_println!("[ABI TEST] 2/3 {} PASS", last);
+
+    // 3. The ELF ABI note.
+    if let Err(e) = notes() {
+        check!(false, "{}", e);
+    }
     crate::selftest::pass();
+}
+
+use super::elf_loader::{abi_of, AbiError, LoadError};
+
+const FILE: usize = 0x3000;
+
+fn put(b: &mut [u8], at: usize, v: &[u8]) {
+    b[at..at + v.len()].copy_from_slice(v);
+}
+
+/// A note: name (with its NUL), type, description – lengths as given, padded to 4.
+fn note(name: &[u8], kind: u32, desc: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut v = alloc::vec::Vec::new();
+    v.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    v.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+    v.extend_from_slice(&kind.to_le_bytes());
+    v.extend_from_slice(name);
+    while v.len() % 4 != 0 {
+        v.push(0);
+    }
+    v.extend_from_slice(desc);
+    while v.len() % 4 != 0 {
+        v.push(0);
+    }
+    v
+}
+
+fn deso(major: u16, minor: u16, flags: u32) -> alloc::vec::Vec<u8> {
+    let mut d = [0u8; 8];
+    put(&mut d, 0, &major.to_le_bytes());
+    put(&mut d, 2, &minor.to_le_bytes());
+    put(&mut d, 4, &flags.to_le_bytes());
+    note(b"DeSo\0", 1, &d)
+}
+
+fn gnu() -> alloc::vec::Vec<u8> {
+    note(b"GNU\0", 3, &[0x5a; 20])
+}
+
+/// A static ELF: code at 0x400000 (exit 0) + the extra program headers (type, offset, filesz,
+/// vaddr) + bytes placed at file offsets.
+fn elf(extra: &[(u32, u64, u64, u64)], blobs: &[(usize, &[u8])]) -> alloc::vec::Vec<u8> {
+    let mut b = alloc::vec![0u8; FILE];
+    put(&mut b, 0, b"\x7fELF\x02\x01\x01");
+    put(&mut b, 16, &2u16.to_le_bytes());
+    put(&mut b, 18, &62u16.to_le_bytes());
+    put(&mut b, 20, &1u32.to_le_bytes());
+    put(&mut b, 24, &0x40_0000u64.to_le_bytes());
+    put(&mut b, 32, &64u64.to_le_bytes());
+    put(&mut b, 52, &64u16.to_le_bytes());
+    put(&mut b, 54, &56u16.to_le_bytes());
+    put(&mut b, 56, &(1 + extra.len() as u16).to_le_bytes());
+    let mut ph = |i: usize, kind: u32, flags: u32, off: u64, size: u64, va: u64| {
+        let p = 64 + i * 56;
+        put(&mut b, p, &kind.to_le_bytes());
+        put(&mut b, p + 4, &flags.to_le_bytes());
+        put(&mut b, p + 8, &off.to_le_bytes());
+        put(&mut b, p + 16, &va.to_le_bytes());
+        put(&mut b, p + 24, &va.to_le_bytes());
+        put(&mut b, p + 32, &size.to_le_bytes());
+        put(&mut b, p + 40, &size.to_le_bytes());
+        put(&mut b, p + 48, &4u64.to_le_bytes());
+    };
+    ph(0, 1, 5, 0x1000, 8, 0x40_0000);
+    for (i, &(kind, off, size, va)) in extra.iter().enumerate() {
+        ph(i + 1, kind, 4, off, size, va);
+    }
+    // xor edi, edi; xor eax, eax (SYS_EXIT); syscall; jmp $
+    put(&mut b, 0x1000, &[0x31, 0xff, 0x31, 0xc0, 0x0f, 0x05, 0xeb, 0xfe]);
+    for &(at, bytes) in blobs {
+        put(&mut b, at, bytes);
+    }
+    b
+}
+
+/// One PT_NOTE at `off` holding `bytes` (its filesz = their length).
+fn one(off: usize, bytes: &[u8]) -> alloc::vec::Vec<u8> {
+    elf(&[(4, off as u64, bytes.len() as u64, 0)], &[(off, bytes)])
+}
+
+/// Runs a built ELF from /tmp; Ok(exit kind) or the exec error.
+fn run_file(name: &str, bytes: &[u8]) -> Result<ExitKind, ExecError> {
+    let path = alloc::format!("/tmp/{}", name);
+    let _ = crate::fs::write_file(&path, bytes);
+    let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
+    let r = exec(&path, &[name], "/", &opts);
+    let r = match r {
+        Ok(id) => {
+            let end = ticks() + 10_000;
+            while sched::task_info(id).is_some() && ticks() < end {
+                crate::time::sleep_ms(1);
+            }
+            Ok(exit_info(id).map(|e| e.kind).unwrap_or(ExitKind::Killed))
+        }
+        Err(e) => Err(e),
+    };
+    let _ = crate::fs::remove(&path);
+    r
+}
+
+/// Whether the file has a PT_NOTE holding the DeSo OS note.
+fn has_note(b: &[u8]) -> bool {
+    let n = u16::from_le_bytes([b[56], b[57]]) as usize;
+    let phoff = u64::from_le_bytes(b[32..40].try_into().unwrap()) as usize;
+    (0..n).any(|i| {
+        let p = phoff + i * 56;
+        let off = u64::from_le_bytes(b[p + 8..p + 16].try_into().unwrap()) as usize;
+        b[p..p + 4] == 4u32.to_le_bytes() && b.get(off + 12..off + 17) == Some(b"DeSo\0".as_slice())
+    })
+}
+
+fn notes() -> Result<(), String> {
+    use alloc::format;
+    // Every program in /bin is built with libdeso: the 1.0 note.
+    let bin = crate::fs::read_dir("/bin").unwrap_or_default();
+    for e in &bin {
+        let b = crate::fs::read_file(&format!("/bin/{}", e.name)).unwrap_or_default();
+        if !has_note(&b) || abi_of(&b) != Ok((1, 0)) {
+            return Err(format!("/bin/{}: no ABI 1.0 note ({:?})", e.name, abi_of(&b)));
+        }
+    }
+    let n10 = deso(1, 0, 0);
+    let two = [deso(1, 0, 0), deso(1, 0, 0)].concat();
+    let both = [gnu(), deso(1, 0, 0), gnu()].concat();
+    let mut namesz = deso(1, 0, 0);
+    put(&mut namesz, 0, &0xFFFF_FFF0u32.to_le_bytes());
+    let mut desc7 = deso(1, 0, 0);
+    put(&mut desc7, 4, &7u32.to_le_bytes());
+    let mut deschuge = deso(1, 0, 0);
+    put(&mut deschuge, 4, &0xFFFF_FFFFu32.to_le_bytes());
+    let mut badgnu = gnu();
+    put(&mut badgnu, 4, &0x1000u32.to_le_bytes());
+    let junk = [deso(1, 0, 0), alloc::vec![0u8; 4]].concat();
+    let bad = Err(AbiError::BadNote);
+    let ok = Ok((1, 0));
+    let cases: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>, Result<(u16, u16), AbiError>)> = alloc::vec![
+        ("1.0", one(0x2000, &n10), ok),
+        ("1.1 (a newer minor)", one(0x2000, &deso(1, 1, 0)), Err(AbiError::Newer(1, 1))),
+        ("2.0 (another major)", one(0x2000, &deso(2, 0, 0)), Err(AbiError::OtherMajor(2, 0))),
+        ("0.9 (another major)", one(0x2000, &deso(0, 9, 0)), Err(AbiError::OtherMajor(0, 9))),
+        ("no note (a program from before ABI 1.0)", elf(&[], &[]), ok),
+        ("an empty PT_NOTE", elf(&[(4, 0x2000, 0, 0)], &[]), ok),
+        ("flags 1", one(0x2000, &deso(1, 0, 1)), Err(AbiError::Flags(1))),
+        ("namesz past the PT_NOTE", one(0x2000, &namesz), bad),
+        ("descsz 7", one(0x2000, &desc7), bad),
+        ("descsz past the PT_NOTE", one(0x2000, &deschuge), bad),
+        ("the note longer than its PT_NOTE", elf(&[(4, 0x2000, 24, 0)], &[(0x2000, &n10)]), bad),
+        ("4 bytes after the last note", one(0x2000, &junk), bad),
+        ("twice in one PT_NOTE", one(0x2000, &two), Err(AbiError::Twice)),
+        ("twice in two PT_NOTEs", elf(&[(4, 0x2000, 28, 0), (4, 0x2100, 28, 0)], &[(0x2000, &n10), (0x2100, &n10)]), Err(AbiError::Twice)),
+        ("a PT_NOTE past the end of the file", elf(&[(4, (FILE - 16) as u64, 28, 0)], &[]), bad),
+        ("p_offset + p_filesz overflows", elf(&[(4, u64::MAX - 3, 28, 0)], &[]), bad),
+        ("two PT_NOTEs overlapping", elf(&[(4, 0x2000, 28, 0), (4, 0x2010, 28, 0)], &[(0x2000, &n10)]), bad),
+        ("a PT_NOTE on the ELF header", elf(&[(4, 0, 28, 0)], &[]), bad),
+        ("a PT_NOTE on the program headers", elf(&[(4, 64, 28, 0)], &[]), bad),
+        ("a misaligned PT_NOTE", one(0x2002, &n10), bad),
+        ("a PT_NOTE over 4 KiB", elf(&[(4, 0x1000, 4100, 0)], &[]), bad),
+        ("five PT_NOTEs", elf(&[(4, 0x2000, 0, 0); 5], &[]), bad),
+        ("the note between foreign GNU notes", one(0x2000, &both), ok),
+        ("a damaged foreign note", one(0x2000, &badgnu), bad),
+        ("the note at the very end of the file", one(FILE - 28, &n10), ok),
+        ("the note before the code", one(0x800, &n10), ok),
+    ];
+    for (what, b, want) in &cases {
+        let got = abi_of(b);
+        if got != *want {
+            return Err(format!("note {}: {:?}, want {:?}", what, got, want));
+        }
+    }
+    // Overlapping PT_LOAD segments are refused before anything is mapped.
+    let ov = elf(&[(1, 0x1000, 8, 0x40_0004)], &[]);
+    let got = super::elf_loader::load(&ov, &["x"]).err();
+    if got != Some(LoadError::Overlap) {
+        return Err(format!("overlapping segments: {:?}", got));
+    }
+    // Through exec: 1.0 and a program without a note run; 1.1 is refused with ERROR_ABI and the reason.
+    for (name, b) in [("abinote10", one(0x2000, &n10)), ("abinone", elf(&[], &[]))] {
+        let r = run_file(name, &b);
+        if !matches!(r, Ok(ExitKind::Exit(0))) {
+            return Err(format!("{}: {:?}", name, r.map_err(|e| format!("{}", e))));
+        }
+    }
+    match run_file("abinote11", &one(0x2000, &deso(1, 1, 0))) {
+        Err(e) => {
+            let text = format!("{}", e);
+            let code = super::syscalls::exec_error(e);
+            if code != super::syscalls::ERROR_ABI || text != "needs DeSo OS ABI 1.1, this system 1.0" {
+                return Err(format!("1.1 through exec: {} ({})", text, code));
+            }
+        }
+        Ok(k) => return Err(format!("1.1 ran: {:?}", k)),
+    }
+    serial_println!(
+        "[ABI TEST] 3/3 ELF ABI note: {} /bin programs carry ABI 1.0; {} note cases (1.0, 1.1, 2.0, none, flags, every length, twice, outside, overflow, overlap, alignment, foreign notes, order), overlapping segments refused; exec: 1.0 and no note run, 1.1 refused with ERROR_ABI PASS",
+        bin.len(),
+        cases.len()
+    );
+    Ok(())
 }

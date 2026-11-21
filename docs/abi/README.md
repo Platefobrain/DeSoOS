@@ -8,7 +8,7 @@ later systems without being rebuilt (programs live on `/disk/bin` since v0.80; p
 | [`abi/abi.toml`](../../abi/abi.toml) | **the one source of truth** – every system call (number, arguments in order with types, result, errors, rights, status, since, how it is tested) and every constant (errors, handle kinds and rights, flags, slots, loader limits) |
 | [`abi/abi-1.0.lock`](../../abi/abi-1.0.lock) | the frozen ABI 1.0 – one readable line per entry with its SHA-256, and a total; written once, never edited |
 | [`SYSCALLS.md`](SYSCALLS.md) | the system calls and constants for people – generated |
-| `user/lib/abi_generated.rs` | the constants for programs – generated |
+| `sdk/libdeso/src/abi.rs` | the constants of the program library `libdeso` – generated; the library defines no other public constant |
 | `kernel/user/abi_generated.rs` | the kernel's half of ABI TEST: the rights table as text and every constant with its kernel path – generated |
 | [`tools/abigen.py`](../../tools/abigen.py) | checks the description, generates the three files, guards the locks; Python 3 standard library only |
 
@@ -36,8 +36,40 @@ Never edit a generated file – change `abi/abi.toml` and run `python3 tools/abi
   16 KiB at the start, growing to `STACK_MAX` (8 MiB). The whole start contract (registers, stack layout, slots, exit
   codes) gets its own page, `STARTUP.md`, in stage D of v0.81.
 
-Service protocols (the service manager, the network, time) get their own versions in stage D (`SERVICES.md`); the ELF
-note that says which ABI a program was built for comes in stage B.
+Service protocols (the service manager, the network, time) get their own versions in stage D (`SERVICES.md`).
+
+## The program library and the ABI note
+
+Every program links to **`libdeso`** (`sdk/libdeso`, one crate): modules `sys` (the raw system call, start and end,
+processes, memory, keys, the heap, output), `errors`, `handles`, `fs`, `chan`, `svc`, `net`, `time`, `dev`, and
+`abi` – the constants, generated from `abi/abi.toml`; everything is also at the crate root (`deso::open`,
+`deso::ERROR_NOT_FOUND`). The library defines no constant of its own (the host test refuses one). `unstable`
+(`--cfg feature="unstable"`) promises nothing and is empty in 1.0.
+
+The library puts **an ABI note** into every program, and `sdk/libdeso/link.ld` gives it its own `PT_NOTE` header (in
+the read-only segment; `strip` keeps it):
+
+| Field | Value |
+|---|---|
+| `namesz`, `descsz`, `type` | 5, 8, 1 (`NT_DESO_ABI`) – little-endian u32 |
+| name | `DeSo\0` + 3 bytes of padding |
+| description | u16 major, u16 minor, u32 flags (0 in 1.0) |
+
+The kernel reads it from the program headers alone, before anything is mapped:
+
+| The program has | Result |
+|---|---|
+| no `DeSo` note of type 1 | a program from before ABI 1.0 – runs as 1.0 |
+| exactly one valid note, the same major, minor ≤ the system's | runs |
+| a newer minor / another major | refused: `ERROR_ABI`, "needs DeSo OS ABI 1.3, this system 1.0" |
+| flags ≠ 0 | refused (`ERROR_ABI`) |
+| the note twice (also in two `PT_NOTE`s) | refused (`ERROR_ABI`) |
+| a damaged note – ours or another owner's: a length past its `PT_NOTE`, bytes left over, our note with `descsz` ≠ 8 | refused (`ERROR_ABI`) |
+| a `PT_NOTE` outside the file, with an overflowing offset + size, misaligned, over 4 KiB, on the ELF or program headers, overlapping another `PT_NOTE`; more than 4 of them | refused (`ERROR_ABI`) |
+
+A parse error is never "no note". Notes of other owners (a GNU build-id) are skipped but checked the same way; the
+order of headers and sections in the file does not matter. The loader also refuses overlapping `PT_LOAD` segments.
+`ver` shows the ABI the system gives.
 
 ## The rules
 
@@ -71,7 +103,7 @@ ABI 1.0 lock: FAILED (1 changes)
 2. `abi/abi.toml`: a `[[syscall]]` with `since = "1.1"`, its arguments, errors, `handles` (the same as the row),
    `test_class` and `test`; `[abi] version = "1.1"`.
 3. `python3 tools/abigen.py` (the generated files), `python3 tools/abigen.py --new-lock` (`abi/abi-1.1.lock`).
-4. The library wrapper in `user/lib/deso.rs` and a probe in `user/bin/abiprobe.rs`.
+4. The library wrapper in the fitting module of `sdk/libdeso/src/` and a probe in `user/bin/abiprobe.rs`.
 5. `tests/test.sh` – the host checks and ABI TEST must pass.
 
 ## Tests
@@ -83,15 +115,18 @@ ABI 1.0 lock: FAILED (1 changes)
 | 1 locks | every `abi/abi-*.lock` is intact (each line's SHA-256 and the total) and matches the description – the human diff above on any difference |
 | 2 description | `abi.toml` is complete: no holes in the numbers, every argument typed, handle arguments match the rights rows, errors are `ERROR_*` constants, every stable entry has a test, no value outside its type |
 | 3 generator | two runs give the same bytes, and they are the files in the tree |
-| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; every constant of `user/lib/deso.rs` has the description's type and value, and every library constant of the description is there |
-| 5 mutations | 18 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a lock line edited / removed, a generated file edited, a library constant changed / not described, the kernel renumbered, the kernel reading another argument |
+| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; `libdeso` defines no constant by hand (only the generated `abi.rs`) and re-exports `abi` |
+| 5 mutations | 19 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a lock line edited / removed, a generated file edited, a constant copied by hand into the library, a library constant not described, the library not re-exporting `abi`, the kernel renumbered, the kernel reading another argument |
 
-ABI TEST in QEMU is the kernel's half: `1/2` the kernel's rights table (`sysinfo rights`) byte for byte, the table's size,
-the reserved numbers without a row, and every syscall number and constant value through its kernel path; `2/2`
+ABI TEST in QEMU is the kernel's half: `1/3` the kernel's rights table (`sysinfo rights`) byte for byte, the table's size,
+the reserved numbers without a row, and every syscall number and constant value through its kernel path; `2/3`
 `/bin/abiprobe` – built on the generated constants, it calls every row of the rights table with a handle that does not
 exist (`ERROR_INVALID_HANDLE`), uses a handle without rights (`ERROR_ACCESS_DENIED`), the reserved numbers
 (`ERROR_NOT_IMPLEMENTED`), bad pointers (`ERROR_INVALID_ADDRESS`) and the ordinary calls with known results, and starts
-a child that exits with 7.
+a child that exits with 7; `3/3` the ABI note – every `/bin` program carries 1.0, 26 hand-built ELF files (every row
+of the table above, the note at the end of the file and before the code, between foreign notes), overlapping
+segments, and through `exec`: a 1.0 program and one without a note run, a 1.1 program is refused with `ERROR_ABI` and
+the reason.
 
 ## Compared with other systems
 
