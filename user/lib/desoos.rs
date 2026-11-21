@@ -221,6 +221,8 @@ pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
 pub const ERROR_NOT_EMPTY: i64 = -39;
 pub const ERROR_MESSAGE_TOO_LARGE: i64 = -90;
 pub const ERROR_TIMED_OUT: i64 = -110;
+/// exec: the program needs a DeSoOS ABI this system does not give (its ELF ABI note).
+pub const ERROR_ABI: i64 = -200;
 
 /// Parent descriptors the child will get as 0, 1, 2.
 pub const fn fds(stdin: u64, stdout: u64, stderr: u64) -> u64 {
@@ -1329,6 +1331,7 @@ pub fn strerror(e: i64) -> &'static str {
         ERROR_NOT_EMPTY => "directory not empty",
         ERROR_MESSAGE_TOO_LARGE => "message too large",
         ERROR_TIMED_OUT => "timed out",
+        ERROR_ABI => "program needs a newer system ABI",
         _ => "error",
     }
 }
@@ -1365,6 +1368,7 @@ pub fn error_name(e: i64) -> &'static str {
         ERROR_NOT_EMPTY => "ERROR_NOT_EMPTY",
         ERROR_MESSAGE_TOO_LARGE => "ERROR_MESSAGE_TOO_LARGE",
         ERROR_TIMED_OUT => "ERROR_TIMED_OUT",
+        ERROR_ABI => "ERROR_ABI",
         _ => "ERROR",
     }
 }

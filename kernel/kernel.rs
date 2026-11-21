@@ -298,6 +298,9 @@ pub extern "sysv64" fn kernel_main(
     // The syscall rights table – every right taken away in turn.
     #[cfg(selftest)]
     selftest::suite("rights", user::rights_self_test);
+    // The ABI description (abi/abi.toml) – the kernel and /bin/abiprobe against it.
+    #[cfg(selftest)]
+    selftest::suite("abi", user::abi_self_test);
     // DeSoCrypto – SHA-256, HMAC, HKDF, ChaCha20 in the kernel and in user space.
     #[cfg(selftest)]
     selftest::suite("crypto", user::crypto_self_test);

@@ -208,6 +208,11 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
 
 ## Syscalls and handles
 
+The whole contract a program relies on – numbers, arguments with types, errors, rights, constants, the loader's
+limits – is described in `abi/abi.toml` (ABI 1.0, frozen in `abi/abi-1.0.lock`) and generated into
+`abi/SYSCALLS.md`; the rules (only additions within a major version, each a new minor) and the tests are in
+`abi/README.md`.
+
 `SYSCALL`/`SYSRET`; number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9; result in RAX (negative = an error, see
 "Errors" below). Process memory is accessed only via `copy_from_user`/`copy_to_user` (page check + SMAP). Almost
 all syscalls run without the Big Kernel Lock (99% of calls under stress).
@@ -218,7 +223,7 @@ all syscalls run without the Big Kernel Lock (99% of calls under stress).
 | 9–12 | `spawn`, `wait`, `getppid`, `kill` |
 | 13–18 | `chdir`, `getcwd`, `readdir`, `stat`, `mkdir`, `unlink` |
 | 19–20 | `readkey` (line editor), `tasks` (ps) |
-| 21 | unused (`ERROR_NOT_IMPLEMENTED`) |
+| 21 | reserved – removed before ABI 1.0, never used again (`ERROR_NOT_IMPLEMENTED`) |
 | 22–25 | `dup`, `dup2`, `seek`, `pipe` |
 | 26–28 | `brk`, `mmap`, `munmap` |
 | 29–30 | `handle_dup`, `handle_info` |

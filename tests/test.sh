@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights crypto rng certs desofs
+#                              suites: smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/desoos/phase=restart): DeSoFS written by the first start must be mounted at /disk
@@ -73,6 +73,18 @@ if ! python3 -c 'import socket; s = socket.socket(); s.setsockopt(socket.SOL_SOC
   echo "Wait for it to finish, or stop it: pkill qemu-system-x86"
   exit 3
 fi
+
+# The ABI (abi/abi.toml, docs/abi/README.md) on the host, before anything is built: the locks,
+# the description, the generator, the code against the description and the mutations
+# (tools/abigen.py --test, logs/test-abi.log).  The kernel's half is ABI TEST in QEMU.
+mkdir -p "$ROOT/logs"
+LOG_ABI="$ROOT/logs/test-abi.log"
+if ! python3 tools/abigen.py --test > "$LOG_ABI" 2>&1; then
+  grep -a -E "FAIL|NOT CAUGHT|^    " "$LOG_ABI" | head -n 30
+  echo "FAIL - ABI host test (logs/test-abi.log)"
+  exit 1
+fi
+ABI_HOST=$(grep -ac "^\[ABI HOST TEST\] [0-9]/5 .* PASS" "$LOG_ABI" || true)
 
 if [ "$BUILD" = 1 ]; then
   ./build.sh --selftest || { echo "ERROR: build failed"; exit 3; }
@@ -349,13 +361,13 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ "$CODE5" = 33
 fi
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(( $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c " PASS" "$LOG5" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
+PASSED=$(( ABI_HOST + $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c " PASS" "$LOG5" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
 # The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY4=$(grep -a "Self-tests:" "$LOG4" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 ONE_PASS=$(grep -ac "^\[ONE STICK TEST\] .* PASS" "$LOG5" || true)
-echo "Log: logs/test.log + logs/test-restart.log + logs/test-usbrestart.log + logs/test-onestick.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, USB restart ${TIME4} s, one stick ${TIME5} s, soak ${TIME3} s, ${PASSED} tests PASS)"
+echo "Log: logs/test-abi.log + logs/test.log + logs/test-restart.log + logs/test-usbrestart.log + logs/test-onestick.log + logs/test-soak.log (${TIME} s, restart ${TIME2} s, USB restart ${TIME4} s, one stick ${TIME5} s, soak ${TIME3} s, ${PASSED} tests PASS)"
 # Service benchmark (kernel vs user space) – the [RESULT-SVC] line from the SVC self-test.
 grep -a "^\[RESULT-SVC\]" "$LOG" | tail -n1 || true
 # USB controller (xHCI) and usbd – the [RESULT-USB] line from the USB self-test.
@@ -440,7 +452,7 @@ fi
 case "$CODE" in
   33)
     if [ -n "$SUMMARY2" ]; then
-      echo "PASS - ${SUMMARY}; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}; one stick: ${ONE_PASS}/2 starts PASSED${SOAK_OK}"
+      echo "PASS - ${SUMMARY}; ABI host: ${ABI_HOST}/5; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}; one stick: ${ONE_PASS}/2 starts PASSED${SOAK_OK}"
     else
       echo "PASS - ${SUMMARY}"
     fi

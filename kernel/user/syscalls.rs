@@ -399,6 +399,9 @@ pub const ERROR_NOT_EMPTY: i64 = -39;
 pub const ERROR_NOT_IMPLEMENTED: i64 = -38;
 /// No reply in time (ublk – usbd did not respond).
 pub const ERROR_TIMED_OUT: i64 = -110;
+/// The program needs an ABI this system does not give (exec – ELF ABI note; DeSoOS-only
+/// codes start at -200, below every Unix number).
+pub const ERROR_ABI: i64 = -200;
 
 /// Largest single write/read (longer ones – several calls).
 const MAX_IO: u64 = 64 * 1024;

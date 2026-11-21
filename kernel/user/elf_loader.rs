@@ -1,8 +1,10 @@
 // Loading ELF programs into a process address space.
 //
 // The same parser as in the bootloader (common/elf.rs) + rules for programs:
-//   * segments only in the lower half: from USER_MIN (the first 1 MiB is empty –
-//     null pointer) to USER_MAX (below the stack, with a gap),
+//   * segments only in the load range of ABI 1.0 (docs/abi/README.md): from USER_MIN
+//     (the first 1 MiB is empty – null pointer) to USER_MAX – below the heap's largest
+//     reach (image end + BRK_MAX) plus a 1 GiB gap before the mmap area (MMAP_BASE), so a
+//     program anywhere in the range never meets its heap, mmap or stack,
 //   * W^X: a segment cannot be both writable and executable; pages
 //     without PF_X get NX,
 //   * entry point in an executable segment, the whole image at most 64 MiB,
@@ -19,10 +21,10 @@ use crate::memory::{nx_flag, NO_EXECUTE, USER, WRITABLE};
 
 const PAGE: u64 = 4096;
 pub const USER_MIN: u64 = 0x10_0000;
-pub const USER_MAX: u64 = USER_STACK_TOP - USER_STACK_SIZE - 0x10_0000;
-const MAX_IMAGE: u64 = 64 * 1024 * 1024;
-const MAX_ARGS: usize = 32;
-const MAX_ARG_BYTES: usize = 4096;
+pub const USER_MAX: u64 = super::vm::MMAP_BASE - super::vm::BRK_MAX - (1 << 30);
+pub const MAX_IMAGE: u64 = 64 * 1024 * 1024;
+pub const MAX_ARGS: usize = 32;
+pub const MAX_ARG_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadError {

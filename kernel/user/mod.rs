@@ -67,6 +67,11 @@ mod test_ipc;
 // The syscall rights table.
 #[cfg(selftest)]
 mod test_rights;
+// The ABI description (abi/abi.toml) against the kernel and /bin/abiprobe.
+#[cfg(selftest)]
+mod abi_generated;
+#[cfg(selftest)]
+mod test_abi;
 // DeSoCrypto (common/desocrypto) in the kernel and in user space.
 #[cfg(selftest)]
 mod test_crypto;
@@ -793,6 +798,8 @@ pub use test_files::self_test as files_self_test;
 pub use test_ipc::self_test as ipc_self_test;
 #[cfg(selftest)]
 pub use test_rights::self_test as rights_self_test;
+#[cfg(selftest)]
+pub use test_abi::self_test as abi_self_test;
 #[cfg(selftest)]
 pub use test_crypto::self_test as crypto_self_test;
 #[cfg(selftest)]

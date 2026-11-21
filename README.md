@@ -42,8 +42,9 @@ More documentation:
 - `docs/` - the documentation of the whole system (index: `docs/README.md`): `docs/ARCHITECTURE.md` (what lives in
   the kernel, what runs in user space, syscalls and IPC), `docs/RELEASE.md` (tests, real hardware, performance and
   current limitations per release), `docs/desofs/` (the DeSoFS file system and its on-disk format),
-  `docs/desocrypto/` (the cryptographic library: algorithms, rules, tests) and `docs/desotls/` (the TLS library:
-  the TLS 1.3 connection, how certificate chains are checked, the CA store, the clock).
+  `docs/desocrypto/` (the cryptographic library: algorithms, rules, tests), `docs/desotls/` (the TLS library:
+  the TLS 1.3 connection, how certificate chains are checked, the CA store, the clock) and `docs/abi/` (the ABI –
+  what a program may rely on: every system call and constant, the rules for changing them, the tests).
 - A `README.md` in the main code folders (`kernel/`, `kernel/fs/desofs/`, `user/`, `common/desocrypto/`,
   `common/desotls/`, `tests/`)
   – what the folder holds and where to start reading.
@@ -109,7 +110,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (41 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, 331 tests), stress tests and a long soak test
+- Built-in self-tests (42 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 338 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -208,15 +209,19 @@ Disks attached by `run-qemu.sh`:
 tests/test.sh                # build --selftest + run tests in headless QEMU
 tests/test.sh --no-build     # run only (after your own ./build.sh --selftest)
 tests/test.sh --verbose      # show the whole log live
-TIMEOUT=600 tests/test.sh    # change the timeout (default 480 s)
+TIMEOUT=900 tests/test.sh    # change the timeout (default 600 s)
 ACCEL=kvm tests/test.sh      # with KVM; SMP=N also works (default 4)
 LOOP=nobkl:400 tests/test.sh # loop mode: one suite 400 times, stops at the first failure
 ```
 
 **Loop mode** is for rare failures that show up once in hundreds of runs. The boot suites run once, then only the
 named suite runs round after round (USB, network, stress and the other suites are skipped); the default timeout
-becomes 3600 s. Suites: `smp`, `lock`, `tlb`, `alloc`, `nobkl`, `files`, `ipc`, `rights`. The summary shows
+becomes 3600 s. Suites: `smp`, `lock`, `tlb`, `alloc`, `nobkl`, `files`, `ipc`, `rights`, `abi`, `crypto`, `rng`, `certs`, `desofs`. The summary shows
 `[RESULT-LOOP] suite=… rounds=… passed=… min_ms=… avg_ms=… max_ms=…` and the failed round, if any.
+
+Before anything is built, the ABI host test (`python3 tools/abigen.py --test`, `logs/test-abi.log`) checks the ABI
+description `abi/abi.toml` against its locks, the generated files and the code (`docs/abi/README.md`); a failure stops
+the run there.
 
 After the tests QEMU starts a second time on the same test disk (the restart phase – DeSoFS written by the first
 start must be there), then a short soak runs for 2 minutes (see below).
@@ -505,7 +510,7 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
   process; `run loop` - endless loop (Ctrl+C or `&` + `kill`).
 - Syscalls: `run hello`, `run cat`, `run files` (then `cat /tmp/ring3.txt`), `run ticker &`,
   `run regs` (100k syscalls), `run badptr` (bad pointer -> -14). Syscall list:
-  `kernel/user/syscalls.rs` and `docs/ARCHITECTURE.md`.
+  `docs/abi/SYSCALLS.md` (generated from `abi/abi.toml`, the ABI description) and `docs/ARCHITECTURE.md`.
 - FPU/SSE: `run sse` (42), `run x87` (3), `run xmm 3` (3 processes checking xmm0-15 2 million
   times; 1 = no corruption), `run fpuclean` (new processes start with clean registers).
 - Kernel tasks: `spawn spin`, `spawn tick`, `kill <id>`.
@@ -521,8 +526,11 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
+- `abi/` - the ABI description `abi.toml` (system calls, handles and rights, constants, the loader's limits) and the
+  locks (`abi-1.0.lock`) that freeze it; `docs/abi/README.md`.
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
-- `tools/` - host tools a real stick is made with: `mkusb.py` (GPT + ESP + DeSoFS), `mkdesofs.py` (an empty DeSoFS).
+- `tools/` - host tools: `mkusb.py` (GPT + ESP + DeSoFS), `mkdesofs.py` (an empty DeSoFS), `abigen.py` (the ABI:
+  checks, generated files, locks).
 - `ab-usb.sh`, `ab/` - write an older kernel version to a USB stick for A/B comparisons.
 - `build/` - build output; `logs/` - test and build logs.
 

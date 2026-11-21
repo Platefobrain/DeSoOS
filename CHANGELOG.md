@@ -2,6 +2,45 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.81.0 — in progress (ABI + SDK)
+
+Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
+
+### Stage A – the ABI description and its guard
+- **`abi/abi.toml` – the one source of truth** for what a program may rely on, written from the code as it is:
+  62 system call numbers (61 stable; 21 reserved – a call removed long ago, `ERROR_NOT_IMPLEMENTED`, never used again),
+  each with its arguments in order (name, type: `handle` / `ptr_in` / `ptr_out` / `len` / `u64` / `i64` / `flags`,
+  meaning), result, documented errors, the rights row (handle arguments, kinds, rights, conditions, path calls),
+  status, `since`, `test_class` and where it is tested; 125 constants (errors, handle kinds and rights, flags, slots,
+  `sysctl` operations, limits) with their type, value and the kernel path that must hold the same value; the loader's
+  limits (load range, program file, image, arguments, stack).
+- **ABI 1.0 frozen** in `abi/abi-1.0.lock`: one readable line per entry with its SHA-256, and a total. Within a major
+  version only additions, each a new minor with its own lock; a lock is never rewritten, so a lock update can never
+  approve a break (`docs/abi/README.md`).
+- **`tools/abigen.py`** (Python 3 standard library, its own small TOML reader): checks the description, generates
+  `docs/abi/SYSCALLS.md`, `user/lib/abi_generated.rs` (constants for programs) and `kernel/user/abi_generated.rs` (the
+  kernel's half of the test), guards the locks with a diff in plain words (`ABI BREAK: SYS_READ argument 1: lock
+  'buf:ptr_out', now 'len:len'`, `ABI ADD WITHOUT VERSION: …`).
+- **`ERROR_ABI` (-200)** is in ABI 1.0 from the start (exec of a program built for a newer ABI – the ELF note comes in
+  stage B); DeSoOS-only error codes start at -200.
+- **The load range is part of ABI 1.0**: a program's segments must lie in [0x100000, 0xFFF80000000] – below its
+  largest heap (1 GiB above the image) and a 1 GiB gap before the `mmap` area. Before, the loader accepted segments up
+  to just below the stack, where a program's heap or the `mmap` area could reach them; every program is linked at
+  0x400000, so nothing changes for them.
+- Tests: `tests/test.sh` runs `python3 tools/abigen.py --test` on the host before building (`logs/test-abi.log`) – the
+  locks, the description (no holes, typed arguments, handle arguments = rights rows, errors are `ERROR_*`, every stable
+  entry tested), the generator (deterministic, = the files in the tree), the code against the description (the
+  kernel's syscall numbers and the argument registers each dispatch arm reads; every constant of `desoos.rs`) and 18
+  mutations, all caught. **ABI TEST** in QEMU: the kernel's rights table byte for byte, the table's size, the reserved
+  numbers, 174 syscall numbers and constants through their kernel paths; `/bin/abiprobe` (raw syscalls on the
+  generated constants, 111 probes): every rights-table row with a handle that does not exist, a handle without rights,
+  reserved numbers, bad pointers, the ordinary calls with known results, a child exiting with 7. `abi` is a loop-mode
+  suite. Kernel-side mutations, each a separate build: a rights row changed (ABI TEST 1/2: the differing line shown),
+  a kernel constant changed (`MSG_MAX`), two arguments of a call swapped in the kernel (`getrandom` – caught by
+  abiprobe) – all caught.
+- Docs: `docs/abi/README.md` (what ABI 1.0 is, the rules, adding a call, the tests), `docs/abi/SYSCALLS.md`
+  (generated), ARCHITECTURE, README, `docs/README.md`, `tools/`, `tests/`, `user/` READMEs.
+
 ## v0.80.1 — 2026-11-21 (fixes after the review of v0.80.0)
 
 Plan: V0801 ver 2 (accepted). Three fixes, no change to the architecture or the production kernel.

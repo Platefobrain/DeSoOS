@@ -7,6 +7,8 @@ The documentation of the whole system. Change history is in `../CHANGELOG.md`; e
 |---|---|
 | `ARCHITECTURE.md` | How DeSoOS is built and how its parts work together: boot, memory, scheduler, syscalls and handles, IPC, user-space services and drivers, permissions (DCP), files, DeSoFS, network, USB, cryptography, certificates |
 | `RELEASE.md` | One report per release: tests passed (QEMU TCG / KVM), real hardware, performance against the previous release, known problems; at the top – the current limitations of the system |
+| `abi/README.md` | The DeSoOS ABI: what a program may rely on (system calls, handles and rights, constants, the loader's limits), the rules for changing it, the locks and the tests |
+| `abi/SYSCALLS.md` | Every system call and constant of the ABI – generated from `abi/abi.toml` |
 | `desofs/README.md` | DeSoFS – DeSoOS's own copy-on-write file system: what it does, the `desofs` commands, where the code and the tests are |
 | `desofs/FORMAT.md` | The DeSoFS on-disk format 1, byte by byte (closed specification) |
 | `desocrypto/README.md` | DeSoCrypto – DeSoOS's own cryptographic library: what it has, who uses it, where the code and the tests are |

@@ -1,0 +1,190 @@
+# DeSoOS ABI 1.0 lock – written once by tools/abigen.py --new-lock, never edited.
+# One line per entry + the SHA-256 of the line; TOTAL = SHA-256 of all entry lines.
+SYS_BLK_ATTACH number=50 args=(blk:handle, chan:handle, buf:handle, info:ptr_in) returns=value rights=[blk BLK need WRITE; chan CHANNEL need SEND|RECV|TRANSFER; buf SHM need MAP_READ] path=no status=stable  sha256=5bdda7f2ed424f1eda390672f34fe990b07debffb8adca4b3aec53f3647336c6
+SYS_BRK number=26 args=(addr:u64) returns=value rights=[] path=no status=stable  sha256=79a2cd9fae5d505cbcb5b648581bdc47616fdb7f247ed770b4adee815f84ad74
+SYS_CHANNEL_CREATE number=31 args=(out:ptr_out) returns=value rights=[] path=no status=stable  sha256=d3dfd610615229136082edf02305412ad2db16e57e80938fb7246f28da4622ab
+SYS_CHAN_RECV number=33 args=(h:handle, buf:ptr_out, len:len, handles:ptr_out, hcap_flags:u64, info:ptr_out) returns=value rights=[h CHANNEL need RECV] path=no status=stable  sha256=56667d2c8fe7cc44a16f7d8d3ddcb7b892aa3e578171190f4dbb1819718143e2
+SYS_CHAN_SEND number=32 args=(h:handle, data:ptr_in, len:len, handles:ptr_in, handles_len:len, flags:flags) returns=value rights=[h CHANNEL need SEND] path=no status=stable  sha256=454c6d31fdd91b922584a2dc9ba46c28a25cb3c7e61e3377f9c8173f6cf1298c
+SYS_CHDIR number=13 args=(path:ptr_in, path_len:len) returns=value rights=[] path=yes status=stable  sha256=5d829fb4b3ce7958dd02dd02fbefa7e09307b34019ce6f67f9978e7b3a316053
+SYS_CLOSE number=4 args=(h:handle) returns=value rights=[h ANY need -] path=no status=stable  sha256=b491f0b6c4323d3a85221d8941e12a8520ee8f5f75b2a5348a7ec6339f53ca86
+SYS_DEV_CLAIM number=39 args=(root:handle, bdf:u64) returns=value rights=[root HW_ROOT need -] path=no status=stable  sha256=818ac4632b01697e22baa030b372a90a6264d290f70ecbee96062cd04e5afb5a
+SYS_DEV_FIND number=48 args=(root:handle, class:u64, nr:u64) returns=value rights=[root HW_ROOT need -] path=no status=stable  sha256=2518796a05c02fea50535f9a44fb58069cec815588d0008b0e476a3dec0e87f4
+SYS_DEV_INFO number=40 args=(h:handle, out:ptr_out) returns=value rights=[h DEVICE need -] path=no status=stable  sha256=d24bbb49d842eefe5f5b3f4f9923709af752a4f0705460fd4870148bdb12d467
+SYS_DEV_MAP number=41 args=(h:handle, bar:u64, prot:flags) returns=value rights=[h DEVICE need MAP_READ +MAP_WRITE if prot&0x2] path=no status=stable  sha256=3fc9db43330b186ff34a796b57f8ca8833968b1727cab8127b6c9276b589433a
+SYS_DIR_OPEN number=51 args=(path:ptr_in, path_len:len, flags:flags) returns=value rights=[] path=yes status=stable  sha256=438ae90304e76d4294e250a7784fb09ad98bd819b4a4343d2492c36cbbab0c71
+SYS_DMA_ALLOC number=44 args=(dev:handle, size:len, bits:u64) returns=value rights=[dev DEVICE need MAP_WRITE] path=no status=stable  sha256=269405ae1cfffb9b62f822b7d7647d3e48fe4898ef648606c3bfc04aecf91b54
+SYS_DMA_PHYS number=45 args=(buf:handle) returns=value rights=[buf SHM need -] path=no status=stable  sha256=5fe4d63a5fd110e8266f22d68bf285c80632d193b6fb9183e1b3ee6521bd3c6f
+SYS_DUP number=22 args=(h:handle) returns=value rights=[h ANY need DUP] path=no status=stable  sha256=dcf2bfc0f3eee167bfd09ce36cd8b85a5c7644884723529983ea2afd60601e51
+SYS_DUP2 number=23 args=(old:handle, new:u64) returns=value rights=[old ANY need DUP] path=no status=stable  sha256=9f08747abcb4bf5a70afb8b74eba0bc5aa9630a317f50257572443a41a877528
+SYS_EXIT number=0 args=(code:i64) returns=never rights=[] path=no status=stable  sha256=eabf7ed00564fd57c0ee6e8f6bcfa74ab301f870ff241c402ab01a652f546370
+SYS_GETCWD number=14 args=(buf:ptr_out, len:len) returns=value rights=[] path=no status=stable  sha256=6169b839997e9b485e43edb9adff88bea674584d83e3eeeadadf5ca85a884117
+SYS_GETPID number=5 args=() returns=value rights=[] path=no status=stable  sha256=1938be7916f2c5b3e47d67312cc7c24b1f70819872843957555f8b5059a0b849
+SYS_GETPPID number=11 args=() returns=value rights=[] path=no status=stable  sha256=c2f11505a1db7f2b174a9e60d99fa83fa306d30605cd753500b81f2117887c4a
+SYS_GETRANDOM number=58 args=(buf:ptr_out, len:len, flags:flags) returns=value rights=[] path=no status=stable  sha256=5a30656da450803b3af625bd2c01600ad69d543eb64342c83c89ec27be44b886
+SYS_HANDLE_DUP number=29 args=(h:handle, mask:flags) returns=value rights=[h ANY need DUP] path=no status=stable  sha256=808c4b787825800763cd4eec33bd5cbeb21ea692ce3af9bff2d95f148328ebf7
+SYS_HANDLE_INFO number=30 args=(h:handle) returns=value rights=[h ANY need -] path=no status=stable  sha256=6630f55a745b27e3232f75048e5d12fe45b547f0a83fdcc9b340847f17a37e15
+SYS_INPUT_INJECT number=49 args=(h:handle, events:ptr_in, n:len) returns=value rights=[h INPUT need WRITE] path=no status=stable  sha256=0c9971afa773cd285936e28593744f0430b7551e12541405b954abf49ea6a786
+SYS_IRQ_BIND number=42 args=(dev:handle) returns=value rights=[dev DEVICE need MAP_WRITE] path=no status=stable  sha256=3798df4cd20de909a436b63de8e0cb1eab281c91552cbf71652aa3a1d713c7e3
+SYS_IRQ_READ number=43 args=(irq:handle) returns=value rights=[irq IRQ need RECV] path=no status=stable  sha256=47d3fc02975b6955e8f5b428690dd0c8ef38bc7afd350fb36502ce2595fd0f24
+SYS_KILL number=12 args=(pid:u64) returns=value rights=[] path=no status=stable  sha256=32fb28976a08eba0df456884115a7ec4e8c2b30a1bc51c5c13ec68168550552d
+SYS_MKDIR number=17 args=(path:ptr_in, path_len:len) returns=value rights=[] path=yes status=stable  sha256=8c0e23519819e0e7a74f2e4947fc567efca21b1bc2451da9a82530ac8bd06ea4
+SYS_MKDIRAT number=55 args=(dir:handle, path:ptr_in, path_len:len) returns=value rights=[dir DIR need WRITE] path=no status=stable  sha256=c359b7baec9dfe9a1a5d1a566f999bb09d1738418d99fa5170c72c8955b1183c
+SYS_MMAP number=27 args=(len:len, prot:flags) returns=value rights=[] path=no status=stable  sha256=2c7ec7ed102d3f994d85227c15af0466463a0954f0e94971cbd756b08487890d
+SYS_MUNMAP number=28 args=(addr:u64, len:len) returns=value rights=[] path=no status=stable  sha256=2ed94696c14f2b69cd6eff8532b39bcef390f58b240569516d8f996635a3ff07
+SYS_OPEN number=3 args=(path:ptr_in, path_len:len, flags:flags) returns=value rights=[] path=yes status=stable  sha256=6968fc2bcb76a8c3fa7bbaf692f65a91667e1c4dd37d532c37d4c038ee5ffe67
+SYS_OPENAT number=52 args=(dir:handle, path:ptr_in, path_len:len, flags:flags) returns=value rights=[dir DIR need - +READ if flags&0x1 +WRITE if flags&0x2] path=no status=stable  sha256=b784abd531611dcec0bf8a9ce2657fab8fb79ef2711865aec788731c3f54c4eb
+SYS_PIPE number=25 args=(out:ptr_out) returns=value rights=[] path=no status=stable  sha256=7a6c2f02fa1735f661eda535e5d7044c3e48863410d4a11480d9b8d5c02e3524
+SYS_READ number=2 args=(h:handle, buf:ptr_out, len:len) returns=value rights=[h CONSOLE|FILE|PIPE need READ] path=no status=stable  sha256=8ecd9c657c1a66dfb35815a93d49a147533f57bc936bf844bfdd3b006638d14f
+SYS_READDIR number=15 args=(path:ptr_in, path_len:len, buf:ptr_out, len:len) returns=value rights=[] path=yes status=stable  sha256=3dc04fb8feef9ee33d197c018318b64b24768a88390e43aaeb993b157c87f9ae
+SYS_READDIRAT number=53 args=(dir:handle, path:ptr_in, path_len:len, buf:ptr_out, len:len) returns=value rights=[dir DIR need READ] path=no status=stable  sha256=4bfe628df4f13e03a2183158e8059528b967432b11df0a8262c4642a1cc4e548
+SYS_READDIR_PART number=57 args=(dir:handle, path:ptr_in, path_len:len, buf:ptr_out, len:len, cursor:ptr_out) returns=value rights=[dir DIR need READ] path=no status=stable  sha256=1c167fd339174e6ce3adfa5579f13dc42bf42ce1d3b1768369990f00bde77124
+SYS_READKEY number=19 args=(line:ptr_in, line_len:len) returns=value rights=[] path=no status=stable  sha256=e22654d5492de6e3bba6662225946da75584f4dd60aba65ae6802848f711ad4a
+SYS_RESERVED_21 number=21 reserved  sha256=229dd3f687ac8d9b058e3f3c0f65fc3ad14106ee268089916cc6964ef675bb1f
+SYS_SEEK number=24 args=(h:handle, offset:i64, whence:u64) returns=value rights=[h ANY need -] path=no status=stable  sha256=993a38a9aac20aacb0aecb33e0a50c7b30536bf0714e7f99116edbf746a6cd23
+SYS_SHM_CREATE number=34 args=(size:len) returns=value rights=[] path=no status=stable  sha256=9b83c500306a0108ed0b7bba5ea43f326ef0f0dff51a48a492f8f8b3f59ea61d
+SYS_SHM_MAP number=35 args=(h:handle, prot:flags) returns=value rights=[h SHM need MAP_READ +MAP_WRITE if prot&0x2] path=no status=stable  sha256=25d0078e2b209706bbecb5f84e520536b75b10c517413a87d435615de08b0fba
+SYS_SHM_SIZE number=37 args=(h:handle) returns=value rights=[h SHM need -] path=no status=stable  sha256=275121e30153f4c43527674b3dc322c69524154d740f37cb1370c576c6ae5e23
+SYS_SLEEP number=6 args=(ms:u64) returns=value rights=[] path=no status=stable  sha256=56f6390f1979eaaf97277e9a7aef6af4435a534ba75ff029756fb33aed9359b7
+SYS_SPAWN number=9 args=(path:ptr_in, path_len:len, args:ptr_in, args_len:len, flags:flags, fds:u64) returns=value rights=[] path=yes status=stable  sha256=9f7932aa29b269c9a4ae1d3b8370f26daa0846e50530f4c90a9a5e3c757336f8
+SYS_SPAWN_EX number=36 args=(path:ptr_in, path_len:len, args:ptr_in, args_len:len, map:ptr_in, map_len_flags:u64) returns=value rights=[] path=yes status=stable  sha256=7ff85284d48e6b69e8febb29f01d5314ec6e3901499b0c1fea28f3e2d7ecf5bf
+SYS_STAT number=16 args=(path:ptr_in, path_len:len, out:ptr_out) returns=value rights=[] path=yes status=stable  sha256=90fbf23808d678a23f1cc8243180d9e15820de39e354a1490ef0eb37ce1d612d
+SYS_STATAT number=54 args=(dir:handle, path:ptr_in, path_len:len, out:ptr_out) returns=value rights=[dir DIR need READ] path=no status=stable  sha256=bf97e8e30c1ffac2e58944a1b6e0244fe87f781685b709e11d7b6c13d84edc13
+SYS_SYSCTL number=47 args=(h:handle, op:u64, arg:u64, out:handle, name:ptr_in, name_len:len) returns=value rights=[h SYSCTL need -] path=no status=stable  sha256=bfbdd58272232c5d01b9fa25541e107e25ff6f760a480b83976ac25bb38c1620
+SYS_SYSINFO number=46 args=(topic:ptr_in, topic_len:len, buf:ptr_out, len:len) returns=value rights=[] path=no status=stable  sha256=060c6162cb4331c81b875d1a1d6ad69dd069173072f6102982a69437ff3ced8c
+SYS_TASKS number=20 args=(buf:ptr_out, len:len) returns=value rights=[] path=no status=stable  sha256=e39ec62b8b421a41aab993b5c62e54eb0cf1f9e22cefa4bf8a4b697c45fd6d6d
+SYS_TIME number=59 args=(out:ptr_out) returns=value rights=[] path=no status=stable  sha256=7c6bad9f63b42b14d321cdb202a518e0a4bed042ce8a97a53fd399b302f7cb0b
+SYS_TIME_BOUND number=61 args=(out:ptr_out, len:len) returns=value rights=[] path=no status=stable  sha256=6cad34b2d87bfc81e187c3f64d9ecd01c707405b66f5684b51ec70468b0c2162
+SYS_TIME_SET number=60 args=(h:handle, t_ms:u64, u_ms:u64, servers:u64) returns=value rights=[h SETTIME need WRITE] path=no status=stable  sha256=948a7a55203ecee55e95602357f65d3d478e7c8ba6a1552a93675f8e9caa2bac
+SYS_UNLINK number=18 args=(path:ptr_in, path_len:len) returns=value rights=[] path=yes status=stable  sha256=60ba3684d04d7b7a6c6d82a19dacb290b35ee28858a78d8dbb4e82370634acf7
+SYS_UNLINKAT number=56 args=(dir:handle, path:ptr_in, path_len:len) returns=value rights=[dir DIR need WRITE] path=no status=stable  sha256=3cdcf2e4409a2785c5b8fd4d3990045c10146b461ca3fd0b97661083c9fa668c
+SYS_UPTIME number=8 args=() returns=value rights=[] path=no status=stable  sha256=cd70dc15404f856e3b9b62152d49cfb0d81f6f4dde66148dc3be133945f66533
+SYS_WAIT number=10 args=(pid:u64, status:ptr_out, flags:flags) returns=value rights=[] path=no status=stable  sha256=e4f03bff898de50a24026a7f270cb7f75032e85710f8ef7cdacbc700c5e6a8ce
+SYS_WAIT_MANY number=38 args=(list:ptr_in, n:len, timeout_ms:u64) returns=value rights=[] path=no status=stable  sha256=36b35d992e1014e64f80f5a107e97152f3c71cb112fda4515b197ae062180e28
+SYS_WRITE number=1 args=(h:handle, buf:ptr_in, len:len) returns=value rights=[h CONSOLE|FILE|PIPE need WRITE] path=no status=stable  sha256=19f7aaf071307f6d694bd5ea5715ae02b62aed83dd6d899a66fce3bd1d40a226
+SYS_YIELD number=7 args=() returns=value rights=[] path=no status=stable  sha256=15fdc4888f0daa7d8372dd6c2027f86b05b5d37d2b2abf630c2f75a673424957
+BLK type=u64 value=6 status=stable  sha256=162dac94a15c8c021b596c1bf46605da6df999dc8744fc4da3820347512c7f79
+BRK_MAX type=u64 value=1073741824 status=stable  sha256=8d32f17cd80a57f7b72f732fb6443621bc7e8ccf1146a4aae206fe9cc3efc68d
+CHAN_NONBLOCK type=u64 value=1 status=stable  sha256=aa752b8514254fc70795e43d23a475667e328d9e280406524e2f5d8660668a4a
+CLASS_ETHERNET type=u64 value=131072 status=stable  sha256=659da7aa4916a89966a692404e2195775f3676094ceb5176a961a8597cd9348d
+CLASS_XHCI type=u64 value=787248 status=stable  sha256=c3967d75574aa25de42f9f1309e8af860bc0bf2ade07368037bfba76ae6515a5
+DIR_END type=u64 value=18446744073709551615 status=stable  sha256=79180bc13f3e02ea3ddcdef751cff9aebf5cfb221b297d9e04daf653d293ca32
+ERROR_ABI type=i64 value=-200 status=stable  sha256=b1d62313e5d17023ccb3e05a1754c70a4898eb80552fdbcbbfb53b5599d93e7b
+ERROR_ACCESS_DENIED type=i64 value=-13 status=stable  sha256=f45c549d0e781e324b35492fee98accc6a5fb0df1324add25b4553132bbb3fcf
+ERROR_ALREADY_EXISTS type=i64 value=-17 status=stable  sha256=b7d418aeb632de3c952ab9b4798cbcd4aea9bf4357cb2903342cede1ab2d1a88
+ERROR_BUFFER_TOO_SMALL type=i64 value=-34 status=stable  sha256=865355dfe9ed6cd99cd3f3bed8e4a74bcf06595422ce11d7271f7029508d60e4
+ERROR_BUSY type=i64 value=-16 status=stable  sha256=dac28c35ad9dff355aa6935b3505f52a9db90f6c4b9082f8664d3580c4e8cd46
+ERROR_CLOSED type=i64 value=-32 status=stable  sha256=aeb0188e5cefc1df141e57e947967185bbff372dcb073c566f9a5dacb399b96d
+ERROR_INTERRUPTED type=i64 value=-4 status=stable  sha256=de744cde61c7eb781b98b8a4b9ac76d8a0c2a0b842d977c971ce113e4ad7daf3
+ERROR_INVALID_ADDRESS type=i64 value=-14 status=stable  sha256=388fa76128884800b71143c0fc4e46225f47079807737f4c09d7771a720a1242
+ERROR_INVALID_ARGUMENT type=i64 value=-22 status=stable  sha256=367399fcd86dcc8b1615f444a21fb0b798950885d4f28196144339954b4b39b6
+ERROR_INVALID_HANDLE type=i64 value=-9 status=stable  sha256=35d4a2326fa33b3a4e6415b93b39617ba19666bfeba310cd170c911f9a4f6335
+ERROR_IO type=i64 value=-5 status=stable  sha256=428e1851c263b3e1549d2c2b3f880418101cf8c4f5a261cdc61ed4f086eaf1b2
+ERROR_IS_DIRECTORY type=i64 value=-21 status=stable  sha256=fa19cc424bf569d4bcf670ef2c8b6afd4d34dd85ec013790bd78861e977c84b0
+ERROR_MESSAGE_TOO_LARGE type=i64 value=-90 status=stable  sha256=f8c044fce0691f9b3ee949f966d643b9695f2cc05c917125deb788946ea7d054
+ERROR_NOT_DIRECTORY type=i64 value=-20 status=stable  sha256=08612a9a25651c3af63efaed9365bdcb1256a6e0e53ff2adad503f668a3a44dd
+ERROR_NOT_EMPTY type=i64 value=-39 status=stable  sha256=32b76ae9bbc36d5a41b5687aa332e1537e60bbeb12e6824c69b1105dd95063d2
+ERROR_NOT_EXECUTABLE type=i64 value=-8 status=stable  sha256=a89e581058f3adb4762d20052849e256588d91f99a139398cf59b0c035ecf72c
+ERROR_NOT_FOUND type=i64 value=-2 status=stable  sha256=284e511bcbe6d4dcfbacfc680bdddd1149444ccc7f615b93e3d254949a9cf203
+ERROR_NOT_IMPLEMENTED type=i64 value=-38 status=stable  sha256=aed2f42ddcbe4d463087a005013b935675ceede15623e0e311b4da82fb74ccd9
+ERROR_NOT_PERMITTED type=i64 value=-1 status=stable  sha256=326aff957f6a4545e5664e47e7e737bcc914b67c07e3d79c2e87c2405f2f8485
+ERROR_NOT_SEEKABLE type=i64 value=-29 status=stable  sha256=3d0e988fa7261e18ada04dc57946af1aeb02d9da099a7577fb06521a4c2f061d
+ERROR_NO_CHILD type=i64 value=-10 status=stable  sha256=036a31df504c68e07abcb9d797af711a4373af87df77f6b28b92a874c3a7cc7d
+ERROR_NO_DEVICE type=i64 value=-19 status=stable  sha256=d95854c76b08b30db82c6c6597c1b91b269d81d788166be67b517c8ae93f95a4
+ERROR_NO_PROCESS type=i64 value=-3 status=stable  sha256=010a6b9ae0f519d7288526de8a195371a1f3206e044e24b5c20b267e6b586811
+ERROR_NO_SPACE type=i64 value=-28 status=stable  sha256=ed157d01b8a0a62dcd717ea123f1346b16816c19d6fc8a43908e80ba7731cf19
+ERROR_OUT_OF_MEMORY type=i64 value=-12 status=stable  sha256=13c735bdd89496e760c4b7781a10531feae1fc916119dac8021b50d006407b4f
+ERROR_READ_ONLY type=i64 value=-30 status=stable  sha256=39b9f5ce40fed055a080fb6740da69bc8a95af214ee79b0cec9e6007f0066097
+ERROR_TIMED_OUT type=i64 value=-110 status=stable  sha256=961d38888cd4d26c0bd1cae1349ce9b84a45a9db0e2dc151efe57f59d8e2afa8
+ERROR_TOO_MANY_ARGUMENTS type=i64 value=-7 status=stable  sha256=97e6eb3cc91a56099d6c0fa2bab6a8887f0cc70df41e4fe6d9d8d085fff54c46
+ERROR_TOO_MANY_HANDLES type=i64 value=-24 status=stable  sha256=f30712ce5dcca3fd6c4769447029d777b6a496ef0bb3c70d89bddbc5eb1c7369
+ERROR_WOULD_BLOCK type=i64 value=-11 status=stable  sha256=e5580d633aec4d565dfb8f4a25877c486d8550101a547953554bcd412bc99a91
+FOREVER type=u64 value=18446744073709551615 status=stable  sha256=4c353714abe09d34a0618d85057738b98586734931ca768efb42342ead56f4e6
+GETRANDOM_MAX type=usize value=4096 status=stable  sha256=d88fb0f9f0a854f25c121afc41b30259574416f82ea52123bd42e6211717f4ef
+HW_ROOT type=u64 value=3 status=stable  sha256=041e9fc4eb4e7a10a9371b0fdf279a37d3b97f9bd2d2d6482db829ac9e25bd7a
+INPUT type=u64 value=5 status=stable  sha256=32e1680f5e3d3d9c9cb0987b9d36700de00a2a1cbb2a306538af4cbfe1ed6bad
+KIND_BLK type=u64 value=11 status=stable  sha256=99762afe1a613d9a9f5e31ec2a5962b7b8abb4f922c7bacf11de7a84fca489d0
+KIND_CHANNEL type=u64 value=4 status=stable  sha256=c9afd98389a88dcf3d725fb0119943471473b7a021db988529f30426c3cc035f
+KIND_CONSOLE type=u64 value=1 status=stable  sha256=f6c9f5acabccd63530079653a894876aa9ae3d097298001406f312b91e36a6d4
+KIND_DEVICE type=u64 value=7 status=stable  sha256=a6fdd8d0d9b3672ef9bdabc856d8e9a0a527fd73997363a7cf465ce57ba7d4e9
+KIND_DIR type=u64 value=12 status=stable  sha256=b8078c0c90dd0ff852149e9bf33b2b9a00b8d2a9852fbbfd931f0fa4ecaaefc8
+KIND_FILE type=u64 value=2 status=stable  sha256=ffac76908fef9c0630a48ee843f67b5874dbfa7c721e4310c46b7d13dd2a9586
+KIND_HW_ROOT type=u64 value=6 status=stable  sha256=bfd537f51ae8a9bb412582e8339394afd19607ebfa40f266f5abf29afab6da36
+KIND_INPUT type=u64 value=10 status=stable  sha256=4b1d32ecad6631b1d21675973dd4362b109bbc47a960589cfb8b8bb1cd93c6a2
+KIND_IRQ type=u64 value=8 status=stable  sha256=2626b1f62a0b52f793e4ec438beecd4dfcc5b9e68fc19dda3ddc4a28eef16885
+KIND_PIPE type=u64 value=3 status=stable  sha256=581809605d25d7bbb7744c3ceafce67f32823c76b4a0d0679e1c65722aa14999
+KIND_SETTIME type=u64 value=13 status=stable  sha256=7647b806c82ca4a7b936cc1d21dc6c7a06f2dac4c262a8d2e1eec9c3c1197c5d
+KIND_SHM type=u64 value=5 status=stable  sha256=eaa890136777ef9f3c9419eb7c4ecab6c8fdc7e6450cb7fe2118c4bab4ccdcd0
+KIND_SYSCTL type=u64 value=9 status=stable  sha256=a108df5bfa92b7c448876bd644a0173a2f8a62ae96fabeb21ed9f88f802fb8a7
+MAX_ARGS type=usize value=32 status=stable  sha256=a42dd0c9cab78287f25cf716250b6ba849f621374d7eb242edec83460eacf64c
+MAX_ARG_BYTES type=usize value=4096 status=stable  sha256=3ea4b1f13ac692ba869b324edfc750f911fd784786b2f0d1f18a246d404a1deb
+MAX_IMAGE type=u64 value=67108864 status=stable  sha256=93ed291d4d5c0a563001d702d94a61e01425305975bf6e2789dbb2e8d55f055d
+MAX_PROGRAM_FILE type=usize value=8388608 status=stable  sha256=bff2a51b44b1831c83fd0bd148e2a1fe864570d629b63127fe7057bab1c72dd3
+MMAP_BASE type=u64 value=17592186044416 status=stable  sha256=7467b5ea4d671a2bd95167b868bce6f6a6188d63f441c45dc82010db337908d4
+MMAP_END type=u64 value=140737479901184 status=stable  sha256=f15949ce11e64e8ca6c610d65e6a1446a5df463164f8bd81a9ec7b9dcfc045af
+MSG_HANDLES type=usize value=8 status=stable  sha256=0c262d3b2e4f9e8759d69895ed2ba35b925306d9a1d599e76733dbe078b26df0
+MSG_MAX type=usize value=4096 status=stable  sha256=e577e4dc75c0283949b079edb19865a4110dc307038e45d9fcc4b37d820ee942
+O_APPEND type=u64 value=16 status=stable  sha256=bd22a9a1e9e192e312fcebda95dc6654f873a2edb7f7860479eebfed3a26bb5b
+O_CREATE type=u64 value=4 status=stable  sha256=6cdbf6c206d8ba90cbf7a373183a7a9b780ea512a77cc0fa850c76b776e4ca33
+O_READ type=u64 value=1 status=stable  sha256=0706f17e76ebac9c639dfa5174e6973ee36c69eb66d7892cac41fc06588f6a91
+O_TRUNC type=u64 value=8 status=stable  sha256=3d3eae61092709c7c1053c005b6eb72accdd8f5c53b666ef9d4670d0aa8a4815
+O_WRITE type=u64 value=2 status=stable  sha256=2a7b89e305049f75bd8e5591ef045da8d2159d6b6b8b996744236f60771f061f
+PROG_SVC type=u64 value=5 status=stable  sha256=081acbc025c62467a5a5ea8cd02075bc892f25265fce1170369639f38aafbf01
+PROT_READ type=u64 value=1 status=stable  sha256=2b3ffb277c54ccd32fdb3979781131dae8deed4b607c9711e33713be9a586bb0
+PROT_WRITE type=u64 value=2 status=stable  sha256=5d4f5d85b10d312c20b6f81643dd89262615b3e95efa74efe2b867c1ac53efba
+R_ALL type=u64 value=255 status=stable  sha256=d4601f4201ff19cf09ca88f12995f652d8cb05d39fa25cf5eccfeee1695e9c3f
+R_DUP type=u64 value=64 status=stable  sha256=0bdeacbb49343ee36416f5496539b2fb50352a660de2c86766d95e6580df1205
+R_MAP_READ type=u64 value=16 status=stable  sha256=7dc114b0f3c0bbf340cd3976db4eff87d2984204d4a29e46e159024d35529d36
+R_MAP_WRITE type=u64 value=32 status=stable  sha256=858efc0a006e031055530d400a48c765189daddb02cf745752c7278b9a0a35df
+R_READ type=u64 value=1 status=stable  sha256=748f3137e195b413aedd86a6323a2966ba7a03b4738796a6f9e08b00a9f207fb
+R_RECV type=u64 value=8 status=stable  sha256=5346ec38139829f292b7c6e4dfde3da30c986f867abaf69563fc7af23211b1ff
+R_SEND type=u64 value=4 status=stable  sha256=a45c259dd0e16bdb9a959a7f311a3c87d0dcf11d45374ce8d4ad93e7e114fa35
+R_TRANSFER type=u64 value=128 status=stable  sha256=bba19fc6026c207f5baa569337e6bdc2541c7daa2799e866babfe25916fb4fcf
+R_WRITE type=u64 value=2 status=stable  sha256=3954f0b9ff10d6bec547170fa668edd466ec6501c89c866bb2b202b83af2c686
+SEEK_CUR type=u64 value=1 status=stable  sha256=879c4412cbf1929d755c3629b21482a1aca1ae2a99d09c0ea2c42aa13d3e8ccf
+SEEK_END type=u64 value=2 status=stable  sha256=e09a05e0245fc522204443ff4f3ee36a9f66b4d0747f6dd6861e5ac6e08c51ab
+SEEK_SET type=u64 value=0 status=stable  sha256=4fabfd2f535f035bae36598f88a107cca1cf255d73a0bb1d33d8df2cf9da8665
+SETTIME type=u64 value=7 status=stable  sha256=1041fd9c0d0959e2140d483dff5b61607685f6c1452f4b774d4a0dc2b62dbc00
+SPAWN_FOREGROUND type=u64 value=1 status=stable  sha256=3b9cbab98319e6f1b332a1cd88a508c2016c827935eff75124897b2a4c0e6845
+SPAWN_NO_FILES type=u64 value=2 status=stable  sha256=ad449f4f3a1077698e2804af995aecf16875aa647bb4947e66a4d66db65e269c
+STACK_MAX type=u64 value=8388608 status=stable  sha256=a79c22e202cdc96d00a9c9ed314a8894c87885b4f5ca8959d6bb962cae8bf97e
+STATUS_SIGNALED type=u64 value=256 status=stable  sha256=a3d99ab195442572ecb7a718ffba7a904590f6b98de3f39d9400d47d643f0ece
+STDIO type=u64 value=8590000128 status=stable  sha256=0feca9a0e88cdf1d5957a938a476fe24d9ffd5fcca46dfa24c93457667307160
+SVC type=u64 value=3 status=stable  sha256=9dfb7f122e77eb252a0078dc4a6d244d040e437928b3e576c5661c7c6f39baf8
+SYSCTL type=u64 value=4 status=stable  sha256=ad9e99581e5c144f61ca157c9549fb86cf650373436b7769fbaf1b1ee92fcd25
+SYSCTL_DESOFS_CHECK type=u64 value=9 status=stable  sha256=b02f105d19c4f63c1a211da2b6250b6f27eb54a59d527de1abba87c6f2c06305
+SYSCTL_DESOFS_FORMAT type=u64 value=6 status=stable  sha256=9af4345680163937c0632e680d6a29cbdbbaf86f3cc0fa86ad76fb4e53fcf106
+SYSCTL_DESOFS_INFO type=u64 value=5 status=stable  sha256=9cbcc29fe94eb859f6f7cc5debbf004b795b8041f57fe5990fbd2423ac022476
+SYSCTL_DESOFS_MOUNT type=u64 value=7 status=stable  sha256=7f48155c9bec2a42c3646435543f01090d06c1a6aa2f649d43a928c43e0afa35
+SYSCTL_DESOFS_REPAIR type=u64 value=10 status=stable  sha256=3bf29854ebf576cb820b73013f7d7dc519018fb7acc4907c8c4b3b3de69f0b07
+SYSCTL_DESOFS_UNMOUNT type=u64 value=8 status=stable  sha256=860f136540a9e09e9443802aa30d5c1a0db5e974cd7655d643b7b39641fa414d
+SYSCTL_HALT type=u64 value=2 status=stable  sha256=fd28a087cb47fac095da85d6a56935a2fbfb68fa9f7eb62ed9c56e1974cfca46
+SYSCTL_RAMDISK type=u64 value=16 status=stable  sha256=6c09ca589ae1fd801ac9c925e85cbdcf85c9b4f0f248a5e4e78d8e4bd98c94ec
+SYSCTL_REBOOT type=u64 value=1 status=stable  sha256=4e1dcbcf6dc23d027584dc7439ade59d9a18b2f58ac3a9e3fb969c1ce83f78b4
+SYSCTL_SNAPSHOT_CREATE type=u64 value=11 status=stable  sha256=ab275d92e9fd5a565ef8dd45c799e97289f050417102cc7b8a4bd7cdced7d8af
+SYSCTL_SNAPSHOT_DELETE type=u64 value=14 status=stable  sha256=ddaccf07e659ea523c2eb6aacf0d566842c28b74f45eb69a2351a45f3fe11105
+SYSCTL_SNAPSHOT_LIST type=u64 value=12 status=stable  sha256=85860612501e114ef14812c9aea39168d7e5f1b6cf8de0fa1df2c66f521c74a7
+SYSCTL_SNAPSHOT_MOUNT type=u64 value=13 status=stable  sha256=ad5d69e79ec29ca57cf65fd86ae0a55109fbb2386ee6b18611d9ef304d899f6c
+SYSCTL_SNAPSHOT_RESTORE type=u64 value=15 status=stable  sha256=bb63f492b888e696672c1ae97d5969b755a5e3c123817192520976c18f86a747
+SYSCTL_STRESS type=u64 value=4 status=stable  sha256=e4a1a8b4fd75eeeb8c1235d735b2e28ac6426d4d17cb8ade217f038d7ced6a17
+SYSCTL_SYNC type=u64 value=3 status=stable  sha256=b39e29f1fb379cd60c1c66bde67c4c36cd00794e10e7c33615640f612ae26870
+SYSCTL_YES type=u64 value=4294967296 status=stable  sha256=c96f9d47ba87b5cfb0c0a6d56f5207b7a39b9e9bbf1c99334b9b462280c6ee35
+TB_NOT_SAVED type=u16 value=2 status=stable  sha256=624ba0cbec73a05e3925b538ffc1536cbb08c78b4d4e05175a7f6792ff62b27f
+TB_PLAUSIBLE type=u16 value=4 status=stable  sha256=e4b680c088b8049fa631bcd63b2f413c543d696a21f73010637ac611c0e0c210
+TB_RECOVERY type=u16 value=1 status=stable  sha256=6abe6704a75e834cf6509e2af13b6d42160e60ab3eab983a544043c55c02f9f0
+TIME_BOUND_LEN type=usize value=40 status=stable  sha256=e03f789e9773c3ef517aa538b44c8f71e44cd44d900be006c63d95d552797306
+TIME_SET_NOT_SAVED type=i64 value=8 status=stable  sha256=911ed1b386c9cb5269b923503178691cc549c8d15ac4bebf30744e88a703dfbc
+TIME_SET_RAISED type=i64 value=1 status=stable  sha256=13209b4b563f6973245c43034e4ec2b03d25a2953fde112a3f19b3020093dbdb
+TIME_SET_REPAIR type=i64 value=4 status=stable  sha256=15ad66f28c810a1d68acb99345ee69ee6f3949b5a3526a7e6cfdaedcdebee988
+TIME_SET_SAVED type=i64 value=2 status=stable  sha256=9407cb5b81b6baea7e34974172ee52fad926133d745bdec16e7c6fde11f5b10e
+UDP_MAX type=usize value=1472 status=stable  sha256=ee2ed1ac813829dfe64aef33356643f04882291913c5c42df2c10fff627dae9e
+USER_LOAD_MAX type=u64 value=17590038560768 status=stable  sha256=6c14cfb634e0807dadb4ae4a35a3ea1c859800bebf6aa273ec8ef0c91e50713a
+USER_LOAD_MIN type=u64 value=1048576 status=stable  sha256=04bea26720202e4bd20e09edeefa078ca7cd3c98729366689ad008c8e77dbd6c
+USER_STACK_SIZE type=u64 value=16384 status=stable  sha256=892eebc090643ed9fb0b30dfc69c8ce705a992785d00390d8f5b40549b376812
+USER_STACK_TOP type=u64 value=140737488289792 status=stable  sha256=16f470df317f73e2d5cc71e0b0d791142616cca38778581260ca892cd8388023
+WAIT_ANY type=u64 value=18446744073709551615 status=stable  sha256=0d7117d3c3b0a5b6b94dae2f03a0d12f3e9c6ed44832516ac73e43f1cabed8b0
+WAIT_MAX type=usize value=16 status=stable  sha256=9335c5350523ef2101cbf72511682224ef9192676f28dcf7b77e456a30bf7c6e
+WNOHANG type=u64 value=1 status=stable  sha256=53a5e20b834512195cc26acc7a2280cae16b96132b75e67102df99ce7a604008
+W_IRQ type=u64 value=4 status=stable  sha256=691fccb326383995651c36ea14f26059056737dbfdd5cc8e5db092a429664b03
+W_READABLE type=u64 value=1 status=stable  sha256=b453b7fac6ee0a4deb0ca220944fcaa53fa5c77dd287d2f6c4fe2896b8d6cc2a
+W_WRITABLE type=u64 value=2 status=stable  sha256=779c4368d8193f4dd7e3e7e643f291ec026776ef6ea952f821955cd0aa567d0d
+TOTAL sha256=9e12fc3fdc304d41eccf8dae2dedba04f8767c54c5e86bbc8ce9f596ce5829a2

@@ -1,0 +1,2257 @@
+# DeSoOS ABI – the one source of truth for what a program may rely on (V081 plan, rules R1–R6).
+# Edited by hand; tools/abigen.py checks it and generates docs/abi/SYSCALLS.md, user/lib/abi_generated.rs and
+# kernel/user/abi_generated.rs from it.  Rules (docs/abi/README.md): within one major version only ADD – never renumber,
+# change or remove; a new entry gets since = the next minor, and that minor its own abi/abi-X.Y.lock.
+#
+# A syscall: number in rax, arguments in rdi, rsi, rdx, r10, r8, r9; the result in rax as i64 – >= 0 a value,
+# < 0 an ERROR_* code.  Argument types: handle, ptr_in (the kernel reads it), ptr_out (the kernel writes it), len,
+# u64, i64, flags.  `rights` = the kernel's rights table (kernel/user/sysrights.rs) for this call: path = the call
+# names a path (refused in the file sandbox); handles = handle arguments (argument register 0-5, kinds, the rights
+# they need, extra rights when a bit of another argument is set); in_call = handles the call checks itself.
+# test_class: normal / stateful / blocking / hardware / terminal; test = where the entry is tested.
+
+[abi]
+version = "1.0"
+
+[[syscall]]
+number = 0
+name = "SYS_EXIT"
+since = "1.0"
+status = "stable"
+args = [{ name = "code", type = "i64", meaning = "exit code (0 = success)" }]
+returns = "never"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "terminal"
+test = "abiprobe: a child exits with 7, the parent's wait sees 7"
+
+[[syscall]]
+number = 1
+name = "SYS_WRITE"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "stream to write to" }, { name = "buf", type = "ptr_in", meaning = "the bytes" }, { name = "len", type = "len", meaning = "how many" }]
+returns = "bytes written"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_CLOSED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_HANDLE", "ERROR_IO", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["CONSOLE", "FILE", "PIPE"], need = ["WRITE"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 2
+name = "SYS_READ"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "stream to read from" }, { name = "buf", type = "ptr_out", meaning = "where to" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes read (0 = end)"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_HANDLE", "ERROR_IO", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["CONSOLE", "FILE", "PIPE"], need = ["READ"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 3
+name = "SYS_OPEN"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "UTF-8 path" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "flags", type = "flags", meaning = "O_*" }]
+returns = "handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY", "ERROR_TOO_MANY_HANDLES"]
+path = true
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 4
+name = "SYS_CLOSE"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "any handle" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 5
+name = "SYS_GETPID"
+since = "1.0"
+status = "stable"
+args = []
+returns = "pid"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 6
+name = "SYS_SLEEP"
+since = "1.0"
+status = "stable"
+args = [{ name = "ms", type = "u64", meaning = "milliseconds" }]
+returns = "0"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 7
+name = "SYS_YIELD"
+since = "1.0"
+status = "stable"
+args = []
+returns = "0"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 8
+name = "SYS_UPTIME"
+since = "1.0"
+status = "stable"
+args = []
+returns = "milliseconds since boot"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 9
+name = "SYS_SPAWN"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "program path" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "args", type = "ptr_in", meaning = "arguments, NUL-separated" }, { name = "args_len", type = "len", meaning = "their length" }, { name = "flags", type = "flags", meaning = "SPAWN_*" }, { name = "fds", type = "u64", meaning = "stdin / stdout / stderr slots (16 bits each)" }]
+returns = "pid"
+errors = ["ERROR_ABI", "ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_EXECUTABLE", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY", "ERROR_TOO_MANY_ARGUMENTS"]
+path = true
+handles = []
+in_call = "stdio handles: DUP"
+test_class = "stateful"
+test = "abiprobe (bad pointer) + PROC TEST"
+
+[[syscall]]
+number = 10
+name = "SYS_WAIT"
+since = "1.0"
+status = "stable"
+args = [{ name = "pid", type = "u64", meaning = "child or WAIT_ANY" }, { name = "status", type = "ptr_out", meaning = "exit status (u64)" }, { name = "flags", type = "flags", meaning = "WNOHANG" }]
+returns = "pid"
+errors = ["ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_NO_CHILD"]
+path = false
+handles = []
+in_call = ""
+test_class = "blocking"
+test = "abiprobe (no child) + PROC TEST"
+
+[[syscall]]
+number = 11
+name = "SYS_GETPPID"
+since = "1.0"
+status = "stable"
+args = []
+returns = "parent pid"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 12
+name = "SYS_KILL"
+since = "1.0"
+status = "stable"
+args = [{ name = "pid", type = "u64", meaning = "the caller or a descendant" }]
+returns = "0"
+errors = ["ERROR_NOT_PERMITTED", "ERROR_NO_PROCESS"]
+path = false
+handles = []
+in_call = "the target: the caller or its descendants"
+test_class = "stateful"
+test = "abiprobe (no process) + PROC TEST"
+
+[[syscall]]
+number = 13
+name = "SYS_CHDIR"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "directory" }, { name = "path_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY"]
+path = true
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 14
+name = "SYS_GETCWD"
+since = "1.0"
+status = "stable"
+args = [{ name = "buf", type = "ptr_out", meaning = "where to" }, { name = "len", type = "len", meaning = "room" }]
+returns = "length"
+errors = ["ERROR_BUFFER_TOO_SMALL", "ERROR_INVALID_ADDRESS"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 15
+name = "SYS_READDIR"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "directory" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "buf", type = "ptr_out", meaning = "entries (name TAB type TAB size per line)" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUFFER_TOO_SMALL", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY"]
+path = true
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 16
+name = "SYS_STAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "path" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "out", type = "ptr_out", meaning = "stat record" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY"]
+path = true
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 17
+name = "SYS_MKDIR"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "path" }, { name = "path_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY"]
+path = true
+handles = []
+in_call = ""
+test_class = "stateful"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 18
+name = "SYS_UNLINK"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "path" }, { name = "path_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_READ_ONLY"]
+path = true
+handles = []
+in_call = ""
+test_class = "stateful"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 19
+name = "SYS_READKEY"
+since = "1.0"
+status = "stable"
+args = [{ name = "line", type = "ptr_in", meaning = "the line being edited (shown by the console)" }, { name = "line_len", type = "len", meaning = "its length" }]
+returns = "key code"
+errors = ["ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_HANDLE"]
+path = false
+handles = []
+in_call = ""
+test_class = "blocking"
+test = "INPUT TEST (keyboard)"
+
+[[syscall]]
+number = 20
+name = "SYS_TASKS"
+since = "1.0"
+status = "stable"
+args = [{ name = "buf", type = "ptr_out", meaning = "task list text" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes"
+errors = ["ERROR_BUFFER_TOO_SMALL", "ERROR_INVALID_ADDRESS", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 21
+name = "SYS_RESERVED_21"
+since = "1.0"
+status = "reserved"
+args = []
+returns = "never succeeds"
+errors = ["ERROR_NOT_IMPLEMENTED"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe: ERROR_NOT_IMPLEMENTED (a number removed before v0.81 - never used again)"
+
+[[syscall]]
+number = 22
+name = "SYS_DUP"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "handle to copy" }]
+returns = "new handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY", "ERROR_TOO_MANY_HANDLES"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 23
+name = "SYS_DUP2"
+since = "1.0"
+status = "stable"
+args = [{ name = "old", type = "handle", meaning = "handle to copy" }, { name = "new", type = "u64", meaning = "target slot" }]
+returns = "new"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY", "ERROR_TOO_MANY_HANDLES"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 24
+name = "SYS_SEEK"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "file" }, { name = "offset", type = "i64", meaning = "offset" }, { name = "whence", type = "u64", meaning = "SEEK_*" }]
+returns = "new position"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_NOT_SEEKABLE"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 25
+name = "SYS_PIPE"
+since = "1.0"
+status = "stable"
+args = [{ name = "out", type = "ptr_out", meaning = "two handles (u64 read end, u64 write end)" }]
+returns = "0"
+errors = ["ERROR_INVALID_ADDRESS", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 26
+name = "SYS_BRK"
+since = "1.0"
+status = "stable"
+args = [{ name = "addr", type = "u64", meaning = "new end of the heap (0 = ask)" }]
+returns = "the end"
+errors = []
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST (memtest)"
+
+[[syscall]]
+number = 27
+name = "SYS_MMAP"
+since = "1.0"
+status = "stable"
+args = [{ name = "len", type = "len", meaning = "bytes" }, { name = "prot", type = "flags", meaning = "PROT_*" }]
+returns = "address"
+errors = ["ERROR_INVALID_ARGUMENT", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST (memtest)"
+
+[[syscall]]
+number = 28
+name = "SYS_MUNMAP"
+since = "1.0"
+status = "stable"
+args = [{ name = "addr", type = "u64", meaning = "address" }, { name = "len", type = "len", meaning = "bytes" }]
+returns = "0"
+errors = ["ERROR_INVALID_ARGUMENT"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST (memtest)"
+
+[[syscall]]
+number = 29
+name = "SYS_HANDLE_DUP"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "handle" }, { name = "mask", type = "flags", meaning = "rights to keep (R_*)" }]
+returns = "new handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY", "ERROR_TOO_MANY_HANDLES"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + RIGHTS TEST"
+
+[[syscall]]
+number = 30
+name = "SYS_HANDLE_INFO"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "handle" }]
+returns = "kind << 32 | rights"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + RIGHTS TEST"
+
+[[syscall]]
+number = 31
+name = "SYS_CHANNEL_CREATE"
+since = "1.0"
+status = "stable"
+args = [{ name = "out", type = "ptr_out", meaning = "two channel ends (u64, u64)" }]
+returns = "0"
+errors = ["ERROR_INVALID_ADDRESS", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + IPC TEST"
+
+[[syscall]]
+number = 32
+name = "SYS_CHAN_SEND"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "channel end" }, { name = "data", type = "ptr_in", meaning = "message" }, { name = "len", type = "len", meaning = "its length" }, { name = "handles", type = "ptr_in", meaning = "handles to transfer (u64 each)" }, { name = "handles_len", type = "len", meaning = "how many" }, { name = "flags", type = "flags", meaning = "CHAN_NONBLOCK" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_CLOSED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_MESSAGE_TOO_LARGE", "ERROR_OUT_OF_MEMORY", "ERROR_WOULD_BLOCK"]
+path = false
+handles = [{ reg = 0, kinds = ["CHANNEL"], need = ["SEND"] }]
+in_call = "handles in the message: TRANSFER"
+test_class = "normal"
+test = "abiprobe (gate) + IPC TEST"
+
+[[syscall]]
+number = 33
+name = "SYS_CHAN_RECV"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "channel end" }, { name = "buf", type = "ptr_out", meaning = "message" }, { name = "len", type = "len", meaning = "room" }, { name = "handles", type = "ptr_out", meaning = "received handles" }, { name = "hcap_flags", type = "u64", meaning = "room for handles; flags in bits 32-63" }, { name = "info", type = "ptr_out", meaning = "receive record" }]
+returns = "bytes"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_BUFFER_TOO_SMALL", "ERROR_CLOSED", "ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_MESSAGE_TOO_LARGE", "ERROR_OUT_OF_MEMORY", "ERROR_TOO_MANY_HANDLES", "ERROR_WOULD_BLOCK"]
+path = false
+handles = [{ reg = 0, kinds = ["CHANNEL"], need = ["RECV"] }]
+in_call = ""
+test_class = "blocking"
+test = "abiprobe (gate) + IPC TEST"
+
+[[syscall]]
+number = 34
+name = "SYS_SHM_CREATE"
+since = "1.0"
+status = "stable"
+args = [{ name = "size", type = "len", meaning = "bytes" }]
+returns = "handle"
+errors = ["ERROR_INVALID_ARGUMENT", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + IPC TEST"
+
+[[syscall]]
+number = 35
+name = "SYS_SHM_MAP"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "shared memory" }, { name = "prot", type = "flags", meaning = "PROT_*" }]
+returns = "address"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["SHM"], need = ["MAP_READ"], conds = [{ reg = 1, bit = 2, right = "MAP_WRITE" }] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + IPC TEST"
+
+[[syscall]]
+number = 36
+name = "SYS_SPAWN_EX"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "program path" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "args", type = "ptr_in", meaning = "arguments" }, { name = "args_len", type = "len", meaning = "their length" }, { name = "map", type = "ptr_in", meaning = "handle map (pairs of u64: source, target slot)" }, { name = "map_len_flags", type = "u64", meaning = "pairs; flags in bits 32-63" }]
+returns = "pid"
+errors = ["ERROR_ABI", "ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_EXECUTABLE", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY", "ERROR_TOO_MANY_ARGUMENTS", "ERROR_TOO_MANY_HANDLES"]
+path = true
+handles = []
+in_call = "handles in the map: DUP"
+test_class = "stateful"
+test = "abiprobe (bad pointer) + PROC TEST"
+
+[[syscall]]
+number = 37
+name = "SYS_SHM_SIZE"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "shared memory" }]
+returns = "bytes"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["SHM"], need = [] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + IPC TEST"
+
+[[syscall]]
+number = 38
+name = "SYS_WAIT_MANY"
+since = "1.0"
+status = "stable"
+args = [{ name = "list", type = "ptr_in", meaning = "(handle, signals) pairs" }, { name = "n", type = "len", meaning = "how many" }, { name = "timeout_ms", type = "u64", meaning = "limit or FOREVER" }]
+returns = "index"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY", "ERROR_TIMED_OUT"]
+path = false
+handles = []
+in_call = "list: RECV / SEND (channel), READ / WRITE (pipe), RECV (interrupt)"
+test_class = "blocking"
+test = "abiprobe (bad pointer) + IPC TEST"
+
+[[syscall]]
+number = 39
+name = "SYS_DEV_CLAIM"
+since = "1.0"
+status = "stable"
+args = [{ name = "root", type = "handle", meaning = "HW_ROOT" }, { name = "bdf", type = "u64", meaning = "PCI bus/device/function" }]
+returns = "device handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_BUSY", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_NO_DEVICE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["HW_ROOT"], need = [] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DEV TEST"
+
+[[syscall]]
+number = 40
+name = "SYS_DEV_INFO"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "device" }, { name = "out", type = "ptr_out", meaning = "device record" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["DEVICE"], need = [] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DEV TEST"
+
+[[syscall]]
+number = 41
+name = "SYS_DEV_MAP"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "device" }, { name = "bar", type = "u64", meaning = "BAR number" }, { name = "prot", type = "flags", meaning = "PROT_*" }]
+returns = "address"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_READ"], conds = [{ reg = 2, bit = 2, right = "MAP_WRITE" }] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DEV TEST"
+
+[[syscall]]
+number = 42
+name = "SYS_IRQ_BIND"
+since = "1.0"
+status = "stable"
+args = [{ name = "dev", type = "handle", meaning = "device" }]
+returns = "interrupt handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_WRITE"] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + IRQ TEST"
+
+[[syscall]]
+number = 43
+name = "SYS_IRQ_READ"
+since = "1.0"
+status = "stable"
+args = [{ name = "irq", type = "handle", meaning = "interrupt" }]
+returns = "count"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["IRQ"], need = ["RECV"] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + IRQ TEST"
+
+[[syscall]]
+number = 44
+name = "SYS_DMA_ALLOC"
+since = "1.0"
+status = "stable"
+args = [{ name = "dev", type = "handle", meaning = "device" }, { name = "size", type = "len", meaning = "bytes" }, { name = "bits", type = "u64", meaning = "address width limit" }]
+returns = "shared memory handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_WRITE"] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DMA TEST"
+
+[[syscall]]
+number = 45
+name = "SYS_DMA_PHYS"
+since = "1.0"
+status = "stable"
+args = [{ name = "buf", type = "handle", meaning = "DMA buffer" }]
+returns = "physical address"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["SHM"], need = [] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DMA TEST"
+
+[[syscall]]
+number = 46
+name = "SYS_SYSINFO"
+since = "1.0"
+status = "stable"
+args = [{ name = "topic", type = "ptr_in", meaning = "topic name" }, { name = "topic_len", type = "len", meaning = "its length" }, { name = "buf", type = "ptr_out", meaning = "text" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes"
+errors = ["ERROR_BUFFER_TOO_SMALL", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_NOT_FOUND", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe"
+
+[[syscall]]
+number = 47
+name = "SYS_SYSCTL"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "SYSCTL" }, { name = "op", type = "u64", meaning = "SYSCTL_*" }, { name = "arg", type = "u64", meaning = "argument" }, { name = "out", type = "handle", meaning = "where the text goes" }, { name = "name", type = "ptr_in", meaning = "snapshot name" }, { name = "name_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["SYSCTL"], need = [] }]
+in_call = "output handle: WRITE (checked before the action); snapshot name copied and checked"
+test_class = "stateful"
+test = "abiprobe (gate) + DESOFS / shell tests"
+
+[[syscall]]
+number = 48
+name = "SYS_DEV_FIND"
+since = "1.0"
+status = "stable"
+args = [{ name = "root", type = "handle", meaning = "HW_ROOT" }, { name = "class", type = "u64", meaning = "PCI class" }, { name = "nr", type = "u64", meaning = "index" }]
+returns = "bdf"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_NOT_FOUND"]
+path = false
+handles = [{ reg = 0, kinds = ["HW_ROOT"], need = [] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + DEV TEST"
+
+[[syscall]]
+number = 49
+name = "SYS_INPUT_INJECT"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "INPUT" }, { name = "events", type = "ptr_in", meaning = "events" }, { name = "n", type = "len", meaning = "how many" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["INPUT"], need = ["WRITE"] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + USB TEST"
+
+[[syscall]]
+number = 50
+name = "SYS_BLK_ATTACH"
+since = "1.0"
+status = "stable"
+args = [{ name = "blk", type = "handle", meaning = "BLK" }, { name = "chan", type = "handle", meaning = "ublk channel" }, { name = "buf", type = "handle", meaning = "shared buffer" }, { name = "info", type = "ptr_in", meaning = "disk record" }]
+returns = "disk number"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["BLK"], need = ["WRITE"] }, { reg = 1, kinds = ["CHANNEL"], need = ["SEND", "RECV", "TRANSFER"] }, { reg = 2, kinds = ["SHM"], need = ["MAP_READ"] }]
+in_call = ""
+test_class = "hardware"
+test = "abiprobe (gate) + USB TEST"
+
+[[syscall]]
+number = 51
+name = "SYS_DIR_OPEN"
+since = "1.0"
+status = "stable"
+args = [{ name = "path", type = "ptr_in", meaning = "directory" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "flags", type = "flags", meaning = "O_READ / O_WRITE" }]
+returns = "directory handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_ALREADY_EXISTS", "ERROR_BUSY", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_IO", "ERROR_IS_DIRECTORY", "ERROR_NOT_DIRECTORY", "ERROR_NOT_EMPTY", "ERROR_NOT_FOUND", "ERROR_NOT_PERMITTED", "ERROR_NO_SPACE", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY", "ERROR_TOO_MANY_HANDLES"]
+path = true
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + FILE TEST"
+
+[[syscall]]
+number = 52
+name = "SYS_OPENAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "flags", type = "flags", meaning = "O_*" }]
+returns = "handle"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_IS_DIRECTORY", "ERROR_NOT_PERMITTED", "ERROR_OUT_OF_MEMORY", "ERROR_READ_ONLY", "ERROR_TOO_MANY_HANDLES"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = [], conds = [{ reg = 3, bit = 1, right = "READ" }, { reg = 3, bit = 2, right = "WRITE" }] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 53
+name = "SYS_READDIRAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "buf", type = "ptr_out", meaning = "entries" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_BUFFER_TOO_SMALL", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 54
+name = "SYS_STATAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "out", type = "ptr_out", meaning = "stat record" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 55
+name = "SYS_MKDIRAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = ["WRITE"] }]
+in_call = ""
+test_class = "stateful"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 56
+name = "SYS_UNLINKAT"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }]
+returns = "0"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = ["WRITE"] }]
+in_call = ""
+test_class = "stateful"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 57
+name = "SYS_READDIR_PART"
+since = "1.0"
+status = "stable"
+args = [{ name = "dir", type = "handle", meaning = "directory" }, { name = "path", type = "ptr_in", meaning = "path below it" }, { name = "path_len", type = "len", meaning = "its length" }, { name = "buf", type = "ptr_out", meaning = "entries" }, { name = "len", type = "len", meaning = "room" }, { name = "cursor", type = "ptr_out", meaning = "position (u64, in and out)" }]
+returns = "bytes"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_BUFFER_TOO_SMALL", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY"]
+path = false
+handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
+in_call = ""
+test_class = "normal"
+test = "abiprobe (gate) + FILE TEST"
+
+[[syscall]]
+number = 58
+name = "SYS_GETRANDOM"
+since = "1.0"
+status = "stable"
+args = [{ name = "buf", type = "ptr_out", meaning = "where to" }, { name = "len", type = "len", meaning = "bytes (at most GETRANDOM_MAX)" }, { name = "flags", type = "flags", meaning = "0" }]
+returns = "bytes"
+errors = ["ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + RNG TEST"
+
+[[syscall]]
+number = 59
+name = "SYS_TIME"
+since = "1.0"
+status = "stable"
+args = [{ name = "out", type = "ptr_out", meaning = "time record" }]
+returns = "0"
+errors = ["ERROR_INVALID_ADDRESS"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + TIME TEST"
+
+[[syscall]]
+number = 60
+name = "SYS_TIME_SET"
+since = "1.0"
+status = "stable"
+args = [{ name = "h", type = "handle", meaning = "SETTIME" }, { name = "t_ms", type = "u64", meaning = "time (ms since 1970)" }, { name = "u_ms", type = "u64", meaning = "uncertainty" }, { name = "servers", type = "u64", meaning = "operators that agreed" }]
+returns = "TIME_SET_* bits"
+errors = ["ERROR_ACCESS_DENIED", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_NOT_PERMITTED"]
+path = false
+handles = [{ reg = 0, kinds = ["SETTIME"], need = ["WRITE"] }]
+in_call = ""
+test_class = "stateful"
+test = "abiprobe (gate) + NTS TEST"
+
+[[syscall]]
+number = 61
+name = "SYS_TIME_BOUND"
+since = "1.0"
+status = "stable"
+args = [{ name = "out", type = "ptr_out", meaning = "bound record (TIME_BOUND_LEN bytes)" }, { name = "len", type = "len", meaning = "room" }]
+returns = "bytes"
+errors = ["ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT"]
+path = false
+handles = []
+in_call = ""
+test_class = "normal"
+test = "abiprobe + NTS TEST"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_PERMITTED"
+type = "i64"
+value = -1
+kernel = "crate::user::syscalls::ERROR_NOT_PERMITTED"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_FOUND"
+type = "i64"
+value = -2
+kernel = "crate::user::syscalls::ERROR_NOT_FOUND"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NO_PROCESS"
+type = "i64"
+value = -3
+kernel = "crate::user::syscalls::ERROR_NO_PROCESS"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_INTERRUPTED"
+type = "i64"
+value = -4
+kernel = "crate::user::syscalls::ERROR_INTERRUPTED"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_IO"
+type = "i64"
+value = -5
+kernel = "crate::user::syscalls::ERROR_IO"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_TOO_MANY_ARGUMENTS"
+type = "i64"
+value = -7
+kernel = "crate::user::syscalls::ERROR_TOO_MANY_ARGUMENTS"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_EXECUTABLE"
+type = "i64"
+value = -8
+kernel = "crate::user::syscalls::ERROR_NOT_EXECUTABLE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_INVALID_HANDLE"
+type = "i64"
+value = -9
+kernel = "crate::user::syscalls::ERROR_INVALID_HANDLE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NO_CHILD"
+type = "i64"
+value = -10
+kernel = "crate::user::syscalls::ERROR_NO_CHILD"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_WOULD_BLOCK"
+type = "i64"
+value = -11
+kernel = "crate::user::syscalls::ERROR_WOULD_BLOCK"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_OUT_OF_MEMORY"
+type = "i64"
+value = -12
+kernel = "crate::user::syscalls::ERROR_OUT_OF_MEMORY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_ACCESS_DENIED"
+type = "i64"
+value = -13
+kernel = "crate::user::syscalls::ERROR_ACCESS_DENIED"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_INVALID_ADDRESS"
+type = "i64"
+value = -14
+kernel = "crate::user::syscalls::ERROR_INVALID_ADDRESS"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_BUSY"
+type = "i64"
+value = -16
+kernel = "crate::user::syscalls::ERROR_BUSY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_ALREADY_EXISTS"
+type = "i64"
+value = -17
+kernel = "crate::user::syscalls::ERROR_ALREADY_EXISTS"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NO_DEVICE"
+type = "i64"
+value = -19
+kernel = "crate::user::syscalls::ERROR_NO_DEVICE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_DIRECTORY"
+type = "i64"
+value = -20
+kernel = "crate::user::syscalls::ERROR_NOT_DIRECTORY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_IS_DIRECTORY"
+type = "i64"
+value = -21
+kernel = "crate::user::syscalls::ERROR_IS_DIRECTORY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_INVALID_ARGUMENT"
+type = "i64"
+value = -22
+kernel = "crate::user::syscalls::ERROR_INVALID_ARGUMENT"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_TOO_MANY_HANDLES"
+type = "i64"
+value = -24
+kernel = "crate::user::syscalls::ERROR_TOO_MANY_HANDLES"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NO_SPACE"
+type = "i64"
+value = -28
+kernel = "crate::user::syscalls::ERROR_NO_SPACE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_SEEKABLE"
+type = "i64"
+value = -29
+kernel = "crate::user::syscalls::ERROR_NOT_SEEKABLE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_READ_ONLY"
+type = "i64"
+value = -30
+kernel = "crate::user::syscalls::ERROR_READ_ONLY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_CLOSED"
+type = "i64"
+value = -32
+kernel = "crate::user::syscalls::ERROR_CLOSED"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_BUFFER_TOO_SMALL"
+type = "i64"
+value = -34
+kernel = "crate::user::syscalls::ERROR_BUFFER_TOO_SMALL"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_IMPLEMENTED"
+type = "i64"
+value = -38
+kernel = "crate::user::syscalls::ERROR_NOT_IMPLEMENTED"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_NOT_EMPTY"
+type = "i64"
+value = -39
+kernel = "crate::user::syscalls::ERROR_NOT_EMPTY"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_MESSAGE_TOO_LARGE"
+type = "i64"
+value = -90
+kernel = "crate::user::syscalls::ERROR_MESSAGE_TOO_LARGE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_TIMED_OUT"
+type = "i64"
+value = -110
+kernel = "crate::user::syscalls::ERROR_TIMED_OUT"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "error"
+name = "ERROR_ABI"
+type = "i64"
+value = -200
+kernel = "crate::user::syscalls::ERROR_ABI"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_CONSOLE"
+type = "u64"
+value = 1
+kernel = "crate::user::process::kind::CONSOLE"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_FILE"
+type = "u64"
+value = 2
+kernel = "crate::user::process::kind::FILE"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_PIPE"
+type = "u64"
+value = 3
+kernel = "crate::user::process::kind::PIPE"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_CHANNEL"
+type = "u64"
+value = 4
+kernel = "crate::user::process::kind::CHANNEL"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_SHM"
+type = "u64"
+value = 5
+kernel = "crate::user::process::kind::SHM"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_HW_ROOT"
+type = "u64"
+value = 6
+kernel = "crate::user::process::kind::HW_ROOT"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_DEVICE"
+type = "u64"
+value = 7
+kernel = "crate::user::process::kind::DEVICE"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_IRQ"
+type = "u64"
+value = 8
+kernel = "crate::user::process::kind::IRQ"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_SYSCTL"
+type = "u64"
+value = 9
+kernel = "crate::user::process::kind::SYSCTL"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_INPUT"
+type = "u64"
+value = 10
+kernel = "crate::user::process::kind::INPUT"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_BLK"
+type = "u64"
+value = 11
+kernel = "crate::user::process::kind::BLK"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_DIR"
+type = "u64"
+value = 12
+kernel = "crate::user::process::kind::DIR"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "kind"
+name = "KIND_SETTIME"
+type = "u64"
+value = 13
+kernel = "crate::user::process::kind::SETTIME"
+lib = true
+meaning = "handle_info kind"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_READ"
+type = "u64"
+value = 1
+kernel = "crate::user::process::rights::READ"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_WRITE"
+type = "u64"
+value = 2
+kernel = "crate::user::process::rights::WRITE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_SEND"
+type = "u64"
+value = 4
+kernel = "crate::user::process::rights::SEND"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_RECV"
+type = "u64"
+value = 8
+kernel = "crate::user::process::rights::RECV"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_MAP_READ"
+type = "u64"
+value = 16
+kernel = "crate::user::process::rights::MAP_READ"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_MAP_WRITE"
+type = "u64"
+value = 32
+kernel = "crate::user::process::rights::MAP_WRITE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_DUP"
+type = "u64"
+value = 64
+kernel = "crate::user::process::rights::DUP"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_TRANSFER"
+type = "u64"
+value = 128
+kernel = "crate::user::process::rights::TRANSFER"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "right"
+name = "R_ALL"
+type = "u64"
+value = 0xFF
+kernel = "crate::user::process::rights::ALL"
+lib = true
+meaning = "every right"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "open"
+name = "O_READ"
+type = "u64"
+value = 1
+kernel = "crate::user::syscalls::O_READ"
+lib = true
+meaning = "open flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "open"
+name = "O_WRITE"
+type = "u64"
+value = 2
+kernel = "crate::user::syscalls::O_WRITE"
+lib = true
+meaning = "open flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "open"
+name = "O_CREATE"
+type = "u64"
+value = 4
+kernel = "crate::user::syscalls::O_CREATE"
+lib = true
+meaning = "open flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "open"
+name = "O_TRUNC"
+type = "u64"
+value = 8
+kernel = "crate::user::syscalls::O_TRUNC"
+lib = true
+meaning = "open flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "open"
+name = "O_APPEND"
+type = "u64"
+value = 16
+kernel = "crate::user::syscalls::O_APPEND"
+lib = true
+meaning = "open flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "memory"
+name = "PROT_READ"
+type = "u64"
+value = 1
+kernel = "crate::user::vm::PROT_READ"
+lib = true
+meaning = "mapping readable"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "memory"
+name = "PROT_WRITE"
+type = "u64"
+value = 2
+kernel = "crate::user::vm::PROT_WRITE"
+lib = true
+meaning = "mapping writable"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "memory"
+name = "MMAP_BASE"
+type = "u64"
+value = 0x100000000000
+kernel = "crate::user::vm::MMAP_BASE"
+lib = true
+meaning = "start of the mmap area"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "memory"
+name = "MMAP_END"
+type = "u64"
+value = 0x7FFFFF7F0000
+kernel = "crate::user::vm::MMAP_END"
+lib = true
+meaning = "end of the mmap area"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "seek"
+name = "SEEK_SET"
+type = "u64"
+value = 0
+kernel = "crate::user::syscalls::SEEK_SET"
+lib = true
+meaning = "seek whence"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "seek"
+name = "SEEK_CUR"
+type = "u64"
+value = 1
+kernel = "crate::user::syscalls::SEEK_CUR"
+lib = true
+meaning = "seek whence"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "seek"
+name = "SEEK_END"
+type = "u64"
+value = 2
+kernel = "crate::user::syscalls::SEEK_END"
+lib = true
+meaning = "seek whence"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "spawn"
+name = "SPAWN_FOREGROUND"
+type = "u64"
+value = 1
+kernel = "crate::user::syscalls::SPAWN_FOREGROUND"
+lib = true
+meaning = "Ctrl+C ends the child"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "spawn"
+name = "SPAWN_NO_FILES"
+type = "u64"
+value = 2
+kernel = "crate::user::syscalls::SPAWN_NO_FILES"
+lib = true
+meaning = "file sandbox: no paths, only the handles passed in"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "spawn"
+name = "STDIO"
+type = "u64"
+value = 0x200010000
+kernel = ""
+lib = true
+meaning = "fds(0, 1, 2): the child gets the parent's 0, 1, 2 (stdin | stdout << 16 | stderr << 32)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait"
+name = "WAIT_ANY"
+type = "u64"
+value = 0xFFFFFFFFFFFFFFFF
+kernel = "crate::user::procs::WAIT_ANY"
+lib = true
+meaning = "any child"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait"
+name = "WNOHANG"
+type = "u64"
+value = 1
+kernel = "crate::user::procs::WNOHANG"
+lib = true
+meaning = "do not wait"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait"
+name = "STATUS_SIGNALED"
+type = "u64"
+value = 0x100
+kernel = "crate::user::procs::STATUS_SIGNALED"
+lib = true
+meaning = "ended by the kernel; the reason in bits 0-7"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "channel"
+name = "CHAN_NONBLOCK"
+type = "u64"
+value = 1
+kernel = "crate::user::syscalls::CHAN_NONBLOCK"
+lib = true
+meaning = "do not block"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "channel"
+name = "MSG_MAX"
+type = "usize"
+value = 4096
+kernel = "crate::user::channel::MSG_MAX"
+lib = true
+meaning = "largest message (bytes)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "channel"
+name = "MSG_HANDLES"
+type = "usize"
+value = 8
+kernel = "crate::user::channel::MSG_HANDLES"
+lib = true
+meaning = "most handles in one message"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait_many"
+name = "W_READABLE"
+type = "u64"
+value = 1
+kernel = "crate::user::syscalls::W_READABLE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait_many"
+name = "W_WRITABLE"
+type = "u64"
+value = 2
+kernel = "crate::user::syscalls::W_WRITABLE"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait_many"
+name = "W_IRQ"
+type = "u64"
+value = 4
+kernel = "crate::user::syscalls::W_IRQ"
+lib = true
+meaning = ""
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait_many"
+name = "WAIT_MAX"
+type = "usize"
+value = 16
+kernel = "crate::user::syscalls::WAIT_MAX"
+lib = true
+meaning = "most entries in one call"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "wait_many"
+name = "FOREVER"
+type = "u64"
+value = 0xFFFFFFFFFFFFFFFF
+kernel = ""
+lib = true
+meaning = "no time limit"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "dir"
+name = "DIR_END"
+type = "u64"
+value = 0xFFFFFFFFFFFFFFFF
+kernel = "crate::user::syscalls::DIR_END"
+lib = true
+meaning = "readdir_part cursor after the last part"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "random"
+name = "GETRANDOM_MAX"
+type = "usize"
+value = 4096
+kernel = "crate::random::MAX_REQUEST"
+lib = true
+meaning = "largest getrandom request"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TIME_SET_RAISED"
+type = "i64"
+value = 1
+kernel = "crate::time_lkg::SetDone::RAISED"
+lib = true
+meaning = "time_set result bit"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TIME_SET_SAVED"
+type = "i64"
+value = 2
+kernel = "crate::time_lkg::SetDone::SAVED"
+lib = true
+meaning = "time_set result bit"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TIME_SET_REPAIR"
+type = "i64"
+value = 4
+kernel = "crate::time_lkg::SetDone::REPAIR"
+lib = true
+meaning = "time_set result bit"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TIME_SET_NOT_SAVED"
+type = "i64"
+value = 8
+kernel = "crate::time_lkg::SetDone::NOT_SAVED"
+lib = true
+meaning = "time_set result bit"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TIME_BOUND_LEN"
+type = "usize"
+value = 40
+kernel = "crate::time_lkg::SNAPSHOT_LEN"
+lib = true
+meaning = "time_bound record length"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TB_RECOVERY"
+type = "u16"
+value = 1
+kernel = "crate::time_lkg::FLAG_RECOVERY"
+lib = true
+meaning = "time_bound flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TB_NOT_SAVED"
+type = "u16"
+value = 2
+kernel = "crate::time_lkg::FLAG_NOT_SAVED"
+lib = true
+meaning = "time_bound flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "time"
+name = "TB_PLAUSIBLE"
+type = "u16"
+value = 4
+kernel = "crate::time_lkg::FLAG_PLAUSIBLE"
+lib = true
+meaning = "time_bound flag"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_REBOOT"
+type = "u64"
+value = 1
+kernel = "crate::shell::SYSCTL_REBOOT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_HALT"
+type = "u64"
+value = 2
+kernel = "crate::shell::SYSCTL_HALT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SYNC"
+type = "u64"
+value = 3
+kernel = "crate::shell::SYSCTL_SYNC"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_STRESS"
+type = "u64"
+value = 4
+kernel = "crate::shell::SYSCTL_STRESS"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_INFO"
+type = "u64"
+value = 5
+kernel = "crate::shell::SYSCTL_DESOFS_INFO"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_FORMAT"
+type = "u64"
+value = 6
+kernel = "crate::shell::SYSCTL_DESOFS_FORMAT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_MOUNT"
+type = "u64"
+value = 7
+kernel = "crate::shell::SYSCTL_DESOFS_MOUNT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_UNMOUNT"
+type = "u64"
+value = 8
+kernel = "crate::shell::SYSCTL_DESOFS_UNMOUNT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_CHECK"
+type = "u64"
+value = 9
+kernel = "crate::shell::SYSCTL_DESOFS_CHECK"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_DESOFS_REPAIR"
+type = "u64"
+value = 10
+kernel = "crate::shell::SYSCTL_DESOFS_REPAIR"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SNAPSHOT_CREATE"
+type = "u64"
+value = 11
+kernel = "crate::shell::SYSCTL_SNAPSHOT_CREATE"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SNAPSHOT_LIST"
+type = "u64"
+value = 12
+kernel = "crate::shell::SYSCTL_SNAPSHOT_LIST"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SNAPSHOT_MOUNT"
+type = "u64"
+value = 13
+kernel = "crate::shell::SYSCTL_SNAPSHOT_MOUNT"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SNAPSHOT_DELETE"
+type = "u64"
+value = 14
+kernel = "crate::shell::SYSCTL_SNAPSHOT_DELETE"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_SNAPSHOT_RESTORE"
+type = "u64"
+value = 15
+kernel = "crate::shell::SYSCTL_SNAPSHOT_RESTORE"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_RAMDISK"
+type = "u64"
+value = 16
+kernel = "crate::shell::SYSCTL_RAMDISK"
+lib = true
+meaning = "sysctl operation"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "sysctl"
+name = "SYSCTL_YES"
+type = "u64"
+value = 0x100000000
+kernel = "crate::shell::SYSCTL_YES"
+lib = true
+meaning = "confirmation bit for destructive operations"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "SVC"
+type = "u64"
+value = 3
+kernel = ""
+lib = true
+meaning = "service channel (programs started by the shell; send only)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "HW_ROOT"
+type = "u64"
+value = 3
+kernel = ""
+lib = true
+meaning = "HW_ROOT (init and drivers it starts)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "SYSCTL"
+type = "u64"
+value = 4
+kernel = ""
+lib = true
+meaning = "SYSCTL (init, the shell)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "INPUT"
+type = "u64"
+value = 5
+kernel = ""
+lib = true
+meaning = "INPUT (init)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "PROG_SVC"
+type = "u64"
+value = 5
+kernel = ""
+lib = true
+meaning = "the shell's program channel (from init)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "BLK"
+type = "u64"
+value = 6
+kernel = ""
+lib = true
+meaning = "BLK (init)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "slot"
+name = "SETTIME"
+type = "u64"
+value = 7
+kernel = ""
+lib = true
+meaning = "SETTIME (init only)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "pci"
+name = "CLASS_XHCI"
+type = "u64"
+value = 0x0C0330
+kernel = ""
+lib = true
+meaning = "PCI class: xHCI USB controller"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "pci"
+name = "CLASS_ETHERNET"
+type = "u64"
+value = 0x020000
+kernel = ""
+lib = true
+meaning = "PCI class: Ethernet controller"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "net"
+name = "UDP_MAX"
+type = "usize"
+value = 1472
+kernel = ""
+lib = true
+meaning = "largest UDP datagram through netd (NET protocol)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "USER_LOAD_MIN"
+type = "u64"
+value = 0x100000
+kernel = "crate::user::elf_loader::USER_MIN"
+lib = false
+meaning = "lowest address a program may be loaded at"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "USER_LOAD_MAX"
+type = "u64"
+value = 0xFFF80000000
+kernel = "crate::user::elf_loader::USER_MAX"
+lib = false
+meaning = "segments end at or below this address (MMAP_BASE - BRK_MAX - 1 GiB)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "USER_STACK_TOP"
+type = "u64"
+value = 0x7FFFFFFF0000
+kernel = "crate::user::USER_STACK_TOP"
+lib = false
+meaning = "top of the main stack"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "USER_STACK_SIZE"
+type = "u64"
+value = 0x4000
+kernel = "crate::user::USER_STACK_SIZE"
+lib = false
+meaning = "stack mapped at start (grows on demand)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "STACK_MAX"
+type = "u64"
+value = 0x800000
+kernel = "crate::user::vm::STACK_MAX"
+lib = false
+meaning = "largest main stack"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "BRK_MAX"
+type = "u64"
+value = 0x40000000
+kernel = "crate::user::vm::BRK_MAX"
+lib = false
+meaning = "largest heap (brk) above the image end"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "MAX_PROGRAM_FILE"
+type = "usize"
+value = 0x800000
+kernel = "crate::user::MAX_PROGRAM_FILE"
+lib = false
+meaning = "largest program file"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "MAX_IMAGE"
+type = "u64"
+value = 0x4000000
+kernel = "crate::user::elf_loader::MAX_IMAGE"
+lib = false
+meaning = "largest loaded image (all segments)"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "MAX_ARGS"
+type = "usize"
+value = 32
+kernel = "crate::user::elf_loader::MAX_ARGS"
+lib = false
+meaning = "most arguments"
+since = "1.0"
+status = "stable"
+
+[[const]]
+group = "startup"
+name = "MAX_ARG_BYTES"
+type = "usize"
+value = 4096
+kernel = "crate::user::elf_loader::MAX_ARG_BYTES"
+lib = false
+meaning = "most argument bytes"
+since = "1.0"
+status = "stable"

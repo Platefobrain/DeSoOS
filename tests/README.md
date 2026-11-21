@@ -7,12 +7,18 @@ helper scripts.
 tests/test.sh              build --selftest and run all suites in QEMU (TCG); result PASS / FAIL
 ACCEL=kvm tests/test.sh    the same with KVM
 tests/test.sh --no-build   run only
-LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights crypto rng certs desofs)
+LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs)
 tests/make-usb-test.sh     make-usb.sh --with-disk on the host (V080 gate C): its refusals against a fake /sys,
                            the image, and an update from build v1 to v2 started in QEMU (two builds)
 tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg,
                            SOAK_DISK=ram – on a RAM disk as on real hardware)
 ```
+
+Before anything is built, `test.sh` runs the ABI host test – `python3 tools/abigen.py --test`: the locks, the
+description `abi/abi.toml`, the generator, the kernel's syscall numbers and argument registers and the library's
+constants against the description, and 18 mutations that must all be caught (`docs/abi/README.md`; `logs/test-abi.log`).
+A failure stops the run there.  In QEMU, ABI TEST is the kernel's half: its rights table and constants against the
+generated `kernel/user/abi_generated.rs`, and `/bin/abiprobe` on the generated constants.
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
 restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by
