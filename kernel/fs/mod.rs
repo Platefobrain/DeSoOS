@@ -198,6 +198,10 @@ pub trait ConcurrentFs {
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize>;
     fn read_all(&self, path: &str) -> Result<Vec<u8>>;
+    /// The whole file into `sink`, piece by piece (at most 4 KiB each), as one consistent
+    /// read – the lock read_all holds is held throughout, but no buffer of the file's size is
+    /// made.  `sink` may stop the read with an error.  Returns the size.
+    fn read_each(&self, path: &str, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<u64>;
     fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<usize>;
     /// Creates a file or replaces its contents.
     fn write_whole(&self, path: &str, data: &[u8]) -> Result<()>;
@@ -328,6 +332,10 @@ impl<F: FileSystem + Send> ConcurrentFs for Locked<F> {
     }
     fn read(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.fs.lock().read(path, offset, buf)
+    }
+    fn read_each(&self, path: &str, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<u64> {
+        let mut fs = self.fs.lock();
+        read_each_locked(&mut *fs, path, sink)
     }
     fn read_all(&self, path: &str) -> Result<Vec<u8>> {
         let mut fs = self.fs.lock();
@@ -1075,6 +1083,53 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
     }
     data.truncate(done);
     Ok(data)
+}
+
+/// read_each on a file system already locked: stat, then 4 KiB at a time.
+fn read_each_locked(fs: &mut dyn FileSystem, path: &str, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<u64> {
+    let meta = fs.stat(path)?;
+    if meta.kind == FileType::Directory {
+        return Err(FsError::IsADirectory);
+    }
+    let mut buf = [0u8; 4096];
+    let mut done = 0u64;
+    while done < meta.size {
+        let want = ((meta.size - done) as usize).min(buf.len());
+        let n = fs.read(path, done, &mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        sink(&buf[..n])?;
+        done += n as u64;
+    }
+    Ok(done)
+}
+
+/// The whole file into `sink`, at most 4 KiB at a time, as one consistent read (like
+/// read_file) – for files that must not sit in one big heap buffer (exec).  Returns the size.
+pub fn read_each(path: &str, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<u64> {
+    let mut sink = Some(sink);
+    if let Some(r) = try_concurrent(path, |c, p| c.read_each(p, sink.take().unwrap())) {
+        return r;
+    }
+    let sink = sink.take().unwrap();
+    let _g = FsWrite::lock(); // the whole read is consistent
+    let meta = stat(path)?;
+    if meta.kind == FileType::Directory {
+        return Err(FsError::IsADirectory);
+    }
+    let mut buf = [0u8; 4096];
+    let mut done = 0u64;
+    while done < meta.size {
+        let want = ((meta.size - done) as usize).min(buf.len());
+        let n = read(path, done, &mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        sink(&buf[..n])?;
+        done += n as u64;
+    }
+    Ok(done)
 }
 
 /// Creates a file or replaces its contents.

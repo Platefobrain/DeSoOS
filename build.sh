@@ -146,6 +146,9 @@ for src in user/bin/*.rs; do
   # usbd's test flags (the third write lock off, a failed WRITE / FLUSH, a late FLUSH
   # reply) – only in the self-test image; the normal usbd refuses them.
   [ "$name" = usbd ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
+  # netd's test hook (`testport N` – the local port of the next TCP connection) – only in
+  # the self-test image.
+  [ "$name" = netd ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \

@@ -7,7 +7,8 @@
 //       stack and DF = 0 itself, loaded at the bottom of the load range (0x100000), at 0x400000
 //       and ending exactly at its top (USER_LOAD_MAX); one page below / past the range refused
 //   3/3 the limits: 32 arguments and 4096 bytes of them start, 33 / 4097 refused; a file of
-//       MAX_PROGRAM_FILE (8 MiB) starts, one byte more refused
+//       MAX_PROGRAM_FILE (8 MiB) starts – read into frames, no big kernel-heap block – one byte
+//       more refused
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -162,16 +163,21 @@ pub fn self_test() {
         let _ = crate::fs::remove(&path);
         r
     };
+    crate::memory::heap::largest_reset();
     let exact = big(MAX_PROGRAM_FILE);
+    let largest = crate::memory::heap::largest();
     check!(matches!(exact, Ok(ExitKind::Exit(0))), "a file of exactly MAX_PROGRAM_FILE in {} must start: {:?}", dir, exact.map_err(|e| alloc::format!("{}", e)));
+    // exec reads the file into frames: no kernel-heap block anywhere near its size.
+    check!(largest < 1 << 20, "exec of an 8 MiB file took a {} KiB block of the kernel heap", largest >> 10);
     let over = big(MAX_PROGRAM_FILE + 1);
     check!(matches!(over, Err(ExecError::TooBig)), "a file over MAX_PROGRAM_FILE must be refused: {:?}", over.map_err(|e| alloc::format!("{}", e)));
     serial_println!(
-        "[STARTUP TEST] 3/3 limits: {} arguments and {} bytes start, one more refused; a {} MiB file ({}) starts, one byte more refused PASS",
+        "[STARTUP TEST] 3/3 limits: {} arguments and {} bytes start, one more refused; a {} MiB file ({}) starts – read into frames, the largest heap block {} KiB – one byte more refused PASS",
         MAX_ARGS,
         MAX_ARG_BYTES,
         MAX_PROGRAM_FILE >> 20,
-        dir
+        dir,
+        largest >> 10
     );
 
     crate::sched::reap();

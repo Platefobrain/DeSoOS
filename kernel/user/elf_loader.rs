@@ -112,17 +112,49 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
-fn u32_at(b: &[u8], o: u64) -> Option<u32> {
-    let o = usize::try_from(o).ok()?;
-    Some(u32::from_le_bytes(b.get(o..o.checked_add(4)?)?.try_into().ok()?))
+/// A program file: a slice in memory, or the frames exec read it into (`ProgramFile`).
+pub trait Source {
+    fn size(&self) -> u64;
+    /// `buf.len()` bytes at `off`; false when they are not all inside the file.
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> bool;
 }
-fn u16_at(b: &[u8], o: u64) -> Option<u16> {
-    let o = usize::try_from(o).ok()?;
-    Some(u16::from_le_bytes(b.get(o..o.checked_add(2)?)?.try_into().ok()?))
+
+impl Source for [u8] {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> bool {
+        let Ok(o) = usize::try_from(off) else { return false };
+        match o.checked_add(buf.len()).and_then(|e| self.get(o..e)) {
+            Some(s) => {
+                buf.copy_from_slice(s);
+                true
+            }
+            None => false,
+        }
+    }
 }
-fn u64_at(b: &[u8], o: u64) -> Option<u64> {
-    let o = usize::try_from(o).ok()?;
-    Some(u64::from_le_bytes(b.get(o..o.checked_add(8)?)?.try_into().ok()?))
+
+impl Source for alloc::vec::Vec<u8> {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> bool {
+        self[..].read_at(off, buf)
+    }
+}
+
+fn u32_at<S: Source + ?Sized>(b: &S, o: u64) -> Option<u32> {
+    let mut x = [0u8; 4];
+    if b.read_at(o, &mut x) { Some(u32::from_le_bytes(x)) } else { None }
+}
+fn u16_at<S: Source + ?Sized>(b: &S, o: u64) -> Option<u16> {
+    let mut x = [0u8; 2];
+    if b.read_at(o, &mut x) { Some(u16::from_le_bytes(x)) } else { None }
+}
+fn u64_at<S: Source + ?Sized>(b: &S, o: u64) -> Option<u64> {
+    let mut x = [0u8; 8];
+    if b.read_at(o, &mut x) { Some(u64::from_le_bytes(x)) } else { None }
 }
 
 /// `x` rounded up to 4 – None on overflow.
@@ -137,9 +169,9 @@ fn align4(x: u64) -> Option<u64> {
 /// "DeSo\0" with zero padding (types other than 1 skipped).  No DeSo OS note = a program from
 /// before ABI 1.0 = 1.0; exactly one valid note = its version; a parse error is never "no
 /// note".  Called on a header `elf::parse` has already checked.
-pub fn abi_of(b: &[u8]) -> Result<(u16, u16), AbiError> {
+pub fn abi_of<S: Source + ?Sized>(b: &S) -> Result<(u16, u16), AbiError> {
     let bad = AbiError::BadNote;
-    let len = b.len() as u64;
+    let len = b.size();
     let phoff = u64_at(b, 32).ok_or(bad)?;
     let phentsize = u16_at(b, 54).ok_or(bad)? as u64;
     let phnum = u16_at(b, 56).ok_or(bad)? as u64;
@@ -183,10 +215,15 @@ pub fn abi_of(b: &[u8]) -> Result<(u16, u16), AbiError> {
             // The owner "DeSo" is ours: a name that starts with it must be exactly "DeSo\0" with zero
             // padding – a damaged name of our note is refused, not taken for another owner's note.
             // (A changed letter, "DeSx\0", cannot be told from another owner; a signature covers that.)
-            let start = name as usize;
-            let deso_owner = namesz >= 4 && &b[start..start + 4] == &NOTE_NAME[..4];
-            if deso_owner && (namesz != NOTE_NAME.len() as u64 || b[start + 4] != 0 || b[start + 5..desc as usize].iter().any(|&x| x != 0)) {
-                return Err(bad);
+            let mut owner = [0u8; 4];
+            let deso_owner = namesz >= 4 && b.read_at(name, &mut owner) && owner == NOTE_NAME[..4];
+            if deso_owner {
+                // name + padding: 8 bytes for "DeSo\0" (desc - name = align4(namesz)).
+                let mut pad = [0u8; 8];
+                let whole = desc - name == 8 && b.read_at(name, &mut pad);
+                if namesz != NOTE_NAME.len() as u64 || !whole || pad[4..].iter().any(|&x| x != 0) {
+                    return Err(bad);
+                }
             }
             // Other types of the "DeSo" owner are kept for later versions: checked for shape, skipped.
             let ours = deso_owner && kind == NT_DESO_ABI;
@@ -219,10 +256,11 @@ pub fn abi_of(b: &[u8]) -> Result<(u16, u16), AbiError> {
 }
 
 /// Validates the file and builds the address space (the process is not running yet).
-pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
-    let image = elf::parse(bytes).map_err(LoadError::Elf)?;
+pub fn load<S: Source + ?Sized>(file: &S, args: &[&str]) -> Result<Loaded, LoadError> {
+    let len = usize::try_from(file.size()).map_err(|_| LoadError::Elf(ElfError::TooSmall))?;
+    let image = elf::parse_with(len, &mut |o, buf| file.read_at(o as u64, buf)).map_err(LoadError::Elf)?;
     // The ABI note before anything is mapped.
-    abi_of(bytes).map_err(LoadError::Abi)?;
+    abi_of(file).map_err(LoadError::Abi)?;
     // Segments do not overlap (pages may be shared – the rights are merged below).
     let segs = image.segments();
     for (i, a) in segs.iter().enumerate() {
@@ -279,9 +317,18 @@ pub fn load(bytes: &[u8], args: &[&str]) -> Result<Loaded, LoadError> {
             }
             page += PAGE;
         }
-        let data = &bytes[seg.offset as usize..(seg.offset + seg.filesz) as usize];
-        if !space.write_bytes(seg.vaddr, data) {
-            return Err(LoadError::NoMemory);
+        // The segment's bytes, a page at a time (the file may be in frames, not one buffer).
+        let mut chunk = [0u8; PAGE as usize];
+        let mut done = 0u64;
+        while done < seg.filesz {
+            let n = (seg.filesz - done).min(PAGE) as usize;
+            if !file.read_at(seg.offset + done, &mut chunk[..n]) {
+                return Err(LoadError::Elf(ElfError::DataOutsideFile));
+            }
+            if !space.write_bytes(seg.vaddr + done, &chunk[..n]) {
+                return Err(LoadError::NoMemory);
+            }
+            done += n as u64;
         }
     }
 

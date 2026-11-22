@@ -421,6 +421,22 @@ impl ConcurrentFs for RamFs {
         i.to_vec()
     }
 
+    fn read_each(&self, path: &str, sink: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<u64> {
+        let f = self.file(path)?;
+        let i = f.inner.lock();
+        let mut buf = [0u8; 4096];
+        let mut done = 0usize;
+        while done < i.len {
+            let n = i.read_at(done, &mut buf);
+            if n == 0 {
+                break;
+            }
+            sink(&buf[..n])?;
+            done += n;
+        }
+        Ok(done as u64)
+    }
+
     fn write(&self, path: &str, offset: u64, bytes: &[u8]) -> Result<usize> {
         let f = self.file(path)?;
         let mut i = f.inner.lock();

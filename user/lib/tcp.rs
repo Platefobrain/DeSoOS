@@ -228,6 +228,23 @@ pub struct Tcb {
 }
 
 impl Tcb {
+    /// While connecting: how many times the SYN has been sent again (None = not connecting).
+    pub fn syn_retries(&self) -> Option<u8> {
+        if self.state == State::SynSent { Some(self.tries) } else { None }
+    }
+
+    /// While connecting: a new initial sequence number for the next SYN – the caller moves
+    /// the connection to another local port at the same time (a new connection to the peer;
+    /// the retry timing stays as it was).
+    pub fn rekey_syn(&mut self, iss: u32) {
+        if self.state == State::SynSent {
+            self.iss = iss;
+            self.snd_una = iss;
+            self.snd_nxt = iss;
+            self.snd_max = iss;
+        }
+    }
+
     /// A new connection in this block: the SYN goes out with the first `output`
     /// call.  Set in place (the block holds the buffers – too big for a stack).
     pub fn init_connect(&mut self, iss: u32, now: u64) {

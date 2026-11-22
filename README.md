@@ -1,4 +1,4 @@
-# DeSo OS <img src="https://img.shields.io/badge/version-0.81.0-1f6feb?style=for-the-badge" alt="Version 0.81.0">
+# DeSo OS <img src="https://img.shields.io/badge/version-0.81.1-1f6feb?style=for-the-badge" alt="Version 0.81.1">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>

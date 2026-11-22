@@ -88,7 +88,7 @@ STARTUP TEST (`tests/test.sh`, `[STARTUP TEST]`):
 |---|---|
 | 1/3 | `/bin/starttest` (`libdeso`) checks its own start: `rsp % 16`, `argc`, `argv[]` (with UTF-8), `argv[argc]`, `envp`, `auxv`, the strings between the vectors and the stack top, slots 0–2, slot 3 a channel – and empty when none is given, 4–15 empty, the stack grown to 7 MiB; `main` returning 42 = exit code 42; a panic = "panic: …" + 101 |
 | 2/3 | a program in plain machine code (no `libdeso`, no note) checks the stack and DF = 0 itself – loaded at 0x100000, at 0x400000 and ending exactly at `USER_LOAD_MAX`; one page below or past the range refused |
-| 3/3 | 32 arguments and 4096 bytes start, 33 / 4097 are refused; a file of exactly 8 MiB starts, one byte more is refused |
+| 3/3 | 32 arguments and 4096 bytes start, 33 / 4097 are refused; a file of exactly 8 MiB starts (the kernel heap's largest block meanwhile below 1 MiB – exec reads into page frames), one byte more is refused |
 
 ELF TEST checks the loader's refusals (magic, class, machine, `ET_DYN`, W^X, overlaps, ranges) and the page rights.
 

@@ -29,8 +29,6 @@ timings move by ±15% from run to run on the same build).
 - `dcp audit` keeps 16 ancestors per entry: a viewer more than 16 levels up does not see the refusal; a process whose
   parent ended is reparented to init, so its later refusals are no longer seen by the old grandparent
 - `spawn` instead of `fork`/`exec`; no environment variables or signals (kill = process exit)
-- exec reads a program file whole (up to 8 MiB) into one kernel-heap buffer before loading it – on a badly fragmented
-  heap a large program can fail to start (`ERROR_OUT_OF_MEMORY`); reading straight into frames would remove that
 - ABI 1.0 does not define what happens with a `PT_INTERP` header: the loader does not read it and starts the program at
   `e_entry` without an interpreter (`deso-build.sh` refuses such a program; `docs/abi/STARTUP.md`)
 - the SDK builds Rust programs only (`no_std` + `libdeso`); no C headers, no package format yet (v0.82)
@@ -239,6 +237,58 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.81.1 — 2026-11-22
+
+**Status: stable on QEMU (TCG and KVM); two fixes before v0.82 – the short soak's KVM failure from v0.81.0 explained
+and fixed (a restarted netd's first SYN no longer stays on a port the host still holds), and `exec` reads a program
+into page frames instead of one heap buffer. ABI 1.0 and the frozen SDK unchanged; 44 suites, 344 tests.**
+
+### What is new (details: `CHANGELOG.md`, `docs/ARCHITECTURE.md`)
+
+- **netd: SYN on a new port.** If the first SYN of a connection gets no answer for 1 s, netd sends the next one from a
+  new local port with a new initial sequence number (the retry times and the 15 s limit unchanged; status key
+  `tcp_synmoved`). Proven before the fix: a new netd forced onto the port of a connection the killed one left open
+  waited 15 007 ms and timed out; on another port it connected in 3 ms. The same can happen behind a home router
+  after a restart.
+- **exec into frames.** The program file is read in 4 KiB pieces, under one file-system lock, straight into page
+  frames; the loader reads the ELF headers, the ABI note and the segments from them (`elf_loader::Source`). The
+  largest kernel heap block while an 8 MiB program starts: 64 KiB (was 8 MiB). The bootloader unchanged.
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 44/44 + ABI host 5/5 + restart + USB restart + one stick 2/2 + short soak, 344 tests PASS (`ver=0.81.1`) | 482 s (restart 26 s, USB restart 6 s, one stick 9 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | the same, 344 tests PASS | 399 s (restart 11 s, USB restart 5 s, one stick 8 s, soak 126 s) |
+| SDK | `tests/sdk-test.sh` (TCG, KVM) | 13 checks PASS; `compat10` of the frozen SDK of ABI 1.0: 34 checks OK | – |
+
+New checks inside existing suites: NET TEST leaves a connection open from port 50123, kills netd and makes the new one
+use the same port (`testport`, only in the self-test build) – it must connect from another port within 5 s
+(`tcp_synmoved == 1`); STARTUP TEST 3/3 requires the largest heap block while the 8 MiB program starts to stay below
+1 MiB. Mutations caught: netd without the port move (NET TEST, 15 s timeout); exec reading the whole file into one
+buffer again ("took a 8192 KiB block").
+
+### Performance against the previous release (v0.81.0 → v0.81.1, same machine)
+
+| | TCG v0.81.0 | TCG v0.81.1 | KVM v0.81.0 | KVM v0.81.1 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 93 / 4 196 | 113 / 4 196 | 52 / 6 131 | 49 / 5 657 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 460 / 12 880 | 7 074 / 11 753 | 16 384 / 52 178 | 18 123 / 54 251 |
+| DeSoFS 1000 small files create / read (ms) | 12 463 / 3 466 | 13 792 / 3 799 | 8 021 / 828 | 6 453 / 813 |
+| short soak: file operations in 2 min | 6 263 | 6 302 | 27 333 | 27 972 |
+| short soak: network MiB | 831 | 813 | 918 | 917 |
+| short soak: processes | 18 812 | 18 154 | 47 146 | 45 652 |
+
+Verdict: no regression beyond the usual spread (TCG ±15%; KVM small files faster this run). Soak: leaks 0, errors 0,
+7 / 8 kills of services, longest recovery 1 048 ms (TCG) / 971 ms (KVM).
+
+### Known problems
+
+- None new. The v0.81.0 problem (short soak under KVM, a TCP connection timed out after `net0` was restarted) is fixed:
+  the cause was the one suspected there – proven, see above.
+
+---
+
 ## v0.81.0 — 2026-11-22
 
 **Status: stable on QEMU (TCG and KVM); ABI 1.0 – the system calls, handles and rights, constants, the loader's limits
@@ -316,7 +366,8 @@ processes in 2 min under KVM). Soak: leaks 0, errors 0, longest recovery 1 001 m
   Not repeatable – the same seed passed. Suspected, not proven: the new netd picked the local port of a connection the
   killed one never closed, which QEMU's user network still holds (netd's TCP state lives in the process, so a restarted
   netd does not know its predecessor's ports; our TCP answers a stray ACK with RST as it should). To be checked by
-  logging the ports of both instances.
+  logging the ports of both instances. **Fixed in v0.81.1** – the cause proven, netd moves an unanswered SYN to a
+  new port.
 
 ---
 

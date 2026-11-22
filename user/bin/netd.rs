@@ -369,6 +369,11 @@ struct Nic {
     cfg_seen: ([u8; 4], u8),
     udp_cfgclosed: u64,
     tcp_cfgclosed: u64,
+    /// Connections whose SYN retries moved to another local port (no answer to the first).
+    tcp_synmoved: u64,
+    /// Self-test image only: the local port of the next TCP connection (`testport N`).
+    #[cfg(selftest)]
+    test_port: u16,
     /// ARP cache: (IP, MAC, uptime in ms when learned); IP 0 = empty.
     arp_cache: [([u8; 4], [u8; 6], u64); ARP_CACHE],
     ip_id: u16,
@@ -1416,6 +1421,13 @@ impl Nic {
                     let _ = writeln!(out, "dns: expected a.b.c.d[:port] or auto, not {:?}", arg);
                 }
             }
+        } else if cfg!(selftest) && req.starts_with("testport ") && self.conns[k].kind & K_ADMIN != 0 {
+            // Self-test image only (NET TEST): the next TCP connection uses this local port.
+            #[cfg(selftest)]
+            {
+                self.test_port = req[9..].trim().parse().unwrap_or(0);
+            }
+            let _ = writeln!(out, "testport {}", req[9..].trim());
         } else if req == "version" {
             // The network protocol's version (docs/abi/SERVICES.md); a netd from before it
             // answered "netd: unknown request" - clients take that as 1.0.
@@ -1908,6 +1920,11 @@ impl Nic {
 
     /// A random local port no TCP connection uses.
     fn tcp_port(&mut self) -> u16 {
+        #[cfg(selftest)]
+        if self.test_port != 0 {
+            // NET TEST: the next connection from this port (`testport N`).
+            return core::mem::take(&mut self.test_port);
+        }
         loop {
             let p = self.new_port();
             let listening = self.conns[..self.nconns].iter().any(|c| matches!(c.op, Op::Listen { port } if port == p));
@@ -2066,7 +2083,20 @@ impl Nic {
                 continue;
             }
             if now >= tcbs()[slot].deadline() {
+                let before = tcbs()[slot].syn_retries();
                 tcbs()[slot].tick(now);
+                if before == Some(0) && tcbs()[slot].syn_retries() == Some(1) {
+                    // No answer at all to the first SYN: the retries go out from another
+                    // local port with a new sequence number.  Something on the way may still
+                    // hold a connection from that port – a netd killed with connections
+                    // open never closed them, and a restarted netd does not know its
+                    // predecessor's ports (QEMU's user network then ignores the SYN; a NAT
+                    // router can keep the old mapping after a restart).
+                    let p = self.tcp_port();
+                    self.tcp[slot].lport = p;
+                    tcbs()[slot].rekey_syn(self.rand32());
+                    self.tcp_synmoved += 1;
+                }
             }
             if self.tcp[slot].listener != NO_OWNER {
                 let st = tcbs()[slot].state;
@@ -2413,7 +2443,7 @@ impl Nic {
         let _ = writeln!(out, "  interrupts {}, frames found by polling {}", self.irqs, self.polled);
         let _ = writeln!(
             out,
-            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={} udp={} udpmade={} udpin={} udpout={} udp_dropped={} udp_foreign={} udp_toolong={} udp_fragmented={} udp_noport={} udp_cfgclosed={} tcp_cfgclosed={}",
+            "netd-status mac={} link={} ip={} prefix={} gw={} dns={} dhcp={} lease={} acks={} naks={} ignored={} declined={} released={} conflicts={} byhand={} dnsq={} dnsa={} dnsbad={} cached={} conns={} tcp={} tcpacc={} loop={} tcpmade={} tcpin={} tcpout={} tcprst={} rx={} tx={} arp={} irq={} errors={} bad={} echo={} udp={} udpmade={} udpin={} udpout={} udp_dropped={} udp_foreign={} udp_toolong={} udp_fragmented={} udp_noport={} udp_cfgclosed={} tcp_cfgclosed={} tcp_synmoved={}",
             Mac(self.mac),
             up as u8,
             ip_text(self.ip),
@@ -2458,7 +2488,8 @@ impl Nic {
             self.udp_fragmented,
             self.udp_noport,
             self.udp_cfgclosed,
-            self.tcp_cfgclosed
+            self.tcp_cfgclosed,
+            self.tcp_synmoved
         );
     }
 }
@@ -3077,6 +3108,9 @@ fn main(args: Args) -> i32 {
         cfg_seen: ([0; 4], 0),
         udp_cfgclosed: 0,
         tcp_cfgclosed: 0,
+        tcp_synmoved: 0,
+        #[cfg(selftest)]
+        test_port: 0,
         arp_cache: [([0; 4], [0; 6], 0); ARP_CACHE],
         ip_id: 0,
         conns: [NO_CONN; MAX_CONNS],

@@ -1089,8 +1089,8 @@ channel (slot 3); the shell's SYSCTL (slot 4), SETTIME (slot 7) and HW_ROOT are 
 from the handles, not from where the file lies). The network administration channel goes to exactly `/bin/netconfig`
 (before v0.80 to any path ending in `netconfig`; since v0.80.1 tested on the handles the processes really get: a shell
 with an administration and a program channel, `/bin/netconfig`'s request on the first only, every disk program with
-"netconfig" in its name or path on the second only). exec reads the whole ELF into memory (`fs::read_file`, at most 8 MiB)
-before the program starts, so pulling the stick out does not disturb a running program; the next start finds nothing.
+"netconfig" in its name or path on the second only). exec reads the whole ELF into memory (`fs::read_each` into physical frames, at most 8
+MiB – no big kernel-heap block; the loader reads it through `elf_loader::Source`) before the program starts, so pulling the stick out does not disturb a running program; the next start finds nothing.
 No signatures or versions yet – packages (PKG) come later; until then a program in `/disk/bin` is as trusted as a
 command typed by hand. Linux: `PATH` with `/usr/local/bin` before `/usr/bin` lets a local copy hide a system command –
 here the order is fixed the other way; Windows: the current directory used to come first in the search order (DLL /
@@ -1435,7 +1435,9 @@ write anywhere in RAM (no IOMMU). netd is trusted system code built into the ima
   3390 initial window, slow start, congestion avoidance, fast retransmit after 3 duplicate ACKs). Retransmission
   timer from measured RTT (RFC 6298, 200 ms – 60 s, doubled per loss, Karn's rule); after a timeout everything
   from the first unacknowledged byte is sent again; 8 timeouts in a row end the connection; SYN resent after 1, 2,
-  4, 8 s, then "timed out". A zero window is probed. Data ahead of a gap (a lost segment) is kept in its place
+  4, 8 s, then "timed out"; when the first SYN gets no answer at all, netd sends the retries from another local port
+  with a new sequence number (`tcp_synmoved=`) – a netd killed with connections open never closed them, and QEMU's
+  user network or a NAT router may still hold the old port and ignore its SYNs. A zero window is probed. Data ahead of a gap (a lost segment) is kept in its place
   in the ring – up to 8 separate pieces – with a duplicate ACK for the gap; when the gap fills, the ACK jumps over
   everything kept (one loss no longer means resending the whole window); overlapping resends are trimmed. Closing: FIN after the queued data; all
   RFC paths (FIN-WAIT-1/2, CLOSING, TIME-WAIT 2 s, CLOSE-WAIT, LAST-ACK); FIN-WAIT-2 gives up after 10 s.

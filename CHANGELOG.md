@@ -2,6 +2,28 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.81.1 — 2026-11-22 (two fixes from the v0.81.0 report)
+
+- **netd: a connection whose first SYN gets no answer moves to another local port.** The short soak's rare
+  "tcp: 10.0.2.2:58080: timed out (no answer)" right after `net0` was killed is now explained and reproduced: a netd
+  killed with a connection open never closes it, QEMU's user network keeps it, and a SYN from the same local port is
+  then ignored – a restarted netd does not know its predecessor's ports and picked the same one (an experiment with
+  the port forced: 15 007 ms and the time-out; another port: 3 ms). Now, when the first SYN of a connection gets no
+  answer at all (1 s), the retries go out from a new local port with a new sequence number (the retry timing and the
+  15 s limit stay as they were); `netd-status` counts them (`tcp_synmoved=`). A NAT router that keeps an old mapping
+  after a restart is handled the same way. NET TEST (nettest): a connection from port 50123 left open, netd killed,
+  the new netd forced to port 50123 again – connected from another port in about a second (a self-test-only request
+  `testport N`; netd is built with `--cfg selftest` in the self-test image). Mutation (no move): the 15 s time-out,
+  caught.
+- **exec reads a program into frames, not into one kernel-heap buffer.** A program file (up to 8 MiB) went whole
+  into one heap block; on a fragmented heap a large program could fail to start. Now `fs::read_each` hands the file
+  over 4 KiB at a time under the same lock `read_file` holds (one consistent read – `ConcurrentFs::read_each` for
+  ramfs and the locked file systems), exec keeps it in physical frames (`ProgramFile`), and the loader reads the ELF
+  headers, the ABI note and each segment through `elf_loader::Source` (`common/elf.rs`: `parse_with`, the same checks
+  as `parse`; the boot loader is unchanged). STARTUP TEST 3/3: exec of an 8 MiB file uses no heap block of 1 MiB or
+  more (it saw 64 KiB; a self-test counter of the largest allocation). Mutation (the old whole-file read added back):
+  "took a 8192 KiB block", caught.
+
 ## v0.81.0 — 2026-11-22 (ABI 1.0 + SDK)
 
 Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release. What a program may rely on is written down once

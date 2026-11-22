@@ -282,9 +282,9 @@ pub fn spawn_with(name: &str, code: &[u8], opts: &SpawnOptions) -> Result<TaskId
 pub const MAX_PROGRAM_FILE: usize = 8 * 1024 * 1024;
 
 /// Process from an ELF image; `args[0]` is the program name (argv[0]).
-pub fn spawn_elf(
+pub fn spawn_elf<S: elf_loader::Source + ?Sized>(
     name: &str,
-    bytes: &[u8],
+    bytes: &S,
     args: &[&str],
     cwd: &str,
     opts: &SpawnOptions,
@@ -369,8 +369,50 @@ pub fn exec(path: &str, args: &[&str], cwd: &str, opts: &SpawnOptions) -> Result
     spawn_elf(name, &bytes, args, cwd, opts).map_err(ExecError::Load)
 }
 
-/// Loads a program file (absolute path) into memory.
-fn read_program(path: &str) -> Result<Vec<u8>, ExecError> {
+/// A program file read into physical frames, a page each – never one big heap buffer (a
+/// large program would otherwise need up to 8 MiB in one piece of a fragmented kernel heap).
+pub struct ProgramFile {
+    frames: Vec<u64>,
+    len: u64,
+}
+
+impl ProgramFile {
+    fn page(&self, k: usize) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(crate::memory::phys_to_virt(self.frames[k]) as *const u8, 4096) }
+    }
+}
+
+impl elf_loader::Source for ProgramFile {
+    fn size(&self) -> u64 {
+        self.len
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> bool {
+        match off.checked_add(buf.len() as u64) {
+            Some(end) if end <= self.len => {}
+            _ => return false,
+        }
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = off as usize + done;
+            let (k, at) = (pos / 4096, pos % 4096);
+            let n = (4096 - at).min(buf.len() - done);
+            buf[done..done + n].copy_from_slice(&self.page(k)[at..at + n]);
+            done += n;
+        }
+        true
+    }
+}
+
+impl Drop for ProgramFile {
+    fn drop(&mut self) {
+        for &f in &self.frames {
+            crate::memory::free_frame(f);
+        }
+    }
+}
+
+/// Loads a program file (absolute path) into frames, as one consistent read of the file.
+fn read_program(path: &str) -> Result<ProgramFile, ExecError> {
     let meta = crate::fs::stat(path).map_err(ExecError::Fs)?;
     if meta.kind == crate::fs::FileType::Directory {
         return Err(ExecError::Fs(crate::fs::FsError::IsADirectory));
@@ -378,7 +420,36 @@ fn read_program(path: &str) -> Result<Vec<u8>, ExecError> {
     if meta.size as usize > MAX_PROGRAM_FILE {
         return Err(ExecError::TooBig);
     }
-    crate::fs::read_file(path).map_err(ExecError::Fs)
+    let mut file = ProgramFile { frames: Vec::new(), len: 0 };
+    let mut too_big = false;
+    let r = crate::fs::read_each(path, &mut |chunk| {
+        let mut done = 0;
+        while done < chunk.len() {
+            if file.len as usize + (chunk.len() - done) > MAX_PROGRAM_FILE {
+                // The file grew since the stat.
+                too_big = true;
+                return Err(crate::fs::FsError::NoSpace);
+            }
+            let at = (file.len % 4096) as usize;
+            if at == 0 {
+                file.frames.try_reserve(1).map_err(|_| crate::fs::FsError::NoSpace)?;
+                let f = crate::memory::alloc_frame().ok_or(crate::fs::FsError::NoSpace)?;
+                file.frames.push(f);
+            }
+            let n = (4096 - at).min(chunk.len() - done);
+            let k = file.frames.len() - 1;
+            let page = unsafe { core::slice::from_raw_parts_mut(crate::memory::phys_to_virt(file.frames[k]) as *mut u8, 4096) };
+            page[at..at + n].copy_from_slice(&chunk[done..done + n]);
+            file.len += n as u64;
+            done += n;
+        }
+        Ok(())
+    });
+    match r {
+        Ok(_) => Ok(file),
+        Err(_) if too_big => Err(ExecError::TooBig),
+        Err(e) => Err(ExecError::Fs(e)),
+    }
 }
 
 /// spawn syscall – child process of the current process `parent` (task

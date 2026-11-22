@@ -492,6 +492,8 @@ unsafe fn cached_dealloc(p: *mut u8, c: usize, size: usize) {
 
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        #[cfg(selftest)]
+        LARGEST.fetch_max(layout.size(), core::sync::atomic::Ordering::Relaxed);
         if CACHE_ON.load(core::sync::atomic::Ordering::Relaxed) {
             if let Some((c, size)) = class_of(layout) {
                 return unsafe { cached_alloc(c, size) };
@@ -537,6 +539,21 @@ pub fn init() {
         (mapped_end - HEAP_START) / 1024,
         HEAP_MAX_SIZE / (1024 * 1024)
     );
+}
+
+/// Self-tests: the largest single allocation since the last `largest_reset` (STARTUP TEST –
+/// exec must not need one big block for a program file).
+#[cfg(selftest)]
+static LARGEST: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(selftest)]
+pub fn largest_reset() {
+    LARGEST.store(0, core::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(selftest)]
+pub fn largest() -> usize {
+    LARGEST.load(core::sync::atomic::Ordering::SeqCst)
 }
 
 #[allow(dead_code)]

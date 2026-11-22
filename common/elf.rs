@@ -97,60 +97,81 @@ impl ElfError {
     }
 }
 
-fn u16_at(b: &[u8], o: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(o..o.checked_add(2)?)?.try_into().ok()?))
+/// Bytes of the file at `o` – from a slice or from a file read piece by piece.
+fn get<const N: usize>(read: &mut dyn FnMut(usize, &mut [u8]) -> bool, len: usize, o: usize) -> Option<[u8; N]> {
+    if o.checked_add(N)? > len {
+        return None;
+    }
+    let mut b = [0u8; N];
+    if read(o, &mut b) { Some(b) } else { None }
 }
-fn u32_at(b: &[u8], o: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(o..o.checked_add(4)?)?.try_into().ok()?))
+fn u16_at(r: &mut dyn FnMut(usize, &mut [u8]) -> bool, len: usize, o: usize) -> Option<u16> {
+    get::<2>(r, len, o).map(u16::from_le_bytes)
 }
-fn u64_at(b: &[u8], o: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(b.get(o..o.checked_add(8)?)?.try_into().ok()?))
+fn u32_at(r: &mut dyn FnMut(usize, &mut [u8]) -> bool, len: usize, o: usize) -> Option<u32> {
+    get::<4>(r, len, o).map(u32::from_le_bytes)
+}
+fn u64_at(r: &mut dyn FnMut(usize, &mut [u8]) -> bool, len: usize, o: usize) -> Option<u64> {
+    get::<8>(r, len, o).map(u64::from_le_bytes)
 }
 
 pub fn parse(elf: &[u8]) -> Result<Elf, ElfError> {
-    if elf.len() < 64 {
+    parse_with(elf.len(), &mut |o, b| match elf.get(o..o + b.len()) {
+        Some(s) => {
+            b.copy_from_slice(s);
+            true
+        }
+        None => false,
+    })
+}
+
+/// `parse` on a file of `len` bytes read through `read(offset, buf)` (true = `buf` filled) –
+/// the kernel loads programs from frames, not from one buffer.
+pub fn parse_with(len: usize, read: &mut dyn FnMut(usize, &mut [u8]) -> bool) -> Result<Elf, ElfError> {
+    if len < 64 {
         return Err(ElfError::TooSmall);
     }
-    if &elf[0..4] != b"\x7fELF" {
+    let head = get::<8>(read, len, 0).ok_or(ElfError::TooSmall)?;
+    if &head[0..4] != b"\x7fELF" {
         return Err(ElfError::BadMagic);
     }
-    if elf[4] != 2 {
+    if head[4] != 2 {
         return Err(ElfError::Not64Bit);
     }
-    if elf[5] != 1 {
+    if head[5] != 1 {
         return Err(ElfError::NotLittleEndian);
     }
-    if u16_at(elf, 18) != Some(EM_X86_64) {
+    if u16_at(read, len, 18) != Some(EM_X86_64) {
         return Err(ElfError::NotX86_64);
     }
-    if u16_at(elf, 16) != Some(ET_EXEC) {
+    if u16_at(read, len, 16) != Some(ET_EXEC) {
         return Err(ElfError::NotExecutable);
     }
-    let entry = u64_at(elf, 24).ok_or(ElfError::TooSmall)?;
-    let phoff = u64_at(elf, 32).ok_or(ElfError::TooSmall)? as usize;
-    let phentsize = u16_at(elf, 54).ok_or(ElfError::TooSmall)? as usize;
-    let phnum = u16_at(elf, 56).ok_or(ElfError::TooSmall)? as usize;
+    let entry = u64_at(read, len, 24).ok_or(ElfError::TooSmall)?;
+    let phoff = u64_at(read, len, 32).ok_or(ElfError::TooSmall)? as usize;
+    let phentsize = u16_at(read, len, 54).ok_or(ElfError::TooSmall)? as usize;
+    let phnum = u16_at(read, len, 56).ok_or(ElfError::TooSmall)? as usize;
     if phentsize < 56 || phnum > 256 {
         return Err(ElfError::BadProgramHeaders);
     }
     match phnum.checked_mul(phentsize).and_then(|n| n.checked_add(phoff)) {
-        Some(end) if end <= elf.len() => {}
+        Some(end) if end <= len => {}
         _ => return Err(ElfError::BadProgramHeaders),
     }
 
     let mut out = Elf { entry, segments: [Segment::default(); MAX_SEGMENTS], count: 0 };
     for i in 0..phnum {
         let ph = phoff + i * phentsize;
-        if u32_at(elf, ph) != Some(PT_LOAD) {
+        if u32_at(read, len, ph) != Some(PT_LOAD) {
             continue;
         }
         let bad = ElfError::BadProgramHeaders;
         let seg = Segment {
-            flags: u32_at(elf, ph + 4).ok_or(bad)?,
-            offset: u64_at(elf, ph + 8).ok_or(bad)?,
-            vaddr: u64_at(elf, ph + 16).ok_or(bad)?,
-            filesz: u64_at(elf, ph + 32).ok_or(bad)?,
-            memsz: u64_at(elf, ph + 40).ok_or(bad)?,
+            flags: u32_at(read, len, ph + 4).ok_or(bad)?,
+            offset: u64_at(read, len, ph + 8).ok_or(bad)?,
+            vaddr: u64_at(read, len, ph + 16).ok_or(bad)?,
+            filesz: u64_at(read, len, ph + 32).ok_or(bad)?,
+            memsz: u64_at(read, len, ph + 40).ok_or(bad)?,
         };
         if seg.memsz == 0 {
             continue;
@@ -159,7 +180,7 @@ pub fn parse(elf: &[u8]) -> Result<Elf, ElfError> {
             return Err(ElfError::FileSizeTooBig);
         }
         match seg.offset.checked_add(seg.filesz) {
-            Some(e) if e <= elf.len() as u64 => {}
+            Some(e) if e <= len as u64 => {}
             _ => return Err(ElfError::DataOutsideFile),
         }
         if seg.vaddr.checked_add(seg.memsz).is_none() {

@@ -29,7 +29,8 @@
 //     "host unreachable", a bad address refused, no malformed packets,
 //   - counters: frames sent and received, interrupts, no receive errors,
 //   - kill netd: init restarts it, the new instance gets its address again and
-//     answers ping.
+//     answers ping; a connection the killed netd left open on port 50123 does not block
+//     the new one from the same port (its SYN retries move to another port).
 // Result: "nettest: N checks OK, ..." and exit code 0.
 #![no_std]
 #![no_main]
@@ -886,6 +887,16 @@ fn main(args: Args) -> i32 {
     check!(n, u_new.is_some(), "UDP socket from the DHCP address again");
     close(u_new.unwrap_or(0));
 
+    // A connection from local port 50123 left open when netd is killed: QEMU's user network
+    // keeps it, and a SYN from the same port is then ignored (the soak once lost 15 s that way).
+    check!(n, ask("testport 50123").starts_with("testport 50123"), "testport (self-test netd)");
+    let stale = open_req("tcp 10.0.2.2 58080");
+    let mut info = RecvInfo::default();
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(OUT) };
+    let r = if stale > 0 { chan_recv(stale as u64, buf, 0, &mut info) } else { -1 };
+    let line = if r > 0 { core::str::from_utf8(&buf[..r as usize]).unwrap_or("") } else { "" };
+    check!(n, line.contains("from 10.0.2.15:50123 "), "the connection from port 50123: {:?}", line.trim());
+
     // Kill the driver: init restarts it, the new instance works.
     check!(n, kill(pid1) == ERROR_ACCESS_DENIED, "a program killed a service it did not start (netd {})", pid1);
     let mut kb = [0u8; 128];
@@ -909,6 +920,22 @@ fn main(args: Args) -> i32 {
     check!(n, p.contains("1 sent, 1 received"), "ping after the restart: {:?}", p.trim());
     let st = ask("status");
     check!(n, num(st, "tx") < tx1 && num(st, "rx") >= 1, "the restarted netd must start from zero: {:?}", st.lines().last());
+    // The same local port again from the new netd: no answer to the first SYN, the retries
+    // move to another port – connected in about a second, not a time-out after 15 s.
+    if stale > 0 {
+        close(stale as u64);
+    }
+    check!(n, ask("testport 50123").starts_with("testport 50123"), "testport after the restart");
+    let t0 = uptime_ms();
+    let again = ask("tcp 10.0.2.2 58080");
+    let took = uptime_ms() - t0;
+    check!(
+        n,
+        again.starts_with("connected 10.0.2.2:58080 from 10.0.2.15:") && !again.contains(":50123 ") && took < 5000 && num(ask("status"), "tcp_synmoved") == 1,
+        "a SYN from the killed netd's port must move to another port: {:?} after {} ms",
+        again.trim(),
+        took
+    );
 
     println!(
         "nettest: {} checks OK, card 52:54:00:12:34:56 link up, DHCP 10.0.2.15/24 (renewed), DNS (13 kinds of answers), TCP (1 MiB in {} ms), user and narrowed rights, loopback ({} KiB), sandboxed netweb reached from the host, concurrent pings, ARP and ping to 10.0.2.2 answered ({} frames out, {} in), netd killed and restarted (pid {} -> {})",
