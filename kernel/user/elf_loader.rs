@@ -133,7 +133,8 @@ fn align4(x: u64) -> Option<u64> {
 /// The ABI a program was built for, from its program headers alone (docs/abi/README.md):
 /// every PT_NOTE inside the file (checked_add), at most 4 of them, each at most 4 KiB,
 /// 4-aligned, not overlapping another PT_NOTE or the ELF / program headers; every note in it
-/// (any owner) with lengths that stay inside its PT_NOTE.  No DeSo OS note = a program from
+/// (any owner) with lengths that stay inside its PT_NOTE; a name starting with "DeSo" exactly
+/// "DeSo\0" with zero padding (types other than 1 skipped).  No DeSo OS note = a program from
 /// before ABI 1.0 = 1.0; exactly one valid note = its version; a parse error is never "no
 /// note".  Called on a header `elf::parse` has already checked.
 pub fn abi_of(b: &[u8]) -> Result<(u16, u16), AbiError> {
@@ -179,7 +180,16 @@ pub fn abi_of(b: &[u8]) -> Result<(u16, u16), AbiError> {
             if next > end {
                 return Err(bad);
             }
-            let ours = namesz == NOTE_NAME.len() as u64 && &b[name as usize..name as usize + NOTE_NAME.len()] == NOTE_NAME && kind == NT_DESO_ABI;
+            // The owner "DeSo" is ours: a name that starts with it must be exactly "DeSo\0" with zero
+            // padding – a damaged name of our note is refused, not taken for another owner's note.
+            // (A changed letter, "DeSx\0", cannot be told from another owner; a signature covers that.)
+            let start = name as usize;
+            let deso_owner = namesz >= 4 && &b[start..start + 4] == &NOTE_NAME[..4];
+            if deso_owner && (namesz != NOTE_NAME.len() as u64 || b[start + 4] != 0 || b[start + 5..desc as usize].iter().any(|&x| x != 0)) {
+                return Err(bad);
+            }
+            // Other types of the "DeSo" owner are kept for later versions: checked for shape, skipped.
+            let ours = deso_owner && kind == NT_DESO_ABI;
             if ours {
                 if descsz != 8 {
                     return Err(bad);

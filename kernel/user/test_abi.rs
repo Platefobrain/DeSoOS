@@ -93,6 +93,10 @@ pub fn self_test() {
         }
         check!(false, "abiprobe: {:?}", kind);
     }
+    // abiprobe leaves nothing behind (it removes its directories whatever its cases gave).
+    for d in ["/abiprobe-order", "/abiprobe-order-at"] {
+        check!(crate::fs::stat(d).is_err(), "abiprobe left {} behind", d);
+    }
     for name in abi::ORDER_ABIPROBE.iter() {
         let line = alloc::format!("abiprobe: order ok {}", name);
         check!(out.lines().any(|l| l.trim() == line), "abiprobe did not check the argument order of {}", name);
@@ -312,6 +316,16 @@ fn notes() -> Result<(), String> {
     let mut badgnu = gnu();
     put(&mut badgnu, 4, &0x1000u32.to_le_bytes());
     let junk = [deso(1, 0, 0), alloc::vec![0u8; 4]].concat();
+    // The owner "DeSo" damaged: no NUL, another last byte, junk in the padding, a longer name.
+    let d10 = deso(1, 0, 0);
+    let desc10 = d10[20..28].to_vec();
+    let no_nul = note(b"DeSo", 1, &desc10);
+    let x_end = note(b"DeSoX", 1, &desc10);
+    let mut pad = d10.clone();
+    put(&mut pad, 17, &[7]);
+    let long = note(b"DeSo10\0", 1, &desc10);
+    let other_type = [note(b"DeSo\0", 2, &[1, 2, 3, 4]), d10.clone()].concat();
+    let changed_letter = note(b"DeSx\0", 1, &deso(1, 1, 0)[20..28]);
     let bad = Err(AbiError::BadNote);
     let ok = Ok((1, 0));
     let cases: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>, Result<(u16, u16), AbiError>)> = alloc::vec![
@@ -341,6 +355,12 @@ fn notes() -> Result<(), String> {
         ("a damaged foreign note", one(0x2000, &badgnu), bad),
         ("the note at the very end of the file", one(FILE - 28, &n10), ok),
         ("the note before the code", one(0x800, &n10), ok),
+        ("owner \"DeSo\" without its NUL", one(0x2000, &no_nul), bad),
+        ("owner \"DeSoX\" (the NUL changed)", one(0x2000, &x_end), bad),
+        ("owner \"DeSo\\0\" with junk in the padding", one(0x2000, &pad), bad),
+        ("owner \"DeSo10\\0\" (a longer name)", one(0x2000, &long), bad),
+        ("another type of the DeSo owner before the note", one(0x2000, &other_type), ok),
+        ("owner \"DeSx\\0\" (another owner - skipped)", one(0x2000, &changed_letter), ok),
     ];
     for (what, b, want) in &cases {
         let got = abi_of(b);
@@ -372,7 +392,7 @@ fn notes() -> Result<(), String> {
         Ok(k) => return Err(format!("1.1 ran: {:?}", k)),
     }
     serial_println!(
-        "[ABI TEST] 3/3 ELF ABI note: {} /bin programs carry ABI 1.0; {} note cases (1.0, 1.1, 2.0, none, flags, every length, twice, outside, overflow, overlap, alignment, foreign notes, order), overlapping segments refused; exec: 1.0 and no note run, 1.1 refused with ERROR_ABI PASS",
+        "[ABI TEST] 3/3 ELF ABI note: {} /bin programs carry ABI 1.0; {} note cases (1.0, 1.1, 2.0, none, flags, every length, twice, outside, overflow, overlap, alignment, foreign notes, order, a damaged DeSo owner name), overlapping segments refused; exec: 1.0 and no note run, 1.1 refused with ERROR_ABI PASS",
         bin.len(),
         cases.len()
     );

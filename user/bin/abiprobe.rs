@@ -115,8 +115,19 @@ fn child(mode: &str) -> i32 {
     if ok { 7 } else { 9 }
 }
 
+/// The directories the order cases make (removed before and after, whatever the results – a
+/// failed case must not leave one for the next run).
+const LEFTOVERS: [&[u8]; 2] = [b"/abiprobe-order-at", b"/abiprobe-order"];
+
+fn clean() {
+    for d in LEFTOVERS {
+        sys(abi::SYS_UNLINK, [d.as_ptr() as u64, d.len() as u64, 0, 0, 0, 0]);
+    }
+}
+
 /// The argument order of every call with `order = "abiprobe"` in abi.toml.
 fn order(p: &mut Probe) {
+    clean();
     let mut buf = [0u8; 4096];
     let b = buf.as_mut_ptr() as u64;
     let blen = buf.len() as u64;
@@ -453,6 +464,7 @@ fn main(args: Args) -> i32 {
 
     // 5. The argument order.
     order(&mut p);
+    clean();
 
     println!(
         "abiprobe: ABI {}.{}, {} probes ({} rights rows through the gate, {} later handle arguments left to the kernel's gate test, {} reserved, {} argument orders), {} failed",

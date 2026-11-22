@@ -21,7 +21,7 @@ that exists, and 25 mutations that must all be caught (`docs/abi/README.md`; `lo
 A failure stops the run there.  In QEMU, ABI TEST is the kernel's half: its rights table and constants against the
 generated `kernel/user/abi_generated.rs` and its gate on every handle argument of every row, `/bin/abiprobe` on the
 generated constants and the argument order of 32 calls, and the loader's ELF ABI note
-rules (every `/bin` program carries ABI 1.0; 26 hand-built ELF files; exec of 1.0, no note, 1.1).
+rules (every `/bin` program carries ABI 1.0; 32 hand-built ELF files; exec of 1.0, no note, 1.1).
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
 restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by

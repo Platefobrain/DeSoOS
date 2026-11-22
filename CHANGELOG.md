@@ -33,6 +33,17 @@ All three remarks were right, checked in the code first:
 - `docs/abi/SYSCALLS.md` has a column for the argument order. The ABI 1.0 lock is unchanged (`test` and `order` are not
   part of it).
 
+### Fixes after the reviews of stage B (9.7/10) and of the stage A fix (9.8/10)
+- **The owner "DeSo" is reserved.** The loader knew our note only by the exact name `DeSo\0`: a damaged name (`DeSo`
+  without its NUL, `DeSoX`, junk in the padding, a longer name) looked like another owner's note, was skipped, and the
+  program ran as a program from before ABI 1.0. Now a name that starts with `DeSo` must be exactly `DeSo\0` with zero
+  padding, or the program is refused with `ERROR_ABI`; other types of the `DeSo` owner are kept for later versions
+  (shape checked, skipped). A changed letter (`DeSx\0`) cannot be told from another owner – documented; a signature
+  covers that. ABI TEST 3/3: 26 -> 32 note cases. Kernel mutations caught: the old exact comparison, no padding check.
+- **abiprobe leaves nothing behind.** It removes the directories of its order cases before and after them, whatever
+  they gave (a failed case left `/abiprobe-order` for the next run, which then failed on mkdir); ABI TEST 2/3 checks
+  that none is left. Handles were never at risk – the kernel closes them when the process ends.
+
 ### The console font: DeSo Console
 - The framebuffer console draws with **DeSo Console**, an 8x16 pixel font of DeSo OS in the style of Orbitron (wide,
   square letters with cut corners, caps 9 pixels tall), instead of Terminus. The same 234 characters (ASCII, Latin-1,

@@ -65,9 +65,12 @@ The kernel reads it from the program headers alone, before anything is mapped:
 | flags ≠ 0 | refused (`ERROR_ABI`) |
 | the note twice (also in two `PT_NOTE`s) | refused (`ERROR_ABI`) |
 | a damaged note – ours or another owner's: a length past its `PT_NOTE`, bytes left over, our note with `descsz` ≠ 8 | refused (`ERROR_ABI`) |
+| a name that starts with `DeSo` but is not exactly `DeSo\0` with zero padding (no NUL, `DeSoX`, junk in the padding, a longer name) – the owner `DeSo` is reserved | refused (`ERROR_ABI`) |
+| a `DeSo` note of another type (kept for later versions) | skipped, its shape checked |
 | a `PT_NOTE` outside the file, with an overflowing offset + size, misaligned, over 4 KiB, on the ELF or program headers, overlapping another `PT_NOTE`; more than 4 of them | refused (`ERROR_ABI`) |
 
-A parse error is never "no note". Notes of other owners (a GNU build-id) are skipped but checked the same way; the
+A parse error is never "no note". A changed letter of the owner (`DeSx\0`) cannot be told from another owner's note –
+that is damage inside the file, which only a signature catches (packages, v0.82). Notes of other owners (a GNU build-id) are skipped but checked the same way; the
 order of headers and sections in the file does not matter. The loader also refuses overlapping `PT_LOAD` segments.
 `ver` shows the ABI the system gives.
 
@@ -136,7 +139,8 @@ generated constants, it puts a handle that does not exist into the first handle 
 real handles before them, which a program cannot get, so 1/3 does them), uses a handle without rights
 (`ERROR_ACCESS_DENIED`), the reserved numbers (`ERROR_NOT_IMPLEMENTED`), bad pointers (`ERROR_INVALID_ADDRESS`), the
 ordinary calls with known results, a child that exits with 7, and the argument order of the 32 calls `abi.toml` gives
-to it – the kernel checks every one printed "abiprobe: order ok"; `3/3` the ABI note – every `/bin` program carries 1.0, 26 hand-built ELF files (every row
+to it – the kernel checks every one printed "abiprobe: order ok" and that abiprobe left none of its directories behind
+(it removes them before and after its cases, whatever they gave); `3/3` the ABI note – every `/bin` program carries 1.0, 32 hand-built ELF files (every row
 of the table above, the note at the end of the file and before the code, between foreign notes), overlapping
 segments, and through `exec`: a 1.0 program and one without a note run, a 1.1 program is refused with `ERROR_ABI` and
 the reason.
