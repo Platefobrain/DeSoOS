@@ -16,9 +16,11 @@ tests/soak.sh              the soak test: everything at once, 1 hour with KVM (D
 
 Before anything is built, `test.sh` runs the ABI host test – `python3 tools/abigen.py --test`: the locks, the
 description `abi/abi.toml`, the generator, the kernel's syscall numbers and argument registers, `libdeso` taking its
-constants only from the generated `abi.rs`, and 19 mutations that must all be caught (`docs/abi/README.md`; `logs/test-abi.log`).
+constants only from the generated `abi.rs`, every test and argument-order reference in `abi.toml` pointing at something
+that exists, and 25 mutations that must all be caught (`docs/abi/README.md`; `logs/test-abi.log`).
 A failure stops the run there.  In QEMU, ABI TEST is the kernel's half: its rights table and constants against the
-generated `kernel/user/abi_generated.rs`, `/bin/abiprobe` on the generated constants, and the loader's ELF ABI note
+generated `kernel/user/abi_generated.rs` and its gate on every handle argument of every row, `/bin/abiprobe` on the
+generated constants and the argument order of 32 calls, and the loader's ELF ABI note
 rules (every `/bin` program carries ABI 1.0; 26 hand-built ELF files; exec of 1.0, no note, 1.1).
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real

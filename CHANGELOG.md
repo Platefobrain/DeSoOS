@@ -6,6 +6,33 @@ Format: newest on top. Dates in Central European time.
 
 Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
 
+### Stage A fixes after the review (9.5/10)
+All three remarks were right, checked in the code first:
+- **Every handle argument through the gate.** `table::HANDLE_ARGS` listed only the first handle of a row
+  (`SYS_BLK_ATTACH` has three). Now every handle argument is listed; abiprobe puts a missing handle into the first one,
+  and ABI TEST 1/3 drives the kernel's gate (`sysrights::check_with`) with each handle argument of each row in turn
+  missing, of a wrong kind, short of each right and of a condition's right, the others valid (32 handle arguments, 122
+  cases; generated table `GATE` in `kernel/user/abi_generated.rs`) – a program cannot reach the later handles with real
+  ones before them.
+- **The argument order.** The host check compared only how many argument registers the kernel reads. Now every call
+  with 2 or more arguments says in `abi.toml` where its order is tested (`order`): 32 calls get an abiprobe case with
+  values chosen so that swapping any two arguments changes the result (each prints "abiprobe: order ok SYS_..." and
+  ABI TEST checks all are there; children `abiprobe nofiles` / `abiprobe slot5` for spawn and spawn_ex), 9 calls that
+  need a privileged handle name the suite program that uses them with real values (devtest, dmatest, usbtest,
+  inputtest, blktest, dsfstest, timetest), `SYS_READKEY` says why it cannot be told apart.
+- **Test names that exist.** `test` is a list of references (`abiprobe:gate`, `abiprobe:<probe label>`, `<SUITE> TEST`,
+  `<SUITE> TEST: <program>`) and the host test checks each one: the probe label is in abiprobe, the suite is printed
+  by the kernel, the suite runs the program, the program calls the function. This found six suites that never
+  existed (PROC, DEV, IRQ, DMA, INPUT TEST, "DESOFS / shell tests") – now the real ones (SVC, NOBKL, IPC, USB, INIT,
+  LKG TEST with their programs) – and `SYS_WAIT_MANY` described as returning an index while it returns a mask of the
+  ready entries (the text fixed; the lock holds only "value", unchanged).
+- Host test: 25 mutations (a test that does not exist, a suite that does not exist, a suite that does not run the
+  program, a program that does not call the function, a 2-argument call without `order`, an order case missing in
+  abiprobe). Kernel mutations, each caught by ABI TEST: the gate checks only the first handle, the gate ignores the
+  conditions, swapped arguments in write, seek, dup2, statat, munmap, wait_many, sysinfo.
+- `docs/abi/SYSCALLS.md` has a column for the argument order. The ABI 1.0 lock is unchanged (`test` and `order` are not
+  part of it).
+
 ### The console font: DeSo Console
 - The framebuffer console draws with **DeSo Console**, an 8x16 pixel font of DeSo OS in the style of Orbitron (wide,
   square letters with cut corners, caps 9 pixels tall), instead of Terminus. The same 234 characters (ASCII, Latin-1,

@@ -3,70 +3,70 @@
 
 What a program may rely on (rules: [README.md](README.md)).  A call: number in `rax`, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, `syscall`; the result in `rax` as i64 – `>= 0` a value, `< 0` an `ERROR_*` code.  The errors listed are the ones ABI 1.0 documents for the call; a program treats any other negative value as a failure too.  Argument types: `handle`, `ptr_in` (the kernel reads it), `ptr_out` (the kernel writes it), `len`, `u64`, `i64`, `flags`.  Every handle argument goes through the rights gate first: a missing handle or one of the wrong kind = `ERROR_INVALID_HANDLE`, a missing right = `ERROR_ACCESS_DENIED`.
 
-| # | Call | Arguments | Returns | Rights | Status | Since | Test |
-|---|---|---|---|---|---|---|---|
-| 0 | `SYS_EXIT` | `code: i64` | never | – | stable | 1.0 | terminal: abiprobe: a child exits with 7, the parent's wait sees 7 |
-| 1 | `SYS_WRITE` | `h: handle`, `buf: ptr_in`, `len: len` | bytes written | h: CONSOLE/FILE/PIPE needs WRITE | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 2 | `SYS_READ` | `h: handle`, `buf: ptr_out`, `len: len` | bytes read (0 = end) | h: CONSOLE/FILE/PIPE needs READ | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 3 | `SYS_OPEN` | `path: ptr_in`, `path_len: len`, `flags: flags` | handle | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 4 | `SYS_CLOSE` | `h: handle` | 0 | h: ANY | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 5 | `SYS_GETPID` | – | pid | – | stable | 1.0 | normal: abiprobe |
-| 6 | `SYS_SLEEP` | `ms: u64` | 0 | – | stable | 1.0 | normal: abiprobe |
-| 7 | `SYS_YIELD` | – | 0 | – | stable | 1.0 | normal: abiprobe |
-| 8 | `SYS_UPTIME` | – | milliseconds since boot | – | stable | 1.0 | normal: abiprobe |
-| 9 | `SYS_SPAWN` | `path: ptr_in`, `path_len: len`, `args: ptr_in`, `args_len: len`, `flags: flags`, `fds: u64` | pid | path (refused in the file sandbox); checked in the call: stdio handles: DUP | stable | 1.0 | stateful: abiprobe (bad pointer) + PROC TEST |
-| 10 | `SYS_WAIT` | `pid: u64`, `status: ptr_out`, `flags: flags` | pid | – | stable | 1.0 | blocking: abiprobe (no child) + PROC TEST |
-| 11 | `SYS_GETPPID` | – | parent pid | – | stable | 1.0 | normal: abiprobe |
-| 12 | `SYS_KILL` | `pid: u64` | 0 | checked in the call: the target: the caller or its descendants | stable | 1.0 | stateful: abiprobe (no process) + PROC TEST |
-| 13 | `SYS_CHDIR` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 14 | `SYS_GETCWD` | `buf: ptr_out`, `len: len` | length | – | stable | 1.0 | normal: abiprobe |
-| 15 | `SYS_READDIR` | `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len` | bytes | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 16 | `SYS_STAT` | `path: ptr_in`, `path_len: len`, `out: ptr_out` | 0 | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 17 | `SYS_MKDIR` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | stateful: abiprobe + FILE TEST |
-| 18 | `SYS_UNLINK` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | stateful: abiprobe + FILE TEST |
-| 19 | `SYS_READKEY` | `line: ptr_in`, `line_len: len` | key code | – | stable | 1.0 | blocking: INPUT TEST (keyboard) |
-| 20 | `SYS_TASKS` | `buf: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe |
-| 21 | `SYS_RESERVED_21` | – | never succeeds | – | reserved | 1.0 | normal: abiprobe: ERROR_NOT_IMPLEMENTED (a number removed before v0.81 - never used again) |
-| 22 | `SYS_DUP` | `h: handle` | new handle | h: ANY needs DUP | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 23 | `SYS_DUP2` | `old: handle`, `new: u64` | new | old: ANY needs DUP | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 24 | `SYS_SEEK` | `h: handle`, `offset: i64`, `whence: u64` | new position | h: ANY | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 25 | `SYS_PIPE` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 26 | `SYS_BRK` | `addr: u64` | the end | – | stable | 1.0 | normal: abiprobe + FILE TEST (memtest) |
-| 27 | `SYS_MMAP` | `len: len`, `prot: flags` | address | – | stable | 1.0 | normal: abiprobe + FILE TEST (memtest) |
-| 28 | `SYS_MUNMAP` | `addr: u64`, `len: len` | 0 | – | stable | 1.0 | normal: abiprobe + FILE TEST (memtest) |
-| 29 | `SYS_HANDLE_DUP` | `h: handle`, `mask: flags` | new handle | h: ANY needs DUP | stable | 1.0 | normal: abiprobe (gate) + RIGHTS TEST |
-| 30 | `SYS_HANDLE_INFO` | `h: handle` | kind << 32 \| rights | h: ANY | stable | 1.0 | normal: abiprobe (gate) + RIGHTS TEST |
-| 31 | `SYS_CHANNEL_CREATE` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe + IPC TEST |
-| 32 | `SYS_CHAN_SEND` | `h: handle`, `data: ptr_in`, `len: len`, `handles: ptr_in`, `handles_len: len`, `flags: flags` | 0 | h: CHANNEL needs SEND; checked in the call: handles in the message: TRANSFER | stable | 1.0 | normal: abiprobe (gate) + IPC TEST |
-| 33 | `SYS_CHAN_RECV` | `h: handle`, `buf: ptr_out`, `len: len`, `handles: ptr_out`, `hcap_flags: u64`, `info: ptr_out` | bytes | h: CHANNEL needs RECV | stable | 1.0 | blocking: abiprobe (gate) + IPC TEST |
-| 34 | `SYS_SHM_CREATE` | `size: len` | handle | – | stable | 1.0 | normal: abiprobe + IPC TEST |
-| 35 | `SYS_SHM_MAP` | `h: handle`, `prot: flags` | address | h: SHM needs MAP_READ, MAP_WRITE if prot has 0x2 | stable | 1.0 | normal: abiprobe (gate) + IPC TEST |
-| 36 | `SYS_SPAWN_EX` | `path: ptr_in`, `path_len: len`, `args: ptr_in`, `args_len: len`, `map: ptr_in`, `map_len_flags: u64` | pid | path (refused in the file sandbox); checked in the call: handles in the map: DUP | stable | 1.0 | stateful: abiprobe (bad pointer) + PROC TEST |
-| 37 | `SYS_SHM_SIZE` | `h: handle` | bytes | h: SHM | stable | 1.0 | normal: abiprobe (gate) + IPC TEST |
-| 38 | `SYS_WAIT_MANY` | `list: ptr_in`, `n: len`, `timeout_ms: u64` | index | checked in the call: list: RECV / SEND (channel), READ / WRITE (pipe), RECV (interrupt) | stable | 1.0 | blocking: abiprobe (bad pointer) + IPC TEST |
-| 39 | `SYS_DEV_CLAIM` | `root: handle`, `bdf: u64` | device handle | root: HW_ROOT | stable | 1.0 | hardware: abiprobe (gate) + DEV TEST |
-| 40 | `SYS_DEV_INFO` | `h: handle`, `out: ptr_out` | 0 | h: DEVICE | stable | 1.0 | hardware: abiprobe (gate) + DEV TEST |
-| 41 | `SYS_DEV_MAP` | `h: handle`, `bar: u64`, `prot: flags` | address | h: DEVICE needs MAP_READ, MAP_WRITE if prot has 0x2 | stable | 1.0 | hardware: abiprobe (gate) + DEV TEST |
-| 42 | `SYS_IRQ_BIND` | `dev: handle` | interrupt handle | dev: DEVICE needs MAP_WRITE | stable | 1.0 | hardware: abiprobe (gate) + IRQ TEST |
-| 43 | `SYS_IRQ_READ` | `irq: handle` | count | irq: IRQ needs RECV | stable | 1.0 | hardware: abiprobe (gate) + IRQ TEST |
-| 44 | `SYS_DMA_ALLOC` | `dev: handle`, `size: len`, `bits: u64` | shared memory handle | dev: DEVICE needs MAP_WRITE | stable | 1.0 | hardware: abiprobe (gate) + DMA TEST |
-| 45 | `SYS_DMA_PHYS` | `buf: handle` | physical address | buf: SHM | stable | 1.0 | hardware: abiprobe (gate) + DMA TEST |
-| 46 | `SYS_SYSINFO` | `topic: ptr_in`, `topic_len: len`, `buf: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe |
-| 47 | `SYS_SYSCTL` | `h: handle`, `op: u64`, `arg: u64`, `out: handle`, `name: ptr_in`, `name_len: len` | 0 | h: SYSCTL; checked in the call: output handle: WRITE (checked before the action); snapshot name copied and checked | stable | 1.0 | stateful: abiprobe (gate) + DESOFS / shell tests |
-| 48 | `SYS_DEV_FIND` | `root: handle`, `class: u64`, `nr: u64` | bdf | root: HW_ROOT | stable | 1.0 | hardware: abiprobe (gate) + DEV TEST |
-| 49 | `SYS_INPUT_INJECT` | `h: handle`, `events: ptr_in`, `n: len` | 0 | h: INPUT needs WRITE | stable | 1.0 | hardware: abiprobe (gate) + USB TEST |
-| 50 | `SYS_BLK_ATTACH` | `blk: handle`, `chan: handle`, `buf: handle`, `info: ptr_in` | disk number | blk: BLK needs WRITE; chan: CHANNEL needs SEND+RECV+TRANSFER; buf: SHM needs MAP_READ | stable | 1.0 | hardware: abiprobe (gate) + USB TEST |
-| 51 | `SYS_DIR_OPEN` | `path: ptr_in`, `path_len: len`, `flags: flags` | directory handle | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe + FILE TEST |
-| 52 | `SYS_OPENAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `flags: flags` | handle | dir: DIR, READ if flags has 0x1, WRITE if flags has 0x2 | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 53 | `SYS_READDIRAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len` | bytes | dir: DIR needs READ | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 54 | `SYS_STATAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `out: ptr_out` | 0 | dir: DIR needs READ | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 55 | `SYS_MKDIRAT` | `dir: handle`, `path: ptr_in`, `path_len: len` | 0 | dir: DIR needs WRITE | stable | 1.0 | stateful: abiprobe (gate) + FILE TEST |
-| 56 | `SYS_UNLINKAT` | `dir: handle`, `path: ptr_in`, `path_len: len` | 0 | dir: DIR needs WRITE | stable | 1.0 | stateful: abiprobe (gate) + FILE TEST |
-| 57 | `SYS_READDIR_PART` | `dir: handle`, `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len`, `cursor: ptr_out` | bytes | dir: DIR needs READ | stable | 1.0 | normal: abiprobe (gate) + FILE TEST |
-| 58 | `SYS_GETRANDOM` | `buf: ptr_out`, `len: len`, `flags: flags` | bytes | – | stable | 1.0 | normal: abiprobe + RNG TEST |
-| 59 | `SYS_TIME` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe + TIME TEST |
-| 60 | `SYS_TIME_SET` | `h: handle`, `t_ms: u64`, `u_ms: u64`, `servers: u64` | TIME_SET_* bits | h: SETTIME needs WRITE | stable | 1.0 | stateful: abiprobe (gate) + NTS TEST |
-| 61 | `SYS_TIME_BOUND` | `out: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe + NTS TEST |
+| # | Call | Arguments | Returns | Rights | Status | Since | Test | Argument order |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `SYS_EXIT` | `code: i64` | never | – | stable | 1.0 | terminal: abiprobe:wait for the child: exit status 7 | – |
+| 1 | `SYS_WRITE` | `h: handle`, `buf: ptr_in`, `len: len` | bytes written | h: CONSOLE/FILE/PIPE needs WRITE | stable | 1.0 | normal: abiprobe:gate; abiprobe:pipe write; FILE TEST: pipetest | abiprobe |
+| 2 | `SYS_READ` | `h: handle`, `buf: ptr_out`, `len: len` | bytes read (0 = end) | h: CONSOLE/FILE/PIPE needs READ | stable | 1.0 | normal: abiprobe:gate; abiprobe:pipe read; FILE TEST: pipetest | abiprobe |
+| 3 | `SYS_OPEN` | `path: ptr_in`, `path_len: len`, `flags: flags` | handle | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:open a missing file; FILE TEST: fdtest | abiprobe |
+| 4 | `SYS_CLOSE` | `h: handle` | 0 | h: ANY | stable | 1.0 | normal: abiprobe:gate; abiprobe:close twice; FILE TEST: fdtest | – |
+| 5 | `SYS_GETPID` | – | pid | – | stable | 1.0 | normal: abiprobe:getpid | – |
+| 6 | `SYS_SLEEP` | `ms: u64` | 0 | – | stable | 1.0 | normal: abiprobe:sleep 1 ms | – |
+| 7 | `SYS_YIELD` | – | 0 | – | stable | 1.0 | normal: abiprobe:yield | – |
+| 8 | `SYS_UPTIME` | – | milliseconds since boot | – | stable | 1.0 | normal: abiprobe:uptime | – |
+| 9 | `SYS_SPAWN` | `path: ptr_in`, `path_len: len`, `args: ptr_in`, `args_len: len`, `flags: flags`, `fds: u64` | pid | path (refused in the file sandbox); checked in the call: stdio handles: DUP | stable | 1.0 | stateful: abiprobe:spawn a child; abiprobe:spawn with a bad path; NOBKL TEST: famtest | abiprobe |
+| 10 | `SYS_WAIT` | `pid: u64`, `status: ptr_out`, `flags: flags` | pid | – | stable | 1.0 | blocking: abiprobe:wait without children; abiprobe:wait for the child: exit status 7; SVC TEST: waittest | abiprobe |
+| 11 | `SYS_GETPPID` | – | parent pid | – | stable | 1.0 | normal: abiprobe:getppid | – |
+| 12 | `SYS_KILL` | `pid: u64` | 0 | checked in the call: the target: the caller or its descendants | stable | 1.0 | stateful: abiprobe:kill a process that does not exist; IPC TEST: chantest | – |
+| 13 | `SYS_CHDIR` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:chdir /; FILE TEST: sandtest | abiprobe |
+| 14 | `SYS_GETCWD` | `buf: ptr_out`, `len: len` | length | – | stable | 1.0 | normal: abiprobe:getcwd | abiprobe |
+| 15 | `SYS_READDIR` | `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len` | bytes | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:readdir /; FILE TEST: dirtest | abiprobe |
+| 16 | `SYS_STAT` | `path: ptr_in`, `path_len: len`, `out: ptr_out` | 0 | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:stat a missing file; FILE TEST: dirtest | abiprobe |
+| 17 | `SYS_MKDIR` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | stateful: abiprobe:SYS_MKDIR; FILE TEST: dirtest | abiprobe |
+| 18 | `SYS_UNLINK` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | stateful: abiprobe:SYS_UNLINK; FILE TEST: dirtest | abiprobe |
+| 19 | `SYS_READKEY` | `line: ptr_in`, `line_len: len` | key code | – | stable | 1.0 | blocking: IPC TEST: handletest | none: the line is only drawn on the console and the key comes from the keyboard - a swap gives no other result to compare |
+| 20 | `SYS_TASKS` | `buf: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe:tasks; NOBKL TEST: famtest | abiprobe |
+| 21 | `SYS_RESERVED_21` | – | never succeeds | – | reserved | 1.0 | normal: abiprobe:reserved number | – |
+| 22 | `SYS_DUP` | `h: handle` | new handle | h: ANY needs DUP | stable | 1.0 | normal: abiprobe:gate; abiprobe:dup; FILE TEST: fdtest | – |
+| 23 | `SYS_DUP2` | `old: handle`, `new: u64` | new | old: ANY needs DUP | stable | 1.0 | normal: abiprobe:gate; abiprobe:dup2 to slot 15; FILE TEST: fdtest | abiprobe |
+| 24 | `SYS_SEEK` | `h: handle`, `offset: i64`, `whence: u64` | new position | h: ANY | stable | 1.0 | normal: abiprobe:gate; abiprobe:seek on a pipe; FILE TEST: fdtest | abiprobe |
+| 25 | `SYS_PIPE` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe:pipe; FILE TEST: pipetest | – |
+| 26 | `SYS_BRK` | `addr: u64` | the end | – | stable | 1.0 | normal: abiprobe:brk(0); FILE TEST: memtest | – |
+| 27 | `SYS_MMAP` | `len: len`, `prot: flags` | address | – | stable | 1.0 | normal: abiprobe:mmap 4 KiB; FILE TEST: memtest | abiprobe |
+| 28 | `SYS_MUNMAP` | `addr: u64`, `len: len` | 0 | – | stable | 1.0 | normal: abiprobe:munmap; FILE TEST: memtest | abiprobe |
+| 29 | `SYS_HANDLE_DUP` | `h: handle`, `mask: flags` | new handle | h: ANY needs DUP | stable | 1.0 | normal: abiprobe:gate; abiprobe:handle_dup(1, no rights); RIGHTS TEST: rightstest | abiprobe |
+| 30 | `SYS_HANDLE_INFO` | `h: handle` | kind << 32 \| rights | h: ANY | stable | 1.0 | normal: abiprobe:gate; abiprobe:pipe kind; RIGHTS TEST: rightstest | – |
+| 31 | `SYS_CHANNEL_CREATE` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe:channel_create; IPC TEST: chantest | – |
+| 32 | `SYS_CHAN_SEND` | `h: handle`, `data: ptr_in`, `len: len`, `handles: ptr_in`, `handles_len: len`, `flags: flags` | 0 | h: CHANNEL needs SEND; checked in the call: handles in the message: TRANSFER | stable | 1.0 | normal: abiprobe:gate; abiprobe:chan_send; IPC TEST: chantest | abiprobe |
+| 33 | `SYS_CHAN_RECV` | `h: handle`, `buf: ptr_out`, `len: len`, `handles: ptr_out`, `hcap_flags: u64`, `info: ptr_out` | bytes | h: CHANNEL needs RECV | stable | 1.0 | blocking: abiprobe:gate; abiprobe:chan_recv; IPC TEST: chantest | abiprobe |
+| 34 | `SYS_SHM_CREATE` | `size: len` | handle | – | stable | 1.0 | normal: abiprobe:shm_create; IPC TEST: shmtest | – |
+| 35 | `SYS_SHM_MAP` | `h: handle`, `prot: flags` | address | h: SHM needs MAP_READ, MAP_WRITE if prot has 0x2 | stable | 1.0 | normal: abiprobe:gate; abiprobe:shm_map; IPC TEST: shmtest | abiprobe |
+| 36 | `SYS_SPAWN_EX` | `path: ptr_in`, `path_len: len`, `args: ptr_in`, `args_len: len`, `map: ptr_in`, `map_len_flags: u64` | pid | path (refused in the file sandbox); checked in the call: handles in the map: DUP | stable | 1.0 | stateful: abiprobe:SYS_SPAWN_EX; FILE TEST: dirtest | abiprobe |
+| 37 | `SYS_SHM_SIZE` | `h: handle` | bytes | h: SHM | stable | 1.0 | normal: abiprobe:gate; abiprobe:shm_size; IPC TEST: shmtest | – |
+| 38 | `SYS_WAIT_MANY` | `list: ptr_in`, `n: len`, `timeout_ms: u64` | ready mask: bit i = entry i is ready; 0 = the time limit passed | checked in the call: list: RECV / SEND (channel), READ / WRITE (pipe), RECV (interrupt) | stable | 1.0 | blocking: abiprobe:wait_many with a bad list; SVC TEST: irqtest | abiprobe |
+| 39 | `SYS_DEV_CLAIM` | `root: handle`, `bdf: u64` | device handle | root: HW_ROOT | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: devtest | SVC TEST: devtest |
+| 40 | `SYS_DEV_INFO` | `h: handle`, `out: ptr_out` | 0 | h: DEVICE | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: devtest | SVC TEST: devtest |
+| 41 | `SYS_DEV_MAP` | `h: handle`, `bar: u64`, `prot: flags` | address | h: DEVICE needs MAP_READ, MAP_WRITE if prot has 0x2 | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: devtest | SVC TEST: devtest |
+| 42 | `SYS_IRQ_BIND` | `dev: handle` | interrupt handle | dev: DEVICE needs MAP_WRITE | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: irqtest | – |
+| 43 | `SYS_IRQ_READ` | `irq: handle` | count | irq: IRQ needs RECV | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: irqtest | – |
+| 44 | `SYS_DMA_ALLOC` | `dev: handle`, `size: len`, `bits: u64` | shared memory handle | dev: DEVICE needs MAP_WRITE | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: dmatest | SVC TEST: dmatest |
+| 45 | `SYS_DMA_PHYS` | `buf: handle` | physical address | buf: SHM | stable | 1.0 | hardware: abiprobe:gate; SVC TEST: dmatest | – |
+| 46 | `SYS_SYSINFO` | `topic: ptr_in`, `topic_len: len`, `buf: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe:sysinfo rights; abiprobe:sysinfo of an unknown topic; RIGHTS TEST: rightstest | abiprobe |
+| 47 | `SYS_SYSCTL` | `h: handle`, `op: u64`, `arg: u64`, `out: handle`, `name: ptr_in`, `name_len: len` | 0 | h: SYSCTL; checked in the call: output handle: WRITE (checked before the action); snapshot name copied and checked | stable | 1.0 | stateful: abiprobe:gate; INIT TEST: dsfstest | INIT TEST: dsfstest |
+| 48 | `SYS_DEV_FIND` | `root: handle`, `class: u64`, `nr: u64` | bdf | root: HW_ROOT | stable | 1.0 | hardware: abiprobe:gate; USB TEST: usbtest | USB TEST: usbtest |
+| 49 | `SYS_INPUT_INJECT` | `h: handle`, `events: ptr_in`, `n: len` | 0 | h: INPUT needs WRITE | stable | 1.0 | hardware: abiprobe:gate; USB TEST: inputtest | USB TEST: inputtest |
+| 50 | `SYS_BLK_ATTACH` | `blk: handle`, `chan: handle`, `buf: handle`, `info: ptr_in` | disk number | blk: BLK needs WRITE; chan: CHANNEL needs SEND+RECV+TRANSFER; buf: SHM needs MAP_READ | stable | 1.0 | hardware: abiprobe:gate; USB TEST: blktest | USB TEST: blktest |
+| 51 | `SYS_DIR_OPEN` | `path: ptr_in`, `path_len: len`, `flags: flags` | directory handle | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:dir_open /; FILE TEST: dirtest | abiprobe |
+| 52 | `SYS_OPENAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `flags: flags` | handle | dir: DIR, READ if flags has 0x1, WRITE if flags has 0x2 | stable | 1.0 | normal: abiprobe:gate; abiprobe:SYS_OPENAT; FILE TEST: dirtest | abiprobe |
+| 53 | `SYS_READDIRAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len` | bytes | dir: DIR needs READ | stable | 1.0 | normal: abiprobe:gate; abiprobe:readdirat /; FILE TEST: dirtest | abiprobe |
+| 54 | `SYS_STATAT` | `dir: handle`, `path: ptr_in`, `path_len: len`, `out: ptr_out` | 0 | dir: DIR needs READ | stable | 1.0 | normal: abiprobe:gate; abiprobe:statat bin; FILE TEST: dirtest | abiprobe |
+| 55 | `SYS_MKDIRAT` | `dir: handle`, `path: ptr_in`, `path_len: len` | 0 | dir: DIR needs WRITE | stable | 1.0 | stateful: abiprobe:gate; abiprobe:mkdirat without WRITE; FILE TEST: dirtest | abiprobe |
+| 56 | `SYS_UNLINKAT` | `dir: handle`, `path: ptr_in`, `path_len: len` | 0 | dir: DIR needs WRITE | stable | 1.0 | stateful: abiprobe:gate; abiprobe:SYS_UNLINKAT; FILE TEST: dirtest | abiprobe |
+| 57 | `SYS_READDIR_PART` | `dir: handle`, `path: ptr_in`, `path_len: len`, `buf: ptr_out`, `len: len`, `cursor: ptr_out` | bytes | dir: DIR needs READ | stable | 1.0 | normal: abiprobe:gate; abiprobe:readdir_part /; FILE TEST: dirtest | abiprobe |
+| 58 | `SYS_GETRANDOM` | `buf: ptr_out`, `len: len`, `flags: flags` | bytes | – | stable | 1.0 | normal: abiprobe:getrandom 16; RNG TEST: rngtest | abiprobe |
+| 59 | `SYS_TIME` | `out: ptr_out` | 0 | – | stable | 1.0 | normal: abiprobe:time; LKG TEST: timetest | – |
+| 60 | `SYS_TIME_SET` | `h: handle`, `t_ms: u64`, `u_ms: u64`, `servers: u64` | TIME_SET_* bits | h: SETTIME needs WRITE | stable | 1.0 | stateful: abiprobe:gate; NTS TEST: timetest | NTS TEST: timetest |
+| 61 | `SYS_TIME_BOUND` | `out: ptr_out`, `len: len` | bytes | – | stable | 1.0 | normal: abiprobe:time_bound; NTS TEST: timetest | abiprobe |
 
 ## Calls in detail
 
@@ -387,7 +387,7 @@ What a program may rely on (rules: [README.md](README.md)).  A call: number in `
 - `list` (rdi, ptr_in): (handle, signals) pairs
 - `n` (rsi, len): how many
 - `timeout_ms` (rdx, u64): limit or FOREVER
-- returns: index
+- returns: ready mask: bit i = entry i is ready; 0 = the time limit passed
 - errors: `ERROR_ACCESS_DENIED`, `ERROR_INTERRUPTED`, `ERROR_INVALID_ADDRESS`, `ERROR_INVALID_ARGUMENT`, `ERROR_INVALID_HANDLE`, `ERROR_OUT_OF_MEMORY`, `ERROR_TIMED_OUT`
 - rights: checked in the call: list: RECV / SEND (channel), READ / WRITE (pipe), RECV (interrupt)
 

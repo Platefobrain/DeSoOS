@@ -84,7 +84,14 @@ order of headers and sections in the file does not matter. The loader also refus
 4. **Every stable entry is tested** or names where it is checked: `test_class` – `normal` (a known result), `stateful`
    (state set up and cleaned), `blocking` (a controlled event: another process, a time limit), `hardware` (a particular
    device – the test set that has it, e.g. USB TEST), `terminal` (ends the process – a child process) – and `test`,
-   where.
+   where: a list of references the host test checks really exist – `abiprobe:gate` (the call has a rights row),
+   `abiprobe:<probe label>` (that label is in `user/bin/abiprobe.rs`), `<SUITE> TEST` (a kernel suite prints it) or
+   `<SUITE> TEST: <program>` (the suite runs the program, and the program calls the function). A name that points
+   nowhere fails the run.
+   A call with 2 or more arguments also says where **the order of its arguments** is tested (`order`): `abiprobe` (a
+   case with values chosen so that swapping any two arguments changes the result – a pointer where a length or handle
+   belongs, a length longer than the data, a handle number that does not exist), `<SUITE> TEST: <program>` (calls
+   that need a privileged handle: the program uses them with real values and fails otherwise) or `none: <why>`.
 5. `status = "unstable"` entries never go into a lock and promise nothing.
 
 A broken rule is reported in plain words:
@@ -101,9 +108,10 @@ ABI 1.0 lock: FAILED (1 changes)
 1. The kernel: the call in `kernel/user/syscalls.rs` (a new number = the next free one), its row in
    `kernel/user/sysrights.rs`.
 2. `abi/abi.toml`: a `[[syscall]]` with `since = "1.1"`, its arguments, errors, `handles` (the same as the row),
-   `test_class` and `test`; `[abi] version = "1.1"`.
+   `test_class`, `test` and `order`; `[abi] version = "1.1"`.
 3. `python3 tools/abigen.py` (the generated files), `python3 tools/abigen.py --new-lock` (`abi/abi-1.1.lock`).
-4. The library wrapper in the fitting module of `sdk/libdeso/src/` and a probe in `user/bin/abiprobe.rs`.
+4. The library wrapper in the fitting module of `sdk/libdeso/src/` and a probe in `user/bin/abiprobe.rs` (with an
+   argument-order case `p.order("SYS_...", ...)` for 2 or more arguments).
 5. `tests/test.sh` – the host checks and ABI TEST must pass.
 
 ## Tests
@@ -113,17 +121,22 @@ ABI 1.0 lock: FAILED (1 changes)
 | | What |
 |---|---|
 | 1 locks | every `abi/abi-*.lock` is intact (each line's SHA-256 and the total) and matches the description – the human diff above on any difference |
-| 2 description | `abi.toml` is complete: no holes in the numbers, every argument typed, handle arguments match the rights rows, errors are `ERROR_*` constants, every stable entry has a test, no value outside its type |
+| 2 description | `abi.toml` is complete: no holes in the numbers, every argument typed, handle arguments match the rights rows, errors are `ERROR_*` constants, every stable entry has a test, every call with 2 or more arguments says where its argument order is tested, no value outside its type |
 | 3 generator | two runs give the same bytes, and they are the files in the tree |
-| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; `libdeso` defines no constant by hand (only the generated `abi.rs`) and re-exports `abi` |
-| 5 mutations | 19 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a lock line edited / removed, a generated file edited, a constant copied by hand into the library, a library constant not described, the library not re-exporting `abi`, the kernel renumbered, the kernel reading another argument |
+| 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; `libdeso` defines no constant by hand (only the generated `abi.rs`) and re-exports `abi`; every test and order reference points at something that exists (probe label, suite, a program the suite runs that calls the function, a `p.order` case) |
+| 5 mutations | 25 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a test that does not exist, a suite that does not exist, a suite that does not run the program, a program that does not call the function, a 2-argument call without `order`, an order case missing in abiprobe, a lock line edited / removed, a generated file edited, a constant copied by hand into the library, a library constant not described, the library not re-exporting `abi`, the kernel renumbered, the kernel reading another argument |
 
 ABI TEST in QEMU is the kernel's half: `1/3` the kernel's rights table (`sysinfo rights`) byte for byte, the table's size,
-the reserved numbers without a row, and every syscall number and constant value through its kernel path; `2/3`
-`/bin/abiprobe` – built on the generated constants, it calls every row of the rights table with a handle that does not
-exist (`ERROR_INVALID_HANDLE`), uses a handle without rights (`ERROR_ACCESS_DENIED`), the reserved numbers
-(`ERROR_NOT_IMPLEMENTED`), bad pointers (`ERROR_INVALID_ADDRESS`) and the ordinary calls with known results, and starts
-a child that exits with 7; `3/3` the ABI note – every `/bin` program carries 1.0, 26 hand-built ELF files (every row
+the reserved numbers without a row, every syscall number and constant value through its kernel path, and the kernel's
+gate itself (`sysrights::check_with`) on every handle argument of every row in turn – the others valid, this one
+missing or of a wrong kind (`ERROR_INVALID_HANDLE`), short of each right it needs or of a condition's right
+(`ERROR_ACCESS_DENIED`), all valid (passes): 32 handle arguments, 122 cases; `2/3` `/bin/abiprobe` – built on the
+generated constants, it puts a handle that does not exist into the first handle argument of every row
+(`ERROR_INVALID_HANDLE` – the later handles of a row, e.g. `SYS_BLK_ATTACH`'s channel and buffer, are reached only with
+real handles before them, which a program cannot get, so 1/3 does them), uses a handle without rights
+(`ERROR_ACCESS_DENIED`), the reserved numbers (`ERROR_NOT_IMPLEMENTED`), bad pointers (`ERROR_INVALID_ADDRESS`), the
+ordinary calls with known results, a child that exits with 7, and the argument order of the 32 calls `abi.toml` gives
+to it – the kernel checks every one printed "abiprobe: order ok"; `3/3` the ABI note – every `/bin` program carries 1.0, 26 hand-built ELF files (every row
 of the table above, the note at the end of the file and before the code, between foreign notes), overlapping
 segments, and through `exec`: a 1.0 program and one without a note run, a 1.1 program is refused with `ERROR_ABI` and
 the reason.

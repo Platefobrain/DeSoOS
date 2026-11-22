@@ -2,8 +2,11 @@
 // tools/abigen.py generates kernel/user/abi_generated.rs from the
 // description: the rights table as text and every constant with its kernel path.
 //   1/3 the kernel = the description: sysrights::text() byte for byte, the table's size, the
-//       reserved numbers without a row, every syscall number and constant value
-//   2/3 /bin/abiprobe: the constants generated for programs, through real syscalls
+//       reserved numbers without a row, every syscall number and constant value; the kernel's
+//       gate (sysrights::check_with) driven with every handle argument of every row in turn
+//       missing, of a wrong kind and short of each right it needs, the other handles valid
+//   2/3 /bin/abiprobe: the constants generated for programs, through real syscalls, and the
+//       argument order of every call abi.toml gives to abiprobe
 //   3/3 the ELF ABI note: every /bin program carries the 1.0 note; the loader's note rules on
 //       hand-built ELF files (versions, flags, every length, twice, outside the file, overflow,
 //       overlap, alignment, foreign notes, order in the file) and through exec
@@ -58,8 +61,15 @@ pub fn self_test() {
         }
     };
     let rows = TABLE.iter().flatten().count();
-    serial_println!("[ABI TEST] 1/3 kernel = description: ABI {}.{}, rights table ({} rows, {} numbers, {} reserved) byte for byte, {} syscall numbers and constants equal PASS",
-        abi::ABI_MAJOR, abi::ABI_MINOR, rows, abi::SYSCALL_COUNT, abi::RESERVED.len(), n);
+    let gate = match gate_cases() {
+        Ok(g) => g,
+        Err(e) => {
+            check!(false, "the gate: {}", e);
+            return;
+        }
+    };
+    serial_println!("[ABI TEST] 1/3 kernel = description: ABI {}.{}, rights table ({} rows, {} numbers, {} reserved) byte for byte, {} syscall numbers and constants equal; the gate: {} handle arguments, {} cases PASS",
+        abi::ABI_MAJOR, abi::ABI_MINOR, rows, abi::SYSCALL_COUNT, abi::RESERVED.len(), n, abi::GATE.len(), gate);
 
     // 2. abiprobe – the program side of the same description.
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
@@ -83,6 +93,10 @@ pub fn self_test() {
         }
         check!(false, "abiprobe: {:?}", kind);
     }
+    for name in abi::ORDER_ABIPROBE.iter() {
+        let line = alloc::format!("abiprobe: order ok {}", name);
+        check!(out.lines().any(|l| l.trim() == line), "abiprobe did not check the argument order of {}", name);
+    }
     serial_println!("[ABI TEST] 2/3 {} PASS", last);
 
     // 3. The ELF ABI note.
@@ -90,6 +104,81 @@ pub fn self_test() {
         check!(false, "{}", e);
     }
     crate::selftest::pass();
+}
+
+/// The gate against the description, one handle argument at a time.  Handle numbers 100 + register
+/// exist (kind: the first one the row allows, all rights); every other number does not.  For each
+/// handle argument of a row: all valid -> Ok; this one missing -> INVALID_HANDLE; of a kind the row
+/// does not allow -> INVALID_HANDLE; without one of the rights it always needs -> ACCESS_DENIED; with
+/// a condition's flag set: the right present -> Ok, missing -> ACCESS_DENIED.  A gate that checks
+/// only some of a row's handles, a wrong kind or a missing right fails here.
+fn gate_cases() -> Result<usize, String> {
+    use super::sysrights::check_with;
+    use super::syscalls::{ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE};
+    const ALL: u32 = 0xFFFF_FFFF;
+    let mut cases = 0;
+    for (i, &(nr, reg, kinds, need, conds)) in abi::GATE.iter().enumerate() {
+        // The row's handle arguments (all entries with this number).
+        let row: alloc::vec::Vec<(usize, u16)> = abi::GATE.iter().filter(|g| g.0 == nr).map(|g| (g.1, g.2)).collect();
+        let first_kind = |mask: u16| (1..16u64).find(|k| mask & (1 << k) != 0).unwrap_or(0);
+        let base = |args: &mut [u64; 6]| {
+            for &(r, _) in &row {
+                args[r] = 100 + r as u64;
+            }
+        };
+        // `this`: (kind, rights) of the argument under test, or None = the handle does not exist.
+        let run = |args: &[u64; 6], this: Option<(u64, u32)>| {
+            check_with(nr, args, |h| {
+                for &(r, mask) in &row {
+                    if h == 100 + r as u64 {
+                        if r == reg {
+                            return this.ok_or(ERROR_INVALID_HANDLE);
+                        }
+                        return Ok((first_kind(mask), ALL));
+                    }
+                }
+                Err(ERROR_INVALID_HANDLE)
+            })
+        };
+        let what = |c: &str| alloc::format!("syscall {} argument {} (row entry {}): {}", nr, reg, i, c);
+        let mut args = [0u64; 6];
+        base(&mut args);
+        let good = Some((first_kind(kinds), ALL));
+        if run(&args, good) != Ok(()) {
+            return Err(what("refused with every handle valid"));
+        }
+        if run(&args, None) != Err(ERROR_INVALID_HANDLE) {
+            return Err(what("a missing handle not refused"));
+        }
+        cases += 2;
+        if let Some(wrong) = (1..16u64).find(|k| kinds & (1 << k) == 0) {
+            if run(&args, Some((wrong, ALL))) != Err(ERROR_INVALID_HANDLE) {
+                return Err(what("a handle of the wrong kind not refused"));
+            }
+            cases += 1;
+        }
+        for bit in 0..32 {
+            let r = 1u32 << bit;
+            if need & r != 0 {
+                if run(&args, Some((first_kind(kinds), ALL & !r))) != Err(ERROR_ACCESS_DENIED) {
+                    return Err(what(&alloc::format!("a handle without right 0x{:x} not refused", r)));
+                }
+                cases += 1;
+            }
+        }
+        for &(creg, cbit, right) in conds.iter().filter(|c| c.0 != 0) {
+            let mut a = args;
+            a[creg - 1] |= cbit;
+            if run(&a, Some((first_kind(kinds), ALL))) != Ok(()) {
+                return Err(what("refused with the condition's right present"));
+            }
+            if run(&a, Some((first_kind(kinds), ALL & !right))) != Err(ERROR_ACCESS_DENIED) {
+                return Err(what(&alloc::format!("flag 0x{:x} set, right 0x{:x} missing, not refused", cbit, right)));
+            }
+            cases += 2;
+        }
+    }
+    Ok(cases)
 }
 
 use super::elf_loader::{abi_of, AbiError, LoadError};

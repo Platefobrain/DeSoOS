@@ -7,7 +7,7 @@
 #                                        kernel/user/abi_generated.rs from abi/abi.toml
 #   python3 tools/abigen.py --check      the description, the locks, the generated files and the code
 #                                        against the description; nothing written (exit 1 on any FAIL)
-#   python3 tools/abigen.py --test       --check as tests 1-4 of the V081 plan + the mutations (test 10)
+#   python3 tools/abigen.py --test       --check (tests 1-4) + the mutations (test 5)
 #                                        – what tests/test.sh runs ([ABI HOST TEST] lines)
 #   python3 tools/abigen.py --new-lock   write abi/abi-<version>.lock for the version in abi.toml – only
 #                                        when that lock does not exist yet and every older lock passes
@@ -29,6 +29,14 @@ STATUSES = ("stable", "deprecated", "unstable", "reserved")
 TEST_CLASSES = ("normal", "stateful", "blocking", "hardware", "terminal")
 CONST_TYPES = {"u64": (0, 2**64 - 1), "i64": (-2**63, 2**63 - 1), "usize": (0, 2**64 - 1), "u16": (0, 2**16 - 1)}
 SYSCALL_KEYS = ("number", "name", "since", "status", "args", "returns", "errors", "path", "handles", "in_call", "test_class", "test")
+# `order` – where the order of the arguments is tested (a call whose arguments, swapped, would give a
+# different result): "abiprobe", "<SUITE> TEST: <program>" or "none: <why>"; only for 2 or more arguments.
+SYSCALL_OPTIONAL = ("order",)
+# A test reference: "abiprobe:gate" (the call has a rights row), "abiprobe:<probe label>", "<SUITE> TEST"
+# or "<SUITE> TEST: <program>" (a kernel suite that runs the program, which uses the call).
+TEST_REF = re.compile(r"abiprobe:\S.*|[A-Z][A-Z0-9]*(?: [A-Z0-9]+)* TEST(?:: [a-z0-9_]+)?")
+ORDER_REF = re.compile(r"abiprobe|[A-Z][A-Z0-9]*(?: [A-Z0-9]+)* TEST: [a-z0-9_]+|none: \S.*")
+ABIPROBE = "user/bin/abiprobe.rs"
 CONST_KEYS = ("group", "name", "type", "value", "kernel", "lib", "meaning", "since", "status")
 REGS = ("rdi", "rsi", "rdx", "r10", "r8", "r9")
 
@@ -242,7 +250,7 @@ def validate(d):
         for k in SYSCALL_KEYS:
             need(k in s, "%s: no %s" % (w, k))
         for k in s:
-            need(k in SYSCALL_KEYS or k == "_line", "%s: unknown key %s" % (w, k))
+            need(k in SYSCALL_KEYS or k in SYSCALL_OPTIONAL or k == "_line", "%s: unknown key %s" % (w, k))
         if not all(k in s for k in SYSCALL_KEYS):
             continue
         name = s["name"]
@@ -259,7 +267,20 @@ def validate(d):
         except Fail as e:
             errs.append(str(e))
         need(s["test_class"] in TEST_CLASSES, "%s: bad test_class %s" % (w, s["test_class"]))
-        need(isinstance(s["test"], str) and s["test"].strip() != "", "%s: no test named (every entry is tested or names where it is checked)" % w)
+        need(isinstance(s["test"], list) and len(s["test"]) > 0, "%s: no test named (every entry is tested or names where it is checked)" % w)
+        if isinstance(s["test"], list):
+            for t in s["test"]:
+                need(isinstance(t, str) and TEST_REF.fullmatch(t) is not None,
+                     "%s: test %r is not abiprobe:<probe>, <SUITE> TEST or <SUITE> TEST: <program>" % (w, t))
+            need(len(set(s["test"])) == len(s["test"]), "%s: a test named twice" % w)
+        live = s["status"] in ("stable", "deprecated")
+        if live and isinstance(s["args"], list) and len(s["args"]) >= 2:
+            need("order" in s, "%s: %d arguments - needs order (where swapped arguments are caught)" % (w, len(s["args"])))
+        else:
+            need("order" not in s, "%s: order only for a call with 2 or more arguments" % w)
+        if "order" in s:
+            need(isinstance(s["order"], str) and ORDER_REF.fullmatch(s["order"]) is not None,
+                 "%s: order %r is not abiprobe, <SUITE> TEST: <program> or none: <why>" % (w, s["order"]))
         need(isinstance(s["returns"], str) and s["returns"] != "", "%s: no returns" % w)
         need(isinstance(s["path"], bool), "%s: path must be true / false" % w)
         need(isinstance(s["args"], list) and len(s["args"]) <= 6, "%s: at most 6 arguments" % w)
@@ -397,10 +418,13 @@ def gen_lib(m):
     o.append("    /// Numbers 0..SYSCALL_COUNT have an entry (reserved ones give ERROR_NOT_IMPLEMENTED).\n    pub const SYSCALL_COUNT: u64 = %d;\n" % (m["syscalls"][-1]["number"] + 1))
     res = [s["number"] for s in m["syscalls"] if s["status"] == "reserved"]
     o.append("    pub const RESERVED: [u64; %d] = [%s];\n" % (len(res), ", ".join(map(str, res))))
-    gated = [(s["number"], s["handles"][0]["reg"], s["name"]) for s in m["syscalls"] if s["handles"] and s["status"] != "unstable"]
-    o.append("    /// (syscall, register of its first handle argument) – every row of the rights table.\n    pub const HANDLE_ARGS: [(u64, usize, &str); %d] = [\n" % len(gated))
-    for n, r, name in gated:
-        o.append("        (%d, %d, %s),\n" % (n, r, rust_str(name)))
+    gated = [(s["number"], h["reg"], i, s["name"]) for s in m["syscalls"] if s["status"] != "unstable" for i, h in enumerate(s["handles"])]
+    o.append("    /// (syscall, register, position in its rights row, name) – every handle argument of every row of the\n"
+             "    /// rights table.  abiprobe puts a missing handle into position 0; the later positions are reached\n"
+             "    /// only with real handles before them – the kernel's gate test (ABI TEST 1/3) does every one.\n"
+             "    pub const HANDLE_ARGS: [(u64, usize, usize, &str); %d] = [\n" % len(gated))
+    for n, r, i, name in gated:
+        o.append("        (%d, %d, %d, %s),\n" % (n, r, i, rust_str(name)))
     o.append("    ];\n")
     paths = [s["number"] for s in m["syscalls"] if s["path"] and s["status"] != "unstable"]
     o.append("    /// Calls that name a path (refused in the file sandbox).\n    pub const PATH_CALLS: [u64; %d] = [%s];\n}\n" % (len(paths), ", ".join(map(str, paths))))
@@ -430,6 +454,27 @@ def gen_kernel(m):
             o.append("    c!(%s, %d, %s);\n" % (c["kernel"], c["value"], rust_str(c["name"])))
     o.append("    Ok(n)\n}\n\n/// Reserved numbers – no row in the rights table.\npub const RESERVED: [usize; %d] = [%s];\n" % (
         len([s for s in m["syscalls"] if s["status"] == "reserved"]), ", ".join(str(s["number"]) for s in m["syscalls"] if s["status"] == "reserved")))
+    gate = []
+    for s in m["syscalls"]:
+        if s["status"] in ("reserved", "unstable"):
+            continue
+        for h in s["handles"]:
+            conds = [(c["reg"] + 1, c["bit"], m["rights"][c["right"]]) for c in h.get("conds", [])]
+            conds += [(0, 0, 0)] * (2 - len(conds))
+            gate.append((s["number"], h["reg"], kind_mask(m, h), rights_mask(m, h["need"]), conds))
+    o.append("\n/// Every handle argument of every rights row: (syscall, register, kinds mask, rights always needed,\n"
+             "/// [(1 + flags register, bit, right needed when the bit is set); 2]) – ABI TEST 1/3 drives the kernel's\n"
+             "/// gate (sysrights::check_with) with each one missing, of a wrong kind and short of each right.\n"
+             "pub const GATE: [(u64, usize, u16, u32, [(usize, u64, u32); 2]); %d] = [\n" % len(gate))
+    for n, r, k, need, conds in gate:
+        o.append("    (%d, %d, 0x%x, 0x%x, [%s]),\n" % (n, r, k, need, ", ".join("(%d, 0x%x, 0x%x)" % c for c in conds)))
+    o.append("];\n")
+    order = [s["name"] for s in m["syscalls"] if s.get("order") == "abiprobe"]
+    o.append("\n/// Calls whose argument order /bin/abiprobe checks (a line \"abiprobe: order ok <name>\" each).\n"
+             "pub const ORDER_ABIPROBE: [&str; %d] = [\n" % len(order))
+    for n in order:
+        o.append("    %s,\n" % rust_str(n))
+    o.append("];\n")
     return "".join(o)
 
 
@@ -464,11 +509,12 @@ def gen_doc(m):
          "failure too.  Argument types: `handle`, `ptr_in` (the kernel reads it), `ptr_out` (the kernel writes it), `len`, "
          "`u64`, `i64`, `flags`.  Every handle argument goes through the rights gate first: a missing handle or one of the "
          "wrong kind = `ERROR_INVALID_HANDLE`, a missing right = `ERROR_ACCESS_DENIED`.\n\n" % (maj, mnr)]
-    o.append("| # | Call | Arguments | Returns | Rights | Status | Since | Test |\n|---|---|---|---|---|---|---|---|\n")
+    o.append("| # | Call | Arguments | Returns | Rights | Status | Since | Test | Argument order |\n|---|---|---|---|---|---|---|---|---|\n")
     for s in m["syscalls"]:
         args = ", ".join("`%s: %s`" % (a["name"], a["type"]) for a in s["args"]) or "–"
-        o.append("| %d | `%s` | %s | %s | %s | %s | %s | %s: %s |\n" % (
-            s["number"], s["name"], args, md(s["returns"]), md(rights_human(m, s)), s["status"], s["since"], s["test_class"], md(s["test"])))
+        o.append("| %d | `%s` | %s | %s | %s | %s | %s | %s: %s | %s |\n" % (
+            s["number"], s["name"], args, md(s["returns"]), md(rights_human(m, s)), s["status"], s["since"], s["test_class"],
+            md("; ".join(s["test"])), md(s.get("order", "–"))))
     o.append("\n## Calls in detail\n")
     for s in m["syscalls"]:
         o.append("\n### %d `%s`\n\n" % (s["number"], s["name"]))
@@ -735,6 +781,67 @@ def check_kernel_src(root, m):
     return len(arms)
 
 
+def check_tests(root, m):
+    """Every test reference points at something that exists: an abiprobe probe label, a kernel suite,
+    a program the suite runs and that uses the call; every order "abiprobe" has its p.order case."""
+    def read(rel):
+        p = os.path.join(root, rel)
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else None
+
+    probe = read(ABIPROBE) or ""
+    suites = {}
+    for d, _, files in os.walk(os.path.join(root, "kernel")):
+        for f in files:
+            if f.endswith(".rs"):
+                text = open(os.path.join(d, f), encoding="utf-8").read()
+                for mm in set(re.findall(r"\[([A-Z][A-Z0-9]*(?: [A-Z0-9]+)* TEST)\]", text)):
+                    suites.setdefault(mm, []).append(text)
+    msgs = []
+    n = 0
+
+    def suite_prog(w, ref, s):
+        name, _, prog = ref.partition(": ")
+        if name not in suites:
+            msgs.append("%s: %r - no kernel suite prints [%s]" % (w, ref, name))
+            return
+        if not prog:
+            return
+        src = read("user/bin/%s.rs" % prog)
+        if src is None:
+            msgs.append("%s: %r - no user/bin/%s.rs" % (w, ref, prog))
+            return
+        if not any(re.search(r'"(?:/bin/)?%s[" ]' % re.escape(prog), t) for t in suites[name]):
+            msgs.append("%s: %r - the [%s] suite does not run %s" % (w, ref, name, prog))
+        if not re.search(r"\b%s\w*\(|\b%s\b" % (re.escape(short(s["name"])), s["name"]), src):
+            msgs.append("%s: %r - %s does not call %s" % (w, ref, prog, short(s["name"])))
+
+    for s in m["syscalls"]:
+        if s["status"] == "unstable":
+            continue
+        w = s["name"]
+        for t in s["test"]:
+            n += 1
+            if t == "abiprobe:gate":
+                if not s["handles"]:
+                    msgs.append("%s: abiprobe:gate - the call has no rights row" % w)
+            elif t.startswith("abiprobe:"):
+                if '"%s"' % t[9:] not in probe:
+                    msgs.append("%s: %r - no probe \"%s\" in %s" % (w, t, t[9:], ABIPROBE))
+            else:
+                suite_prog(w, t, s)
+        o = s.get("order")
+        if o == "abiprobe":
+            n += 1
+            if 'p.order("%s"' % w not in probe:
+                msgs.append("%s: order abiprobe - no p.order(\"%s\", ...) case in %s" % (w, w, ABIPROBE))
+        elif o and not o.startswith("none: "):
+            n += 1
+            suite_prog(w, o, s)
+    if msgs:
+        raise Fail("\n".join(msgs))
+    return n
+
+
 # ---------------------------------------------------------------- the commands
 
 def check_generated(root, m):
@@ -787,19 +894,17 @@ def run_checks(root, out):
     step(1, "locks", lambda: "; ".join(check_locks(root, mm)))
     step(3, "generator", lambda: "deterministic, %d bytes = the files in the tree" % check_generated(root, mm))
     step(4, "code = description",
-         lambda: "%s: %d syscall numbers and argument counts; %s: %d files, constants only from abi.rs" % (SYSCALLS_RS, check_kernel_src(root, mm), LIBDIR, check_lib(root, mm)))
+         lambda: "%s: %d syscall numbers and argument counts; %s: %d files, constants only from abi.rs; %d test references exist" % (
+             SYSCALLS_RS, check_kernel_src(root, mm), LIBDIR, check_lib(root, mm), check_tests(root, mm)))
     return ok
 
 
 def copy_tree(root):
     tmp = tempfile.mkdtemp(prefix="deso-abi-")
-    for rel in ("abi", "docs/abi", "tools", LIBDIR):
+    for rel in ("abi", "docs/abi", "tools", LIBDIR, "kernel", "user/bin"):
         src = os.path.join(root, rel)
         if os.path.isdir(src):
             shutil.copytree(src, os.path.join(tmp, rel))
-    for rel in (KERN, SYSCALLS_RS):
-        os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
-        shutil.copy(os.path.join(root, rel), os.path.join(tmp, rel))
     return tmp
 
 
@@ -832,7 +937,17 @@ MUTATIONS = [
     ("added as 1.1 without its lock", TOML, 'version = "1.0"', 'version = "1.1"\n\n[[const]]\ngroup = "seek"\nname = "SEEK_DATA"\ntype = "u64"\nvalue = 3\nkernel = ""\nlib = false\nmeaning = "x"\nsince = "1.1"\nstatus = "stable"',
      "ABI 1.1 has no lock yet", True),
     ("a hole in the numbers", TOML, 'number = 21\nname = "SYS_RESERVED_21"', 'number = 99\nname = "SYS_RESERVED_21"', "numbers without an entry: [21", False),
-    ("an entry without a test", TOML, 'test = "abiprobe (gate) + FILE TEST"', 'test = ""', "no test named", False),
+    ("an entry without a test", TOML, 'test = ["abiprobe:gate", "abiprobe:pipe write", "FILE TEST: pipetest"]', 'test = []', "no test named", False),
+    ("a test that does not exist", TOML, '"abiprobe:pipe write"', '"abiprobe:pipe written"', "SYS_WRITE: 'abiprobe:pipe written' - no probe", False),
+    ("a suite that does not exist", TOML, '"FILE TEST: pipetest"]\norder = "abiprobe"\n\n[[syscall]]\nnumber = 2', '"PROC TEST: pipetest"]\norder = "abiprobe"\n\n[[syscall]]\nnumber = 2',
+     "no kernel suite prints [PROC TEST]", False),
+    ("a suite that does not run the program", TOML, '"SVC TEST: devtest"]\norder = "SVC TEST: devtest"\n\n[[syscall]]\nnumber = 40', '"SVC TEST: blktest"]\norder = "SVC TEST: devtest"\n\n[[syscall]]\nnumber = 40',
+     "the [SVC TEST] suite does not run blktest", False),
+    ("a program that does not use the call", TOML, '"USB TEST: inputtest"]\norder = "USB TEST: inputtest"', '"USB TEST: inputtest"]\norder = "USB TEST: usbtest"',
+     "usbtest does not call input_inject", False),
+    ("a call with 2 arguments without order", TOML, 'test = ["abiprobe:gate", "abiprobe:dup2 to slot 15", "FILE TEST: fdtest"]\norder = "abiprobe"', 'test = ["abiprobe:gate", "abiprobe:dup2 to slot 15", "FILE TEST: fdtest"]',
+     "SYS_DUP2: 2 arguments - needs order", False),
+    ("an order case missing in abiprobe", ABIPROBE, 'p.order("SYS_SEEK"', 'p.val("SYS_SEEK"', 'SYS_SEEK: order abiprobe - no p.order("SYS_SEEK"', False),
     ("lock line edited", "abi/abi-1.0.lock", "ERROR_INVALID_HANDLE type=i64 value=-9", "ERROR_INVALID_HANDLE type=i64 value=-7", "damaged", False),
     ("lock line removed", "abi/abi-1.0.lock", None, None, "damaged (TOTAL", False),
     ("generated file edited by hand", LIB, "pub const SYS_READ: u64 = 2;", "pub const SYS_READ: u64 = 3;", "differs from abi/abi.toml", False),
@@ -867,7 +982,7 @@ def mutation_test(root, out):
                 m = load(tmp)
                 if regen:
                     write_generated(tmp, m)
-                for fn in (check_locks, check_generated, check_kernel_src, check_lib):
+                for fn in (check_locks, check_generated, check_kernel_src, check_lib, check_tests):
                     try:
                         fn(tmp, m)
                     except Fail as e:

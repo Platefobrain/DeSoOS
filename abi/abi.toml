@@ -1,4 +1,4 @@
-# DeSo OS ABI – the one source of truth for what a program may rely on (V081 plan, rules R1–R6).
+# DeSo OS ABI – the one source of truth for what a program may rely on.
 # Edited by hand; tools/abigen.py checks it and generates docs/abi/SYSCALLS.md, sdk/libdeso/src/abi.rs and
 # kernel/user/abi_generated.rs from it.  Rules (docs/abi/README.md): within one major version only ADD – never renumber,
 # change or remove; a new entry gets since = the next minor, and that minor its own abi/abi-X.Y.lock.
@@ -8,7 +8,12 @@
 # u64, i64, flags.  `rights` = the kernel's rights table (kernel/user/sysrights.rs) for this call: path = the call
 # names a path (refused in the file sandbox); handles = handle arguments (argument register 0-5, kinds, the rights
 # they need, extra rights when a bit of another argument is set); in_call = handles the call checks itself.
-# test_class: normal / stateful / blocking / hardware / terminal; test = where the entry is tested.
+# test_class: normal / stateful / blocking / hardware / terminal.  test = where the entry is tested, a list of
+# references tools/abigen.py checks exist: "abiprobe:gate" (the call's rights row; /bin/abiprobe and ABI TEST 1/3),
+# "abiprobe:<probe label>", "<SUITE> TEST" or "<SUITE> TEST: <program>" (a kernel suite that runs a program using the
+# call).  order (calls with 2 or more arguments) = where swapped arguments are caught: "abiprobe" (a p.order case
+# with values chosen so that swapping any two arguments changes the result), "<SUITE> TEST: <program>" (the program
+# uses the call with real values and fails otherwise) or "none: <why>".
 
 [abi]
 version = "1.0"
@@ -25,7 +30,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "terminal"
-test = "abiprobe: a child exits with 7, the parent's wait sees 7"
+test = ["abiprobe:wait for the child: exit status 7"]
 
 [[syscall]]
 number = 1
@@ -39,7 +44,8 @@ path = false
 handles = [{ reg = 0, kinds = ["CONSOLE", "FILE", "PIPE"], need = ["WRITE"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:pipe write", "FILE TEST: pipetest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 2
@@ -53,7 +59,8 @@ path = false
 handles = [{ reg = 0, kinds = ["CONSOLE", "FILE", "PIPE"], need = ["READ"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:pipe read", "FILE TEST: pipetest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 3
@@ -67,7 +74,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:open a missing file", "FILE TEST: fdtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 4
@@ -81,7 +89,7 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:close twice", "FILE TEST: fdtest"]
 
 [[syscall]]
 number = 5
@@ -95,7 +103,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:getpid"]
 
 [[syscall]]
 number = 6
@@ -109,7 +117,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:sleep 1 ms"]
 
 [[syscall]]
 number = 7
@@ -123,7 +131,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:yield"]
 
 [[syscall]]
 number = 8
@@ -137,7 +145,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:uptime"]
 
 [[syscall]]
 number = 9
@@ -151,7 +159,8 @@ path = true
 handles = []
 in_call = "stdio handles: DUP"
 test_class = "stateful"
-test = "abiprobe (bad pointer) + PROC TEST"
+test = ["abiprobe:spawn a child", "abiprobe:spawn with a bad path", "NOBKL TEST: famtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 10
@@ -165,7 +174,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "blocking"
-test = "abiprobe (no child) + PROC TEST"
+test = ["abiprobe:wait without children", "abiprobe:wait for the child: exit status 7", "SVC TEST: waittest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 11
@@ -179,7 +189,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:getppid"]
 
 [[syscall]]
 number = 12
@@ -193,7 +203,7 @@ path = false
 handles = []
 in_call = "the target: the caller or its descendants"
 test_class = "stateful"
-test = "abiprobe (no process) + PROC TEST"
+test = ["abiprobe:kill a process that does not exist", "IPC TEST: chantest"]
 
 [[syscall]]
 number = 13
@@ -207,7 +217,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:chdir /", "FILE TEST: sandtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 14
@@ -221,7 +232,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:getcwd"]
+order = "abiprobe"
 
 [[syscall]]
 number = 15
@@ -235,7 +247,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:readdir /", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 16
@@ -249,7 +262,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:stat a missing file", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 17
@@ -263,7 +277,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "stateful"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:SYS_MKDIR", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 18
@@ -277,7 +292,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "stateful"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:SYS_UNLINK", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 19
@@ -291,7 +307,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "blocking"
-test = "INPUT TEST (keyboard)"
+test = ["IPC TEST: handletest"]
+order = "none: the line is only drawn on the console and the key comes from the keyboard - a swap gives no other result to compare"
 
 [[syscall]]
 number = 20
@@ -305,7 +322,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:tasks", "NOBKL TEST: famtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 21
@@ -319,7 +337,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe: ERROR_NOT_IMPLEMENTED (a number removed before v0.81 - never used again)"
+test = ["abiprobe:reserved number"]
 
 [[syscall]]
 number = 22
@@ -333,7 +351,7 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:dup", "FILE TEST: fdtest"]
 
 [[syscall]]
 number = 23
@@ -347,7 +365,8 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:dup2 to slot 15", "FILE TEST: fdtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 24
@@ -361,7 +380,8 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:seek on a pipe", "FILE TEST: fdtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 25
@@ -375,7 +395,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:pipe", "FILE TEST: pipetest"]
 
 [[syscall]]
 number = 26
@@ -389,7 +409,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST (memtest)"
+test = ["abiprobe:brk(0)", "FILE TEST: memtest"]
 
 [[syscall]]
 number = 27
@@ -403,7 +423,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST (memtest)"
+test = ["abiprobe:mmap 4 KiB", "FILE TEST: memtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 28
@@ -417,7 +438,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST (memtest)"
+test = ["abiprobe:munmap", "FILE TEST: memtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 29
@@ -431,7 +453,8 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = ["DUP"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + RIGHTS TEST"
+test = ["abiprobe:gate", "abiprobe:handle_dup(1, no rights)", "RIGHTS TEST: rightstest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 30
@@ -445,7 +468,7 @@ path = false
 handles = [{ reg = 0, kinds = ["ANY"], need = [] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + RIGHTS TEST"
+test = ["abiprobe:gate", "abiprobe:pipe kind", "RIGHTS TEST: rightstest"]
 
 [[syscall]]
 number = 31
@@ -459,7 +482,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + IPC TEST"
+test = ["abiprobe:channel_create", "IPC TEST: chantest"]
 
 [[syscall]]
 number = 32
@@ -473,7 +496,8 @@ path = false
 handles = [{ reg = 0, kinds = ["CHANNEL"], need = ["SEND"] }]
 in_call = "handles in the message: TRANSFER"
 test_class = "normal"
-test = "abiprobe (gate) + IPC TEST"
+test = ["abiprobe:gate", "abiprobe:chan_send", "IPC TEST: chantest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 33
@@ -487,7 +511,8 @@ path = false
 handles = [{ reg = 0, kinds = ["CHANNEL"], need = ["RECV"] }]
 in_call = ""
 test_class = "blocking"
-test = "abiprobe (gate) + IPC TEST"
+test = ["abiprobe:gate", "abiprobe:chan_recv", "IPC TEST: chantest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 34
@@ -501,7 +526,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + IPC TEST"
+test = ["abiprobe:shm_create", "IPC TEST: shmtest"]
 
 [[syscall]]
 number = 35
@@ -515,7 +540,8 @@ path = false
 handles = [{ reg = 0, kinds = ["SHM"], need = ["MAP_READ"], conds = [{ reg = 1, bit = 2, right = "MAP_WRITE" }] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + IPC TEST"
+test = ["abiprobe:gate", "abiprobe:shm_map", "IPC TEST: shmtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 36
@@ -529,7 +555,8 @@ path = true
 handles = []
 in_call = "handles in the map: DUP"
 test_class = "stateful"
-test = "abiprobe (bad pointer) + PROC TEST"
+test = ["abiprobe:SYS_SPAWN_EX", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 37
@@ -543,7 +570,7 @@ path = false
 handles = [{ reg = 0, kinds = ["SHM"], need = [] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + IPC TEST"
+test = ["abiprobe:gate", "abiprobe:shm_size", "IPC TEST: shmtest"]
 
 [[syscall]]
 number = 38
@@ -551,13 +578,14 @@ name = "SYS_WAIT_MANY"
 since = "1.0"
 status = "stable"
 args = [{ name = "list", type = "ptr_in", meaning = "(handle, signals) pairs" }, { name = "n", type = "len", meaning = "how many" }, { name = "timeout_ms", type = "u64", meaning = "limit or FOREVER" }]
-returns = "index"
+returns = "ready mask: bit i = entry i is ready; 0 = the time limit passed"
 errors = ["ERROR_ACCESS_DENIED", "ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_INVALID_HANDLE", "ERROR_OUT_OF_MEMORY", "ERROR_TIMED_OUT"]
 path = false
 handles = []
 in_call = "list: RECV / SEND (channel), READ / WRITE (pipe), RECV (interrupt)"
 test_class = "blocking"
-test = "abiprobe (bad pointer) + IPC TEST"
+test = ["abiprobe:wait_many with a bad list", "SVC TEST: irqtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 39
@@ -571,7 +599,8 @@ path = false
 handles = [{ reg = 0, kinds = ["HW_ROOT"], need = [] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DEV TEST"
+test = ["abiprobe:gate", "SVC TEST: devtest"]
+order = "SVC TEST: devtest"
 
 [[syscall]]
 number = 40
@@ -585,7 +614,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DEVICE"], need = [] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DEV TEST"
+test = ["abiprobe:gate", "SVC TEST: devtest"]
+order = "SVC TEST: devtest"
 
 [[syscall]]
 number = 41
@@ -599,7 +629,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_READ"], conds = [{ reg = 2, bit = 2, right = "MAP_WRITE" }] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DEV TEST"
+test = ["abiprobe:gate", "SVC TEST: devtest"]
+order = "SVC TEST: devtest"
 
 [[syscall]]
 number = 42
@@ -613,7 +644,7 @@ path = false
 handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_WRITE"] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + IRQ TEST"
+test = ["abiprobe:gate", "SVC TEST: irqtest"]
 
 [[syscall]]
 number = 43
@@ -627,7 +658,7 @@ path = false
 handles = [{ reg = 0, kinds = ["IRQ"], need = ["RECV"] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + IRQ TEST"
+test = ["abiprobe:gate", "SVC TEST: irqtest"]
 
 [[syscall]]
 number = 44
@@ -641,7 +672,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DEVICE"], need = ["MAP_WRITE"] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DMA TEST"
+test = ["abiprobe:gate", "SVC TEST: dmatest"]
+order = "SVC TEST: dmatest"
 
 [[syscall]]
 number = 45
@@ -655,7 +687,7 @@ path = false
 handles = [{ reg = 0, kinds = ["SHM"], need = [] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DMA TEST"
+test = ["abiprobe:gate", "SVC TEST: dmatest"]
 
 [[syscall]]
 number = 46
@@ -669,7 +701,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe"
+test = ["abiprobe:sysinfo rights", "abiprobe:sysinfo of an unknown topic", "RIGHTS TEST: rightstest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 47
@@ -683,7 +716,8 @@ path = false
 handles = [{ reg = 0, kinds = ["SYSCTL"], need = [] }]
 in_call = "output handle: WRITE (checked before the action); snapshot name copied and checked"
 test_class = "stateful"
-test = "abiprobe (gate) + DESOFS / shell tests"
+test = ["abiprobe:gate", "INIT TEST: dsfstest"]
+order = "INIT TEST: dsfstest"
 
 [[syscall]]
 number = 48
@@ -697,7 +731,8 @@ path = false
 handles = [{ reg = 0, kinds = ["HW_ROOT"], need = [] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + DEV TEST"
+test = ["abiprobe:gate", "USB TEST: usbtest"]
+order = "USB TEST: usbtest"
 
 [[syscall]]
 number = 49
@@ -711,7 +746,8 @@ path = false
 handles = [{ reg = 0, kinds = ["INPUT"], need = ["WRITE"] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + USB TEST"
+test = ["abiprobe:gate", "USB TEST: inputtest"]
+order = "USB TEST: inputtest"
 
 [[syscall]]
 number = 50
@@ -725,7 +761,8 @@ path = false
 handles = [{ reg = 0, kinds = ["BLK"], need = ["WRITE"] }, { reg = 1, kinds = ["CHANNEL"], need = ["SEND", "RECV", "TRANSFER"] }, { reg = 2, kinds = ["SHM"], need = ["MAP_READ"] }]
 in_call = ""
 test_class = "hardware"
-test = "abiprobe (gate) + USB TEST"
+test = ["abiprobe:gate", "USB TEST: blktest"]
+order = "USB TEST: blktest"
 
 [[syscall]]
 number = 51
@@ -739,7 +776,8 @@ path = true
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + FILE TEST"
+test = ["abiprobe:dir_open /", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 52
@@ -753,7 +791,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = [], conds = [{ reg = 3, bit = 1, right = "READ" }, { reg = 3, bit = 2, right = "WRITE" }] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:SYS_OPENAT", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 53
@@ -767,7 +806,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:readdirat /", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 54
@@ -781,7 +821,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:statat bin", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 55
@@ -795,7 +836,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = ["WRITE"] }]
 in_call = ""
 test_class = "stateful"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:mkdirat without WRITE", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 56
@@ -809,7 +851,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = ["WRITE"] }]
 in_call = ""
 test_class = "stateful"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:SYS_UNLINKAT", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 57
@@ -823,7 +866,8 @@ path = false
 handles = [{ reg = 0, kinds = ["DIR"], need = ["READ"] }]
 in_call = ""
 test_class = "normal"
-test = "abiprobe (gate) + FILE TEST"
+test = ["abiprobe:gate", "abiprobe:readdir_part /", "FILE TEST: dirtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 58
@@ -837,7 +881,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + RNG TEST"
+test = ["abiprobe:getrandom 16", "RNG TEST: rngtest"]
+order = "abiprobe"
 
 [[syscall]]
 number = 59
@@ -851,7 +896,7 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + TIME TEST"
+test = ["abiprobe:time", "LKG TEST: timetest"]
 
 [[syscall]]
 number = 60
@@ -865,7 +910,8 @@ path = false
 handles = [{ reg = 0, kinds = ["SETTIME"], need = ["WRITE"] }]
 in_call = ""
 test_class = "stateful"
-test = "abiprobe (gate) + NTS TEST"
+test = ["abiprobe:gate", "NTS TEST: timetest"]
+order = "NTS TEST: timetest"
 
 [[syscall]]
 number = 61
@@ -879,7 +925,8 @@ path = false
 handles = []
 in_call = ""
 test_class = "normal"
-test = "abiprobe + NTS TEST"
+test = ["abiprobe:time_bound", "NTS TEST: timetest"]
+order = "abiprobe"
 
 [[const]]
 group = "error"
