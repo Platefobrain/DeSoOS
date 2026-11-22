@@ -10,6 +10,7 @@ later systems without being rebuilt (programs live on `/disk/bin` since v0.80; p
 | [`SYSCALLS.md`](SYSCALLS.md) | the system calls and constants for people – generated |
 | `sdk/libdeso/src/abi.rs` | the constants of the program library `libdeso` – generated; the library defines no other public constant |
 | `kernel/user/abi_generated.rs` | the kernel's half of ABI TEST: the rights table as text and every constant with its kernel path – generated |
+| [`SDK.md`](SDK.md) | building a program outside the repository with `sdk/` (`deso-build.sh`, the template) and putting it on `/disk/bin` |
 | [`tools/abigen.py`](../../tools/abigen.py) | checks the description, generates the three files, guards the locks; Python 3 standard library only |
 
 Never edit a generated file – change `abi/abi.toml` and run `python3 tools/abigen.py`.

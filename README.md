@@ -168,7 +168,8 @@ kernel is located physically.
 User programs live in `user/bin/*.rs` and are embedded in the kernel image as `/bin/<name>`.
 To add one, create `user/bin/<name>.rs` (see `user/bin/hello.rs`) and run `./build.sh`. The
 program library `libdeso` (`sdk/libdeso`) provides `println!`, files, directories, `spawn`/`wait`/`kill`,
-`sleep_ms`, `readkey`, arguments, and `Vec`/`String` via `extern crate alloc;`.
+`sleep_ms`, `readkey`, arguments, and `Vec`/`String` via `extern crate alloc;`. A program outside the repository:
+`sdk/deso-build.sh new DIR` and `sdk/deso-build.sh build DIR/main.rs`, then copy it to `/disk/bin` (`docs/abi/SDK.md`).
 
 ## Running in QEMU
 
@@ -521,11 +522,12 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `kernel/` - the kernel: `arch/`, `memory/`, `sched/`, `drivers/`, `fs/`, `user/` (processes,
   syscalls), ACPI, GPT, block layer, console, kernel shell, self-tests.
 - `user/` - user-space programs (`bin/`) and the code they share (`lib/`).
-- `sdk/libdeso/` - the program library `libdeso` (ABI 1.0: system calls, handles, files, channels, services, time,
-  output) and the linker script with the ABI note; every program links to it.
+- `sdk/` - the SDK (copy it anywhere, `docs/abi/SDK.md`): the program library `libdeso` (ABI 1.0: system calls,
+  handles, files, channels, services, time, output) and the linker script with the ABI note – every program links to
+  it –, a template and `deso-build.sh` (a program built outside the repository, offline).
 - `common/` - code shared by different parts of DeSo OS: ELF parsing (boot loader, kernel), DeSoCrypto
   (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
-- `tests/` - `test.sh`, `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
+- `tests/` - `test.sh`, `sdk-test.sh` (the SDK outside the repository), `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
 - `abi/` - the ABI description `abi.toml` (system calls, handles and rights, constants, the loader's limits) and the

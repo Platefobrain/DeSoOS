@@ -206,7 +206,9 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
   segments only in the ABI 1.0 load range, not overlapping, W^X, a System V-style stack (argc, argv); before
   anything is mapped it reads the program's ABI note (a `DeSo` note of type 1 in its own PT_NOTE: major, minor,
   flags) – no note = 1.0, a newer minor, another major, unknown flags, a damaged or doubled note = `ERROR_ABI`
-  (`abi/README.md`). The library allocator uses `brk` (small blocks) and `mmap` (large).
+  (`abi/README.md`). The library allocator uses `brk` (small blocks) and `mmap` (large). Outside the repository a
+  program is built with the SDK – `sdk/` copied anywhere, `sdk/deso-build.sh` (`rustc` alone, offline, the same
+  options as `build.sh`), then copied to `/disk/bin` (`abi/SDK.md`; test `tests/sdk-test.sh`, SDK TEST).
 - Shell: pipelines `a | b | c`, `>`, `>>`, `<`, quotes, history, `&`.
 
 ## Syscalls and handles

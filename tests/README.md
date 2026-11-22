@@ -10,6 +10,8 @@ tests/test.sh --no-build   run only
 LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs)
 tests/make-usb-test.sh     make-usb.sh --with-disk on the host (V080 gate C): its refusals against a fake /sys,
                            the image, and an update from build v1 to v2 started in QEMU (two builds)
+tests/sdk-test.sh          the SDK outside the repository: a copy of sdk/ alone builds the template offline, then
+                           the program on /disk/bin in QEMU (SDK TEST); ACCEL=kvm for KVM
 tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg,
                            SOAK_DISK=ram – on a RAM disk as on real hardware)
 ```
@@ -42,6 +44,7 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `test.sh` | the test run (above) |
 | `soak.sh` | the long soak test (above) |
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
+| `sdk-test.sh` | the SDK (`docs/abi/SDK.md`): `sdk/` alone copied to an empty temporary directory, an empty environment (new `HOME`, only `PATH`, working directory `/`) – `deso-build.sh new` + `build` of the template, a static ELF with the ABI 1.0 note, no repository path in the program or the log and no build path in the program, nothing in `HOME`, 4 refusals; then QEMU (`./build.sh --selftest` first) with a fresh DeSoFS volume and the program in the fw_cfg file `opt/deso/sdkprog` – SDK TEST copies it to `/disk/bin` through the shell and runs it by name (11 checks, `logs/test-sdk.log`) |
 | `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESO_SYS`, `DESO_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESO_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests; `--format` = `tools/mkdesofs.py` (the production formatter) with a fixed uuid / time |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |

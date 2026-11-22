@@ -246,6 +246,13 @@ pub extern "sysv64" fn kernel_main(
         let ok = selftest::finish();
         selftest::exit_if_autotest(ok);
     }
+    // tests/sdk-test.sh: a program built with the SDK outside the repository, onto /disk/bin.
+    #[cfg(selftest)]
+    if let Some(name) = selftest::sdk() {
+        user::sdk_test(name);
+        let ok = selftest::finish();
+        selftest::exit_if_autotest(ok);
+    }
     arch::x86_64::smp::init();
     // tests/soak.sh: the long test instead of the self-tests (it needs every core, the
     // keyboard repeat task and the usb-disks task like a normal start).

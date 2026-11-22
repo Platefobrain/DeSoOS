@@ -17,6 +17,9 @@
 // * USB restart phase: a third start, `opt/deso/phase` = "usbrestart", QEMU without the virtio
 //   and NVMe disks – only USB RESTART TEST (the writable stick of the first start becomes /disk
 //   by itself, with the last known good time and a file the first start left on it).
+// * SDK phase (tests/sdk-test.sh): `opt/deso/phase` = "sdk NAME" and the program itself – built
+//   outside the repository with sdk/deso-build.sh – in the fw_cfg file `opt/deso/sdkprog`; only
+//   SDK TEST runs (the program onto /disk/bin through the shell, then run by name).
 // * Soak phase (tests/soak.sh): `opt/deso/phase` = "soak <seconds> <seed> [ram]"; the boot
 //   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
@@ -40,6 +43,8 @@ static USB_RESTART: AtomicBool = AtomicBool::new(false);
 /// build tag the second start expects (up to 8 bytes, packed little-endian; 0 – none).
 static ONE_STICK: AtomicU32 = AtomicU32::new(0);
 static ONE_STICK_TAG: AtomicU64 = AtomicU64::new(0);
+/// SDK phase: the program's name (len 0 = not an SDK start; u8::MAX = a bad phase).
+static mut SDK_NAME: ([u8; 32], u8) = ([0; 32], 0);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
 static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
@@ -293,6 +298,20 @@ fn detect_phase() {
         serial_println!("[TEST] One-stick phase {}: only ONE STICK TEST (started from a make-usb.sh --with-disk image)", if first == Some("onestick1") { 1 } else { 2 });
         return;
     }
+    if first == Some("sdk") {
+        let name = w.next().unwrap_or("");
+        let ok = !name.is_empty() && name.len() <= 32 && name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-') && w.next().is_none();
+        let mut b = [0u8; 32];
+        if ok {
+            b[..name.len()].copy_from_slice(name.as_bytes());
+            serial_println!("[TEST] SDK phase: only SDK TEST (the program {} from opt/deso/sdkprog)", name);
+        } else {
+            serial_println!("[TEST] bad SDK phase {:?} - expected \"sdk <name>\"", text);
+            STARTED.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe { SDK_NAME = (b, if ok { name.len() as u8 } else { u8::MAX }) };
+        return;
+    }
     if first == Some("soak") {
         let secs = w.next().and_then(|s| s.parse::<u64>().ok()).filter(|&s| (60..=7 * 24 * 3600).contains(&s));
         let seed = w.next().and_then(|s| s.parse::<u64>().ok());
@@ -353,9 +372,32 @@ pub fn soak() -> Option<(u64, u64, bool)> {
     }
 }
 
-/// Restart or soak start: the boot self-tests are skipped.
+/// The SDK start: Some(the program's name); Some("") – a bad phase (fails at once).
+pub fn sdk() -> Option<&'static str> {
+    let (b, n) = unsafe { &*core::ptr::addr_of!(SDK_NAME) };
+    match *n {
+        0 => None,
+        u8::MAX => Some(""),
+        n => core::str::from_utf8(&b[..n as usize]).ok(),
+    }
+}
+
+/// A fw_cfg file's bytes (at most `max`); None when QEMU has no such file or it is larger.
+pub fn fw_cfg_file(name: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
+    let (size, select) = fw_cfg_find(name)?;
+    let size = size as usize;
+    if size > max {
+        return None;
+    }
+    let mut v = alloc::vec![0u8; size];
+    unsafe { outw(FW_CFG_SELECTOR, select) };
+    fw_cfg_bytes(&mut v);
+    Some(v)
+}
+
+/// Restart, SDK or soak start: the boot self-tests are skipped.
 pub fn skip_boot() -> bool {
-    restart() || usb_restart() || one_stick().is_some() || soak().is_some()
+    restart() || usb_restart() || one_stick().is_some() || soak().is_some() || sdk().is_some()
 }
 
 pub fn autotest() -> bool {

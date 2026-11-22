@@ -33,6 +33,26 @@ All three remarks were right, checked in the code first:
 - `docs/abi/SYSCALLS.md` has a column for the argument order. The ABI 1.0 lock is unchanged (`test` and `order` are not
   part of it).
 
+### Stage C – the SDK outside the repository
+- **`sdk/` is the whole SDK** – copy it anywhere: `libdeso`, `link.ld`, `template/main.rs` and `deso-build.sh`:
+  `new DIR` (a program from the template) and `build FILE.rs [-o DIR] [-n NAME]` (the library from `libdeso/` and the
+  program with `rustc` alone and the same options as `build.sh` – no cargo, no packages, no network; refuses a program
+  that is not a static ELF or has no ABI note for the library's version; `--remap-path-prefix`, so the SDK's and the
+  program's paths do not end up in the file). Needs `rustc` 1.85+ with `x86_64-unknown-none` and binutils. A change
+  against the plan: no cargo (the plan had `cargo --offline`) – `build.sh` has built `libdeso` with `rustc` alone since
+  stage B, and the library is compiled with the same `rustc` as the program, so no "same compiler as the system" rule
+  is needed (the system's ABI is its system calls). `abi/abi.toml` stays the one source of the ABI – the SDK has only
+  the generated `abi.rs`.
+- **`docs/abi/SDK.md`**: from zero to a program on `/disk/bin` (rustup, `new`, `build`, the program's shape, copying
+  it through the stick's ESP – `/usb0` – to `/disk/bin`, the ABI check), compared with Linux, Windows, macOS, Redox.
+- **`tests/sdk-test.sh`** (11 checks, `logs/test-sdk.log`): `sdk/` alone in an empty temporary directory, an empty
+  environment (new `HOME`, only `PATH`, working directory `/`) – `new` + `build` of the template, a static ELF with the
+  ABI 1.0 note, no path of the repository in the program or the log, no build path in the program (without
+  `--remap-path-prefix` the temporary path is in it – checked), nothing written to `HOME`, 4 refusals; then QEMU with a
+  fresh DeSoFS volume and the program in the fw_cfg file `opt/deso/sdkprog` (phase `sdk NAME`): **SDK TEST** copies it
+  to `/disk/bin` through the shell, runs it by name with two arguments, finds the same bytes on the disk and the name
+  in `help`.
+
 ### Fixes after the reviews of stage B (9.7/10) and of the stage A fix (9.8/10)
 - **The owner "DeSo" is reserved.** The loader knew our note only by the exact name `DeSo\0`: a damaged name (`DeSo`
   without its NUL, `DeSoX`, junk in the padding, a longer name) looked like another owner's note, was skipped, and the

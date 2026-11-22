@@ -22,4 +22,5 @@ Start reading at `bin/init.rs` (the first process: starts the services and the s
 
 A new program: add `bin/<name>.rs` (`#![no_std]`, `#![no_main]`, `#[macro_use] extern crate libdeso;`,
 `use libdeso as deso;`, `entry!(main)`); `build.sh` builds it against `libdeso` with `sdk/libdeso/link.ld` (the ABI
-note in its own PT_NOTE) and it appears as `/bin/<name>`.
+note in its own PT_NOTE) and it appears as `/bin/<name>`. A program that is not part of the system: the SDK (`sdk/deso-build.sh`,
+`docs/abi/SDK.md`) builds it outside the repository, and it goes to `/disk/bin`.
