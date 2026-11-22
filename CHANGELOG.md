@@ -2,9 +2,71 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.81.0 — in progress (ABI + SDK)
+## v0.81.0 — 2026-11-22 (ABI 1.0 + SDK)
 
-Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release.
+Plan: V081 ver 5 (accepted; D1–D5 = a). Stages A–D, one release. What a program may rely on is written down once
+(`abi/abi.toml`, frozen in `abi/abi-1.0.lock`), every program carries the ABI it was built for in an ELF note, the SDK
+(`sdk/`) builds programs outside the repository, and the SDK of ABI 1.0 is kept frozen and run on every later system.
+
+### Release
+- Version 0.81.0 (`Cargo.toml`, `Cargo.lock`, the README badge); `docs/RELEASE.md` – the v0.81.0 report; README: 44
+  suites, 344 tests. "Current limitations": exec reads a program whole into one kernel-heap buffer; a `PT_INTERP`
+  header is not defined by ABI 1.0 (the loader does not read it, the SDK refuses one).
+
+### Stage D – the start contract, service versions, the frozen SDK
+- **`docs/abi/STARTUP.md`** – the start contract of ABI 1.0 written down: the file (ELF64 `ET_EXEC`, no interpreter,
+  W^X, any address in the load range, the sizes), the first instruction (`rsp % 16 == 0` at `argc`, other registers
+  undefined, DF = 0, a clean x87/SSE state), the stack (argc, argv[], NULL, an empty envp, auxv = `AT_NULL` only, the
+  strings; 16 KiB growing to 8 MiB with a guard page), the slots (0–2 stdio, 3 the service channel or nothing, 4+ only
+  what the starter hands over) and the end (exit codes, a panic = 101, the wait status of a kill or an exception).
+  What the 1.0 loader does with a `PT_INTERP` header is left undefined (it does not read it) – the SDK refuses one.
+- **STARTUP TEST** (new suite, loopable): `/bin/starttest` (`libdeso`) checks its own start stack, slots 0–15 with and
+  without a channel in slot 3 and a stack grown to 7 MiB; `main`'s 42 = exit code 42, a panic = "panic: …" + 101; a
+  program in plain machine code (no `libdeso`, no note) checks the stack and DF itself at 0x100000, 0x400000 and
+  ending exactly at `USER_LOAD_MAX` (a page outside refused); 32 arguments / 4096 bytes start, one more is refused; a
+  file of exactly 8 MiB starts, one byte more is refused. `libdeso`: `Args::argv()` (the `argv` array; `argc` is the
+  word before it).
+- **`docs/abi/SERVICES.md`** – the service protocols with their own versions: `svc 1.0` (init's service manager:
+  `connect`, `narrow`, `list`, `version`), `net 1.0` (netd: `status`, `resolve`, `ping`, `arp`, `tcp`, `udp`, `listen`,
+  `version`), `time 1.0` (`SYS_TIME` / `SYS_TIME_BOUND`; timekeeper internal); what is internal without a promise. The
+  rules: `version` answers `<protocol> <major>.<minor>`; within a major only new requests; a service from before
+  `version` answers it as an unknown request = 1.0; a client never panics on an answer.
+- **`version` in init and netd**: init answers `svc 1.0`, netd `net 1.0`. init now answers an unknown request (or a
+  known one with extra words) with `unknown request` before closing the reply handle – it used to close it without a
+  word (svctest updated). `libdeso`: `svc_version()`, `svc_version_via(svc, timeout_ms)`, `net_version(c,
+  timeout_ms)`, `parse_version(answer, protocol)` – an old manager (the reply closed, the service channel open) or an
+  old netd (`netd: unknown request`) = 1.0; garbage or an answer with a handle = `ERROR_IO` (its handles closed), a
+  channel closed half-way = `ERROR_CLOSED`, no answer = `ERROR_TIMED_OUT`.
+- **SERVICES TEST** (new suite): `/bin/prototest` through the real init – old clients unchanged, `svc 1.0` and `net
+  1.0`, unknown requests and fields answered with the channels alive; against fake services (prototest itself in slot-3
+  mode): an old one = 1.0, newer ones (1.7, 1.3, 2.0) read as they are, garbage / `svc 01.0` / `net 1.x` / an answer
+  with a handle = `ERROR_IO`, closed half-way = `ERROR_CLOSED`, silent = `ERROR_TIMED_OUT` after the client's limit.
+- **`sdk/compat/abi-1.0` – the SDK of ABI 1.0, frozen**: `deso-build.sh`, `libdeso`, the template and
+  `programs/compat10.rs` (the start, calls, handles, files, time, the service protocols). Never edited:
+  `sdk/compat/abi-1.0.lock` holds the SHA-256 of every file and a total, `tools/abigen.py --check` refuses a changed,
+  added or removed file (ABI HOST TEST 1/5; `--new-compat abi-X.Y` writes a lock once; 3 new mutations – 28 in all).
+  `tests/sdk-test.sh` builds compat10 from a copy of the directory alone with its own `deso-build.sh`, and **SDK TEST
+  2/2** runs it from `/disk/bin` through the real init with a network card (QEMU gets an e1000e).
+- **`deso-build.sh` refuses a program with an interpreter** (`PT_INTERP`) – sdk-test checks it with a copy of the SDK
+  whose linker script adds one (13 checks).
+- Test fixes from the gate: STARTUP TEST makes its 8 MiB file without an 8 MiB kernel buffer (the program's first page
+  and one byte at the end) and names the reason of a failure – on a 4-CPU TCG run the test's buffer plus exec's own
+  read of the file did not fit; NTP TEST case 49 (four servers at once, two times seen failing under KVM with 7
+  queries instead of 5) counts the queries per port – the stub reports them (`per=`): the silent server exactly 2,
+  the Kiss-o'-Death one and each answering one 1, one more only when an answer was lost on the way and the one retry
+  went out.
+- **`wait` returns only once the child is gone** (found by IPC TEST, handletest check 29, once under KVM with 4 CPUs):
+  the child left its status for the parent and only then finished its exit (`sched::exit`) – a parent woken on another
+  CPU could still see it in `dcp inspect` / `ps` right after `wait`. Now `wait` takes the status and waits for the
+  child's task to be dead (microseconds) before it returns, as on Linux, where `wait` itself removes the zombie. Part
+  of ABI 1.0 from the start: `SYS_WAIT` in `abi/abi.toml` (the text of its result – the lock is unchanged) and
+  `docs/abi/STARTUP.md`. handletest checks `dcp inspect` right after `wait` again without waiting; waittest: 60
+  children by pid, `WAIT_ANY` and `WNOHANG`, none in the task table right after `wait` – SVC TEST makes waittest's
+  children pause 20 ms between leaving their status and ending (a self-test hook), so the window is hit every time:
+  without the fix the first child is caught (on 2 CPUs the race alone did not show in 20 rounds of IPC TEST).
+- IPC TEST's frame check counts the kernel heap's growth like NET TEST does (its pages and the page-table page that
+  maps them): the heap returns pages lazily, and a run where it grew by one step (32 pages, in ipcbench – found in
+  `LOOP=ipc` runs) was reported as "frames leaked 33" while nothing leaked.
 
 ### Stage A fixes after the review (9.5/10)
 All three remarks were right, checked in the code first:

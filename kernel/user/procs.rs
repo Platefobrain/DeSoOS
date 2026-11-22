@@ -312,13 +312,17 @@ pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
     let p: &super::Process = p;
     loop {
         let seen = p.child_gen.load(Ordering::SeqCst);
-        let any_live = {
+        let (found, any_live) = {
             let mut z = p.zombies.lock();
-            if let Some(z) = z.take_first(|z| pid == WAIT_ANY || z.pid == pid) {
-                return Ok((z.pid, z.status));
+            match z.take_first(|z| pid == WAIT_ANY || z.pid == pid) {
+                Some(z) => (Some(z), true),
+                None => (None, p.live_children.load(Ordering::SeqCst) > 0),
             }
-            p.live_children.load(Ordering::SeqCst) > 0
         };
+        if let Some(z) = found {
+            gone(z.pid);
+            return Ok((z.pid, z.status));
+        }
         let waiting = if pid == WAIT_ANY {
             any_live
         } else {
@@ -337,6 +341,27 @@ pub fn wait(me: TaskId, pid: TaskId, flags: u64) -> Result<(TaskId, u64), i64> {
         child_q(me).wait_until(|| p.child_gen.load(Ordering::SeqCst) != seen || sched::should_exit(), None);
         if sched::should_exit() {
             return Err(ERROR_INTERRUPTED);
+        }
+    }
+}
+
+/// Self-tests: a process named `waittest` sleeps this long between leaving its status and
+/// sched::exit – the window `gone` closes, made wide enough to hit every time (SVC TEST).
+#[cfg(selftest)]
+pub static EXIT_PAUSE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The child has left its status (on_exit) but its task may still be finishing its exit on
+/// another CPU (sched::exit is the next step, it takes microseconds).  wait returns only
+/// after that: once a parent has the status, the child is in no list – `ps`, `dcp`, the
+/// task table – as on Linux, where wait itself removes the zombie (docs/abi/STARTUP.md).
+fn gone(pid: TaskId) {
+    let mut spins = 0u32;
+    while sched::with_process(pid, |_| ()).is_some() {
+        spins += 1;
+        if spins < 1000 {
+            sched::yield_now();
+        } else {
+            crate::time::sleep_ms(1);
         }
     }
 }

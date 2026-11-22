@@ -19,6 +19,8 @@
 //
 // Handles (from init): 1 console, 3 the claimed card, 4 connection channel.
 // Clients (channel ends forwarded by init on "connect net0"):
+//   "version"    – "net 1.0" (docs/abi/SERVICES.md; a netd from before it answered
+//                  "netd: unknown request" – clients take that as 1.0),
 //   "status"     – a description line + a "netd-status k=v ..." line (tests),
 //   "arp a.b.c.d" – send an ARP request and wait up to 1 s for the answer:
 //                  "arp a.b.c.d is-at xx:xx:xx:xx:xx:xx in N ms",
@@ -1414,8 +1416,12 @@ impl Nic {
                     let _ = writeln!(out, "dns: expected a.b.c.d[:port] or auto, not {:?}", arg);
                 }
             }
+        } else if req == "version" {
+            // The network protocol's version (docs/abi/SERVICES.md); a netd from before it
+            // answered "netd: unknown request" - clients take that as 1.0.
+            let _ = writeln!(out, "net 1.0");
         } else {
-            let _ = writeln!(out, "netd: unknown request {:?} (status, ping host [count], resolve name, tcp host port, udp host port, listen port, arp a.b.c.d, dns server|auto, renew, set a.b.c.d/nn, dhcp)", req);
+            let _ = writeln!(out, "netd: unknown request {:?} (status, ping host [count], resolve name, tcp host port, udp host port, listen port, arp a.b.c.d, dns server|auto, renew, set a.b.c.d/nn, dhcp, version)", req);
         }
         self.tell(k, &out);
     }

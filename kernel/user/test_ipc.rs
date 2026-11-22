@@ -43,6 +43,9 @@ pub fn self_test() {
     serial_println!("[IPC TEST] Starting IPC tests (handles, channels, shared memory)...");
     crate::selftest::begin();
     let frames0 = crate::selftest::settled_free_frames();
+    // The heap returns pages lazily (as in NET TEST) – its growth is not a leak: its pages
+    // (it grows by 128 KiB at a time) and the page-table pages that map them (one per 2 MiB).
+    let heap0 = crate::memory::heap::mapped_bytes() as u64;
 
     // 1. Handles with rights – handle_dup only reduces, read / write
     // without the right = ERROR_ACCESS_DENIED, copies without DUP = ERROR_ACCESS_DENIED, the child inherits rights,
@@ -107,14 +110,19 @@ pub fn self_test() {
     serial_println!("[IPC TEST] 5/5 stress job (ipcload), demo (ipcdemo), benchmark: {} PASS", human);
 
     crate::sched::reap();
+    let heap = || {
+        let pages = (crate::memory::heap::mapped_bytes() as u64).saturating_sub(heap0) / 4096;
+        pages + pages.div_ceil(512)
+    };
     check!(
         wait_for(2_000, || {
             crate::sched::reap();
-            crate::sched::stack::free_frames_flushed() >= frames0
+            crate::sched::stack::free_frames_flushed() + heap() >= frames0
         }),
-        "frames leaked ({} -> {})",
+        "frames leaked ({} -> {}, heap +{} pages)",
         frames0,
-        crate::sched::stack::free_frames_flushed()
+        crate::sched::stack::free_frames_flushed(),
+        heap()
     );
     crate::selftest::pass();
 }

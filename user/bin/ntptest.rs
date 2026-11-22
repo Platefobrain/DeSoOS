@@ -697,6 +697,45 @@ fn stats(reset: bool) -> Option<(u64, u64, u64)> {
     got
 }
 
+/// The stub's queries per port (0-29) since its last reset.
+fn per_port() -> Option<[u64; 30]> {
+    let mut reply = [0u8; 512];
+    let c = udp_open_via(SVC, "net0", "10.0.2.2", BASE + 30, &mut reply).ok()?;
+    let mut got = None;
+    let mut info = RecvInfo::default();
+    for _ in 0..3 {
+        if udp_send(c, b"stats") != 0 {
+            break;
+        }
+        if wait_many(&[(c, W_READABLE)], 1000) == Ok(1) {
+            let r = chan_recv(c, &mut reply, CHAN_NONBLOCK, &mut info);
+            if r > 0 {
+                let t = core::str::from_utf8(&reply[..r as usize]).unwrap_or("");
+                let list = t.split(' ').find_map(|w| w.strip_prefix("per="));
+                let mut out = [0u64; 30];
+                let mut k = 0;
+                for v in list.unwrap_or("").split(',') {
+                    if k == 30 {
+                        k = 31;
+                        break;
+                    }
+                    match v.parse() {
+                        Ok(x) => out[k] = x,
+                        Err(_) => break,
+                    }
+                    k += 1;
+                }
+                if k == 30 {
+                    got = Some(out);
+                }
+                break;
+            }
+        }
+    }
+    close(c);
+    got
+}
+
 /// "... is about N s ahead of / behind ..." or "agrees to the second": the clock minus
 /// network time in seconds; None when the summary line is not there.
 fn rtc_offset(out: &str) -> Option<i64> {
@@ -825,7 +864,20 @@ fn net() -> i32 {
     stats(true);
     let r = run(&["-t", "400", server(0, 0), server(1, 4), server(2, 0), server(3, 5)]);
     case!(n, r.code == 0 && r.out.contains("the median of 2 servers") && r.out.contains("no answer (2 queries of 400 ms)") && r.out.contains("RATE"), "four servers: two answer, one silent, one KoD: {} {:?}", r.code, r.out);
-    case!(n, r.ms >= 800 && r.ms < 3200 && stats(false) == Some((5, 0, 0)), "four servers at once: 2 x 400 ms, not 4 x ({} ms), 5 packets: {:?}", r.ms, stats(false));
+    // Per port: the silent server (port 4) exactly 2 queries; the KoD server (port 5) 1, the two
+    // answering servers (both on port 0) 1 each – one more per server only when an answer was
+    // lost on the way (UDP) and the one retry went out; no other port asked.
+    let per = per_port();
+    let fair = per.is_some_and(|p| {
+        p[4] == 2 && (2..=4).contains(&p[0]) && (1..=2).contains(&p[5]) && p.iter().enumerate().all(|(k, &c)| matches!(k, 0 | 4 | 5) || c == 0)
+    });
+    case!(
+        n,
+        r.ms >= 800 && r.ms < 3200 && fair && stats(false).is_some_and(|s| s.1 == 0 && s.2 == 0),
+        "four servers at once: 2 x 400 ms, not 4 x ({} ms); queries on ports 0 (two servers) / 4 (silent) / 5 (KoD): {:?} (want 2-4 / 2 / 1-2)",
+        r.ms,
+        per.map(|p| (p[0], p[4], p[5]))
+    );
 
     // The arguments.
     let huge = "99999999999999999999";

@@ -55,3 +55,21 @@ pub fn udp_send(c: u64, data: &[u8]) -> i64 {
     }
     chan_send(c, data, 0)
 }
+
+/// The network protocol's version ("net") on a connection from `svc_connect("net0")`
+/// (docs/abi/SERVICES.md): Ok((major, minor)) from "net M.N"; a netd from before `version`
+/// answers "netd: unknown request …" – Ok((1, 0)).  Errors: ERROR_TIMED_OUT (no answer within
+/// `timeout_ms`), ERROR_CLOSED (netd closed the connection), ERROR_IO (an answer that is not a
+/// version – never a panic).  The connection stays usable after it.
+pub fn net_version(c: u64, timeout_ms: u64) -> Result<(u16, u16), i64> {
+    let r = chan_send(c, b"version", 0);
+    if r != 0 {
+        return Err(r);
+    }
+    let mut buf = [0u8; 512];
+    let n = crate::svc::answer_on(c, &mut buf, timeout_ms)?;
+    if buf[..n].starts_with(b"netd: unknown request") {
+        return Ok((1, 0));
+    }
+    parse_version(&buf[..n], "net").ok_or(ERROR_IO)
+}

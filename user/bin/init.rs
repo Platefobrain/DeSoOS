@@ -727,11 +727,22 @@ fn serve_svc(svc: u64, grants: u8, defs: &[Def], svcs: &[Svc], narrowed: &mut Na
             }
             chan_send(h, &out[..n], CHAN_NONBLOCK);
             close(h);
+        } else if text == "version" {
+            // The service manager's protocol version (docs/abi/SERVICES.md); a manager from
+            // before it closed the reply channel without an answer - clients take that as 1.0.
+            chan_send(h, SVC_PROTOCOL.as_bytes(), CHAN_NONBLOCK);
+            close(h);
         } else {
+            // An unknown request (or a known one with extra words): refused with an answer, the
+            // service channel stays as it was.
+            chan_send(h, b"unknown request", CHAN_NONBLOCK);
             close(h);
         }
     }
 }
+
+/// `version` (docs/abi/SERVICES.md): the protocol and its major.minor.
+const SVC_PROTOCOL: &str = "svc 1.0";
 
 /// Answer to "kill <name>".
 enum Reply {

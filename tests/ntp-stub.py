@@ -24,8 +24,8 @@
 #   27  transmit 0        28  receive 0          29  version 5
 #   31  correct, but the server's clock says 1960-01-01 00:00:00 UTC (before the Unix
 #       epoch, within 68 years of the build date)
-#   30  not NTP: "reset" zeroes the query counter (bad and dup count for the whole run), anything answers
-#       "queries=N bad=N dup=N" - queries seen on ports 0-29, queries that are not the
+#   30  not NTP: "reset" zeroes the query counters (bad and dup count for the whole run), anything answers
+#       "queries=N bad=N dup=N per=N,N,...,N" - queries seen on ports 0-29 (in all and per port), queries that are not the
 #       minimal client packet (48 bytes: 0x23, 0, 0, 0x20, zeros, a Transmit value),
 #       Transmit values seen more than once.
 # A query that is not the minimal client packet gets no answer.  Garbage in is never a
@@ -137,6 +137,7 @@ def main():
         socks[s] = n
     stubnet.ready("ntp")
     count = {"queries": 0, "bad": 0, "dup": 0}
+    per = [0] * STATS
     seen = set()
     senders = set()
     late = {}
@@ -152,9 +153,12 @@ def main():
                 if n == STATS:
                     if data == b"reset":
                         count["queries"] = 0
-                    s.sendto(b"queries=%d bad=%d dup=%d" % (count["queries"], count["bad"], count["dup"]), peer)
+                        per = [0] * STATS
+                    s.sendto(b"queries=%d bad=%d dup=%d per=%s" % (count["queries"], count["bad"], count["dup"], ",".join(str(c) for c in per).encode()), peer)
                     continue
                 count["queries"] += 1
+                if n < STATS:
+                    per[n] += 1
                 if len(data) != 48 or data[:4] != b"\x23\x00\x00\x20" or any(data[4:40]) or not any(data[40:]):
                     count["bad"] += 1
                     continue

@@ -8,6 +8,8 @@ The documentation of the whole system. Change history is in `../CHANGELOG.md`; e
 | `ARCHITECTURE.md` | How DeSo OS is built and how its parts work together: boot, memory, scheduler, syscalls and handles, IPC, user-space services and drivers, permissions (DCP), files, DeSoFS, network, USB, cryptography, certificates |
 | `RELEASE.md` | One report per release: tests passed (QEMU TCG / KVM), real hardware, performance against the previous release, known problems; at the top – the current limitations of the system |
 | `abi/README.md` | The DeSo OS ABI: what a program may rely on (system calls, handles and rights, constants, the loader's limits), the rules for changing it, the locks and the tests |
+| `abi/STARTUP.md` | How a program starts and ends (part of ABI 1.0): the file, the first instruction, the stack, the slots, exit codes |
+| `abi/SERVICES.md` | The service protocols with their own versions: `svc` (init's service manager), `net` (netd), `time` |
 | `abi/SDK.md` | The SDK: a program built outside the repository (`sdk/`, `deso-build.sh`, the template) and put on `/disk/bin` |
 | `abi/SYSCALLS.md` | Every system call and constant of the ABI – generated from `abi/abi.toml` |
 | `desofs/README.md` | DeSoFS – DeSo OS's own copy-on-write file system: what it does, the `desofs` commands, where the code and the tests are |

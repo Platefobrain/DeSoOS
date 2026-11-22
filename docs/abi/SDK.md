@@ -34,8 +34,8 @@ cp -r sdk ~/deso-sdk            # in the DeSo OS repository
 
 The result is `~/programs/witaj2/build/witaj2` (about 17 KB) – the name comes from the file, or from its directory
 for `main.rs` (`-n NAME` gives another; 1–32 characters `a-z 0-9 _ -`; `-o DIR` another output directory).
-`witaj2.full` next to it keeps the symbols (for `objdump`). The script refuses a program that is not a static ELF or
-has no ABI note for the library's ABI version (1.0), and the paths of the SDK and of the program do not end up in the
+`witaj2.full` next to it keeps the symbols (for `objdump`). The script refuses a program that is not a static ELF, has
+an interpreter (`PT_INTERP` – DeSo OS has no dynamic loader) or has no ABI note for the library's ABI version (1.0), and the paths of the SDK and of the program do not end up in the
 file (`--remap-path-prefix`).
 
 The program is `no_std` Rust with `libdeso`:
@@ -56,7 +56,8 @@ fn main(args: deso::Args) -> i32 {
 }
 ```
 
-`main` gets the arguments and returns the exit code. Everything of the library is at the crate root: `deso::open`,
+`main` gets the arguments and returns the exit code; a panic prints "panic: …" and ends the program with 101 (the
+whole start contract: [STARTUP.md](STARTUP.md); the services a program talks to: [SERVICES.md](SERVICES.md)). Everything of the library is at the crate root: `deso::open`,
 `deso::read`, `deso::spawn`, `deso::ERROR_NOT_FOUND`, … (modules `sys`, `errors`, `handles`, `fs`, `chan`, `svc`,
 `net`, `time`, `dev`). `Vec` / `String` with `extern crate alloc;` – the library has the allocator. There is no `std`.
 
@@ -97,7 +98,11 @@ empty environment (a new `HOME`, only `PATH`, working directory `/`): `new` and 
 ELF with the ABI 1.0 note, no path of the repository in the program or the log and no build path in the program,
 nothing written to `HOME`, the refusals (an existing directory, a bad name, no such file, not a `.rs` file); then
 QEMU with a fresh DeSoFS volume and the program handed over in a fw_cfg file – SDK TEST copies it to `/disk/bin`
-through the shell, runs it by name with two arguments and finds it in `help` (`logs/test-sdk.log`).
+through the shell, runs it by name with two arguments and finds it in `help`. The same run refuses a program with an
+interpreter, and builds `sdk/compat/abi-1.0/programs/compat10.rs` with **the SDK of ABI 1.0 frozen in
+`sdk/compat/abi-1.0`** (its own `deso-build.sh` and `libdeso`, never edited – `sdk/compat/abi-1.0.lock`); SDK TEST 2/2
+runs it from `/disk/bin` through the real init with a network card: what a program built with the 1.0 SDK relies on
+must keep working on every later system (`logs/test-sdk.log`, 13 checks).
 
 ## Compared with other systems
 

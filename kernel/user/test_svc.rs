@@ -53,7 +53,10 @@ pub fn self_test() {
     // 1. wait_many – list errors, timeout, channels and pipes (read /
     // write / close), wakeup from a child, a server with 4 clients, full
     // queue, kill of a process waiting in wait_many.
+    // Children of waittest pause 20 ms between leaving their status and ending (procs::gone).
+    super::procs::EXIT_PAUSE_MS.store(20, core::sync::atomic::Ordering::SeqCst);
     let r = run("/bin/waittest", &["waittest"], 60_000, false);
+    super::procs::EXIT_PAUSE_MS.store(0, core::sync::atomic::Ordering::SeqCst);
     check!(r.is_some(), "waittest did not finish");
     let (kind, out) = r.unwrap();
     check!(kind == ExitKind::Exit(0) && out.contains("checks OK"), "waittest: {:?} {:?}", kind, out.trim());

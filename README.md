@@ -1,4 +1,4 @@
-# DeSo OS <img src="https://img.shields.io/badge/version-0.80.1-1f6feb?style=for-the-badge" alt="Version 0.80.1">
+# DeSo OS <img src="https://img.shields.io/badge/version-0.81.0-1f6feb?style=for-the-badge" alt="Version 0.81.0">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
@@ -110,7 +110,7 @@ More documentation:
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (42 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 339 tests), stress tests and a long soak test
+- Built-in self-tests (44 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 344 tests), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -524,14 +524,16 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
 - `user/` - user-space programs (`bin/`) and the code they share (`lib/`).
 - `sdk/` - the SDK (copy it anywhere, `docs/abi/SDK.md`): the program library `libdeso` (ABI 1.0: system calls,
   handles, files, channels, services, time, output) and the linker script with the ABI note – every program links to
-  it –, a template and `deso-build.sh` (a program built outside the repository, offline).
+  it –, a template and `deso-build.sh` (a program built outside the repository, offline); `sdk/compat/abi-1.0` – the
+  SDK of ABI 1.0 frozen, built and run by `tests/sdk-test.sh` on every later system.
 - `common/` - code shared by different parts of DeSo OS: ELF parsing (boot loader, kernel), DeSoCrypto
   (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
 - `tests/` - `test.sh`, `sdk-test.sh` (the SDK outside the repository), `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
 - `abi/` - the ABI description `abi.toml` (system calls, handles and rights, constants, the loader's limits) and the
-  locks (`abi-1.0.lock`) that freeze it; `docs/abi/README.md`.
+  locks (`abi-1.0.lock`) that freeze it; `docs/abi/README.md`, the start contract `docs/abi/STARTUP.md`, the
+  service protocols `docs/abi/SERVICES.md`.
 - `build.sh`, `run-qemu.sh`, `make-usb.sh` - build, run in QEMU, write a USB stick.
 - `tools/` - host tools: `mkusb.py` (GPT + ESP + DeSoFS), `mkdesofs.py` (an empty DeSoFS), `abigen.py` (the ABI:
   checks, generated files, locks).

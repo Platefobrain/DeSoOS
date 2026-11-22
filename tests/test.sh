@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs
+#                              suites: smp lock tlb alloc nobkl files ipc rights abi startup crypto rng certs desofs
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/deso/phase=restart): DeSoFS written by the first start must be mounted at /disk

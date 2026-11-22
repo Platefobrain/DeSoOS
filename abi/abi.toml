@@ -168,7 +168,7 @@ name = "SYS_WAIT"
 since = "1.0"
 status = "stable"
 args = [{ name = "pid", type = "u64", meaning = "child or WAIT_ANY" }, { name = "status", type = "ptr_out", meaning = "exit status (u64)" }, { name = "flags", type = "flags", meaning = "WNOHANG" }]
-returns = "pid"
+returns = "pid – the child is then gone from every task list (ps, dcp)"
 errors = ["ERROR_INTERRUPTED", "ERROR_INVALID_ADDRESS", "ERROR_INVALID_ARGUMENT", "ERROR_NO_CHILD"]
 path = false
 handles = []

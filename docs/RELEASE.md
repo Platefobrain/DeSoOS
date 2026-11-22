@@ -29,6 +29,11 @@ timings move by ±15% from run to run on the same build).
 - `dcp audit` keeps 16 ancestors per entry: a viewer more than 16 levels up does not see the refusal; a process whose
   parent ended is reparented to init, so its later refusals are no longer seen by the old grandparent
 - `spawn` instead of `fork`/`exec`; no environment variables or signals (kill = process exit)
+- exec reads a program file whole (up to 8 MiB) into one kernel-heap buffer before loading it – on a badly fragmented
+  heap a large program can fail to start (`ERROR_OUT_OF_MEMORY`); reading straight into frames would remove that
+- ABI 1.0 does not define what happens with a `PT_INTERP` header: the loader does not read it and starts the program at
+  `e_entry` without an interpreter (`deso-build.sh` refuses such a program; `docs/abi/STARTUP.md`)
+- the SDK builds Rust programs only (`no_std` + `libdeso`); no C headers, no package format yet (v0.82)
 - system actions (`sysctl`) behind a single `SYSCTL` handle – no split into reboot / sync / stress / `desofs` (`desofs info` / `check` also need it); raw disk writes only from the kernel's emergency shell
 - `desofs check` runs inside one syscall: no progress until it ends and no Ctrl+C (64 MiB – a fraction of a second; a large disk will need progress and cancelling)
 - snapshots: no automatic ones, no snapshot of a single directory (one live file system per volume in format 1), no creation time (the format stores only the generation); `snapshot delete` / `restore` and `snapshot list` walk the volume (like a mount; one walk per snapshot for the list); a snapshot whose name came from another tool and breaks the stricter rules can be listed but not mounted or deleted through the shell
@@ -231,6 +236,87 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.81.0 — 2026-11-22
+
+**Status: stable on QEMU (TCG and KVM); ABI 1.0 – the system calls, handles and rights, constants, the loader's limits
+and the start contract described once and frozen; every program carries its ABI in an ELF note; the SDK (`sdk/`)
+builds programs outside the repository and the SDK of ABI 1.0 is kept frozen and run on every later system; service
+protocols with their own versions; 44 suites, 344 tests.**
+
+### What is new (details: `CHANGELOG.md`, `docs/abi/`)
+
+- **Stage A** – `abi/abi.toml` (62 syscall numbers, 125 constants, the loader's limits) → `tools/abigen.py` generates
+  `docs/abi/SYSCALLS.md`, the library's constants and the kernel's half of ABI TEST; `abi/abi-1.0.lock` freezes 1.0;
+  the host test (locks, description, generator, code = description, 28 mutations) runs before every build; ABI TEST
+  checks the kernel's rights gate on every handle argument (122 cases), 143 abiprobe probes and the argument order of
+  32 calls.
+- **Stage B** – the program library as the crate `sdk/libdeso` (82 programs moved), the ELF ABI note read by the
+  loader before anything is mapped (newer minor / other major / damaged / twice → `ERROR_ABI`; the owner "DeSo"
+  reserved); the console font DeSo Console.
+- **Stage C** – `sdk/` is the whole SDK: `deso-build.sh new` / `build` with `rustc` alone, offline, no paths of the
+  build machine in the program; `docs/abi/SDK.md`; `tests/sdk-test.sh`.
+- **Stage D** – `docs/abi/STARTUP.md` (the start contract) + STARTUP TEST; `docs/abi/SERVICES.md` (`svc 1.0`, `net
+  1.0`, `time 1.0`), `version` in init and netd + SERVICES TEST; `sdk/compat/abi-1.0` (the frozen SDK with its lock) built
+  and run by sdk-test; `deso-build.sh` refuses `PT_INTERP`; `wait` returns only once the child is gone from every
+  task list (part of ABI 1.0).
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 44/44 + ABI host 5/5 + restart + USB restart + one stick 2/2 + short soak, 344 tests PASS (`ver=0.81.0`) | 478 s (restart 23 s, USB restart 6 s, one stick 9 s, soak 130 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | the same, 344 tests PASS | 396 s (restart 12 s, USB restart 5 s, one stick 8 s, soak 126 s) |
+| SDK | `tests/sdk-test.sh` (TCG, KVM) | 13 checks PASS: `sdk/` alone builds the template offline, 5 refusals (with `PT_INTERP`), the frozen SDK of ABI 1.0 builds `compat10`; on DeSo OS the program runs from `/disk/bin` and `compat10` (34 checks) runs through init | – |
+
+The runs of the release build (`ver=0.81.0`); the stage D gate before the version bump gave the same (TCG 482 s, KVM
+398 s, 344 PASS). The first KVM run of the release build failed in the short soak only (below, "Known problems"); its
+seed run again passed, and so did the next full KVM run. New suites: ABI TEST (42nd), STARTUP TEST (43rd),
+SERVICES TEST (44th); SDK TEST in sdk-test. Tests 331 → 344. Found by the gate and fixed before the release: STARTUP
+TEST's own 8 MiB buffer next to exec's (4-CPU TCG); NTP TEST case 49 counted 7 queries instead of 5 twice under KVM
+(an answer lost on the way and the allowed retry – now counted per server); `wait` returned the status a moment before
+the child's task ended, so `dcp` could still list it under KVM (now `wait` waits for it – the fix of the kernel); IPC
+TEST's frame check took one step of heap growth for a leak. Kernel mutations caught in every stage (A 9, B 6 + 2, D:
+the start stack's alignment, the service manager's check of its channel, `wait` without waiting for the child).
+
+### Real hardware (Legion laptop, the release image, 2026-11-22)
+
+- The Wilk stick updated with `./make-usb.sh /media/dawid/DESO` (only `BOOTX64.EFI` replaced, 7 558 144 B); the
+  "DeSo system" partition kept: `/usb0` = FAT32 `DESO` read-only, `/disk` = DeSoFS (disk 5, generation 1) read-write.
+- `ver`: "DeSo OS v0.81.0 (x86_64, UEFI, ABI 1.0)".
+- **`witaj2 raz dwa` – a program built with the SDK in stage C (v0.81 in progress) and left in `/disk/bin`, run by the
+  release without being rebuilt**: "Hello from witaj2, built with the DeSo OS SDK (ABI 1.0), pid 28", "argument 1:
+  raz", "argument 2: dwa".
+- `help`: "Programs from the disk (/disk/bin; never instead of a system name): witaj witaj2" – `witaj` is a copy of
+  `/bin/hello` from v0.80.0; both start under the release's loader (one without the note = 1.0, one with the 1.0 note).
+- The rest of the start as before: three xHCI controllers, the Realtek card as `net0`, the time service started with
+  its three operators.
+
+### Performance against the previous release (v0.80.0 → v0.81.0, same machine)
+
+| | TCG v0.80.0 | TCG v0.81.0 | KVM v0.80.0 | KVM v0.81.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 94 / 4 248 | 93 / 4 196 | 50 / 5 885 | 52 / 6 131 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 117 / 11 175 | 7 460 / 12 880 | 17 541 / 53 894 | 16 384 / 52 178 |
+| DeSoFS 1000 small files create / read (ms) | 13 431 / 3 743 | 12 463 / 3 466 | 8 187 / 831 | 8 021 / 828 |
+| short soak: file operations in 2 min | 6 286 | 6 263 | 28 064 | 27 333 |
+| short soak: network MiB | 889 | 831 | 907 | 918 |
+| short soak: processes | – | 18 812 | – | 47 146 |
+
+Verdict: no regression beyond the usual spread – the system calls themselves did not change; the library moved into
+a crate, programs grew or shrank by whole pages. The waiting `wait` costs microseconds per child (soak: 47 146
+processes in 2 min under KVM). Soak: leaks 0, errors 0, longest recovery 1 001 ms (TCG) / 913 ms (KVM).
+
+### Known problems
+
+- Short soak under KVM, once in the release runs (and once in v0.77.0): right after `net0` was killed and restarted
+  by init (883 ms), a new TCP connection to the host's test server got no answer ("tcp: 10.0.2.2:58080: timed out").
+  Not repeatable – the same seed passed. Suspected, not proven: the new netd picked the local port of a connection the
+  killed one never closed, which QEMU's user network still holds (netd's TCP state lives in the process, so a restarted
+  netd does not know its predecessor's ports; our TCP answers a stray ACK with RST as it should). To be checked by
+  logging the ports of both instances.
 
 ---
 

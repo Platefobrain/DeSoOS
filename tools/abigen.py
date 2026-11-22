@@ -11,6 +11,9 @@
 #                                        – what tests/test.sh runs ([ABI HOST TEST] lines)
 #   python3 tools/abigen.py --new-lock   write abi/abi-<version>.lock for the version in abi.toml – only
 #                                        when that lock does not exist yet and every older lock passes
+#   python3 tools/abigen.py --new-compat abi-1.0
+#                                        write sdk/compat/abi-1.0.lock (every file of the frozen SDK
+#                                        sdk/compat/abi-1.0 and its SHA-256) – once, never rewritten
 #
 # Rules (D4): within one major version entries are only added – never renumbered, changed or
 # removed (stable -> deprecated is allowed).  A new entry gets since = the next minor, abi.toml's
@@ -685,6 +688,83 @@ def check_locks(root, m):
     return report
 
 
+# ---------------------------------------------------------------- the frozen SDK copies (sdk/compat, test 6)
+
+COMPAT = "sdk/compat"
+
+
+def compat_lines(d):
+    """'relative/path  sha256=<file's SHA-256>' for every file under d, sorted."""
+    out = []
+    for base, dirs, files in os.walk(d):
+        dirs.sort()
+        for f in sorted(files):
+            p = os.path.join(base, f)
+            with open(p, "rb") as fh:
+                h = hashlib.sha256(fh.read()).hexdigest()
+            out.append("%s  sha256=%s" % (os.path.relpath(p, d).replace(os.sep, "/"), h))
+    return sorted(out)
+
+
+def compat_lock_text(name, lines):
+    o = ["# DeSo OS SDK %s, frozen - written once by tools/abigen.py --new-compat, never edited.\n" % name,
+         "# One line per file of sdk/compat/%s + its SHA-256; TOTAL = SHA-256 of all lines.\n" % name]
+    o += [l + "\n" for l in lines]
+    o.append("TOTAL sha256=%s\n" % sha("\n".join(lines)))
+    return "".join(o)
+
+
+def check_compat(root, m=None):
+    """Every sdk/compat/abi-X.Y directory = its lock, file by file; Fail with what changed."""
+    d = os.path.join(root, COMPAT)
+    if not os.path.isdir(d):
+        raise Fail("no %s (the frozen SDK of ABI 1.0)" % COMPAT)
+    names = sorted(x for x in os.listdir(d) if os.path.isdir(os.path.join(d, x)))
+    locks = sorted(x[:-5] for x in os.listdir(d) if x.endswith(".lock"))
+    msgs, report = [], []
+    for x in names:
+        if not re.fullmatch(r"abi-[0-9]+\.[0-9]+", x):
+            msgs.append("%s/%s: not a frozen SDK (abi-MAJOR.MINOR)" % (COMPAT, x))
+        elif x not in locks:
+            msgs.append("%s/%s has no lock (python3 tools/abigen.py --new-compat %s)" % (COMPAT, x, x))
+    for x in locks:
+        if x not in names:
+            msgs.append("COMPAT REMOVED: %s/%s (its lock is there)" % (COMPAT, x))
+            continue
+        lock, total = {}, None
+        with open(os.path.join(d, x + ".lock"), encoding="utf-8") as f:
+            raw = [l.rstrip("\n") for l in f if l.strip() and not l.startswith("#")]
+        lines = []
+        for l in raw:
+            if l.startswith("TOTAL sha256="):
+                total = l[len("TOTAL sha256="):]
+            else:
+                lines.append(l)
+                path, _, h = l.partition("  sha256=")
+                lock[path] = h
+        if total is None or sha("\n".join(lines)) != total:
+            msgs.append("%s/%s.lock: damaged (TOTAL does not match - a line added, removed or changed)" % (COMPAT, x))
+            continue
+        now = {}
+        for l in compat_lines(os.path.join(d, x)):
+            path, _, h = l.partition("  sha256=")
+            now[path] = h
+        n0 = len(msgs)
+        for path in sorted(lock):
+            if path not in now:
+                msgs.append("COMPAT REMOVED: %s/%s/%s" % (COMPAT, x, path))
+            elif now[path] != lock[path]:
+                msgs.append("COMPAT CHANGED: %s/%s/%s (the frozen SDK is never edited)" % (COMPAT, x, path))
+        for path in sorted(now):
+            if path not in lock:
+                msgs.append("COMPAT ADDED: %s/%s/%s" % (COMPAT, x, path))
+        k = len(msgs) - n0
+        report.append("SDK %s: %s" % (x, "OK (%d files)" % len(lock) if not k else "FAILED (%d changes)" % k))
+    if msgs:
+        raise Fail("\n".join(msgs + report))
+    return report
+
+
 # ---------------------------------------------------------------- the code against the description (test 4, host part)
 
 def eval_rust_int(expr):
@@ -891,7 +971,7 @@ def run_checks(root, out):
     if not box:
         return False
     mm = box[0]
-    step(1, "locks", lambda: "; ".join(check_locks(root, mm)))
+    step(1, "locks", lambda: "; ".join(check_locks(root, mm) + check_compat(root, mm)))
     step(3, "generator", lambda: "deterministic, %d bytes = the files in the tree" % check_generated(root, mm))
     step(4, "code = description",
          lambda: "%s: %d syscall numbers and argument counts; %s: %d files, constants only from abi.rs; %d test references exist" % (
@@ -901,7 +981,7 @@ def run_checks(root, out):
 
 def copy_tree(root):
     tmp = tempfile.mkdtemp(prefix="deso-abi-")
-    for rel in ("abi", "docs/abi", "tools", LIBDIR, "kernel", "user/bin"):
+    for rel in ("abi", "docs/abi", "tools", LIBDIR, COMPAT, "kernel", "user/bin"):
         src = os.path.join(root, rel)
         if os.path.isdir(src):
             shutil.copytree(src, os.path.join(tmp, rel))
@@ -950,6 +1030,10 @@ MUTATIONS = [
     ("an order case missing in abiprobe", ABIPROBE, 'p.order("SYS_SEEK"', 'p.val("SYS_SEEK"', 'SYS_SEEK: order abiprobe - no p.order("SYS_SEEK"', False),
     ("lock line edited", "abi/abi-1.0.lock", "ERROR_INVALID_HANDLE type=i64 value=-9", "ERROR_INVALID_HANDLE type=i64 value=-7", "damaged", False),
     ("lock line removed", "abi/abi-1.0.lock", None, None, "damaged (TOTAL", False),
+    ("frozen SDK edited", COMPAT + "/abi-1.0/libdeso/src/svc.rs", "pub fn svc_version() -> Result<(u16, u16), i64> {\n    svc_version_via(SVC, 2000)", "pub fn svc_version() -> Result<(u16, u16), i64> {\n    svc_version_via(SVC, 3000)",
+     "COMPAT CHANGED: sdk/compat/abi-1.0/libdeso/src/svc.rs", False),
+    ("frozen SDK program edited", COMPAT + "/abi-1.0/programs/compat10.rs", "fn main(args: Args) -> i32 {", "fn main(args: Args) -> i32 {\n    let _ = args.len();", "COMPAT CHANGED: sdk/compat/abi-1.0/programs/compat10.rs", False),
+    ("frozen SDK lock edited", COMPAT + "/abi-1.0.lock", "deso-build.sh  sha256=", "deso-build.sh  sha256=0", "abi-1.0.lock: damaged", False),
     ("generated file edited by hand", LIB, "pub const SYS_READ: u64 = 2;", "pub const SYS_READ: u64 = 3;", "differs from abi/abi.toml", False),
     ("library constant copied by hand", LIBDIR + "/fs.rs", "use crate::*;\n", "use crate::*;\npub const ERROR_INVALID_HANDLE: i64 = -7;\n", "pub const ERROR_INVALID_HANDLE defined by hand (an ABI constant)", False),
     ("library constant not described", LIBDIR + "/fs.rs", "use crate::*;\n", "use crate::*;\npub const SEEK_HOLE: u64 = 4;\n", "pub const SEEK_HOLE defined by hand (not in abi.toml)", False),
@@ -982,7 +1066,7 @@ def mutation_test(root, out):
                 m = load(tmp)
                 if regen:
                     write_generated(tmp, m)
-                for fn in (check_locks, check_generated, check_kernel_src, check_lib, check_tests):
+                for fn in (check_locks, check_compat, check_generated, check_kernel_src, check_lib, check_tests):
                     try:
                         fn(tmp, m)
                     except Fail as e:
@@ -1049,6 +1133,17 @@ def main():
                         raise Fail("lock %d.%d does not pass (%s) - a new lock never approves a break" % (v + (", ".join(bad[:5]),)))
             with open(path, "x", encoding="utf-8") as f:
                 f.write(lock_text(m, m["version"]))
+            print("abigen: wrote %s" % os.path.relpath(path, root))
+        elif mode == "--new-compat":
+            name = args[1] if len(args) > 1 else ""
+            d = os.path.join(root, COMPAT, name)
+            path = d + ".lock"
+            if not re.fullmatch(r"abi-[0-9]+\.[0-9]+", name) or not os.path.isdir(d):
+                raise Fail("usage: abigen.py --new-compat abi-MAJOR.MINOR (an existing %s/abi-MAJOR.MINOR)" % COMPAT)
+            if os.path.exists(path):
+                raise Fail("%s exists - a frozen SDK's lock is never rewritten" % os.path.relpath(path, root))
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(compat_lock_text(name, compat_lines(d)))
             print("abigen: wrote %s" % os.path.relpath(path, root))
         else:
             print(__doc__ if __doc__ else "see the comment at the top of tools/abigen.py")

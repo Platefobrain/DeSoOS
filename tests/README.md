@@ -7,11 +7,12 @@ helper scripts.
 tests/test.sh              build --selftest and run all suites in QEMU (TCG); result PASS / FAIL
 ACCEL=kvm tests/test.sh    the same with KVM
 tests/test.sh --no-build   run only
-LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights abi crypto rng certs desofs)
+LOOP=desofs:20 tests/test.sh   loop mode: one suite many times (smp lock tlb alloc nobkl files ipc rights abi startup crypto rng certs desofs)
 tests/make-usb-test.sh     make-usb.sh --with-disk on the host (V080 gate C): its refusals against a fake /sys,
                            the image, and an update from build v1 to v2 started in QEMU (two builds)
-tests/sdk-test.sh          the SDK outside the repository: a copy of sdk/ alone builds the template offline, then
-                           the program on /disk/bin in QEMU (SDK TEST); ACCEL=kvm for KVM
+tests/sdk-test.sh          the SDK outside the repository: a copy of sdk/ alone builds the template offline, the
+                           frozen SDK of ABI 1.0 builds its program, both run on /disk/bin in QEMU (SDK TEST);
+                           ACCEL=kvm for KVM
 tests/soak.sh              the soak test: everything at once, 1 hour with KVM (DURATION=8h, SEED=, ACCEL=tcg,
                            SOAK_DISK=ram – on a RAM disk as on real hardware)
 ```
@@ -19,11 +20,14 @@ tests/soak.sh              the soak test: everything at once, 1 hour with KVM (D
 Before anything is built, `test.sh` runs the ABI host test – `python3 tools/abigen.py --test`: the locks, the
 description `abi/abi.toml`, the generator, the kernel's syscall numbers and argument registers, `libdeso` taking its
 constants only from the generated `abi.rs`, every test and argument-order reference in `abi.toml` pointing at something
-that exists, and 25 mutations that must all be caught (`docs/abi/README.md`; `logs/test-abi.log`).
+that exists, the frozen SDK `sdk/compat/abi-1.0` equal to its lock, and 28 mutations that must all be caught (`docs/abi/README.md`; `logs/test-abi.log`).
 A failure stops the run there.  In QEMU, ABI TEST is the kernel's half: its rights table and constants against the
 generated `kernel/user/abi_generated.rs` and its gate on every handle argument of every row, `/bin/abiprobe` on the
 generated constants and the argument order of 32 calls, and the loader's ELF ABI note
-rules (every `/bin` program carries ABI 1.0; 32 hand-built ELF files; exec of 1.0, no note, 1.1).
+rules (every `/bin` program carries ABI 1.0; 32 hand-built ELF files; exec of 1.0, no note, 1.1).  STARTUP TEST checks
+the start contract from the program's side (`docs/abi/STARTUP.md`: `/bin/starttest` and a program in plain machine
+code at the edges of the load range, the argument and file limits); SERVICES TEST the service protocols' versions
+through the real init (`docs/abi/SERVICES.md`: `/bin/prototest` against init, netd and fake services).
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
 restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by
@@ -44,14 +48,14 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `test.sh` | the test run (above) |
 | `soak.sh` | the long soak test (above) |
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
-| `sdk-test.sh` | the SDK (`docs/abi/SDK.md`): `sdk/` alone copied to an empty temporary directory, an empty environment (new `HOME`, only `PATH`, working directory `/`) – `deso-build.sh new` + `build` of the template, a static ELF with the ABI 1.0 note, no repository path in the program or the log and no build path in the program, nothing in `HOME`, 4 refusals; then QEMU (`./build.sh --selftest` first) with a fresh DeSoFS volume and the program in the fw_cfg file `opt/deso/sdkprog` – SDK TEST copies it to `/disk/bin` through the shell and runs it by name (11 checks, `logs/test-sdk.log`) |
+| `sdk-test.sh` | the SDK (`docs/abi/SDK.md`): `sdk/` alone copied to an empty temporary directory, an empty environment (new `HOME`, only `PATH`, working directory `/`) – `deso-build.sh new` + `build` of the template, a static ELF with the ABI 1.0 note, no repository path in the program or the log and no build path in the program, nothing in `HOME`, 4 refusals and a program with an interpreter (`PT_INTERP`) refused; the frozen SDK `sdk/compat/abi-1.0` alone builds `programs/compat10.rs` with its own `deso-build.sh`; then QEMU (`./build.sh --selftest` first) with a fresh DeSoFS volume, a network card and the programs in the fw_cfg files `opt/deso/sdkprog` and `opt/deso/compatprog` – SDK TEST copies the first to `/disk/bin` through the shell and runs it by name (1/2), then runs compat10 from `/disk/bin` through the real init (2/2) (13 checks, `logs/test-sdk.log`) |
 | `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESO_SYS`, `DESO_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESO_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests; `--format` = `tools/mkdesofs.py` (the production formatter) with a fixed uuid / time |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
 | `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSo system" partition, primary and backup GPT |
 | `dns-stub.py`, `http-stub.py` | small DNS and HTTP servers on the host for the network tests and the soak |
 | `udp-stub.py` | a UDP echo server on the host for NET TEST (`/bin/udptest`, nettest's address-change checks) and the soak: echo, 1472-byte answer, bursts, an answer from a foreign port, silence, a per-sender count |
-| `ntp-stub.py` | 32 NTP servers on the host (one per port) for NTP TEST (`/bin/ntptest net`): correct, shifted, silent, Kiss-o'-Death, forged, late and malformed answers, servers in 1960 and 2040; checks every query byte for byte, counts packets and repeated Transmit values |
+| `ntp-stub.py` | 32 NTP servers on the host (one per port) for NTP TEST (`/bin/ntptest net`): correct, shifted, silent, Kiss-o'-Death, forged, late and malformed answers, servers in 1960 and 2040; checks every query byte for byte, counts packets (in all and per server) and repeated Transmit values |
 | `http_pages.py` | the HTTP/1.1 answers both `http-stub.py` and `tls-stub.py` serve: chunked bodies, 1xx, 204 / 205 / 304, trailers, Connection, refused answers, the end after a whole answer |
 | `tls-stub.py` | HTTPS servers on the host for TLS TEST (Python `ssl` = OpenSSL): good and bad certificates, TLS 1.2 only, no X25519, the framing pages, and men in the middle that change, replay, cut, join or re-key records with the server's keys or break the record with close_notify; port 58471 never answers a SYN (a dead server for nettime's NTS-KE limit) |
 | `nts-server/` | a test server on the host in Rust on **rustls** and RustCrypto **aes-siv** (independent of DeSoTLS / DeSoCrypto) – built by `test.sh` (`cargo build`, its own `Cargo.lock`; the first build downloads its crates): the TLS exporter and ALPN for TLS TEST (58500–58502), 27 NTS-KE responses (58510–58536), 15 kinds of NTP-with-NTS answers (58540–58554, reached through NTS-KE at 58570–58584), counters at 58539; for NTS TEST 15 time servers – NTS-KE at 58600–58614 with a chosen certificate, NTP at 58630–58644 with a chosen time (the host's, shifted, or fixed) |

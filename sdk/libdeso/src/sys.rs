@@ -435,6 +435,13 @@ impl Args {
     pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
         (0..self.argc).filter_map(move |i| self.get(i))
     }
+
+    /// The `argv` array on the start stack (docs/abi/STARTUP.md): `argc` is the word before
+    /// it (the start RSP), then `argv[argc]` = NULL, the empty `envp` (NULL) and `auxv`
+    /// (AT_NULL, 0).
+    pub fn argv(&self) -> *const *const u8 {
+        self.argv
+    }
 }
 
 /// The ABI note (docs/abi/README.md): which DeSo OS ABI this program was built for.  link.ld

@@ -10,7 +10,10 @@ later systems without being rebuilt (programs live on `/disk/bin` since v0.80; p
 | [`SYSCALLS.md`](SYSCALLS.md) | the system calls and constants for people – generated |
 | `sdk/libdeso/src/abi.rs` | the constants of the program library `libdeso` – generated; the library defines no other public constant |
 | `kernel/user/abi_generated.rs` | the kernel's half of ABI TEST: the rights table as text and every constant with its kernel path – generated |
+| [`STARTUP.md`](STARTUP.md) | how a program starts and ends: the file, the first instruction, the stack, the slots, exit codes |
+| [`SERVICES.md`](SERVICES.md) | the service protocols with their own versions: `svc` (init), `net` (netd), `time` |
 | [`SDK.md`](SDK.md) | building a program outside the repository with `sdk/` (`deso-build.sh`, the template) and putting it on `/disk/bin` |
+| [`sdk/compat/abi-1.0`](../../sdk/compat/abi-1.0) + `.lock` | the SDK of ABI 1.0 frozen with a program written against it – built and run on every later system (SDK TEST 2/2); never edited, guarded by its lock |
 | [`tools/abigen.py`](../../tools/abigen.py) | checks the description, generates the three files, guards the locks; Python 3 standard library only |
 
 Never edit a generated file – change `abi/abi.toml` and run `python3 tools/abigen.py`.
@@ -35,9 +38,10 @@ Never edit a generated file – change `abi/abi.toml` and run `python3 tools/abi
   `mmap` or stack; a program file at most `MAX_PROGRAM_FILE` (8 MiB), all segments together at most `MAX_IMAGE`
   (64 MiB); at most `MAX_ARGS` (32) arguments and `MAX_ARG_BYTES` (4096) bytes of them; the stack at `USER_STACK_TOP`,
   16 KiB at the start, growing to `STACK_MAX` (8 MiB). The whole start contract (registers, stack layout, slots, exit
-  codes) gets its own page, `STARTUP.md`, in stage D of v0.81.
+  codes): [STARTUP.md](STARTUP.md).
 
-Service protocols (the service manager, the network, time) get their own versions in stage D (`SERVICES.md`).
+Service protocols (the service manager, the network, time) are not part of the ABI number: each has its own version
+and the same rule – only additions within a major ([SERVICES.md](SERVICES.md)).
 
 ## The program library and the ABI note
 
@@ -124,11 +128,11 @@ ABI 1.0 lock: FAILED (1 changes)
 
 | | What |
 |---|---|
-| 1 locks | every `abi/abi-*.lock` is intact (each line's SHA-256 and the total) and matches the description – the human diff above on any difference |
+| 1 locks | every `abi/abi-*.lock` is intact (each line's SHA-256 and the total) and matches the description – the human diff above on any difference; every frozen SDK `sdk/compat/abi-X.Y` equals its `sdk/compat/abi-X.Y.lock` file by file (`COMPAT CHANGED / ADDED / REMOVED: …`) |
 | 2 description | `abi.toml` is complete: no holes in the numbers, every argument typed, handle arguments match the rights rows, errors are `ERROR_*` constants, every stable entry has a test, every call with 2 or more arguments says where its argument order is tested, no value outside its type |
 | 3 generator | two runs give the same bytes, and they are the files in the tree |
 | 4 code = description | the syscall numbers in `kernel/user/syscalls.rs`; the argument registers each dispatch arm reads = the number of arguments; `libdeso` defines no constant by hand (only the generated `abi.rs`) and re-exports `abi`; every test and order reference points at something that exists (probe label, suite, a program the suite runs that calls the function, a `p.order` case) |
-| 5 mutations | 25 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a test that does not exist, a suite that does not exist, a suite that does not run the program, a program that does not call the function, a 2-argument call without `order`, an order case missing in abiprobe, a lock line edited / removed, a generated file edited, a constant copied by hand into the library, a library constant not described, the library not re-exporting `abi`, the kernel renumbered, the kernel reading another argument |
+| 5 mutations | 28 changes, each must be caught: renumbered call, arguments swapped, argument type changed / added, right changed, error value changed, entry removed, added without a new minor, added as 1.1 without its lock, a hole in the numbers, an entry without a test, a test that does not exist, a suite that does not exist, a suite that does not run the program, a program that does not call the function, a 2-argument call without `order`, an order case missing in abiprobe, a lock line edited / removed, a generated file edited, a constant copied by hand into the library, a library constant not described, the library not re-exporting `abi`, the kernel renumbered, the kernel reading another argument, a file of the frozen SDK or its program edited, its lock edited |
 
 ABI TEST in QEMU is the kernel's half: `1/3` the kernel's rights table (`sysinfo rights`) byte for byte, the table's size,
 the reserved numbers without a row, every syscall number and constant value through its kernel path, and the kernel's
@@ -146,6 +150,10 @@ of the table above, the note at the end of the file and before the code, between
 segments, and through `exec`: a 1.0 program and one without a note run, a 1.1 program is refused with `ERROR_ABI` and
 the reason.
 
+The rest of ABI 1.0 has its own suites: STARTUP TEST – the start contract ([STARTUP.md](STARTUP.md)); SERVICES TEST –
+the service protocols' versions ([SERVICES.md](SERVICES.md)); `tests/sdk-test.sh` – the SDK outside the repository
+and the frozen SDK of ABI 1.0 built and run on today's system (SDK TEST 1/2 and 2/2, [SDK.md](SDK.md)).
+
 ## Compared with other systems
 
 | | What is stable | How it is guarded |
@@ -153,4 +161,4 @@ the reason.
 | Linux | the system calls ("we do not break user space") + glibc | review; per-architecture syscall tables; glibc symbol versions |
 | Windows | the Win32 libraries; system call numbers change between builds | the libraries are the contract |
 | Redox | relibc; the kernel's ABI still moves | – |
-| **DeSo OS** | system calls, handles and rights, constants, loader limits (ABI 1.0) | one description, generated files, locks with SHA-256, mutations, the kernel and a program tested against the description |
+| **DeSo OS** | system calls, handles and rights, constants, loader limits, the start contract (ABI 1.0); service protocols with their own versions | one description, generated files, locks with SHA-256, mutations, the kernel and a program tested against the description, the frozen 1.0 SDK built and run every time |

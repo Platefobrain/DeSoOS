@@ -1,0 +1,20 @@
+# DeSo OS SDK abi-1.0, frozen - written once by tools/abigen.py --new-compat, never edited.
+# One line per file of sdk/compat/abi-1.0 + its SHA-256; TOTAL = SHA-256 of all lines.
+README.md  sha256=7aa483bbdd5a541accdb1b20011bc573b0a196b18509041240eac130b2f1f74e
+deso-build.sh  sha256=475607153111edb803cc62aed819e302dbcc314c17538dc67fa08be924a190d4
+libdeso/link.ld  sha256=16cdf5f6f7acc8efbc955ec483d6d2a5fb768a7e5b3e0fc2181bb424338bf659
+libdeso/src/abi.rs  sha256=c6f460a3fb8fe56b578ae1cb95d95227c9d9f17425c19b8dd15b962c40aa950a
+libdeso/src/chan.rs  sha256=2919beed11986a685dad61a09caeb3f47674722617aaa98434a3abec141abf4f
+libdeso/src/dev.rs  sha256=289fe3895d86dee3fb791c6656f78cab14dce91c8108eb7bfa7ed0ec5f1cddea
+libdeso/src/errors.rs  sha256=3f2a2bfd75361237b475a6260270b5c820d0081013cd20ebc5f980fe4fb40f3a
+libdeso/src/fs.rs  sha256=34ff3c7be3d521ead54c33b05a09ca7b3b623260d4fbe17f8c0ff171d9d6a565
+libdeso/src/handles.rs  sha256=34863b750a6c7b585cc7ba7ed116f064e2f4ca5c5e07076eb7ed559dfd4d44ef
+libdeso/src/lib.rs  sha256=caf49b35dee901544990b5548cebef721d607ba8ff59e1bf4bc7e3d6b12dd1a5
+libdeso/src/net.rs  sha256=df48c4da2b0ec0cf97702eee19926b4ce12bbac2e903b5a393390c7797de72fd
+libdeso/src/svc.rs  sha256=4384fc2ae701d4c2814103d35fff6d0cf657d002d961bd7d97e6f67e9a98d19e
+libdeso/src/sys.rs  sha256=5290dfeac7266cd35af2ae90f76222ff1547fd680fae3123cea3aeea6bbb3685
+libdeso/src/time.rs  sha256=75d4314f7da3d8dd40491353fa8882956749230b61b5cc100787de45a45142f8
+libdeso/src/unstable.rs  sha256=36e8af355ee9b0de8d57835962892c5b504644ac0a80b2c7e9c55a4e23e52b2c
+programs/compat10.rs  sha256=3c154314b702751bea439c5712736ee6b927265f92055ef1c4e6267e864dbbf5
+template/main.rs  sha256=e1f8de568f8f9b9579be4376eab98956397fb410ade5235e7e38f61d879009d1
+TOTAL sha256=0541e21c3273ee7322b3bbb30d5df68d416dfa7aa7b0b187eb5abc65dc304227

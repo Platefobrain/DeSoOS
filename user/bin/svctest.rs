@@ -218,7 +218,9 @@ fn main(_args: Args) -> i32 {
     check!(n, chan_send(SVC, b"list", 0) == 0, "request without a handle is accepted (and ignored)");
     let (a, b) = channel_create().unwrap_or((0, 0));
     check!(n, chan_send_h(SVC, b"bogus", &[b], 0) == 0, "unknown request");
-    check!(n, chan_recv(a, &mut out, 0, &mut info) == ERROR_CLOSED, "unknown request: handle closed by init");
+    let r = chan_recv(a, &mut out, 0, &mut info);
+    check!(n, r > 0 && &out[..r as usize] == b"unknown request", "unknown request: init answers \"unknown request\" ({})", r);
+    check!(n, chan_recv(a, &mut out, 0, &mut info) == ERROR_CLOSED, "unknown request: then the reply channel is closed by init");
     close(a);
     check!(n, state_is("echo", "running").is_some(), "init still answers after bad requests");
 

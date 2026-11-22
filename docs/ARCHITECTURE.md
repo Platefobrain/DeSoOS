@@ -196,6 +196,8 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
     and hands live children over (`reparent_with`); its zombies go to init. `wait` takes only its own list lock.
     A child whose parent finished exiting between the child reading `ppid` and looking the parent up checks
     `ppid` again and goes to the new parent (init) – otherwise its exit status was lost.
+  - `wait` returns a status only once the child's task is dead (`gone` in `procs.rs` – the child leaves its status
+    and then finishes `sched::exit`, microseconds later): after `wait` the child is in no list (`ps`, `dcp`), as on Linux.
   - The list holds 4 entries inline in the process (no heap), more in a `Vec`.
   - The list lock is a single byte, not an `IrqSpinLock`. Why: `IrqSpinLock` is 64 B aligned and would push every
     `Process` onto the slow heap path. A compile-time assertion keeps `Process` ≤ 2 KiB with alignment ≤ 16.
@@ -216,7 +218,10 @@ kernel ── starts ──> /bin/init ──> /bin/sh ──> programs (ls, pri
 The whole contract a program relies on – numbers, arguments with types, errors, rights, constants, the loader's
 limits – is described in `abi/abi.toml` (ABI 1.0, frozen in `abi/abi-1.0.lock`) and generated into
 `abi/SYSCALLS.md`; the rules (only additions within a major version, each a new minor) and the tests are in
-`abi/README.md`.
+`abi/README.md`.  How a program starts (the stack, the slots, exit codes) is in `abi/STARTUP.md`; the service
+protocols – init's service manager (`svc`), netd (`net`) – each have their own version and a `version` request
+(`abi/SERVICES.md`).  The SDK of ABI 1.0 is kept frozen in `sdk/compat/abi-1.0` and built and run on every later
+system (`tests/sdk-test.sh`).
 
 `SYSCALL`/`SYSRET`; number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9; result in RAX (negative = an error, see
 "Errors" below). Process memory is accessed only via `copy_from_user`/`copy_to_user` (page check + SMAP). Almost
@@ -767,8 +772,10 @@ When the last `DEVICE` handle disappears (process exit, close), the kernel, in t
   the service talk directly. Unknown / not running service → init closes the end and the client gets `ERROR_CLOSED`.
   `"list"` + an end → init replies with lines "name state pid N restarts N (program)" and closes.
   `"kill <name>"` + an end → init ends the service (it is restarted by the rules below) and replies `killed <name>
-  (pid N)`, `not allowed` (the program channel or a narrowed one), `no such service` or `not running`. Library:
-  `svc_connect("edu")`, `svc_list(buf)`, `svc_kill("net0", buf)`; commands `services`, `kill <name>`.
+  (pid N)`, `not allowed` (the program channel or a narrowed one), `no such service` or `not running`.
+  `"version"` + an end → `svc 1.0` (the protocol's version, `abi/SERVICES.md`); any other request → `unknown
+  request` and the end closed. Library: `svc_connect("edu")`, `svc_list(buf)`, `svc_kill("net0", buf)`,
+  `svc_version()`; commands `services`, `kill <name>`.
 - Service crashed → its clients get `ERROR_CLOSED` and reconnect (after the restart).
 - The shell checks at startup whether slot 3 is a channel; if so, it starts programs with `spawn_ex` and
   `[(in,0), (out,1), (2,2), (5,3)]` – the program channel from slot 5 as the child's slot 3 (only `netconfig` gets

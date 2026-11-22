@@ -72,6 +72,12 @@ mod test_rights;
 pub mod abi_generated;
 #[cfg(selftest)]
 mod test_abi;
+// The start contract (docs/abi/STARTUP.md) seen from programs.
+#[cfg(selftest)]
+mod test_startup;
+// The service protocols' versions (docs/abi/SERVICES.md).
+#[cfg(selftest)]
+mod test_services;
 // DeSoCrypto (common/desocrypto) in the kernel and in user space.
 #[cfg(selftest)]
 mod test_crypto;
@@ -670,6 +676,13 @@ pub(crate) fn exit_current() -> ! {
         }
         crate::console::remove_foreground(id);
         procs::on_exit(id, kind);
+        #[cfg(selftest)]
+        {
+            let pause = procs::EXIT_PAUSE_MS.load(Ordering::SeqCst);
+            if pause > 0 && sched::with_current_name(|_, n| n == "waittest").unwrap_or(false) {
+                crate::time::sleep_ms(pause);
+            }
+        }
     }
     prof::stop(prof::EXIT, t0);
     sched::exit()
@@ -803,6 +816,10 @@ pub use test_ipc::self_test as ipc_self_test;
 pub use test_rights::self_test as rights_self_test;
 #[cfg(selftest)]
 pub use test_abi::self_test as abi_self_test;
+#[cfg(selftest)]
+pub use test_startup::self_test as startup_self_test;
+#[cfg(selftest)]
+pub use test_services::self_test as services_self_test;
 #[cfg(selftest)]
 pub use test_crypto::self_test as crypto_self_test;
 #[cfg(selftest)]

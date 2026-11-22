@@ -15,7 +15,7 @@ What a program may rely on (rules: [README.md](README.md)).  A call: number in `
 | 7 | `SYS_YIELD` | – | 0 | – | stable | 1.0 | normal: abiprobe:yield | – |
 | 8 | `SYS_UPTIME` | – | milliseconds since boot | – | stable | 1.0 | normal: abiprobe:uptime | – |
 | 9 | `SYS_SPAWN` | `path: ptr_in`, `path_len: len`, `args: ptr_in`, `args_len: len`, `flags: flags`, `fds: u64` | pid | path (refused in the file sandbox); checked in the call: stdio handles: DUP | stable | 1.0 | stateful: abiprobe:spawn a child; abiprobe:spawn with a bad path; NOBKL TEST: famtest | abiprobe |
-| 10 | `SYS_WAIT` | `pid: u64`, `status: ptr_out`, `flags: flags` | pid | – | stable | 1.0 | blocking: abiprobe:wait without children; abiprobe:wait for the child: exit status 7; SVC TEST: waittest | abiprobe |
+| 10 | `SYS_WAIT` | `pid: u64`, `status: ptr_out`, `flags: flags` | pid – the child is then gone from every task list (ps, dcp) | – | stable | 1.0 | blocking: abiprobe:wait without children; abiprobe:wait for the child: exit status 7; SVC TEST: waittest | abiprobe |
 | 11 | `SYS_GETPPID` | – | parent pid | – | stable | 1.0 | normal: abiprobe:getppid | – |
 | 12 | `SYS_KILL` | `pid: u64` | 0 | checked in the call: the target: the caller or its descendants | stable | 1.0 | stateful: abiprobe:kill a process that does not exist; IPC TEST: chantest | – |
 | 13 | `SYS_CHDIR` | `path: ptr_in`, `path_len: len` | 0 | path (refused in the file sandbox) | stable | 1.0 | normal: abiprobe:chdir /; FILE TEST: sandtest | abiprobe |
@@ -156,7 +156,7 @@ What a program may rely on (rules: [README.md](README.md)).  A call: number in `
 - `pid` (rdi, u64): child or WAIT_ANY
 - `status` (rsi, ptr_out): exit status (u64)
 - `flags` (rdx, flags): WNOHANG
-- returns: pid
+- returns: pid – the child is then gone from every task list (ps, dcp)
 - errors: `ERROR_INTERRUPTED`, `ERROR_INVALID_ADDRESS`, `ERROR_INVALID_ARGUMENT`, `ERROR_NO_CHILD`
 - rights: –
 

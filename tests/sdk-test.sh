@@ -10,9 +10,13 @@
 #    template and builds it.  The result: a static ELF, the ABI 1.0 note, no path of the
 #    repository or of the temporary directory in the file or in the build log; the refusals
 #    (an existing directory, a bad name, no such file, not a .rs file).
-# 2. QEMU (the self-test kernel – ./build.sh --selftest first) with a fresh DeSoFS volume on
-#    the virtio disk and the program in the fw_cfg file opt/deso/sdkprog: SDK TEST copies it to
-#    /disk/bin through the shell and runs it by name (logs/test-sdk.log).
+# 2. The refusal of a program with an interpreter (PT_INTERP, from a linker script that adds
+#    one); the frozen SDK of ABI 1.0 (sdk/compat/abi-1.0 alone) builds programs/compat10.rs with
+#    its own deso-build.sh.
+# 3. QEMU (the self-test kernel – ./build.sh --selftest first) with a fresh DeSoFS volume on
+#    the virtio disk, a network card and the programs in the fw_cfg files opt/deso/sdkprog and
+#    opt/deso/compatprog: SDK TEST copies the first to /disk/bin through the shell and runs it
+#    by name, then runs compat10 from /disk/bin through the real init (logs/test-sdk.log).
 # Ends with the self-test build in build/ (as tests/test.sh leaves it).
 set -uo pipefail
 
@@ -94,30 +98,54 @@ MSG="a program name" refuse "a bad name" new "$W/apps/Bad Name"
 MSG="no such file" refuse "a missing file" build "$W/apps/none.rs"
 printf 'x\n' > "$W/apps/x.txt"
 MSG="not a .rs file" refuse "not a .rs file" build "$W/apps/x.txt"
+# A program with an interpreter (PT_INTERP): a copy of the SDK whose linker script adds one.
+cp -r "$W/sdk" "$W/sdk-interp"
+sed -i '/^PHDRS/{n;s/^{/{\n    interp PT_INTERP FLAGS(4);/}' "$W/sdk-interp/libdeso/link.ld"
+sed -i 's/^    \.rodata : ALIGN(4096)/    .interp : { BYTE(0x2f) BYTE(0x6c) BYTE(0) } :rodata :interp\n\n&/' "$W/sdk-interp/libdeso/link.ld"
+if run "$W/sdk-interp/deso-build.sh" build "$APP/main.rs" -o "$W/interp" > "$W/r.log" 2>&1; then bad "a program with PT_INTERP accepted"
+elif grep -q "has an interpreter (PT_INTERP)" "$W/r.log" && readelf -lW "$W/interp/sdkhello.full" | grep -q INTERP && [ ! -e "$W/interp/sdkhello" ]; then
+  ok "a program with an interpreter refused ($(head -n 1 "$W/r.log" | cut -c1-90))"
+else bad "PT_INTERP: $(cat "$W/r.log")"; fi
 
-# ------------------------------------------------------------------ 2. on DeSo OS
+# ------------------------------------------------------------------ the frozen SDK of ABI 1.0
+# sdk/compat/abi-1.0 alone (tools/abigen.py guards it with sdk/compat/abi-1.0.lock), built with
+# its own deso-build.sh; SDK TEST 2/2 runs the program on this system.
+cp -r "$ROOT/sdk/compat/abi-1.0" "$W/compat"
+rm -rf "$W/compat/programs/build"
+COMPAT="$W/compat/programs/build/compat10"
+if run bash "$W/compat/deso-build.sh" build "$W/compat/programs/compat10.rs" > "$W/compat.log" 2>&1 \
+  && readelf -nW "$COMPAT" 2>/dev/null | grep -A1 "^ *DeSo .*0x00000008" | grep -q "description data: 01 00 00 00 00 00 00 00" \
+  && ! grep -aq "$ROOT" "$COMPAT"; then
+  ok "the frozen SDK of ABI 1.0 builds compat10 ($(stat -c %s "$COMPAT") B, ABI 1.0 note)"
+else
+  bad "the frozen SDK of ABI 1.0: $(tail -n 5 "$W/compat.log")"
+fi
+
+# ------------------------------------------------------------------ 3. on DeSo OS
 if ! ./build.sh --selftest > "$W/selftest.log" 2>&1; then
   tail -n 20 "$W/selftest.log"
   bad "./build.sh --selftest"
 elif ! python3 tools/mkdesofs.py "$W/disk.img" --blocks 16384 > "$W/fmt.log" 2>&1; then
   bad "tools/mkdesofs.py: $(cat "$W/fmt.log")"
-elif [ ! -f "$PROG" ]; then
+elif [ ! -f "$PROG" ] || [ ! -f "$COMPAT" ]; then
   bad "no program to run"
 else
-  timeout 300 qemu-system-x86_64 -machine q35 -m 512M -smp 2 "${ACCEL_ARGS[@]}" \
+  timeout 600 qemu-system-x86_64 -machine q35 -m 512M -smp 2 "${ACCEL_ARGS[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -device qemu-xhci,id=xhci \
     -drive if=none,id=usbboot,format=raw,file=fat:"$ROOT/build",readonly=on \
     -device usb-storage,bus=xhci.0,port=1,drive=usbboot,bootindex=0 \
     -drive file="$W/disk.img",format=raw,if=none,id=vd0 -device virtio-blk-pci,drive=vd0 \
+    -netdev user,id=net0 -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -fw_cfg name=opt/deso/autotest,string=1 \
     -fw_cfg "name=opt/deso/phase,string=sdk sdkhello" \
     -fw_cfg "name=opt/deso/sdkprog,file=$PROG" \
+    -fw_cfg "name=opt/deso/compatprog,file=$COMPAT" \
     -serial stdio -display none -no-reboot < /dev/null > "$W/qemu.log" 2>&1
   c=$?
   tr -d '\r' < "$W/qemu.log" | grep -a "^\[SDK TEST\]" >> "$LOG"
-  if [ "$c" = 33 ]; then ok "on DeSo OS ($ACCEL): copied to /disk/bin by the shell, run by name"
+  if [ "$c" = 33 ]; then ok "on DeSo OS ($ACCEL): copied to /disk/bin by the shell, run by name; compat10 of the frozen SDK runs"
   else bad "on DeSo OS: QEMU code $c"; tr -d '\r' < "$W/qemu.log" | tail -n 15 >> "$LOG"; fi
 fi
 

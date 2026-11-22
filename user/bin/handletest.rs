@@ -185,7 +185,9 @@ fn main(args: Args) -> i32 {
     // No such process; a process that already exited; a child may not look at its parent.
     check!(n, dcp_pid("dcp inspect ", 999_999).contains("no user process"), "dcp inspect of a missing pid");
     let gone = spawn("/bin/handletest", &["handletest", "exit"], 0, fds(0, 1, 2));
-    check!(n, gone > 0 && wait(gone as u64, 0).is_ok() && dcp_pid("dcp inspect ", gone as u64).contains("no user process"), "dcp inspect of an exited process");
+    // Once wait has the status, the child is gone from every list – also when it ended on
+    // another CPU (no waiting, no retry).
+    check!(n, gone > 0 && wait(gone as u64, 0).is_ok() && dcp_pid("dcp inspect ", gone as u64).contains("no user process"), "dcp inspect of an exited process right after wait");
     let peek = spawn("/bin/handletest", &["handletest", "peek"], 0, fds(0, 1, 2));
     check!(n, peek > 0 && wait(peek as u64, 0) == Ok((peek as u64, 0)), "a child without SYS_POWER saw its parent's capabilities");
     // The parent sees its child, also while the child changes its table on another CPU.

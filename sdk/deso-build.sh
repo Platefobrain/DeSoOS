@@ -7,7 +7,7 @@
 #                                             FILE.rs -> DIR/NAME (default: build/ next to FILE.rs;
 #                                             NAME: the file's name, or its directory's for main.rs)
 #
-# The result is a static ELF for DeSo OS ABI 1.0 with the ABI note (copy it to /disk/bin on DeSo OS);
+# The result is a static ELF (no interpreter) for DeSo OS ABI 1.0 with the ABI note (copy it to /disk/bin on DeSo OS);
 # NAME.full next to it keeps the symbols.  Needs rustc (edition 2024 – 1.85 or newer) with the
 # x86_64-unknown-none target, and objcopy / readelf (binutils).  No cargo, no network, nothing
 # outside this directory and the program's own: the library is compiled from libdeso/ with the
@@ -100,6 +100,11 @@ cmd_build() {
     --extern "libdeso=$out/.libdeso/liblibdeso.rlib" "${remap[@]}" \
     -o "$out/$name.full" "$src" || die "$src does not build"
   readelf -h "$out/$name.full" | grep -q "EXEC" || die "$name: not a static ELF (ET_EXEC) - DeSo OS would not run it"
+  # No interpreter: DeSo OS has no dynamic loader (docs/abi/STARTUP.md) - a PT_INTERP header
+  # (a link with -dynamic-linker, or a shared library) is refused, not shipped.
+  if readelf -lW "$out/$name.full" | grep -q "INTERP"; then
+    die "$name: has an interpreter (PT_INTERP) - DeSo OS programs are static, without a dynamic loader"
+  fi
   local v want
   v="$(abi_version)"
   set -- $v

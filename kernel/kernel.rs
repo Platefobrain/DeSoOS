@@ -308,6 +308,9 @@ pub extern "sysv64" fn kernel_main(
     // The ABI description (abi/abi.toml) – the kernel and /bin/abiprobe against it.
     #[cfg(selftest)]
     selftest::suite("abi", user::abi_self_test);
+    // The start contract (docs/abi/STARTUP.md) – a libdeso program and plain machine code.
+    #[cfg(selftest)]
+    selftest::suite("startup", user::startup_self_test);
     // DeSoCrypto – SHA-256, HMAC, HKDF, ChaCha20 in the kernel and in user space.
     #[cfg(selftest)]
     selftest::suite("crypto", user::crypto_self_test);
@@ -348,6 +351,11 @@ pub extern "sysv64" fn kernel_main(
     #[cfg(selftest)]
     if !selftest::looping() {
         user::net_self_test();
+    }
+    // The service protocols' versions (docs/abi/SERVICES.md) – init's manager and netd.
+    #[cfg(selftest)]
+    if !selftest::looping() {
+        user::services_self_test();
     }
     // HTTPS – DeSoTLS handshake and records, netget https:// against tests/tls-stub.py.
     #[cfg(selftest)]

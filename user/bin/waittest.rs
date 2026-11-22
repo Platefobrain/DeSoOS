@@ -2,7 +2,8 @@
 // (ERROR_INVALID_ARGUMENT / ERROR_INVALID_HANDLE / ERROR_ACCESS_DENIED), check only (timeout 0), timeout,
 // channel and pipe readiness for read / write, closing the other side,
 // wakeup by a message from a child, a server handling 4 clients at once
-// (the user-space service pattern), full queue, kill of a process waiting in wait_many.
+// (the user-space service pattern), full queue, kill of a process waiting in wait_many; and
+// wait itself: once it has a child's status, the child is in no task list (60 children).
 // Result: "waittest: N checks OK, ..." and exit code 0, or a description of the first error and
 // exit code 1.  Run by SVC TEST (self-tests).
 //
@@ -88,6 +89,7 @@ fn main(args: Args) -> i32 {
         Some("client") => return client(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0)),
         Some("drain") => return drain(),
         Some("waiter") => return waiter(),
+        Some("quit") => return 0,
         _ => {}
     }
     let mut n = 0;
@@ -262,6 +264,35 @@ fn main(args: Args) -> i32 {
     close(b);
     close(send_only);
     close(recv_only);
+
+    // 9. wait and the task table: once wait has a child's status, the child is in no list
+    //    (ps) – also when it ended on another CPU a moment before; by pid, WAIT_ANY and
+    //    WNOHANG.
+    let listed = |pid: u64| -> bool {
+        let mut t = [0u8; 8192];
+        let k = tasks(&mut t);
+        k > 0 && core::str::from_utf8(&t[..k as usize]).unwrap_or("").lines().any(|l| l.split('\t').next().and_then(|s| s.parse::<u64>().ok()) == Some(pid))
+    };
+    let mut seen = 0;
+    for round in 0..60 {
+        let pid = spawn("/bin/waittest", &["waittest", "quit"], 0, fds(0, 1, 2));
+        check!(n, pid > 0, "spawn quit child: {}", pid);
+        let pid = pid as u64;
+        let r = match round % 3 {
+            0 => wait(pid, 0),
+            1 => wait(WAIT_ANY, 0),
+            _ => loop {
+                match wait(pid, WNOHANG) {
+                    Ok((0, _)) => continue,
+                    other => break other,
+                }
+            },
+        };
+        check!(n, r == Ok((pid, 0)), "wait for quit child {}: {:?}", pid, r);
+        check!(n, !listed(pid), "child {} still in the task table right after wait (round {})", pid, round);
+        seen += 1;
+    }
+    check!(n, seen == 60, "60 children");
 
     println!(
         "waittest: {} checks OK, server: {} requests from {} clients in {} ms, {} wake-ups",

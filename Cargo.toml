@@ -1,6 +1,6 @@
 [package]
 name = "deso-boot"
-version = "0.80.1"
+version = "0.81.0"
 edition = "2024"
 license = "GPL-3.0-or-later AND OFL-1.1"
 build = "build.rs"
