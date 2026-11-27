@@ -2,10 +2,30 @@
 
 Format: newest on top. Dates in Central European time.
 
-## v0.82.0 — in progress (desopkg: programs from the internet)
+## v0.82.0 — 2026-11-27 (desopkg: programs from the internet)
 
-Plan: V082 ver 4.6 (accepted) and V082-B ver 1 (accepted). Stages A, B1 and B2 done; stage C (the real repository,
-real hardware) and the release are next. Details: `docs/pkg/README.md`, formats: `docs/pkg/FORMAT.md`.
+Plan: V082 ver 4.6 (accepted) and V082-B ver 1 (accepted). Stages A, B1, B2 and C, one release. Details:
+`docs/pkg/README.md`, formats: `docs/pkg/FORMAT.md`.
+
+### Release
+- Version 0.82.0 (`Cargo.toml`, `Cargo.lock`, the README badge); `docs/RELEASE.md` – the v0.82.0 report; README: 45
+  suites, 353 tests, desopkg in the feature list. "Current limitations": a new "Packages (desopkg)" part; the lines
+  "no package format yet" and "no signatures, versions or installer yet" removed.
+
+### Stage C – the real repository
+- **DecodeSoft's key**: `user/etc/desopkg/keys` holds the public key `decodesoft-2026-01` (P-256) – every normal image
+  trusts it; the private key stays on the build machine (`~/.deso-keys/`), never in the project.
+- **`tools/deso-repo.sh`**: `key` (once: the key pair, the public half into `user/etc/desopkg/keys`; an existing key
+  is never replaced) and `build [OUT]` (witaj 1.0.0 and 1.0.1 built with the SDK, packed, the index signed with a
+  serial from the UTC time and checked again, into `OUT/deso/stable/x86_64/` – outside the project, to upload).
+- **`https://decodesoft.pl/deso/stable/x86_64/`** serves the first index (serial 202611272157, valid 30 days) and
+  `witaj` 1.0.0 / 1.0.1. On the Legion: refresh, install 1.0.0, update to 1.0.1, a downgrade back to 1.0.0, update
+  again, verify, a restart (the program runs before the network is up), remove.
+- `docs/pkg/README.md`: "Publishing"; what PKG TEST's power losses do and do not show (QEMU killed, not a lost disk
+  cache – DESOFS TEST 15–18 cover that; no real power cut on hardware). `tests/pkg-test.sh --mutants` no longer
+  copies the end of the QEMU log for an expected failure.
+- The mutant "order" writes one early generation file and replaces it with the real one: without a crash it behaves
+  like a normal desopkg, so the crash point K6 is what catches it.
 
 ### Stage B2 – crashes, power losses, the lock, mutants
 - **PKG TEST part 2** (`tests/pkg-test.sh`, phase `pkg b2` on part 1's volume): desopkg stopped as if killed at every

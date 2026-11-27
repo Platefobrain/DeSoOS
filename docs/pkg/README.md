@@ -58,6 +58,52 @@ certificates are checked against `/etc/certs/roots`, and nothing is sent before 
 (NTS) has set the clock. What this does not protect against (a local program with access to
 `/disk`): `FORMAT.md` §8.
 
+## The repository at decodesoft.pl
+
+DeSo OS installs from one repository: DecodeSoft's, `https://decodesoft.pl/deso/` (`/etc/desopkg/repo`). Every normal
+image trusts one key, `decodesoft-2026-01` – its public half is `user/etc/desopkg/keys` in this project; the private
+half exists only on DecodeSoft's build machine. Anyone who builds DeSo OS from this project gets the same key and the
+same repository: `desopkg install` works without any setup.
+
+What the server holds (a static folder – no program runs on it):
+
+```
+deso/stable/x86_64/index                      the list of packages: name, version, size, SHA-256, dependencies
+deso/stable/x86_64/index.sig                  its signature (ECDSA P-256, key decodesoft-2026-01)
+deso/stable/x86_64/packages/<name>-<version>.pkg
+```
+
+### Publishing (DecodeSoft)
+
+1. **The key – once.** `tools/deso-repo.sh key`: the private key `~/.deso-keys/decodesoft-2026-01.pem` (mode 600) and
+   its public half into `user/etc/desopkg/keys`. Back the private key up off line (a second stick). Never copy it into
+   the project, onto the server or into an image. An existing key is never replaced: systems that trust it would
+   refuse an index signed with a new one.
+2. **The packages and the index.** `tools/deso-repo.sh build` builds the packages with the SDK, packs them, signs the
+   index (serial = the UTC time `YYYYMMDDHHMM`, valid 30 days) and checks it again – into `~/Pulpit/deso-repo/deso/`.
+3. **Upload.** The folder `stable` into `deso/` at the top of the site (`public_html/deso/stable/…`). Check that
+   `https://decodesoft.pl/deso/stable/x86_64/index` opens and starts with `format=1`.
+4. **Again within 30 days.** An expired index is refused by every system: run `build` and upload again before then –
+   also when nothing changed (a new serial, a new date).
+
+A new program or a new version: its package is added to `tools/deso-repo.sh build` (the source with `sdk/deso-build.sh`,
+a `desopkg.meta` with `name=`, `version=`, `summary=`, optional `depends=` / `conflicts=`, the program in `bin/`, data
+in `share/`), then steps 2–3. Old versions may stay in the index – `desopkg install name=version` can go back to them.
+A version once published is never changed: a fix gets a new version number.
+
+### A repository of your own (a fork)
+
+Someone who builds DeSo OS with their own programs makes their own key and points the system at their own server:
+
+1. `tools/deso-repo.sh key` in their copy of the project – their key replaces DecodeSoft's in `user/etc/desopkg/keys`.
+2. `user/etc/desopkg/repo`: `url=` their server (`https://<host>/<path>/`), `repo=` their name.
+3. Their packages: `tools/desopkg.py pack DIR -o <name>-<version>.pkg` for each, all into
+   `deso/stable/x86_64/packages/`, then
+   `tools/desopkg.py index deso/stable/x86_64 --serial N --key ~/.deso-keys/<key>.pem --keyid <id> --repo <name>`.
+4. Upload `deso/`, build the image (`./make-usb.sh`).
+
+Their systems then trust only their key: DecodeSoft's packages no longer install there (one repository per system).
+
 ## Code
 
 | Where | What |
@@ -84,6 +130,11 @@ The self-test image (desopkg and sh built with `--cfg selftest`) trusts the test
 `desopkg-crash` (stop at a crash point as if killed, or hang there for a power loss),
 `desopkg-nomem`, `sh-pause` (the shell waits between finding a package program and starting it);
 none of that exists in a normal image (checked by PKG TEST).
+
+PKG TEST stops QEMU with `kill -9`: it checks that desopkg recovers from the machine stopping at
+any point, not that data in a disk cache is lost – everything QEMU already wrote reaches the
+image. Lost unflushed writes and failed writes / flushes are tested by DeSoFS itself (DESOFS TEST
+15–18, a crash after every write). A real power cut on hardware has not been tested.
 
 ### Crash points
 

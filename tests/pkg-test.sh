@@ -110,9 +110,10 @@ fi
 
 # One start of QEMU on $W/disk.img with the phase "pkg $1"; the log in $W/qemu-$1.log, its PKG
 # lines into $LOG.  $2 = end: QEMU ends by itself (isa-debug-exit 33 = PASS); $2 = power: the
-# start ends with "POWER OFF at" and is killed (kill -9 – a power loss at that moment).
+# start ends with "POWER OFF at" and is killed (kill -9 – a power loss at that moment).  $3 =
+# quiet: a failure is expected (a mutant) – the end of the QEMU log is not added to $LOG.
 boot() {
-  local phase="$1" mode="$2" q="$W/qemu-$1.log" c=0 qpid
+  local phase="$1" mode="$2" quiet="${3:-}" q="$W/qemu-$1.log" c=0 qpid
   qemu-system-x86_64 -machine q35 -m 512M -smp 2 "${ACCEL_ARGS[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
     -device qemu-xhci,id=xhci \
@@ -148,7 +149,7 @@ boot() {
   elif [ "$c" = 33 ]; then
     return 0
   fi
-  tr -d '\r' < "$q" | tail -n 25 >> "$LOG"
+  [ "$quiet" = quiet ] || tr -d '\r' < "$q" | tail -n 25 >> "$LOG"
   return 1
 }
 
@@ -195,13 +196,16 @@ elif [ "$MUTANTS" = 1 ]; then
       continue
     fi
     echo "[PKG HOST TEST] mutant $m:" >> "$LOG"
-    if boot m end; then
+    quiet=quiet
+    [ "$m" = none ] && quiet=""
+    if boot m end "$quiet"; then
       if [ "$m" = none ]; then ok "without a mutant the sequence passes ($ACCEL)"
       else bad "the mutant $m was NOT caught"; fi
     elif [ "$m" != none ] && grep -aq "\[PKG TEST\] FAIL" "$W/qemu-m.log"; then
       ok "the mutant $m was caught: $(tr -d '\r' < "$W/qemu-m.log" | grep -a -m1 "\[PKG TEST\] FAIL" | cut -c1-200)"
     else
       bad "the sequence failed with the mutant $m without a FAIL line (or without a mutant)"
+      [ "$m" = none ] || tr -d '\r' < "$W/qemu-m.log" | tail -n 25 >> "$LOG"
     fi
   done
   env -u DESO_PKG_MUTANT ./build.sh --selftest > "$W/selftest-end.log" 2>&1 || bad "./build.sh --selftest at the end"

@@ -1,4 +1,4 @@
-# DeSo OS <img src="https://img.shields.io/badge/version-0.81.1-1f6feb?style=for-the-badge" alt="Version 0.81.1">
+# DeSo OS <img src="https://img.shields.io/badge/version-0.82.0-1f6feb?style=for-the-badge" alt="Version 0.82.0">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
@@ -106,11 +106,16 @@ More documentation:
   checksum, directories, relations) and repaired back to a whole sound state (kernel shell `desofs`); every
   operation is tested against power loss at each write. A block cache keeps verified blocks between operations
   (every hit checked by its SHA-256 again; at most 1/16 of memory, 64 MiB).
+- Programs from the internet: `desopkg` installs, updates (also back to an older version on request), removes and
+  verifies packages from DecodeSoft's signed repository (`https://decodesoft.pl/deso/`) onto `/disk`; the index is
+  signed (ECDSA P-256) and every package pinned by its size and SHA-256; a change builds new directories next to the
+  old ones and switches with one new generation file – a crash or power loss leaves the old or the new set whole;
+  the shell runs package programs by name (`docs/pkg/README.md`).
 - Framebuffer console with scrollback, PS/2 and USB keyboards, mouse wheel scrolling.
 - User-space shell (`sh`) with history, Tab completion, redirection and job control, lines up to 4096 characters
   (a line wider than the screen scrolls sideways and is shown whole after Enter); a kernel
   emergency shell as a fallback.
-- Built-in self-tests (44 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI host test before the build – 344 tests), stress tests and a long soak test
+- Built-in self-tests (45 suites, a restart phase, a USB restart phase, two starts from a `make-usb.sh --with-disk` image and a short soak, plus the ABI and package host tests before the build – 353 tests; desopkg against a test repository with crashes, power losses and mutants in `tests/pkg-test.sh`), stress tests and a long soak test
   (`tests/soak.sh` – everything at once for hours with leak and file system checkpoints), runnable automatically in
   QEMU or on real hardware.
 
@@ -322,7 +327,7 @@ reads the result back. `--dry-run` only checks. Update DeSo OS on such a stick a
 **Programs from the disk**: copy a program to `/disk/bin` (e.g. `cp /usb1/prog /disk/bin/prog` from another FAT32
 stick) and type its name in the shell. It is looked up after everything of the system – it can never replace a
 built-in, a `/bin` program or an information command – and it gets what any program typed by hand gets: no system
-actions (`sysctl`), no clock setting, no network administration. No signatures yet (packages come later).
+actions (`sysctl`), no clock setting, no network administration. Signed programs come as packages: `desopkg`.
 
 To run a stress test without a keyboard: `DESO_AUTOSTRESS=60 ./make-usb.sh /media/$USER/<LABEL>`
 (see [Stress test on real hardware](#stress-test-on-real-hardware)). A plain `./make-usb.sh`

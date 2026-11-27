@@ -2152,7 +2152,7 @@ In short:
 
 Not checked: revocation (CRL, OCSP) and Certificate Transparency. Not audited, not for production use.
 
-## Packages – desopkg (`user/bin/desopkg.rs`, v0.82 in progress)
+## Packages – desopkg (`user/bin/desopkg.rs`, v0.82)
 
 Programs from the internet on the writable `/disk`; the system itself (kernel, `/bin`, `/etc`) changes only with
 `make-usb.sh`. Commands, trust and formats: `docs/pkg/README.md`, `docs/pkg/FORMAT.md`.

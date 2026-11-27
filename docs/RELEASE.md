@@ -31,7 +31,7 @@ timings move by ±15% from run to run on the same build).
 - `spawn` instead of `fork`/`exec`; no environment variables or signals (kill = process exit)
 - ABI 1.0 does not define what happens with a `PT_INTERP` header: the loader does not read it and starts the program at
   `e_entry` without an interpreter (`deso-build.sh` refuses such a program; `docs/abi/STARTUP.md`)
-- the SDK builds Rust programs only (`no_std` + `libdeso`); no C headers, no package format yet (v0.82)
+- the SDK builds Rust programs only (`no_std` + `libdeso`); no C headers
 - system actions (`sysctl`) behind a single `SYSCTL` handle – no split into reboot / sync / stress / `desofs` (`desofs info` / `check` also need it); raw disk writes only from the kernel's emergency shell
 - `desofs check` runs inside one syscall: no progress until it ends and no Ctrl+C (64 MiB – a fraction of a second; a large disk will need progress and cancelling)
 - snapshots: no automatic ones, no snapshot of a single directory (one live file system per volume in format 1), no creation time (the format stores only the generation); `snapshot delete` / `restore` and `snapshot list` walk the volume (like a mount; one walk per snapshot for the list); a snapshot whose name came from another tool and breaks the stricter rules can be listed but not mounted or deleted through the shell
@@ -41,13 +41,29 @@ timings move by ±15% from run to run on the same build).
 - directory handles hold a path, not the directory: a directory removed and created again under the same name is
   reached through the old handle; the shell's `cd` and unsandboxed programs still use global paths
 - IPC: no futex and no ring buffers in the library
-- programs from the disk (`/disk/bin`, v0.80): no signatures, versions or installer yet (PKG, v0.82) – a program
-  copied there is as trusted as a command typed by hand: it gets what a `/bin` program gets (stdio and the program
+- programs from the disk (`/disk/bin`, v0.80): a program copied there by hand is not signed (signed programs come as
+  packages – desopkg) and is as trusted as a command typed by hand: it gets what a `/bin` program gets (stdio and the program
   channel), never SYSCTL, SETTIME or the network administration channel, and never runs instead of a system name
 - ELF: only static ET_EXEC, envp and auxv empty
 - programs from `/bin` built into the kernel image (initrd); the asm test programs too (only from the kernel's emergency shell: `run <name>`)
 - limits are global, not per user: 1024 processes, kernel memory reserve, 16 MiB of IPC buffers, 24 MiB ramfs; kernel heap 64 MiB
 - `read(0)` reads a whole line; background processes compete with the shell for the keyboard (`readkey`/`read` – first come, first served)
+
+**Packages (desopkg)**
+- one repository and one key (`decodesoft-2026-01`): no second key for a key change yet, no revocation – a lost or
+  leaked private key means a new image with a new key
+- the index is valid for at most 30 days: the repository must be signed and uploaded again before then
+  (`tools/deso-repo.sh build`), otherwise every system refuses it
+- desopkg needs the time from the time service (NTS) before it sends anything: no installs without the network or
+  before the first time round
+- no `rollback` command: an older version is installed on request (`desopkg install name=version`, a warning and
+  y/N); the previous generation is kept only as a spare after a crash
+- every install builds a new version directory (an unchanged package is not reused); one package in memory at a time
+  (up to 32 MiB)
+- `/disk/pkg` is protected by rules, not by the kernel: a local program with access to `/disk` can change or put back
+  older files there (`verify` finds changed files; `docs/pkg/FORMAT.md` §8)
+- the power-loss tests kill QEMU (the machine stops at a chosen point – everything already written reaches the image);
+  lost disk-cache writes are tested inside DeSoFS (DESOFS TEST 15–18); a real power cut on hardware has not been tested
 
 **Scheduler and concurrency**
 - TLB shootdown only for the upper half (kernel); process address spaces rely on processes being single-threaded (threads – later)
@@ -234,6 +250,81 @@ timings move by ±15% from run to run on the same build).
 - soak leak checks compare kernel counters and handle counts at checkpoints (with tolerances: free frames 1 MiB,
   kernel heap 512 KiB, the console scrollback counted apart) – no per-allocation tracking like kmemleak; a slow leak
   below the tolerance shows only as the "three checkpoints in a row" trend, so only in runs of 2 hours or more
+
+---
+
+## v0.82.0 — 2026-11-27
+
+**Status: stable on QEMU (TCG and KVM) and on the Legion; programs from the internet – `desopkg` installs, updates,
+downgrades on request, removes and verifies signed packages from `https://decodesoft.pl/deso/` onto `/disk`, and the
+shell runs them by name; tested against crashes at every step, power losses and six mutants. ABI 1.0 unchanged
+(desopkg needed no new system call); 45 suites, 353 tests.**
+
+### What is new (details: `CHANGELOG.md`, `docs/pkg/`)
+
+- **Stage A – formats**: the package, the signed index (ECDSA P-256, low-S, strict DER, a domain line), the generation
+  file, the keys and repository files (`docs/pkg/FORMAT.md`); `user/lib/pkgfmt.rs` and `tools/desopkg.py` implement
+  them independently and must agree on 3294 vectors (PKG HOST TEST) and in user space (PKG FORMAT TEST, 695 vectors).
+- **Stage B1 – desopkg and the shell**: every command; generations (the highest valid one is current, like the DeSoFS
+  superblock), packages downloaded into memory (exactly their size), `gc`; HTTPS through `user/lib/fetch.rs` (the
+  client `netget` uses); the shell runs package programs after built-ins, `/bin` and `/disk/bin` with their full path
+  as `argv[0]` and looks again when a program disappeared.
+- **Stage B2 – failures**: crash points K1–K10, four power losses, the lock, the shell against `gc`, damaged files,
+  six mutants (`tests/pkg-test.sh`).
+- **Stage C – the real repository**: DecodeSoft's public key in the image, `tools/deso-repo.sh`, the first packages on
+  decodesoft.pl.
+
+### Tests
+
+| Run | Configuration | Result | Time |
+|---|---|---|---|
+| TCG | QEMU q35, 4 CPUs, 512 MiB, `-accel tcg,thread=multi -cpu max` | 45/45 + ABI host 5/5 + pkg host 6/6 + restart + USB restart + one stick 2/2 + short soak, 353 tests PASS (`ver=0.82.0`) | 483 s (restart 23 s, USB restart 6 s, one stick 9 s, soak 131 s) |
+| KVM | QEMU q35, 4 CPUs, 512 MiB, `-accel kvm -cpu host` | the same, 353 tests PASS (second run – see Known problems) | 402 s (restart 12 s, USB restart 5 s, one stick 8 s, soak 126 s) |
+| SDK | `tests/sdk-test.sh` (TCG, KVM) | 13 checks PASS; `compat10` of the frozen SDK of ABI 1.0: 34 checks OK | – |
+| PKG TEST | `tests/pkg-test.sh` (TCG, KVM), 7 starts of QEMU on one volume | part 1: 196 checks; part 2: 279 checks (K1–K10, the lock – 3 rounds of two at once, the shell paused while `gc` removed its program: 2 tries, a bad ELF: 1 try, damaged index and generations); 4 power losses (K2h, K6, K7h, K9), each followed by a start that checks the disk and the shell; the normal image holds nothing of the self-test image | part 1: 52 s TCG / 36 s KVM; part 2: 34 s / 32 s |
+| Mutants | `tests/pkg-test.sh --mutants` (TCG) | without a mutant 36 checks PASS; sig, serial, expires, paths, order, hash – each caught by its own check | – |
+
+`test.sh` with the release number (`ver=0.82.0`); SDK, PKG TEST and the mutants on the same code a few hours earlier,
+before only the version number and the documents changed.
+
+### Real hardware (Legion laptop, the release image from `make-usb.sh`, 2026-11-27)
+
+The stick "Wilk" (`make-usb.sh --with-disk`, `/disk` = its DeSoFS partition), the normal image with DecodeSoft's key;
+time from 3 NTS operators after DHCP (15.7 s).
+
+| Step | Result |
+|---|---|
+| `desopkg refresh` | `index serial 202611272157 accepted (2 packages, valid until 2026-12-27)` – HTTPS to decodesoft.pl, the signature of `decodesoft-2026-01` |
+| `install witaj=1.0.0` with an old hand copy in `/disk/bin/witaj` | refused: "its program witaj is already in /disk/bin (copied by hand) - remove that copy first"; after `rm` – generation 1 |
+| `witaj` | `witaj 1.0.0 argv0=/disk/pkg/witaj/1.0.0-…/bin/witaj`, the data line from `../share` |
+| `list` / `update` | `1.0.0 -> 1.0.1`; generation 2, `witaj 1.0.1` |
+| `install witaj=1.0.0` | the downgrade warning, `y`: generation 3, `witaj 1.0.0` (a new directory) |
+| `update` / `verify` | generation 4, `witaj 1.0.1`; `OK - 2 files of 1 packages, generation 4` |
+| restart, `witaj` | `witaj 1.0.1` – typed before DHCP: the generation is read from the disk |
+| `remove witaj`, `witaj` | generation 5; "command not found - did you mean 'witaj2'?" |
+
+### Performance against the previous release (v0.81.1 → v0.82.0, same machine)
+
+| | TCG v0.81.1 | TCG v0.82.0 | KVM v0.81.1 | KVM v0.82.0 |
+|---|---|---|---|---|
+| TLS `/hello` (ms) / 1 MiB (KiB/s) | 113 / 4 196 | 97 / 4 697 | 49 / 5 657 | 54 / 6 059 |
+| DeSoFS 8 MiB write / read (KiB/s) | 7 074 / 11 753 | 7 627 / 12 720 | 18 123 / 54 251 | 17 770 / 53 542 |
+| DeSoFS 1000 small files create / read (ms) | 13 792 / 3 799 | 12 297 / 3 471 | 6 453 / 813 | 7 937 / 833 |
+| short soak: file operations in 2 min | 6 302 | 6 002 | 27 972 | 27 512 |
+| short soak: network MiB | 813 | 777 | 917 | 925 |
+| short soak: processes | 18 154 | 17 603 | 45 652 | 46 099 |
+
+Verdict: no regression beyond the usual spread (KVM small-file creation 7 937 ms is within the range seen before –
+6 453…8 295 ms). Soak: leaks 0, errors 0, 6 / 8 kills of services, longest recovery 950 ms (TCG) / 863 ms (KVM).
+
+### Known problems
+
+- None in desopkg. The first KVM run of the release build failed USB TEST check 23 ("HID reports via interrupt
+  endpoints: 6 in 400 ms") while the whole run was 20–50 times slower than usual (`fact_kernel_ns` 3 030 303 instead
+  of ~55 000, the xHCI No-Op 1 020 µs instead of ~90 µs) – the host was busy; the second run, unchanged, passed.
+  Nothing in USB changed in this release. Watched.
+- Seen once in a mutant run (TCG): the kernel measured the TSC as ~334 810 MHz instead of ~2 890 MHz
+  at start – a disturbed calibration under host load; the run itself passed. Watched.
 
 ---
 
