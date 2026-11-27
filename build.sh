@@ -149,6 +149,8 @@ for src in user/bin/*.rs; do
   # netd's test hook (`testport N` – the local port of the next TCP connection) – only in
   # the self-test image.
   [ "$name" = netd ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
+  # desopkg (V082-B): the test CA, the self-test time, crash points – only in the self-test image.
+  [ "$name" = desopkg ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \
@@ -191,14 +193,22 @@ echo "pub static ETC_CERTS_ROOTS: &[u8] = include_bytes!(\"$ROOT/user/etc/certs/
 # image trusts only the test key (tests/pkg/test-key.pem – a test key, never for real packages);
 # a normal image the keys in user/etc/desopkg/keys (DecodeSoft's public key – V082 stage C; until
 # then empty, and desopkg refuses every index).
+# The self-test image also gets the test repository (tests/repo-stub.py at tls.deso:58480,
+# user/etc/desopkg/repo.test) and its CA as /etc/desopkg/ca (tests/tls/ca.pem) – desopkg built
+# with --cfg selftest reads that instead of /etc/certs/roots; a normal image has neither.
 DESOPKG_KEYS=user/etc/desopkg/keys
-[ "$MODE" = "selftest" ] && DESOPKG_KEYS=user/etc/desopkg/keys.test
-for f in "$DESOPKG_KEYS" user/etc/desopkg/repo; do
+DESOPKG_REPO=user/etc/desopkg/repo
+if [ "$MODE" = "selftest" ]; then
+  DESOPKG_KEYS=user/etc/desopkg/keys.test
+  DESOPKG_REPO=user/etc/desopkg/repo.test
+fi
+for f in "$DESOPKG_KEYS" "$DESOPKG_REPO"; do
   [ -f "$f" ] || { echo "$f missing (docs/pkg/FORMAT.md)."; exit 1; }
 done
 echo "pub static ETC_DESOPKG: &[(&str, &[u8])] = &[" >> "$INITRD"
 echo "    (\"keys\", include_bytes!(\"$ROOT/$DESOPKG_KEYS\"))," >> "$INITRD"
-echo "    (\"repo\", include_bytes!(\"$ROOT/user/etc/desopkg/repo\"))," >> "$INITRD"
+echo "    (\"repo\", include_bytes!(\"$ROOT/$DESOPKG_REPO\"))," >> "$INITRD"
+[ "$MODE" = "selftest" ] && echo "    (\"ca\", include_bytes!(\"$ROOT/tests/tls/ca.pem\"))," >> "$INITRD"
 echo "];" >> "$INITRD"
 # DeSoFS reference image (tests/mkdesofs.py – an independent implementation of the
 # format) for DESOFS TEST; only in the self-test build.

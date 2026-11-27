@@ -254,6 +254,13 @@ pub extern "sysv64" fn kernel_main(
         selftest::exit_if_autotest(ok);
     }
     arch::x86_64::smp::init();
+    // tests/pkg-test.sh: desopkg against the test repository (every core: TLS and SHA-256).
+    #[cfg(selftest)]
+    if let Some(part) = selftest::pkg() {
+        user::pkg_b_test(part);
+        let ok = selftest::finish();
+        selftest::exit_if_autotest(ok);
+    }
     // tests/soak.sh: the long test instead of the self-tests (it needs every core, the
     // keyboard repeat task and the usb-disks task like a normal start).
     // tests/test.sh, third start (no virtio / NVMe): the writable USB stick as /disk.

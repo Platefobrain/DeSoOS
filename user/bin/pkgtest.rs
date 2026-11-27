@@ -10,6 +10,16 @@
 //   pkgtest elf              every program in /bin accepted by common/elf.rs `check_program` –
 //                            the rules desopkg checks a package's programs with are the kernel's
 //                            own: "pkgtest elf: N programs accepted, ABI 1.0"
+//   pkgtest b1-notime        PKG TEST (tests/pkg-test.sh, V082-B): without the time service's
+//                            time desopkg refuses before connecting (repo-stub saw nothing)
+//   pkgtest b1:s1 … b1:s8    PKG TEST part 1 in 8 segments: desopkg against tests/repo-stub.py
+//                            through the real init – install, list / search / info, update,
+//                            downgrade, dependencies and refusals, remove, verify and reinstall,
+//                            refused indexes and transfers, no memory, a big package:
+//                            "pkgtest b1 sN: K checks OK (…)"  (`init test /bin/pkgtest b1:sN` –
+//                            init passes one argument).  Between segments the kernel runs
+//                            the shell (only the kernel can feed its keyboard input) and checks
+//                            what the installed programs print.
 //
 // A failure prints "pkgtest: FAIL ..." and exits with 1.
 #![no_std]
@@ -195,9 +205,379 @@ fn main(args: deso::Args) -> i32 {
         [_, "vectors", path] => vectors(path),
         [_, "etc"] => etc(),
         [_, "elf"] => elf_all(),
+        [_, "b1-notime"] => b1::notime(),
+        [_, m] if m.starts_with("b1:") => b1::main(&m[3..]),
         _ => {
-            eprintln!("usage: pkgtest vectors <file> | etc | elf");
+            eprintln!("usage: pkgtest vectors <file> | etc | elf | b1-notime | b1:s1 .. b1:s8");
             1
+        }
+    }
+}
+
+/// PKG TEST part 1 (V082-B plan §5, points 1–10 + P2-1, P2-2).
+mod b1 {
+    use super::*;
+    use alloc::string::ToString;
+    use deso::{O_CREATE, O_TRUNC, O_WRITE, SVC, chan_recv, chan_send, sleep_ms, spawn_ex, svc_connect, uptime_ms, wait, write, RecvInfo};
+
+    const IN: &str = "/tmp/pt-in";
+    const OUT: &str = "/tmp/pt-out";
+    static mut CHECKS: u32 = 0;
+
+    macro_rules! check {
+        ($cond:expr, $($msg:tt)*) => {
+            if !$cond {
+                println!("pkgtest: FAIL {}", format!($($msg)*));
+                return Err(());
+            }
+            unsafe { CHECKS += 1 };
+        };
+    }
+
+    fn put(path: &str, data: &[u8]) -> bool {
+        let fd = deso::open(path, O_WRITE | O_CREATE | O_TRUNC);
+        if fd < 0 {
+            return false;
+        }
+        let ok = data.is_empty() || write(fd as u64, data) == data.len() as i64;
+        close(fd as u64);
+        ok
+    }
+
+    /// netd's answer to an administration request (dns, status).
+    fn ask(req: &str) -> String {
+        let Ok(c) = svc_connect("net0") else { return String::new() };
+        let mut buf = vec![0u8; 4096];
+        let mut info = RecvInfo::default();
+        let r = if chan_send(c, req.as_bytes(), 0) == 0 { chan_recv(c, &mut buf, 0, &mut info) } else { -1 };
+        close(c);
+        if r < 0 { String::new() } else { String::from_utf8_lossy(&buf[..r as usize]).into_owned() }
+    }
+
+    /// netd has 8 TCP connections and closing ones wait 2 s: room for a whole command.
+    fn tcp_room() {
+        let t = uptime_ms();
+        loop {
+            let st = ask("status");
+            let n: u32 = st.lines().find(|l| l.starts_with("netd-status")).and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix("tcp="))).and_then(|v| v.parse().ok()).unwrap_or(0);
+            if n <= 2 || uptime_ms() - t > 10_000 {
+                return;
+            }
+            sleep_ms(100);
+        }
+    }
+
+    const ERR: &str = "/tmp/pt-err";
+    const TRACE: &str = "/tmp/desopkg-trace";
+
+    /// A program with `input` on stdin, stdout and stderr into separate files: (exit code,
+    /// stdout followed by stderr).
+    fn run(path: &str, args: &[&str], input: &str) -> (u64, String) {
+        if !put(IN, input.as_bytes()) || !put(OUT, b"") || !put(ERR, b"") {
+            return (997, String::from("cannot write /tmp"));
+        }
+        let fin = deso::open(IN, deso::O_READ);
+        let fout = deso::open(OUT, O_WRITE);
+        let ferr = deso::open(ERR, O_WRITE);
+        if fin < 0 || fout < 0 || ferr < 0 {
+            return (996, String::from("cannot open /tmp files"));
+        }
+        let pid = spawn_ex(path, args, &[(fin as u64, 0), (fout as u64, 1), (ferr as u64, 2), (SVC, SVC)], 0);
+        close(fin as u64);
+        close(fout as u64);
+        close(ferr as u64);
+        if pid <= 0 {
+            return (999, format!("spawn {}: {}", path, deso::strerror(pid)));
+        }
+        let code = wait(pid as u64, 0).map(|(_, c)| c).unwrap_or(998);
+        let out = read_file(OUT).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let err = read_file(ERR).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        (code, format!("{}{}", out, err))
+    }
+
+    /// desopkg; a non-zero exit adds the self-test build's step trace (/tmp/desopkg-trace).
+    fn desopkg(args: &[&str], input: &str) -> (u64, String) {
+        tcp_room();
+        let mut a = vec!["desopkg"];
+        a.extend_from_slice(args);
+        let _ = deso::unlink(TRACE);
+        let (code, mut out) = run("/bin/desopkg", &a, input);
+        if code != 0 {
+            let t = read_file(TRACE).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            out.push_str(&format!("\n[out {} B, trace: {}]", out.len(), t.trim().replace('\n', " > ")));
+        }
+        (code, out)
+    }
+
+    /// The output on one line (the kernel's test collects whole FAIL lines), the end kept – where
+    /// the error message is.
+    fn short(s: &str) -> String {
+        let t: String = s.trim().replace('\n', " | ");
+        if t.len() <= 900 {
+            return t;
+        }
+        let mut start = t.len() - 900;
+        while !t.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &t[start..])
+    }
+
+    fn control(path: &str) -> String {
+        tcp_room();
+        let url = format!("http://tls.deso:58481{}", path);
+        let (code, _) = run("/bin/netget", &["netget", "-o", "/tmp/pt-ctl", &url], "");
+        if code != 0 {
+            return String::new();
+        }
+        read_file("/tmp/pt-ctl").map(|b| String::from_utf8_lossy(&b).trim().to_string()).unwrap_or_default()
+    }
+
+    fn scenario(name: &str) -> Result<(), ()> {
+        let r = control(&format!("/scenario?name={}", name));
+        check!(r == format!("ok {}", name), "repo-stub scenario {}: {:?}", name, r);
+        Ok(())
+    }
+
+    /// The current generation's number from `desopkg list` (0 – none).
+    fn generation() -> u64 {
+        let (_, out) = desopkg(&["list"], "");
+        out.lines().find_map(|l| l.strip_prefix("generation ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+    }
+
+    /// The one version directory of `pkg` currently in use (from `desopkg info`).
+    fn vdir(pkg: &str) -> String {
+        let (_, out) = desopkg(&["info", pkg], "");
+        out.lines().find_map(|l| l.strip_prefix("installed  ")).and_then(|l| l.split_once(", ").map(|(_, r)| r.trim_end_matches(')').to_string())).unwrap_or_default()
+    }
+
+    /// Entries of a directory (files and directories).
+    fn files_in(dir: &str) -> usize {
+        entries(dir).len()
+    }
+
+    fn entries(dir: &str) -> Vec<String> {
+        let mut buf = vec![0u8; 8192];
+        let n = deso::readdir(dir, &mut buf);
+        if n < 0 {
+            return Vec::new();
+        }
+        core::str::from_utf8(&buf[..n as usize]).unwrap_or("").lines().filter_map(|l| l.splitn(3, '\t').nth(2).map(String::from)).collect()
+    }
+
+    fn net_ready() -> Result<(), ()> {
+        let t = uptime_ms();
+        while !ask("status").lines().any(|l| l.starts_with("netd-status") && l.split_whitespace().any(|w| w == "dhcp=bound")) {
+            check!(uptime_ms() - t < 15_000, "net0 has no DHCP address after 15 s");
+            sleep_ms(50);
+        }
+        let r = ask("dns 10.0.2.2:53530");
+        check!(r.starts_with("DNS server 10.0.2.2:53530"), "dns set: {:?}", r.trim());
+        Ok(())
+    }
+
+    pub fn notime() -> i32 {
+        let r = (|| -> Result<(), ()> {
+            net_ready()?;
+            scenario("v100")?;
+            check!(control("/reset") == "ok reset", "repo-stub reset");
+            let (code, out) = desopkg(&["refresh"], "");
+            check!(code == 3 && out.contains("not set by the time service"), "refresh without the time service's time: {} {}", code, short(&out));
+            let h = control("/hits");
+            check!(h == "index=0 sig=0 pkg=0", "repo-stub was contacted: {}", h);
+            Ok(())
+        })();
+        match r {
+            Ok(()) => {
+                println!("pkgtest b1-notime: refused before connecting (exit 3, repo-stub saw nothing) OK");
+                0
+            }
+            Err(()) => 1,
+        }
+    }
+
+    /// The highest generation file number (valid or not).
+    fn top_generation() -> u64 {
+        entries("/disk/pkg/gen").iter().filter_map(|n| n.parse::<u64>().ok()).max().unwrap_or(0)
+    }
+
+    /// The shell checks between segments are the kernel's (kernel/user/test_pkgb.rs): only a
+    /// process the kernel starts can feed the shell's keyboard input.
+    fn segment(seg: &str) -> Result<String, ()> {
+        net_ready()?;
+        match seg {
+            // 1. An empty system, the first index, install with a dependency.
+            "s1" => {
+                scenario("v100")?;
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 0 && out.contains("no packages installed"), "list on an empty system: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 10 accepted"), "refresh v100: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 10 is up to date"), "refresh again: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "witaj"], "");
+                check!(code == 0 && out.contains("install    witaj 1.0.0") && out.contains("install    fonts 1.0.0 (dependency)") && out.contains("generation 1 is now current"), "install witaj: {} {}", code, short(&out));
+            }
+            // 2. list, search, info; a newer index; update everything in one generation.
+            "s2" => {
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 0 && out.lines().any(|l| l.starts_with("witaj") && l.contains("1.0.0") && l.contains("explicit")) && out.lines().any(|l| l.starts_with("fonts") && l.contains("dependency")) && out.contains("generation 1"), "list: {}", short(&out));
+                let (code, out) = desopkg(&["search", "greet"], "");
+                check!(code == 0 && out.contains("witaj") && !out.contains("fonts"), "search: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["info", "witaj"], "");
+                check!(code == 0 && out.contains("installed  1.0.0 (explicit, /disk/pkg/witaj/1.0.0-") && out.contains("depends    fonts>=1.0.0"), "info: {} {}", code, short(&out));
+                scenario("v101")?;
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 11 accepted"), "refresh v101: {} {}", code, short(&out));
+                let (_, out) = desopkg(&["list"], "");
+                check!(out.lines().any(|l| l.starts_with("witaj") && l.contains("1.0.0 -> 1.1.0")) && out.lines().any(|l| l.starts_with("fonts") && l.contains("1.0.0 -> 1.1.0")), "list with newer versions: {}", short(&out));
+                let (code, out) = desopkg(&["update"], "n\n");
+                check!(code == 5 && out.contains("aborted") && generation() == 1, "update answered n: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "update"], "");
+                check!(code == 0 && out.contains("upgrade    witaj 1.0.0 -> 1.1.0") && out.contains("upgrade    fonts 1.0.0 -> 1.1.0") && out.contains("generation 2 is now current"), "update: {} {}", code, short(&out));
+            }
+            // 3. Nothing newer; a downgrade on request (a warning and y/N).
+            "s3" => {
+                let (code, out) = desopkg(&["-y", "update"], "");
+                check!(code == 0 && out.contains("nothing to update") && generation() == 2, "update with nothing newer: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["install", "witaj=1.0.1"], "\n");
+                check!(code == 5 && out.contains("downgrade  witaj 1.1.0 -> 1.0.1") && out.contains("warning: downgrade") && generation() == 2, "downgrade without y: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "witaj=1.0.1"], "");
+                check!(code == 0 && out.contains("generation 3 is now current"), "downgrade: {} {}", code, short(&out));
+            }
+            // 4. Dependencies never lowered; refusals; remove.
+            "s4" => {
+                let (_, out) = desopkg(&["list"], "");
+                check!(out.lines().any(|l| l.starts_with("fonts") && l.contains("1.1.0")), "fonts kept at 1.1.0: {}", short(&out));
+                let (code, out) = desopkg(&["-y", "update", "witaj"], "");
+                check!(code == 0 && out.contains("upgrade    witaj 1.0.1 -> 1.1.0") && !out.contains("fonts") && out.contains("generation 4 is now current"), "update witaj: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "edytor"], "");
+                check!(code == 0 && out.contains("generation 5 is now current"), "install edytor: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "witaj=1.0.1"], "");
+                check!(code == 2 && out.contains("would break edytor") && generation() == 5, "downgrade breaking edytor: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "witaj=9.9.9"], "");
+                check!(code == 2 && out.contains("not in the repository"), "install witaj=9.9.9: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "remove", "fonts"], "");
+                check!(code == 2 && out.contains("needed by"), "remove fonts: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "oldwitaj"], "");
+                check!(code == 2 && out.contains("conflicts with"), "install oldwitaj: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "install", "ls"], "");
+                check!(code == 2 && out.contains("reserved_name") && deso::stat("/disk/pkg/ls").is_err() && generation() == 5, "install ls: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["install"], "");
+                check!(code == 1 && out.contains("usage"), "install without a name: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "remove", "edytor"], "");
+                check!(code == 0 && out.contains("generation 6 is now current"), "remove edytor: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "remove", "witaj"], "");
+                check!(code == 0 && out.contains("no longer needed: fonts") && out.contains("generation 7 is now current"), "remove witaj: {} {}", code, short(&out));
+            }
+            // 5. verify: MODIFIED, MISSING, UNEXPECTED, SHADOWED (a copy in /disk/bin).
+            "s5" => {
+                let (code, out) = desopkg(&["-y", "install", "witaj"], "");
+                check!(code == 0 && out.contains("generation 8 is now current"), "install witaj again: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 0 && out.contains("OK - "), "verify: {} {}", code, short(&out));
+                let w = vdir("witaj");
+                check!(w.starts_with("/disk/pkg/witaj/1.1.0-"), "witaj's directory: {:?}", w);
+                let hello = format!("{}/share/witaj/hello.txt", w);
+                check!(put(&hello, b"changed\n"), "change {}", hello);
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 2 && out.contains("MODIFIED") && out.contains("hello.txt"), "verify a changed file: {} {}", code, short(&out));
+                check!(deso::unlink(&hello) >= 0, "remove {}", hello);
+                let (code, out) = desopkg(&["verify", "witaj"], "");
+                check!(code == 2 && out.contains("MISSING"), "verify a missing file: {} {}", code, short(&out));
+                check!(put(&format!("{}/share/witaj/extra.txt", w), b"x\n"), "extra file");
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 2 && out.contains("UNEXPECTED") && out.contains("extra.txt"), "verify an extra file: {} {}", code, short(&out));
+                let _ = deso::mkdir("/disk/bin");
+                let hello_bin = read_file("/bin/hello").unwrap_or_default();
+                check!(put("/disk/bin/witaj", &hello_bin), "copy to /disk/bin/witaj");
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 2 && out.contains("SHADOWED"), "verify a shadowed program: {} {}", code, short(&out));
+            }
+            // 6. reinstall repairs; a damaged package file: the previous generation is in force.
+            "s6" => {
+                check!(deso::unlink("/disk/bin/witaj") >= 0, "remove /disk/bin/witaj");
+                let g = generation();
+                let (code, out) = desopkg(&["-y", "reinstall", "witaj"], "");
+                check!(code == 0 && out.contains("reinstall  witaj 1.1.0") && generation() == g + 1, "reinstall: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 0 && out.contains("OK - "), "verify after reinstall: {} {}", code, short(&out));
+                let g = generation();
+                let w = vdir("witaj");
+                let mut m = read_file(&format!("{}/package", w)).unwrap_or_default();
+                m.push(b'\n');
+                check!(put(&format!("{}/package", w), &m), "damage the package file");
+                let (code, out) = desopkg(&["verify"], "");
+                check!(code == 2 && out.contains("DAMAGED") && generation() == g - 1, "verify a damaged package file: {} {} (generation {})", code, short(&out), generation());
+            }
+            // 7. Repaired; refused indexes and transfers (P2-2) change nothing; a good transfer.
+            "s7" => {
+                let top = top_generation();
+                let (code, out) = desopkg(&["-y", "reinstall", "witaj"], "");
+                let (code2, out2) = desopkg(&["verify"], "");
+                check!(code == 0 && code2 == 0 && generation() == top + 1, "repaired by reinstall: {} {} {} {}", code, code2, short(&out), short(&out2));
+                let before = files_in("/disk/pkg/index");
+                for (sc, why) in [("old", "older than the accepted"), ("expired", "expired"), ("future", "in the future"), ("badsig", "signature"), ("otherkey", "signature"), ("testing", "this system uses")] {
+                    scenario(sc)?;
+                    let (code, out) = desopkg(&["refresh"], "");
+                    check!(code == 2 && out.contains(why), "refresh {}: {} {}", sc, code, short(&out));
+                    check!(files_in("/disk/pkg/index") == before, "{}: index files changed", sc);
+                }
+                scenario("tx")?;
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 20 accepted"), "refresh tx: {} {}", code, short(&out));
+                let g = generation();
+                let dirs = files_in("/disk/pkg/witaj");
+                for (ver, want, why) in [("1.1.2", 2, "pkg_sha_mismatch"), ("1.1.3", 3, "Content-Length"), ("1.1.4", 3, "Content-Length")] {
+                    let (code, out) = desopkg(&["-y", "install", &format!("witaj={}", ver)], "");
+                    check!(code == want && out.contains(why), "install witaj={}: {} {}", ver, code, short(&out));
+                }
+                for (sc, why) in [("long", "malformed"), ("short", "incomplete"), ("badlen", "Content-Length"), ("redirect", "HTTP 302")] {
+                    scenario(sc)?;
+                    let (code, out) = desopkg(&["-y", "install", "witaj=1.1.1"], "");
+                    check!(code == 3 && out.contains(why), "transfer {}: {} {}", sc, code, short(&out));
+                }
+                check!(generation() == g && files_in("/disk/pkg/witaj") == dirs, "refused transfers changed the disk");
+                scenario("tx")?;
+                let (code, out) = desopkg(&["-y", "install", "witaj=1.1.1"], "");
+                check!(code == 0 && out.contains("upgrade    witaj 1.1.0 -> 1.1.1"), "install witaj=1.1.1: {} {}", code, short(&out));
+            }
+            // 8. No memory for a package (P2-1); a big package.
+            "s8" => {
+                check!(put("/tmp/desopkg-nomem", b""), "nomem switch");
+                let g = generation();
+                let (code, out) = desopkg(&["-y", "install", "edytor"], "");
+                let _ = deso::unlink("/tmp/desopkg-nomem");
+                check!(code == 4 && out.contains("not enough memory") && generation() == g && deso::stat("/tmp/desopkg.lock").is_err(), "no memory: {} {}", code, short(&out));
+                scenario("big")?;
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 40 accepted"), "refresh big: {} {}", code, short(&out));
+                let tb = uptime_ms();
+                let (code, out) = desopkg(&["-y", "install", "big"], "");
+                let big_ms = uptime_ms() - tb;
+                check!(code == 0 && out.contains("is now current"), "install big: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["verify", "big"], "");
+                check!(code == 0 && out.contains("OK - 1 files"), "verify big: {} {}", code, short(&out));
+                let (code, out) = desopkg(&["-y", "remove", "big"], "");
+                check!(code == 0, "remove big: {} {}", code, short(&out));
+                return Ok(format!("generation {}, a 30 MiB package installed in {} ms", generation(), big_ms));
+            }
+            _ => {
+                println!("pkgtest: FAIL unknown segment {}", seg);
+                return Err(());
+            }
+        }
+        Ok(format!("generation {}", generation()))
+    }
+
+    pub fn main(seg: &str) -> i32 {
+        let t0 = uptime_ms();
+        match segment(seg) {
+            Ok(summary) => {
+                println!("pkgtest b1 {}: {} checks OK ({}, {} ms)", seg, unsafe { CHECKS }, summary, uptime_ms() - t0);
+                0
+            }
+            Err(()) => 1,
         }
     }
 }

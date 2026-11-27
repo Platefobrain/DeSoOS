@@ -46,7 +46,7 @@ fn main() {
     names.dedup();
     match pkgvec::run(&data, &system_name, &names) {
         Ok((n, fails)) if fails.is_empty() => println!(
-            "[PKG HOST TEST] 5/5 Rust (user/lib/pkgfmt.rs on the host): {} vectors, the same verdict and reason as tools/desopkg.py ({} system names) PASS",
+            "[PKG HOST TEST] 5/6 Rust (user/lib/pkgfmt.rs on the host): {} vectors, the same verdict and reason as tools/desopkg.py ({} system names) PASS",
             n,
             names.len()
         ),

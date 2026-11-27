@@ -854,10 +854,20 @@ pub struct RepoConfig {
     pub arch: String,
 }
 
-/// `https://<host>/<path>/`: host `[a-z0-9.-]+`, path of `[a-z0-9._/-]`, ending with `/`.
+/// `https://<host>[:<port>]/<path>/`: host `[a-z0-9.-]+`, port a decimal 1–65535 (V082-B),
+/// path of `[a-z0-9._/-]`, ending with `/`.
 fn url_ok(u: &str) -> bool {
     let Some(rest) = u.strip_prefix("https://") else { return false };
-    let Some((host, path)) = rest.split_once('/') else { return false };
+    let Some((hostport, path)) = rest.split_once('/') else { return false };
+    let host = match hostport.split_once(':') {
+        Some((h, p)) => {
+            if !decimal(p, 65535).is_some_and(|p| p > 0) {
+                return false;
+            }
+            h
+        }
+        None => hostport,
+    };
     !host.is_empty()
         && host.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'.' || c == b'-')
         && (path.is_empty() || path.ends_with('/'))

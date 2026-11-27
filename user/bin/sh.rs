@@ -21,6 +21,13 @@
 //   name of the system: a built-in, a /bin program, an information command or a kernel-only
 //   command always wins.  It gets what a /bin program typed by hand gets (stdio and the
 //   program channel) – no SYSCTL, no SETTIME, no administration channel (only /bin/netconfig).
+// * Programs from packages (v0.82, desopkg): a name found nowhere above – not even in /disk/bin –
+//   is a program of the current package generation (/disk/pkg/gen/<n>, the highest valid one –
+//   user/lib/pkgstate.rs, the same rule as desopkg).  It never hides a system name or a
+//   /disk/bin program; it gets its full path in argv[0] (its data is in ../share/).  The
+//   generation is read again only when the newest gen/ file changes; a program that disappeared
+//   meanwhile (an update and its clean-up) – ERROR_NOT_FOUND from exec – is looked up again, up
+//   to 3 times; other errors are reported at once.
 // * Ctrl+C while a program runs ends the program (not the shell) – the kernel knows
 //   the foreground process (spawn with SPAWN_FOREGROUND).
 #![no_std]
@@ -58,6 +65,15 @@ const HISTORY_MAX: usize = 32;
 // the kernel-only commands – one list shared with /bin/desopkg (user/lib/cmdnames.rs).
 #[path = "../lib/cmdnames.rs"]
 mod cmdnames;
+// Programs from packages (v0.82): the current generation, read exactly as desopkg reads it.
+#[path = "../../common/desocrypto/mod.rs"]
+mod desocrypto;
+#[path = "../../common/elf.rs"]
+mod elf;
+#[path = "../lib/pkgfmt.rs"]
+mod pkgfmt;
+#[path = "../lib/pkgstate.rs"]
+mod pkgstate;
 use cmdnames::{BUILTINS, INFO_COMMANDS, KERNEL_ONLY, SYSCTL_BUILTINS};
 
 // ------------------------------------------------------------
@@ -497,8 +513,45 @@ fn command_names() -> Vec<String> {
             names.push(n);
         }
     }
+    for n in package_programs() {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
     names
 }
+
+/// The current generation's programs (program, full path) – cached until the newest gen/ file
+/// (its number and size) changes.
+static mut PKG_CACHE: (Option<(u64, u64)>, Vec<(String, String)>) = (None, Vec::new());
+
+fn pkg_map() -> Vec<(String, String)> {
+    let stamp = pkgstate::newest_generation_stamp();
+    let cache = unsafe { &mut *core::ptr::addr_of_mut!(PKG_CACHE) };
+    if stamp.is_none() {
+        cache.0 = None;
+        cache.1.clear();
+        return Vec::new();
+    }
+    if cache.0 != stamp {
+        let map = pkgstate::generations(&system_name).current.map(|c| c.programs()).unwrap_or_default();
+        *cache = (stamp, map);
+    }
+    cache.1.clone()
+}
+
+/// Forgets the cached generation (a program of it was not found).
+fn pkg_forget() {
+    unsafe { (*core::ptr::addr_of_mut!(PKG_CACHE)).0 = None };
+}
+
+/// Package programs that hide nothing: not a system name, not in /disk/bin.
+fn package_programs() -> Vec<String> {
+    pkg_map().into_iter().map(|(n, _)| n).filter(|n| !system_name(n) && deso::stat(&format!("{}/{}", DISK_BIN, n)).is_err()).collect()
+}
+
+/// Where package programs live: such a path gets itself as argv[0].
+const PKG_ROOT: &str = "/disk/pkg/";
 
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
@@ -556,7 +609,8 @@ fn find_program(name: &str) -> Option<String> {
     let path = format!("{}/{}", DISK_BIN, name);
     match deso::stat(&path) {
         Ok(s) if !s.is_dir => Some(path),
-        _ => None,
+        Ok(_) => None,
+        Err(_) => pkg_map().into_iter().find(|(n, _)| n == name).map(|(_, p)| p),
     }
 }
 
@@ -829,19 +883,41 @@ impl Shell {
                 return;
             }
         };
-        let args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
         let flags = if cmd.background { 0 } else { SPAWN_FOREGROUND } | if nofiles { deso::SPAWN_NO_FILES } else { 0 };
-        let pid = if svc.is_some() || dir.is_some() {
-            let mut map: Vec<(u64, u64)> = alloc::vec![(fin, 0), (fout, 1), (2, 2)];
-            if let Some(h) = svc {
-                map.push((h, deso::SVC));
+        let mut path = String::from(path);
+        let mut tries = 0;
+        let pid = loop {
+            let mut args: Vec<&str> = cmd.args.iter().map(|s| s.as_str()).collect();
+            // A package program gets its full path (its data is in ../share/).
+            if path.starts_with(PKG_ROOT) {
+                args[0] = path.as_str();
             }
-            if let Some(h) = dir {
-                map.push((h, 4));
+            let pid = if svc.is_some() || dir.is_some() {
+                let mut map: Vec<(u64, u64)> = alloc::vec![(fin, 0), (fout, 1), (2, 2)];
+                if let Some(h) = svc {
+                    map.push((h, deso::SVC));
+                }
+                if let Some(h) = dir {
+                    map.push((h, 4));
+                }
+                deso::spawn_ex(&path, &args, &map, flags)
+            } else {
+                spawn_child(&path, &args, flags, fin, fout)
+            };
+            // An update with its clean-up may have removed the program between the lookup and
+            // exec: the generation is read again, at most 3 tries in all; other errors at once.
+            if pid == ERROR_NOT_FOUND && path.starts_with(PKG_ROOT) && tries < 2 {
+                tries += 1;
+                pkg_forget();
+                match find_program(&cmd.args[0]) {
+                    Some(p) => {
+                        path = p;
+                        continue;
+                    }
+                    None => break pid,
+                }
             }
-            deso::spawn_ex(path, &args, &map, flags)
-        } else {
-            spawn_child(path, &args, flags, fin, fout)
+            break pid;
         };
         close_redirects(fin, fout);
         if pid < 0 {
@@ -929,7 +1005,10 @@ impl Shell {
             match &paths[i] {
                 None => builtins.push((i, fout)),
                 Some(path) => {
-                    let args: Vec<&str> = c.args.iter().map(|s| s.as_str()).collect();
+                    let mut args: Vec<&str> = c.args.iter().map(|s| s.as_str()).collect();
+                    if path.starts_with(PKG_ROOT) {
+                        args[0] = path.as_str();
+                    }
                     let pid = spawn_child(path, &args, flags, fin, fout);
                     if pid < 0 {
                         eprintln!("sh: {}: {}", c.args[0], strerror(pid));
@@ -1002,6 +1081,12 @@ impl Shell {
                     disk.sort();
                     let _ = writeln!(o, "Programs from the disk ({}; never instead of a system name):", DISK_BIN);
                     let _ = writeln!(o, "  {}", disk.join("  "));
+                }
+                let mut pkg = package_programs();
+                if !pkg.is_empty() {
+                    pkg.sort();
+                    let _ = writeln!(o, "Programs from packages (desopkg list; never instead of a system name or /disk/bin):");
+                    let _ = writeln!(o, "  {}", pkg.join("  "));
                 }
                 let _ = writeln!(o, "System information (read-only, from the kernel):");
                 let _ = writeln!(o, "  {}   (lspci -v: details)", INFO_COMMANDS.join("  "));

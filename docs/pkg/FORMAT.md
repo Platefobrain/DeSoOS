@@ -224,8 +224,9 @@ arch=x86_64
 end
 ```
 
-`url`: `https://`, a host of `[a-z0-9.-]`, then a path of `[a-z0-9._/-]` ending with `/` (no
-port, no user, no `//`) – else `bad_url`. Both `/etc/desopkg` files are sealed at boot.
+`url`: `https://`, a host of `[a-z0-9.-]`, an optional `:port` (a decimal 1–65535 without leading
+zeros), then a path of `[a-z0-9._/-]` ending with `/` (no user, no `//`) – else `bad_url`. The
+self-test image's repository is `https://tls.deso:58480/deso/` (`user/etc/desopkg/repo.test`). Both `/etc/desopkg` files are sealed at boot.
 
 ### Accepted index: `/disk/pkg/index/<serial>`
 

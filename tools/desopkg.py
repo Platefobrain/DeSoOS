@@ -808,9 +808,14 @@ def url_ok(u):
     if not u.startswith("https://"):
         return False
     rest = u[8:]
-    host, sep, path = rest.partition("/")
+    hostport, sep, path = rest.partition("/")
     if not sep:
         return False
+    host, colon, port = hostport.partition(":")
+    if colon:
+        p = decimal(port, 65535)
+        if p is None or p == 0:
+            return False
     return (
         len(host) > 0
         and re.fullmatch(r"[a-z0-9.-]+", host) is not None
@@ -1675,7 +1680,15 @@ def build_vectors(bin_dir=None, fuzz=400):
     RC("ok", "good /etc/desopkg/repo", repo)
     RC("bad_url", "http://", repo.replace(b"https://", b"http://"))
     RC("bad_url", "no / at the end", repo.replace(b"/deso/", b"/deso"))
-    RC("bad_url", "a port", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:8443/"))
+    RC("ok", "a port", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:8443/"))
+    RC("ok", "port 65535", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:65535/"))
+    RC("bad_url", "port 0", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:0/"))
+    RC("bad_url", "port 65536", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:65536/"))
+    RC("bad_url", "port with a leading zero", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:08443/"))
+    RC("bad_url", "empty port", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:/"))
+    RC("bad_url", "two ports", repo.replace(b"decodesoft.pl/", b"decodesoft.pl:1:2/"))
+    RC("bad_url", "port without a host", repo.replace(b"decodesoft.pl/", b":8443/"))
+    RC("ok", "the self-test repository", repo.replace(b"https://decodesoft.pl/deso/", b"https://tls.deso:58480/deso/"))
     RC("bad_url", "user info", repo.replace(b"https://", b"https://a@"))
     RC("ok", "host only", repo.replace(b"https://decodesoft.pl/deso/", b"https://decodesoft.pl/"))
     RC("bad_channel", "channel in capitals", repo.replace(b"channel=stable", b"channel=STABLE"))
@@ -1906,14 +1919,14 @@ def cmd_test(args):
     if "mod cmdnames" not in sh_src or re.search(r"^const (BUILTINS|INFO_COMMANDS|KERNEL_ONLY|SYSCTL_BUILTINS)\b", sh_src, re.M):
         print("[PKG HOST TEST] FAIL sh.rs must take its name lists from user/lib/cmdnames.rs")
         sys.exit(1)
-    print("[PKG HOST TEST] 1/5 user/lib/cmdnames.rs: %d names in 4 lists, sh.rs uses them PASS" % n_listed)
+    print("[PKG HOST TEST] 1/6 user/lib/cmdnames.rs: %d names in 4 lists, sh.rs uses them PASS" % n_listed)
     # 2. every rule on its own
     V = build_vectors(bin_dir, fuzz=0)
     kinds = {}
     for r in V.recs:
         kinds[r[0]] = kinds.get(r[0], 0) + 1
     refused = sum(1 for r in V.recs if r[1] not in ("ok", "lt", "eq", "gt"))
-    print("[PKG HOST TEST] 2/5 %d vectors (%s), %d mutations refused with the intended reason PASS" % (len(V.recs), ", ".join("%s %d" % kv for kv in sorted(kinds.items())), refused))
+    print("[PKG HOST TEST] 2/6 %d vectors (%s), %d mutations refused with the intended reason PASS" % (len(V.recs), ", ".join("%s %d" % kv for kv in sorted(kinds.items())), refused))
     # 3. reserved names: every name of the lists and of /bin
     listed, bins = system_names(bin_dir)
     sn = system_name_fn(bin_dir)
@@ -1921,7 +1934,7 @@ def cmd_test(args):
     if r != "ok":
         print("[PKG HOST TEST] FAIL reserved names: %s" % r)
         sys.exit(1)
-    print("[PKG HOST TEST] 3/5 %d system names (%d listed + %d programs of /bin from %s) refused as package and program names PASS" % (len(listed | bins), len(listed), len(bins), where))
+    print("[PKG HOST TEST] 3/6 %d system names (%d listed + %d programs of /bin from %s) refused as package and program names PASS" % (len(listed | bins), len(listed), len(bins), where))
     # 4. the tools end to end: pack, index, check
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "src")
@@ -1946,7 +1959,7 @@ def cmd_test(args):
         parsed = parse_index(idx)
         pkgb = open(os.path.join(repo, "packages", "witaj-1.0.0.pkg"), "rb").read()
         check_pkg_against_index(pkgb, parsed["packages"][0], sn)
-    print("[PKG HOST TEST] 4/5 pack -> index (signed, low-S) -> keys -> check: the package against the signed index PASS")
+    print("[PKG HOST TEST] 4/6 pack -> index (signed, low-S) -> keys -> check: the package against the signed index PASS")
 
 
 def main():

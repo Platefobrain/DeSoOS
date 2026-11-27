@@ -113,6 +113,9 @@ mod test_usbw;
 mod test_usbdisk;
 #[cfg(selftest)]
 mod test_sdk;
+// desopkg against tests/repo-stub.py (tests/pkg-test.sh, V082-B).
+#[cfg(selftest)]
+mod test_pkgb;
 #[cfg(selftest)]
 mod test_net;
 // The long test (tests/soak.sh): init + /bin/soak instead of the self-tests.
@@ -916,6 +919,8 @@ pub use test_usbdisk::usb_restart as usb_restart_test;
 pub use test_usbdisk::one_stick as one_stick_test;
 #[cfg(selftest)]
 pub use test_sdk::sdk as sdk_test;
+#[cfg(selftest)]
+pub use test_pkgb::run as pkg_b_test;
 #[cfg(selftest)]
 pub use test_net::self_test as net_self_test;
 #[cfg(selftest)]

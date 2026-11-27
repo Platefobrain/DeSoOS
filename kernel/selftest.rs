@@ -20,6 +20,8 @@
 // * SDK phase (tests/sdk-test.sh): `opt/deso/phase` = "sdk NAME" and the program itself – built
 //   outside the repository with sdk/deso-build.sh – in the fw_cfg file `opt/deso/sdkprog`; only
 //   SDK TEST runs (the program onto /disk/bin through the shell, then run by name).
+// * PKG phase (tests/pkg-test.sh, V082-B): `opt/deso/phase` = "pkg b1" – only PKG TEST: desopkg
+//   against tests/repo-stub.py on a fresh DeSoFS volume, through init and the shell.
 // * Soak phase (tests/soak.sh): `opt/deso/phase` = "soak <seconds> <seed> [ram]"; the boot
 //   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
@@ -45,6 +47,8 @@ static ONE_STICK: AtomicU32 = AtomicU32::new(0);
 static ONE_STICK_TAG: AtomicU64 = AtomicU64::new(0);
 /// SDK phase: the program's name (len 0 = not an SDK start; u8::MAX = a bad phase).
 static mut SDK_NAME: ([u8; 32], u8) = ([0; 32], 0);
+/// PKG phase (tests/pkg-test.sh, V082-B): 1 = "pkg b1" (0 = not a PKG start, u32::MAX = bad).
+static PKG_PHASE: AtomicU32 = AtomicU32::new(0);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
 static SOAK_SEED: AtomicU64 = AtomicU64::new(0);
@@ -298,6 +302,19 @@ fn detect_phase() {
         serial_println!("[TEST] One-stick phase {}: only ONE STICK TEST (started from a make-usb.sh --with-disk image)", if first == Some("onestick1") { 1 } else { 2 });
         return;
     }
+    if first == Some("pkg") {
+        let part = w.next();
+        let ok = part == Some("b1") && w.next().is_none();
+        if ok {
+            serial_println!("[TEST] PKG phase: only PKG TEST part 1 (desopkg against tests/repo-stub.py)");
+            PKG_PHASE.store(1, Ordering::SeqCst);
+        } else {
+            serial_println!("[TEST] bad PKG phase {:?} - expected \"pkg b1\"", text);
+            PKG_PHASE.store(u32::MAX, Ordering::SeqCst);
+            STARTED.fetch_add(1, Ordering::SeqCst);
+        }
+        return;
+    }
     if first == Some("sdk") {
         let name = w.next().unwrap_or("");
         let ok = !name.is_empty() && name.len() <= 32 && name.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-') && w.next().is_none();
@@ -395,9 +412,18 @@ pub fn fw_cfg_file(name: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
     Some(v)
 }
 
-/// Restart, SDK or soak start: the boot self-tests are skipped.
+/// The PKG start (tests/pkg-test.sh): Some("b1"); Some("") – a bad phase (fails at once).
+pub fn pkg() -> Option<&'static str> {
+    match PKG_PHASE.load(Ordering::SeqCst) {
+        0 => None,
+        1 => Some("b1"),
+        _ => Some(""),
+    }
+}
+
+/// Restart, SDK, PKG or soak start: the boot self-tests are skipped.
 pub fn skip_boot() -> bool {
-    restart() || usb_restart() || one_stick().is_some() || soak().is_some() || sdk().is_some()
+    restart() || usb_restart() || one_stick().is_some() || soak().is_some() || sdk().is_some() || pkg().is_some()
 }
 
 pub fn autotest() -> bool {

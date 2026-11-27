@@ -12,6 +12,7 @@ The documentation of the whole system. Change history is in `../CHANGELOG.md`; e
 | `abi/SERVICES.md` | The service protocols with their own versions: `svc` (init's service manager), `net` (netd), `time` |
 | `abi/SDK.md` | The SDK: a program built outside the repository (`sdk/`, `deso-build.sh`, the template) and put on `/disk/bin` |
 | `abi/SYSCALLS.md` | Every system call and constant of the ABI – generated from `abi/abi.toml` |
+| `pkg/README.md` | desopkg (v0.82): the commands, how a change is made (generations), trust, the code and the tests |
 | `pkg/FORMAT.md` | desopkg's file formats (v0.82): the package and its manifest, the signed index, the key store, the repository configuration, an accepted index, a generation; every refusal with its reason id; the test vectors |
 | `desofs/README.md` | DeSoFS – DeSo OS's own copy-on-write file system: what it does, the `desofs` commands, where the code and the tests are |
 | `desofs/FORMAT.md` | The DeSoFS on-disk format 1, byte by byte (closed specification) |

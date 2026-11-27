@@ -104,7 +104,7 @@ if ! { python3 tools/desopkg.py --test && bash tests/pkg/pkgfmt-host.sh; } > "$L
   echo "FAIL - desopkg format host test (logs/test-pkg.log)"
   exit 1
 fi
-PKG_HOST=$(grep -ac "^\[PKG HOST TEST\] [0-9]/5 .* PASS" "$LOG_PKG" || true)
+PKG_HOST=$(grep -ac "^\[PKG HOST TEST\] [0-9]/6 .* PASS" "$LOG_PKG" || true)
 
 if [ "$BUILD" = 1 ]; then
   ./build.sh --selftest || { echo "ERROR: build failed"; exit 3; }
@@ -474,7 +474,7 @@ fi
 case "$CODE" in
   33)
     if [ -n "$SUMMARY2" ]; then
-      echo "PASS - ${SUMMARY}; ABI host: ${ABI_HOST}/5; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}; one stick: ${ONE_PASS}/2 starts PASSED${SOAK_OK}"
+      echo "PASS - ${SUMMARY}; ABI host: ${ABI_HOST}/5; pkg host: ${PKG_HOST}/6; restart: ${SUMMARY2}; USB restart: ${SUMMARY4}; one stick: ${ONE_PASS}/2 starts PASSED${SOAK_OK}"
     else
       echo "PASS - ${SUMMARY}"
     fi

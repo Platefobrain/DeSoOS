@@ -1,0 +1,6 @@
+format=1
+url=https://tls.deso:58480/deso/
+repo=decodesoft
+channel=stable
+arch=x86_64
+end
