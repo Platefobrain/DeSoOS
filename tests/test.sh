@@ -6,7 +6,7 @@
 #   tests/test.sh --verbose    show the whole log live
 #   LOOP=nobkl:400 tests/test.sh   loop mode: the boot suites once, then only
 #                              the named suite 400 times (stops at the first failure);
-#                              suites: smp lock tlb alloc nobkl files ipc rights abi startup crypto rng certs desofs
+#                              suites: smp lock tlb alloc nobkl files ipc rights abi startup crypto rng certs pkg desofs
 #
 # After a passing run QEMU starts a second time on the same test disk (fw_cfg
 # opt/deso/phase=restart): DeSoFS written by the first start must be mounted at /disk
@@ -95,6 +95,16 @@ if [ -n "$OLD_NAME" ]; then
   exit 1
 fi
 ABI_HOST=$(grep -ac "^\[ABI HOST TEST\] [0-9]/5 .* PASS" "$LOG_ABI" || true)
+# desopkg's formats on the host (V082 stage A): tools/desopkg.py --test (every rule on its own, the
+# reserved names, pack -> index -> check) and user/lib/pkgfmt.rs compiled for the host judging the
+# same vectors (tests/pkg/pkgfmt-host.sh, logs/test-pkg.log).  The QEMU half is PKG FORMAT TEST.
+LOG_PKG="$ROOT/logs/test-pkg.log"
+if ! { python3 tools/desopkg.py --test && bash tests/pkg/pkgfmt-host.sh; } > "$LOG_PKG" 2>&1; then
+  grep -a -E "FAIL|Error|error|intended" "$LOG_PKG" | head -n 30
+  echo "FAIL - desopkg format host test (logs/test-pkg.log)"
+  exit 1
+fi
+PKG_HOST=$(grep -ac "^\[PKG HOST TEST\] [0-9]/5 .* PASS" "$LOG_PKG" || true)
 
 if [ "$BUILD" = 1 ]; then
   ./build.sh --selftest || { echo "ERROR: build failed"; exit 3; }
@@ -371,7 +381,7 @@ if [ "$CODE" = 33 ] && [ "$CODE2" = 33 ] && [ "$CODE4" = 33 ] && [ "$CODE5" = 33
 fi
 TIME=$(( $(date +%s) - START ))
 
-PASSED=$(( ABI_HOST + $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c " PASS" "$LOG5" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
+PASSED=$(( ABI_HOST + PKG_HOST + $(grep -c " PASS" "$LOG" || true) + $(grep -c " PASS" "$LOG2" || true) + $(grep -c " PASS" "$LOG4" || true) + $(grep -c " PASS" "$LOG5" || true) + $(grep -c "^\[SOAK TEST\] .* PASS" "$LOG3" || true) ))
 # The serial log ends lines with CR LF – the CR goes, or text printed after it overwrites the line.
 SUMMARY=$(grep -a "Self-tests:" "$LOG" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
 SUMMARY2=$(grep -a "Self-tests:" "$LOG2" | tail -n1 | tr -d '\r' | sed 's/^.*Self-tests: //')
@@ -388,6 +398,8 @@ grep -a "^\[RESULT-RIGHTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-CRYPTO\]" "$LOG" | tail -n1 || true
 # The random number generator – the [RESULT-RNG] line from RNG TEST.
 grep -a "^\[RESULT-RNG\]" "$LOG" | tail -n1 || true
+# desopkg's formats – the [RESULT-PKG] line from PKG FORMAT TEST.
+grep -a "^\[RESULT-PKG\]" "$LOG" | tail -n1 || true
 # DeSoTLS – the [RESULT-CERTS] line from CERT TEST, [RESULT-TLS] from TLS TEST.
 grep -a "^\[RESULT-CERTS\]" "$LOG" | tail -n1 || true
 grep -a "^\[RESULT-TLS\]" "$LOG" | tail -n1 || true

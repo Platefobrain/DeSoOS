@@ -54,31 +54,11 @@ const MIN_LINE: usize = 24;
 const LINE_MAX: usize = 4096;
 const HISTORY_MAX: usize = 32;
 
-const BUILTINS: &[(&str, &str)] = &[
-    ("cd", "cd [dir]           change directory (no argument: /)"),
-    ("pwd", "pwd                print the current directory"),
-    ("echo", "echo [text...]     print text"),
-    ("exit", "exit [code]        leave the shell (init starts a new one)"),
-    ("help", "help               this list"),
-    ("history", "history            command history"),
-    ("clear", "clear              clear the screen (also Ctrl+L)"),
-    ("wait", "wait               wait for background programs"),
-    ("kill", "kill <pid|service>  end a program started here, or a service (init restarts it)"),
-    ("sync", "sync               flush file system buffers to disk"),
-    ("reboot", "reboot             restart the computer"),
-    ("halt", "halt               stop the computer"),
-    ("stress", "stress [s]         SMP stress test in the kernel (1..600 s, default 10)"),
-    ("desofs", "desofs <cmd> <disk> DeSoFS: info, format [yes], mount (0 at /disk, others at /desofs), unmount, check, repair [yes],\n                   snapshot create|mount <disk> <name>, snapshot list <disk>, snapshot delete|restore <disk> <name> [yes]"),
-];
-
-/// System actions (sysctl syscall) – only with the SYSCTL handle from init.
-const SYSCTL_BUILTINS: &[&str] = &["sync", "reboot", "halt", "stress", "desofs"];
-
-/// Information from the kernel (sysinfo syscall, read-only).
-const INFO_COMMANDS: &[&str] = &["ver", "uptime", "date", "mem", "counters", "irq", "cpus", "lspci", "acpi", "disk", "mount", "df", "dcp"];
-
-/// Commands that remain only in the kernel's emergency shell.
-const KERNEL_ONLY: &[&str] = &["run", "hexdump", "write", "spawn", "colors", "keys", "k"];
+// The names the system keeps for itself – the built-ins, the sysctl and information commands,
+// the kernel-only commands – one list shared with /bin/desopkg (user/lib/cmdnames.rs).
+#[path = "../lib/cmdnames.rs"]
+mod cmdnames;
+use cmdnames::{BUILTINS, INFO_COMMANDS, KERNEL_ONLY, SYSCTL_BUILTINS};
 
 // ------------------------------------------------------------
 // Output
@@ -550,12 +530,10 @@ fn suggest(name: &str) -> Option<String> {
 /// Where programs copied to the disk live (v0.80).
 const DISK_BIN: &str = "/disk/bin";
 
-/// A name the system already uses – a /disk/bin program of that name is never run by name.
+/// A name the system already uses – a /disk/bin program of that name is never run by name
+/// (user/lib/cmdnames.rs; /bin asked live).
 fn system_name(name: &str) -> bool {
-    BUILTINS.iter().any(|(n, _)| *n == name)
-        || INFO_COMMANDS.contains(&name)
-        || KERNEL_ONLY.contains(&name)
-        || matches!(deso::stat(&format!("/bin/{}", name)), Ok(_))
+    cmdnames::system_name(name, &|n| matches!(deso::stat(&format!("/bin/{}", n)), Ok(_)))
 }
 
 /// Program path: with '/' – as given (the kernel resolves it relative to cwd),

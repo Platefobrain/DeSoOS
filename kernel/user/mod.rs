@@ -87,6 +87,9 @@ mod test_rng;
 // DeSoTLS (common/desotls): certificates, the CA store, the clock.
 #[cfg(selftest)]
 mod test_certs;
+// desopkg's formats (user/lib/pkgfmt.rs) against tools/desopkg.py, /etc/desopkg (V082 stage A).
+#[cfg(selftest)]
+mod test_pkg;
 // HTTPS: the DeSoTLS handshake and records, netget https:// (tests/tls-stub.py).
 #[cfg(selftest)]
 mod test_tls;
@@ -897,6 +900,8 @@ pub use test_crypto::self_test as crypto_self_test;
 pub use test_rng::self_test as rng_self_test;
 #[cfg(selftest)]
 pub use test_certs::self_test as certs_self_test;
+#[cfg(selftest)]
+pub use test_pkg::self_test as pkg_self_test;
 #[cfg(selftest)]
 pub use test_svc::self_test as svc_self_test;
 #[cfg(selftest)]

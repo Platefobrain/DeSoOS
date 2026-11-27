@@ -320,6 +320,9 @@ pub extern "sysv64" fn kernel_main(
     // DeSoTLS – certificates, the sealed CA store, the clock (syscall 59), certcheck.
     #[cfg(selftest)]
     selftest::suite("certs", user::certs_self_test);
+    // desopkg's formats – the Python tool's vectors judged by pkgfmt.rs, /etc/desopkg.
+    #[cfg(selftest)]
+    selftest::suite("pkg", user::pkg_self_test);
     // DeSoFS – read-only check of a volume (format 1, stage 1).
     #[cfg(selftest)]
     selftest::suite("desofs", fs::desofs::test::self_test);

@@ -27,7 +27,11 @@ generated constants and the argument order of 32 calls, and the loader's ELF ABI
 rules (every `/bin` program carries ABI 1.0; 32 hand-built ELF files; exec of 1.0, no note, 1.1).  STARTUP TEST checks
 the start contract from the program's side (`docs/abi/STARTUP.md`: `/bin/starttest` and a program in plain machine
 code at the edges of the load range, the argument and file limits); SERVICES TEST the service protocols' versions
-through the real init (`docs/abi/SERVICES.md`: `/bin/prototest` against init, netd and fake services).
+through the real init (`docs/abi/SERVICES.md`: `/bin/prototest` against init, netd and fake services).  PKG FORMAT TEST checks desopkg's formats
+(`docs/pkg/FORMAT.md`): `/bin/pkgtest` judges the vectors `tools/desopkg.py` made at build time with
+`user/lib/pkgfmt.rs` – the same verdict and reason for each – reads the image's `/etc/desopkg` and runs every `/bin`
+program through `common/elf.rs` against the kernel loader; before QEMU, PKG HOST TEST does the same on the host
+(`tools/desopkg.py --test`, `tests/pkg/pkgfmt-host.sh`, `logs/test-pkg.log`).
 
 After a passing run QEMU starts a second time on the same test disk (RESTART TEST: DeSoFS data must survive a real
 restart), a third time without the virtio and NVMe disks (USB RESTART TEST: the writable USB stick becomes /disk by
@@ -50,6 +54,7 @@ HANG (no line for 5 minutes), 3 QEMU ended by itself, 4 too long.
 | `stress-qemu.sh` | the same stress test as on real hardware, in QEMU |
 | `sdk-test.sh` | the SDK (`docs/abi/SDK.md`): `sdk/` alone copied to an empty temporary directory, an empty environment (new `HOME`, only `PATH`, working directory `/`) – `deso-build.sh new` + `build` of the template, a static ELF with the ABI 1.0 note, no repository path in the program or the log and no build path in the program, nothing in `HOME`, 4 refusals and a program with an interpreter (`PT_INTERP`) refused; the frozen SDK `sdk/compat/abi-1.0` alone builds `programs/compat10.rs` with its own `deso-build.sh`; then QEMU (`./build.sh --selftest` first) with a fresh DeSoFS volume, a network card and the programs in the fw_cfg files `opt/deso/sdkprog` and `opt/deso/compatprog` – SDK TEST copies the first to `/disk/bin` through the shell and runs it by name (1/2), then runs compat10 from `/disk/bin` through the real init (2/2) (13 checks, `logs/test-sdk.log`) |
 | `make-usb-test.sh` | `make-usb.sh --with-disk` on the host (above): 16 refusals and checks against a fake `/sys`, `/proc`, `lsblk` and `findmnt` (`DESO_SYS`, `DESO_PROC`); `tools/mkusb.py`'s identity check of the opened device on a fake udev directory (11 cases) and on this computer's USB disks; `tools/mkdesofs.py` – image files only (8 cases); the image (`fsck.vfat` when installed; too small refused, a 70000 MiB stick gets a 64 GiB partition 2); build `v1` → start → the ESP updated to `v2` (`DESO_BUILD_TAG`) → partition 2 unchanged → start: `ver` = v2, the file and the LKG kept. Log `logs/test-make-usb.log` |
+| `pkg/` | desopkg's formats on the host (PKG HOST TEST): `pkgfmt-host.rs` – `user/lib/pkgfmt.rs` compiled for this computer, `pkgfmt-host.sh` builds it and judges 3286 vectors of `tools/desopkg.py` (286 written by hand, 3000 random mutations) – the same verdict and reason id or FAIL; `test-key.pem`, `other-key.pem` – **test keys only** (the self-test image trusts `deso-test-1`) |
 | `mkdesofs.py` | DeSoFS in Python: the reference image for the kernel tests; `--format` = `tools/mkdesofs.py` (the production formatter) with a fixed uuid / time |
 | `mkfat32.py` | the FAT32 image of the emulated USB stick |
 | `mkgpt.py` | the writable test USB stick of USB WRITE TEST: GPT with an ESP (a marker in every sector – the test checks nothing in it changes) and a "DeSo system" partition, primary and backup GPT |

@@ -23,6 +23,23 @@ fn install_roots() {
     }
 }
 
+/// desopkg's trust and repository (V082): /etc/desopkg/keys (the public keys an index must be
+/// signed with) and /etc/desopkg/repo (where the repository is, its channel and architecture),
+/// then sealed like the CA store – before /etc itself is sealed.  A program cannot plant its own
+/// key; changing them means a new image.
+fn install_desopkg() {
+    use crate::fs;
+    let mut ok = fs::stat("/etc/desopkg").is_ok() || fs::mkdir("/etc/desopkg").is_ok();
+    for (name, data) in ETC_DESOPKG {
+        let path = alloc::format!("/etc/desopkg/{}", name);
+        ok = ok && fs::write_file(&path, data).is_ok() && fs::seal(&path).is_ok();
+    }
+    ok = ok && fs::seal("/etc/desopkg").is_ok();
+    if !ok {
+        crate::serial_println!("[FS] cannot install /etc/desopkg - desopkg will refuse every index");
+    }
+}
+
 /// Creates /bin and writes the programs, and /etc/services with the service manifests
 /// (init reads them once at its start).  Returns the number of programs.
 pub fn install() -> usize {
@@ -43,6 +60,7 @@ pub fn install() -> usize {
             }
         }
     }
+    install_desopkg();
     install_roots();
     if fs::stat("/bin").is_err() && fs::mkdir("/bin").is_err() {
         return 0;
