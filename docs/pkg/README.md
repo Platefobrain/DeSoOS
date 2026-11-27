@@ -76,8 +76,25 @@ certificates are checked against `/etc/certs/roots`, and nothing is sent before 
 |---|---|
 | PKG HOST TEST (`tests/test.sh`) | `tools/desopkg.py --test`, Rust = Python on the formats' vectors, the solver's table |
 | PKG FORMAT TEST (`tests/test.sh`, QEMU) | the vectors judged by `pkgfmt.rs` in user space, `/etc/desopkg`, every `/bin` program through `check_program` |
-| PKG TEST (`tests/pkg-test.sh`, QEMU) | desopkg against `tests/repo-stub.py`: install, run, update, downgrade, dependencies, refusals, remove, verify, reinstall, refused indexes and transfers, no memory, a big package; the normal image holds nothing of the self-test image |
+| PKG TEST (`tests/pkg-test.sh`, QEMU) | part 1: desopkg against `tests/repo-stub.py` – install, run, update, downgrade, dependencies, refusals, remove, verify, reinstall, refused indexes and transfers, no memory, a big package; part 2: desopkg killed at every crash point (K1–K10), the lock, the shell against `gc`, damaged indexes and generations; four power losses (QEMU killed at K2h, K6, K7h, K9); the normal image holds nothing of the self-test image |
+| `tests/pkg-test.sh --mutants` (QEMU, TCG) | six builds, each with one check of desopkg switched off (signature, serial, expiry, paths, directories before the generation, the generation's hash) – each must fail the short sequence a normal desopkg passes |
 
-The self-test image (desopkg built with `--cfg selftest`) trusts the test CA `/etc/desopkg/ca` and
-the self-test time instead of NTS, and has crash points for the tests; none of that exists in a
-normal image (checked by PKG TEST).
+The self-test image (desopkg and sh built with `--cfg selftest`) trusts the test CA
+`/etc/desopkg/ca` and the self-test time instead of NTS, and has the tests' switches in `/tmp`:
+`desopkg-crash` (stop at a crash point as if killed, or hang there for a power loss),
+`desopkg-nomem`, `sh-pause` (the shell waits between finding a package program and starting it);
+none of that exists in a normal image (checked by PKG TEST).
+
+### Crash points
+
+| Point | Where | What the next start finds |
+|---|---|---|
+| K1 | right after the lock | nothing changed; the dead one's lock is taken over |
+| K2 / K2h / K3 | before / in the middle of / after writing `index/<serial>` | the previous index; a half-written file does not count; a whole one counts (valid by its signature) |
+| K4, K5 | before the download / after the checks | nothing on the disk |
+| K6 | in the middle of a version directory | a directory without `package` – nothing points to it, `gc` removes it |
+| K7 | before `gen/<m>` | a complete directory nothing points to – `gc` removes it |
+| K7h | in the middle of `gen/<m>` | the file is not valid: the old generation is in force; it stays until a newer one exists |
+| K8 | after `gen/<m>` | the new generation is in force whole |
+| K9 | inside `gc` (after the generation files) | the new generation; the next command finishes `gc` |
+| K10 | before giving the lock back | everything done; the lock is taken over |

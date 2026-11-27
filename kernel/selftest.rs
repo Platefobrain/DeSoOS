@@ -20,8 +20,11 @@
 // * SDK phase (tests/sdk-test.sh): `opt/deso/phase` = "sdk NAME" and the program itself – built
 //   outside the repository with sdk/deso-build.sh – in the fw_cfg file `opt/deso/sdkprog`; only
 //   SDK TEST runs (the program onto /disk/bin through the shell, then run by name).
-// * PKG phase (tests/pkg-test.sh, V082-B): `opt/deso/phase` = "pkg b1" – only PKG TEST: desopkg
-//   against tests/repo-stub.py on a fresh DeSoFS volume, through init and the shell.
+// * PKG phase (tests/pkg-test.sh): `opt/deso/phase` = "pkg b1" – only PKG TEST: desopkg
+//   against tests/repo-stub.py on a fresh DeSoFS volume, through init and the shell; "pkg b2" –
+//   part 2 on the same volume (crash points, the lock, the shell against gc, damaged files);
+//   "pkg p1" … "pkg p5" – power losses (p1–p4 end with "POWER OFF" and QEMU is killed, the next
+//   start checks the disk); "pkg m" – the short sequence the mutant builds must fail.
 // * Soak phase (tests/soak.sh): `opt/deso/phase` = "soak <seconds> <seed> [ram]"; the boot
 //   tests are skipped and `init test /bin/soak <seconds>:<seed>[:ram]` runs instead – all workers
 //   at once for hours, checkpoints for leaks and DeSoFS (user/bin/soak.rs).
@@ -41,13 +44,14 @@ static PASSED: AtomicU32 = AtomicU32::new(0);
 static AUTOTEST: AtomicBool = AtomicBool::new(false);
 static RESTART: AtomicBool = AtomicBool::new(false);
 static USB_RESTART: AtomicBool = AtomicBool::new(false);
-/// ONE STICK TEST (V080 stage C): 1 / 2 – the start from a `make-usb.sh --with-disk` image; the
+/// ONE STICK TEST: 1 / 2 – the start from a `make-usb.sh --with-disk` image; the
 /// build tag the second start expects (up to 8 bytes, packed little-endian; 0 – none).
 static ONE_STICK: AtomicU32 = AtomicU32::new(0);
 static ONE_STICK_TAG: AtomicU64 = AtomicU64::new(0);
 /// SDK phase: the program's name (len 0 = not an SDK start; u8::MAX = a bad phase).
 static mut SDK_NAME: ([u8; 32], u8) = ([0; 32], 0);
-/// PKG phase (tests/pkg-test.sh, V082-B): 1 = "pkg b1" (0 = not a PKG start, u32::MAX = bad).
+/// PKG phase (tests/pkg-test.sh): an index into PKG_PARTS + 1 (0 = not a PKG start,
+/// u32::MAX = bad).
 static PKG_PHASE: AtomicU32 = AtomicU32::new(0);
 /// Soak phase: its length in seconds (0 = not a soak start) and the seed.
 static SOAK_SECS: AtomicU64 = AtomicU64::new(0);
@@ -303,13 +307,12 @@ fn detect_phase() {
         return;
     }
     if first == Some("pkg") {
-        let part = w.next();
-        let ok = part == Some("b1") && w.next().is_none();
-        if ok {
-            serial_println!("[TEST] PKG phase: only PKG TEST part 1 (desopkg against tests/repo-stub.py)");
-            PKG_PHASE.store(1, Ordering::SeqCst);
+        let part = w.next().and_then(|p| PKG_PARTS.iter().position(|x| *x == p));
+        if let (Some(i), None) = (part, w.next()) {
+            serial_println!("[TEST] PKG phase {}: only PKG TEST (desopkg against tests/repo-stub.py)", PKG_PARTS[i]);
+            PKG_PHASE.store(i as u32 + 1, Ordering::SeqCst);
         } else {
-            serial_println!("[TEST] bad PKG phase {:?} - expected \"pkg b1\"", text);
+            serial_println!("[TEST] bad PKG phase {:?} - expected \"pkg\" and one of {:?}", text, PKG_PARTS);
             PKG_PHASE.store(u32::MAX, Ordering::SeqCst);
             STARTED.fetch_add(1, Ordering::SeqCst);
         }
@@ -412,12 +415,14 @@ pub fn fw_cfg_file(name: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
     Some(v)
 }
 
-/// The PKG start (tests/pkg-test.sh): Some("b1"); Some("") – a bad phase (fails at once).
+/// The parts of PKG TEST a start can run (tests/pkg-test.sh).
+pub const PKG_PARTS: &[&str] = &["b1", "b2", "p1", "p2", "p3", "p4", "p5", "m"];
+
+/// The PKG start (tests/pkg-test.sh): Some(part); Some("") – a bad phase (fails at once).
 pub fn pkg() -> Option<&'static str> {
     match PKG_PHASE.load(Ordering::SeqCst) {
         0 => None,
-        1 => Some("b1"),
-        _ => Some(""),
+        n => Some(PKG_PARTS.get(n as usize - 1).copied().unwrap_or("")),
     }
 }
 

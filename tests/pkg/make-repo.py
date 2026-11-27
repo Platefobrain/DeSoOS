@@ -21,6 +21,10 @@ Times are relative to now (the guest's clock is the host's RTC).
   5       old        v100 with an older serial
   30      expired, future, badsig, otherkey, testing  – refused indexes
   40      big        tx + big 1.0.0 (MIB MiB of data, default 30)
+  21      evil       tx + zly 1.0.0, a package with the path share/../../zly-evil.txt (must be
+                     refused: bad_path)
+  50..59  s50..s59   tx with a higher serial each – the crash points in refresh need a
+                     new index every time
 """
 import hashlib
 import os
@@ -152,7 +156,12 @@ def main():
     blob = bytes(rnd.getrandbits(8) for _ in range(1024 * 1024)) * big_mib
     add("big", "1.0.0", pkg("big", "1.0.0", "A big package", [("share/big/data.bin", blob, "data")]), "A big package")
     write(out, "big", {k + ".pkg": P[k + ".pkg"] for k in tx + ["big-1.0.0"]}, [E[k] for k in tx + ["big-1.0.0"]], 40, iss, exp)
-    print("%s: scenarios v100 v101 tx old expired future badsig otherkey testing big (%d MiB)" % (out, big_mib))
+    add("zly", "1.0.0", pkg("zly", "1.0.0", "A package with a bad path", [("share/../../zly-evil.txt", b"evil\n", "data")]), "A package with a bad path")
+    evil = tx + ["zly-1.0.0"]
+    write(out, "evil", {k + ".pkg": P[k + ".pkg"] for k in evil}, [E[k] for k in evil], 21, iss, exp)
+    for serial in range(50, 60):
+        write(out, "s%d" % serial, {k + ".pkg": P[k + ".pkg"] for k in tx}, [E[k] for k in tx], serial, iss, exp)
+    print("%s: scenarios v100 v101 tx old expired future badsig otherkey testing big (%d MiB) evil s50..s59" % (out, big_mib))
 
 
 if __name__ == "__main__":

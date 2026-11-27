@@ -2,6 +2,59 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.82.0 — in progress (desopkg: programs from the internet)
+
+Plan: V082 ver 4.6 (accepted) and V082-B ver 1 (accepted). Stages A, B1 and B2 done; stage C (the real repository,
+real hardware) and the release are next. Details: `docs/pkg/README.md`, formats: `docs/pkg/FORMAT.md`.
+
+### Stage B2 – crashes, power losses, the lock, mutants
+- **PKG TEST part 2** (`tests/pkg-test.sh`, phase `pkg b2` on part 1's volume): desopkg stopped as if killed at every
+  crash point – K1 (after the lock), K2 / K2h / K3 (before, in the middle of and after writing an index file), K4, K5,
+  K6 (half a version directory), K7, K7h (half a generation file), K8, K9, K10. After each: the old or the new
+  generation in force whole, the programs start through the shell, the next command sweeps what was left. The lock:
+  beside a living holder another desopkg gets code 4; a dead one's lock is taken over; two new ones started at once
+  beside a stale lock are never both inside (three rounds) and neither removes the lock the other holds. A damaged
+  newest index gives way to the previous one; generation files with the wrong number, another version, a program the
+  manifest does not have or a wrong hash do not count (one written correctly by hand does).
+- **The shell against gc**: the shell paused between finding a package program and starting it (`/tmp/sh-pause`,
+  self-test image only) while two installs and their `gc` remove the directory – it looks again and starts the new
+  version (two tries); a bad ELF in a valid generation is reported at once (one try), `reinstall` repairs it.
+- **Power losses**: four starts of QEMU end with desopkg hanging at K2h, K6, K7h and K9; the kernel says
+  `POWER OFF at …` and the script kills QEMU (`kill -9`); the next start checks the disk and the shell, then the next
+  point. Phases `pkg p1` … `pkg p5`.
+- **Mutants** (`tests/pkg-test.sh --mutants`, TCG): `DESO_PKG_MUTANT=sig|serial|expires|paths|order|hash` builds a
+  self-test image with one check switched off (`--cfg pkg_mutant`, only with `--selftest`); each must fail the short
+  phase `pkg m` that a normal build passes. New scenarios in `tests/pkg/make-repo.py`: `evil` (a package with the path
+  `share/../../…`), `s50`…`s59` (the same index with higher serials).
+- desopkg: the crash point K9 is now inside `gc` (after the generation files, before the directories) –
+  `pkgstate::gc` takes a callback; `sh` is built with `--cfg selftest` in the self-test image (the pause only).
+- Output: line 1/2 of PKG TEST no longer says "OK PASS"; `[RESULT-PKGB]` is `checks= generation= big_ms= ms=` (it
+  had "ms ms="); new `[RESULT-PKGB2]` and `[RESULT-PKGP]`.
+
+### Stage B1 – desopkg and the shell
+- **`/bin/desopkg`**: `refresh`, `install <name>[=<version>]`, `update [<name>…]`, `remove`, `reinstall`, `list`,
+  `search`, `info`, `verify`; exit codes 0 OK, 1 usage, 2 refused, 3 network / time, 4 disk / lock / memory, 5
+  aborted. Generations `/disk/pkg/gen/<n>` (the highest valid one is current), version directories
+  `/disk/pkg/<package>/<version>-<16 hex>/` (`package` written last), accepted indexes `/disk/pkg/index/<serial>`;
+  `gc` keeps the current and the previous generation, two indexes and the highest generation file. A package is
+  downloaded into memory (exactly its size from the signed index, `try_reserve_exact`). Production trusts only the
+  NTS time and `/etc/certs/roots`.
+- `user/lib/fetch.rs` (the HTTP(S) client, `netget` uses it), `pkgstate.rs` (shared with `sh`), `pkgsolve.rs` (31
+  cases on the host); `url` may have a port.
+- **The shell** runs programs of the current generation by name after built-ins, `/bin` and `/disk/bin`; `argv[0]`
+  is the full path; a program removed meanwhile is looked up again (up to 3 tries); `help` and Tab list them.
+- **PKG TEST part 1** (`tests/pkg-test.sh`, phase `pkg b1`): `tests/repo-stub.py` (HTTPS with the test CA, control
+  port), `tests/pkg/witaj/` built with the SDK, `tests/pkg/make-repo.py`; refused before connecting without the NTS
+  time, then install, run, update, downgrade, dependencies, refusals, remove, verify, reinstall, refused indexes and
+  transfers, no memory, a 30 MiB package. The normal image holds nothing of the self-test image.
+
+### Stage A – formats
+- `docs/pkg/FORMAT.md`: the package (`DESOPKG 1 M D`, manifest, data), the signed index (ECDSA P-256, low-S, strict
+  DER, the domain line `DESO-INDEX-SIGNATURE-V1`), the generation file, the accepted index, `/etc/desopkg/keys` and
+  `repo`. `user/lib/pkgfmt.rs` and `tools/desopkg.py` implement them independently; **PKG HOST TEST** (Rust = Python
+  on 3294 vectors) and **PKG FORMAT TEST** (45th suite: the vectors in user space, `/etc/desopkg`, every `/bin`
+  program through `check_program`). Names the system keeps: `user/lib/cmdnames.rs`, shared by `sh` and desopkg.
+
 ## v0.81.1 — 2026-11-22 (two fixes from the v0.81.0 report)
 
 - **netd: a connection whose first SYN gets no answer moves to another local port.** The short soak's rare

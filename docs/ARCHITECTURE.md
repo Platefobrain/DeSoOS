@@ -2152,6 +2152,27 @@ In short:
 
 Not checked: revocation (CRL, OCSP) and Certificate Transparency. Not audited, not for production use.
 
+## Packages – desopkg (`user/bin/desopkg.rs`, v0.82 in progress)
+
+Programs from the internet on the writable `/disk`; the system itself (kernel, `/bin`, `/etc`) changes only with
+`make-usb.sh`. Commands, trust and formats: `docs/pkg/README.md`, `docs/pkg/FORMAT.md`.
+
+- **No journal – generations** (like the DeSoFS superblock): a change builds new version directories
+  `/disk/pkg/<package>/<version>-<16 hex>/` next to the old ones (`package` last), then writes one new file
+  `/disk/pkg/gen/<m>` naming the whole set. The current generation is the highest **valid** one (grammar, hash, every
+  directory's `package` file); until `gen/<m>` is whole the old one is in force. `gc` removes what nothing points to
+  (the previous generation stays as a spare). Programs need no new system call: ABI 1.0 is enough.
+- **Shared rule**: `user/lib/pkgstate.rs` picks the generation for both desopkg and the shell; the shell caches it
+  by the newest file's number and size and looks again when exec says "not found" (a program removed by an update's
+  `gc` in the meantime).
+- **Trust**: a signed index (P-256), each package pinned by size and SHA-256 and downloaded into memory
+  (`user/lib/fetch.rs`, the client `netget` uses), HTTPS to one host, nothing sent before the NTS time.
+- **Testing**: PKG HOST TEST and PKG FORMAT TEST (formats, Rust = Python); PKG TEST (`tests/pkg-test.sh`): part 1
+  (every command against `tests/repo-stub.py`), part 2 (killed at each crash point K1–K10, the lock, the shell
+  against `gc`, damaged files), four power losses (QEMU killed), and `--mutants` (each check switched off must be
+  caught). The self-test image's switches (test CA, self-test time, crash points, the shell's pause) do not exist in
+  a normal image.
+
 ## Resource limits
 
 No program can take resources the kernel depends on – it gets an error or dies itself.

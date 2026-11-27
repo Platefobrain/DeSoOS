@@ -1,4 +1,4 @@
-// desopkg's file formats (V082 plan §3–§5, docs/pkg/FORMAT.md): the package (.pkg) and its
+// desopkg's file formats (docs/pkg/FORMAT.md): the package (.pkg) and its
 // manifest, the repository index, its signature, the trusted keys, the repository
 // configuration, an accepted index on the disk and a generation file.
 //
@@ -7,7 +7,7 @@
 // file (`#[path]`) declares both modules at its root: /bin/desopkg, /bin/pkgtest and the host
 // check (tests/pkgfmt-host.sh).
 //
-// One rule for every text file (§3.1) – exact bytes:
+// One rule for every text file (FORMAT.md §1) – exact bytes:
 //   UTF-8; a line ends with `\n` only (CR = error); no control characters (bytes < 0x20 other
 //   than `\n`, and 0x7f); a line at most 1024 bytes; the file ends with `\n` and nothing
 //   follows the last line; `key=value` lines in a fixed order – a key that is unknown, repeated
@@ -31,7 +31,7 @@ use crate::elf;
 /// Why something was refused – a stable id (docs/pkg/FORMAT.md, "Reasons").
 pub type Reason = &'static str;
 
-/// Limits (§3, §4, §5).
+/// Limits (FORMAT.md §3, §4, §5).
 pub const MAX_LINE: usize = 1024;
 pub const MAX_MANIFEST: usize = 64 * 1024;
 pub const MAX_DATA: u64 = 32 * 1024 * 1024;
@@ -59,7 +59,7 @@ pub const DAY: u64 = 86_400;
 pub const SYSTEM_ABI: (u16, u16) = (1, 0);
 pub const ARCH: &str = "x86_64";
 
-/// The signed message's domain line (§4).
+/// The signed message's domain line (FORMAT.md §4).
 pub const SIG_DOMAIN: &[u8] = b"DESO-INDEX-SIGNATURE-V1\n";
 
 // ------------------------------------------------------------
@@ -185,7 +185,7 @@ pub fn parse_date(s: &str) -> Option<u64> {
 }
 
 // ------------------------------------------------------------
-// The text rule (§3.1)
+// The text rule (FORMAT.md §1)
 // ------------------------------------------------------------
 
 /// The file's lines after the whole-file checks (in this order): empty → `truncated`;
@@ -333,7 +333,7 @@ fn strings(v: &[&str]) -> Vec<String> {
 }
 
 // ------------------------------------------------------------
-// Manifest and package (§3)
+// Manifest and package (FORMAT.md §3)
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,6 +378,10 @@ impl Manifest {
 fn path_ok(p: &str) -> bool {
     if p.is_empty() || p.len() > MAX_PATH {
         return false;
+    }
+    // The self-test mutant "paths" (tests/pkg-test.sh --mutants): every path accepted.
+    if cfg!(pkg_mutant = "paths") {
+        return true;
     }
     let comps: Vec<&str> = p.split('/').collect();
     for c in &comps {
@@ -519,7 +523,7 @@ fn parse_pkg_header(b: &[u8]) -> Result<(usize, usize, u64), Reason> {
     Ok((nl + 1, m as usize, d))
 }
 
-/// The whole package (§3): size limit, header, header + M + D == file size, the manifest,
+/// The whole package (FORMAT.md §3): size limit, header, header + M + D == file size, the manifest,
 /// `data` == D, then every file: its SHA-256 and, for programs, the kernel's own rules
 /// (common/elf.rs) with the ABI note equal to the manifest's `abi`.
 pub fn parse_pkg<'a>(b: &'a [u8], system_name: &dyn Fn(&str) -> bool) -> Result<Package<'a>, Reason> {
@@ -553,7 +557,7 @@ pub fn parse_pkg<'a>(b: &'a [u8], system_name: &dyn Fn(&str) -> bool) -> Result<
 }
 
 // ------------------------------------------------------------
-// Index (§4)
+// Index (FORMAT.md §4)
 // ------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -657,8 +661,12 @@ pub fn parse_index(b: &[u8]) -> Result<Index, Reason> {
     Ok(Index { repo: String::from(repo), channel: String::from(channel), arch: String::from(arch), serial, issued, expires, packages })
 }
 
-/// Step 5 of `refresh` (§4) against the clock: `expires` > now, `issued` ≤ now + 1 day.
+/// Step 5 of `refresh` against the clock: `expires` > now, `issued` ≤ now + 1 day.
 pub fn check_index_time(idx: &Index, now: u64) -> Result<(), Reason> {
+    // The self-test mutant "expires": the index's dates not compared with the clock.
+    if cfg!(pkg_mutant = "expires") {
+        return Ok(());
+    }
     if idx.expires <= now {
         return Err("expired");
     }
@@ -676,7 +684,7 @@ pub fn check_index_repo(idx: &Index, cfg: &RepoConfig) -> Result<(), Reason> {
     Ok(())
 }
 
-/// A downloaded package against its index entry (§3 order): exactly `size` bytes, SHA-256 of
+/// A downloaded package against its index entry (FORMAT.md §3 order): exactly `size` bytes, SHA-256 of
 /// the whole file, then the package itself, then name, version, abi, summary, depends and
 /// conflicts == the entry.
 pub fn check_pkg_against_index<'a>(b: &'a [u8], e: &IndexEntry, system_name: &dyn Fn(&str) -> bool) -> Result<Package<'a>, Reason> {
@@ -695,7 +703,7 @@ pub fn check_pkg_against_index<'a>(b: &'a [u8], e: &IndexEntry, system_name: &dy
 }
 
 // ------------------------------------------------------------
-// Signature, keys, repository configuration (§4, §2)
+// Signature, keys, repository configuration (FORMAT.md §4)
 // ------------------------------------------------------------
 
 pub struct Signature {
@@ -838,6 +846,10 @@ pub fn verify_index(index: &[u8], sig: &[u8], keys: &[Key]) -> Result<(), Reason
     let s = parse_signature(sig)?;
     let key = keys.iter().find(|k| k.keyid == s.keyid).ok_or("unknown_key")?;
     let msg = signed_message(&s.alg, &s.keyid, index);
+    // The self-test mutant "sig": a known key id is enough, the signature not checked.
+    if cfg!(pkg_mutant = "sig") {
+        return Ok(());
+    }
     match desocrypto::ecdsa::verify(desocrypto::ecdsa::Curve::P256, &key.point, &msg, &s.der) {
         Ok(()) => Ok(()),
         Err(desocrypto::Error::Mismatch) => Err("bad_signature"),
@@ -854,7 +866,7 @@ pub struct RepoConfig {
     pub arch: String,
 }
 
-/// `https://<host>[:<port>]/<path>/`: host `[a-z0-9.-]+`, port a decimal 1–65535 (V082-B),
+/// `https://<host>[:<port>]/<path>/`: host `[a-z0-9.-]+`, port a decimal 1–65535,
 /// path of `[a-z0-9._/-]`, ending with `/`.
 fn url_ok(u: &str) -> bool {
     let Some(rest) = u.strip_prefix("https://") else { return false };
@@ -903,7 +915,7 @@ pub fn parse_repo_config(b: &[u8]) -> Result<RepoConfig, Reason> {
 }
 
 // ------------------------------------------------------------
-// An accepted index on the disk: /disk/pkg/index/<serial> (§4 step 7)
+// An accepted index on the disk: /disk/pkg/index/<serial> (written by `refresh`)
 // ------------------------------------------------------------
 
 /// `DESO-ACCEPTED-INDEX 1 <index size> <signature size>\n` + index + signature: (index, sig).
@@ -942,7 +954,7 @@ pub fn check_accepted(b: &[u8], keys: &[Key]) -> Result<Index, Reason> {
 }
 
 // ------------------------------------------------------------
-// Generation file: /disk/pkg/gen/<n> (§5)
+// Generation file: /disk/pkg/gen/<n> (FORMAT.md §5)
 // ------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1060,13 +1072,14 @@ pub fn parse_generation(b: &[u8], number: u64, system_name: &dyn Fn(&str) -> boo
     let hashed = c.offset(b);
     let h = sha256_hex(c.kv("hash")?).ok_or("bad_hash")?;
     c.done()?;
-    if desocrypto::sha256::sha256(&b[..hashed]) != h {
+    // The self-test mutant "hash": a generation's hash not compared.
+    if desocrypto::sha256::sha256(&b[..hashed]) != h && !cfg!(pkg_mutant = "hash") {
         return Err("bad_hash");
     }
     Ok(Generation { number: g, op: String::from(op), packages })
 }
 
-/// One package of a generation against its directory's `package` file (§5): SHA-256 of the
+/// One package of a generation against its directory's `package` file (FORMAT.md §5): SHA-256 of the
 /// file == `manifest=`, the manifest valid, name, version, programs, depends and conflicts ==
 /// the entry.
 pub fn check_generation_package(e: &GenEntry, manifest_bytes: &[u8], system_name: &dyn Fn(&str) -> bool) -> Result<Manifest, Reason> {

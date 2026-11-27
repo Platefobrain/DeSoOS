@@ -23,7 +23,7 @@ fn install_roots() {
     }
 }
 
-/// desopkg's trust and repository (V082): /etc/desopkg/keys (the public keys an index must be
+/// desopkg's trust and repository: /etc/desopkg/keys (the public keys an index must be
 /// signed with) and /etc/desopkg/repo (where the repository is, its channel and architecture),
 /// then sealed like the CA store – before /etc itself is sealed.  A program cannot plant its own
 /// key; changing them means a new image.

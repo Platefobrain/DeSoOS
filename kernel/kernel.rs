@@ -352,7 +352,7 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::usbw_self_test();
     }
-    // A USB stick's "DeSo system" partition as /disk – rules D2 / E / D / F (v0.80 stage B).
+    // A USB stick's "DeSo system" partition as /disk – rules D2 / E / D / F.
     #[cfg(selftest)]
     if !selftest::looping() {
         user::usbdisk_self_test();

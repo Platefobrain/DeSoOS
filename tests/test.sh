@@ -95,7 +95,7 @@ if [ -n "$OLD_NAME" ]; then
   exit 1
 fi
 ABI_HOST=$(grep -ac "^\[ABI HOST TEST\] [0-9]/5 .* PASS" "$LOG_ABI" || true)
-# desopkg's formats on the host (V082 stage A): tools/desopkg.py --test (every rule on its own, the
+# desopkg's formats on the host: tools/desopkg.py --test (every rule on its own, the
 # reserved names, pack -> index -> check) and user/lib/pkgfmt.rs compiled for the host judging the
 # same vectors (tests/pkg/pkgfmt-host.sh, logs/test-pkg.log).  The QEMU half is PKG FORMAT TEST.
 LOG_PKG="$ROOT/logs/test-pkg.log"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""desopkg host tool (V082 plan §8, docs/pkg/FORMAT.md) – Python 3 + openssl.
+"""desopkg host tool (docs/pkg/FORMAT.md) – Python 3 + openssl.
 
 An independent implementation of the package formats: it makes packages, indexes and their
 signatures, checks them, and makes the PKG FORMAT TEST vectors that user/lib/pkgfmt.rs (Rust,
@@ -41,7 +41,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ------------------------------------------------------------
-# Limits (§3, §4, §5) – the same numbers as user/lib/pkgfmt.rs
+# Limits (FORMAT.md §3, §4, §5) – the same numbers as user/lib/pkgfmt.rs
 # ------------------------------------------------------------
 MAX_LINE = 1024
 MAX_MANIFEST = 64 * 1024
@@ -181,7 +181,7 @@ def sha256(b):
 
 
 # ------------------------------------------------------------
-# The text rule (§3.1)
+# The text rule (FORMAT.md §1)
 # ------------------------------------------------------------
 def text_lines(b):
     if len(b) == 0:
@@ -288,7 +288,7 @@ def read_relations(c, me):
 
 
 # ------------------------------------------------------------
-# Manifest and package (§3)
+# Manifest and package (FORMAT.md §3)
 # ------------------------------------------------------------
 def path_ok(p):
     if len(p) == 0 or len(p.encode()) > MAX_PATH:
@@ -584,7 +584,7 @@ def elf_program(major=1, minor=0, flags=0, seg_flags=5, with_note=True):
 
 
 # ------------------------------------------------------------
-# Index (§4)
+# Index (FORMAT.md §4)
 # ------------------------------------------------------------
 def parse_index(b):
     if len(b) > MAX_INDEX:
@@ -882,7 +882,7 @@ def check_accepted(b, keys):
 
 
 # ------------------------------------------------------------
-# Generation (§5)
+# Generation (FORMAT.md §5)
 # ------------------------------------------------------------
 def dir_ok(d, version):
     v, sep, ident = d.rpartition("-")

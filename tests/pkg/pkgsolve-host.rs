@@ -1,4 +1,4 @@
-// desopkg's dependency solver (user/lib/pkgsolve.rs) on the host: every rule of V082 plan §6.1
+// desopkg's dependency solver (user/lib/pkgsolve.rs) on the host: every rule
 // on its own, as a table – the request, the installed packages and the index in, the expected
 // new set (or refusal id) out.  tests/pkg/pkgfmt-host.sh builds and runs it (PKG HOST TEST).
 extern crate alloc;
@@ -205,5 +205,5 @@ fn main() {
         println!("[PKG HOST TEST] FAIL solver: {} of {} cases", fails, cases.len());
         std::process::exit(1);
     }
-    println!("[PKG HOST TEST] 6/6 solver (user/lib/pkgsolve.rs on the host): {} cases – every rule of §6.1 PASS", cases.len());
+    println!("[PKG HOST TEST] 6/6 solver (user/lib/pkgsolve.rs on the host): {} cases – every rule PASS", cases.len());
 }

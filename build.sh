@@ -40,6 +40,14 @@ fi
 if [ "$DESO_AUTOSOAK" != 0 ] && [ "$DESO_AUTOSTRESS" != 0 ]; then
   echo "--autosoak and --autostress together: choose one"; exit 1
 fi
+# DESO_PKG_MUTANT (tests/pkg-test.sh --mutants): only with --selftest, only a known name.
+if [ -n "${DESO_PKG_MUTANT:-}" ]; then
+  case "$DESO_PKG_MUTANT" in
+    sig|serial|expires|paths|order|hash) ;;
+    *) echo "DESO_PKG_MUTANT: sig, serial, expires, paths, order or hash (got: $DESO_PKG_MUTANT)"; exit 1 ;;
+  esac
+  [ "$MODE" = "selftest" ] || { echo "DESO_PKG_MUTANT only with --selftest"; exit 1; }
+fi
 # The random number generator's trust policy (kernel/random.rs): 0 = the source is still
 # mixed into the pool, but its entropy is not counted.  DESO_TRUST_CPU – RDSEED;
 # DESO_TRUST_BOOTLOADER – the firmware's RNG (RAW algorithm).  Default 1 (counted).
@@ -149,8 +157,16 @@ for src in user/bin/*.rs; do
   # netd's test hook (`testport N` – the local port of the next TCP connection) – only in
   # the self-test image.
   [ "$name" = netd ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
-  # desopkg (V082-B): the test CA, the self-test time, crash points – only in the self-test image.
-  [ "$name" = desopkg ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
+  # desopkg: the test CA, the self-test time, crash points – only in the self-test image.
+  # DESO_PKG_MUTANT=X (tests/pkg-test.sh --mutants only): one of desopkg's checks switched off,
+  # so PKG TEST can show it catches that – never in a normal image.
+  if [ "$name" = desopkg ] && [ "$MODE" = "selftest" ]; then
+    EXTRA_CFG=(--cfg selftest)
+    [ -n "${DESO_PKG_MUTANT:-}" ] && EXTRA_CFG+=(--cfg "pkg_mutant=\"$DESO_PKG_MUTANT\"")
+  fi
+  # The shell's pause before starting a package program (PKG TEST: a gc between the lookup and
+  # exec) – only in the self-test image.
+  [ "$name" = sh ] && [ "$MODE" = "selftest" ] && EXTRA_CFG=(--cfg selftest)
   rustc \
     --edition=2024 \
     --target x86_64-unknown-none \
@@ -160,6 +176,7 @@ for src in user/bin/*.rs; do
     -C link-arg=-Tsdk/libdeso/link.ld \
     --extern libdeso=build/user/liblibdeso.rlib \
     --check-cfg 'cfg(selftest, desocrypto_test, desotls_test, desocrypto_no_simd)' \
+    --check-cfg 'cfg(pkg_mutant, values("sig", "serial", "expires", "paths", "order", "hash"))' \
     "${EXTRA_CFG[@]}" \
     -o "build/user/$name.full" \
     "$src"
@@ -188,10 +205,10 @@ echo "];" >> "$INITRD"
 # store) -> /etc/certs/roots at boot, sealed (no process can change it).
 [ -f user/etc/certs/roots ] || { echo "user/etc/certs/roots missing (user/etc/certs/gen-roots.py)."; exit 1; }
 echo "pub static ETC_CERTS_ROOTS: &[u8] = include_bytes!(\"$ROOT/user/etc/certs/roots\");" >> "$INITRD"
-# desopkg (V082): /etc/desopkg/keys (the public keys an index must be signed with) and
+# desopkg: /etc/desopkg/keys (the public keys an index must be signed with) and
 # /etc/desopkg/repo (url, repo, channel, arch) -> /etc/desopkg at boot, sealed.  The self-test
 # image trusts only the test key (tests/pkg/test-key.pem – a test key, never for real packages);
-# a normal image the keys in user/etc/desopkg/keys (DecodeSoft's public key – V082 stage C; until
+# a normal image the keys in user/etc/desopkg/keys (DecodeSoft's public key – until
 # then empty, and desopkg refuses every index).
 # The self-test image also gets the test repository (tests/repo-stub.py at tls.deso:58480,
 # user/etc/desopkg/repo.test) and its CA as /etc/desopkg/ca (tests/tls/ca.pem) – desopkg built
@@ -220,7 +237,7 @@ if [ "$MODE" = "selftest" ]; then
   echo "pub static DESOFS_REF: &[u8] = include_bytes!(\"$ROOT/build/user/desofs-ref.img\");" >> "$INITRD"
   echo "#[allow(dead_code)]" >> "$INITRD"
   echo "pub static DESOFS_FMT: &[u8] = include_bytes!(\"$ROOT/build/user/desofs-fmt.img\");" >> "$INITRD"
-  # PKG FORMAT TEST (V082): tools/desopkg.py makes the vectors – packages, indexes, signatures
+  # PKG FORMAT TEST: tools/desopkg.py makes the vectors – packages, indexes, signatures
   # (the test key, through openssl), generations, every rule broken on its own – and judges each
   # one itself; /bin/pkgtest (user/lib/pkgfmt.rs) must judge them the same way.  --bin: the
   # programs just built, i.e. this image's /bin (the reserved names).

@@ -1,4 +1,4 @@
-// desopkg's dependency solver (V082 plan §6.1, V082-B plan §2) – pure code: the installed
+// desopkg's dependency solver – pure code: the installed
 // packages (the current generation), the accepted index and one request in; the new set of
 // packages (the plan) or a refusal out.  No syscalls – tests/pkg/pkgsolve-host.rs runs it on the
 // host.

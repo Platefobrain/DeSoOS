@@ -1,5 +1,4 @@
-// One HTTP(S) GET through netd – the client of /bin/netget, shared with /bin/desopkg (V082-B,
-// D-B1).  TCP through netd ("tcp host port"), the TLS 1.3 handshake with DeSoTLS for https,
+// One HTTP(S) GET through netd – the client of /bin/netget, shared with /bin/desopkg.  TCP through netd ("tcp host port"), the TLS 1.3 handshake with DeSoTLS for https,
 // one request ("Connection: close", "Accept-Encoding: identity"), the answer parsed by
 // user/lib/http.rs into a sink, the connection's end (docs/desotls/HANDSHAKE.md, "netget").
 // The behaviour, every message and every exit code are netget's (TLS TEST); the messages
@@ -341,7 +340,7 @@ pub fn fetch(u: &Url<'_>, o: &Options<'_>, sink: &mut dyn http::Sink) -> (i32, O
             }
         }
         // desopkg: the answer must announce exactly the size the signed index gives – a
-        // different Content-Length (or none) ends the connection at once (V082-B P2-2).
+        // different Content-Length (or none) ends the connection at once.
         if let (Some(want), Some(a)) = (o.expect_len, p.answer) {
             if (200..300).contains(&a.status) && a.framing != http::Framing::Length(want) {
                 match a.framing {

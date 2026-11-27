@@ -553,6 +553,31 @@ fn package_programs() -> Vec<String> {
 /// Where package programs live: such a path gets itself as argv[0].
 const PKG_ROOT: &str = "/disk/pkg/";
 
+/// Self-test image only (PKG TEST): every try to start a package
+/// program is logged in /tmp/sh-pause-log; while /tmp/sh-pause exists the first try waits
+/// (marked by /tmp/sh-paused) – the test runs an update and its gc in the meantime.
+#[cfg(selftest)]
+fn pause_before_package(path: &str, tries: u32) {
+    if !path.starts_with(PKG_ROOT) {
+        return;
+    }
+    let fd = deso::open("/tmp/sh-pause-log", O_WRITE | O_CREATE | O_APPEND);
+    if fd >= 0 {
+        let _ = deso::write(fd as u64, alloc::format!("try {} {}\n", tries, path).as_bytes());
+        deso::close(fd as u64);
+    }
+    if tries == 0 && deso::stat("/tmp/sh-pause").is_ok() {
+        let fd = deso::open("/tmp/sh-paused", O_WRITE | O_CREATE | O_TRUNC);
+        if fd >= 0 {
+            deso::close(fd as u64);
+        }
+        while deso::stat("/tmp/sh-pause").is_ok() {
+            deso::sleep_ms(20);
+        }
+        let _ = deso::unlink("/tmp/sh-paused");
+    }
+}
+
 fn edit_distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
@@ -892,6 +917,8 @@ impl Shell {
             if path.starts_with(PKG_ROOT) {
                 args[0] = path.as_str();
             }
+            #[cfg(selftest)]
+            pause_before_package(&path, tries);
             let pid = if svc.is_some() || dir.is_some() {
                 let mut map: Vec<(u64, u64)> = alloc::vec![(fin, 0), (fout, 1), (2, 2)];
                 if let Some(h) = svc {

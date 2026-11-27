@@ -1,5 +1,5 @@
 // pkgtest – desopkg's formats (user/lib/pkgfmt.rs) in user space; the kernel PKG FORMAT TEST
-// runs it (V082 stage A).
+// runs it.
 //
 //   pkgtest vectors <file>   the vectors tools/desopkg.py made (build.sh --selftest): every one
 //                            judged by pkgfmt.rs must get the verdict and reason the Python tool
@@ -10,7 +10,7 @@
 //   pkgtest elf              every program in /bin accepted by common/elf.rs `check_program` –
 //                            the rules desopkg checks a package's programs with are the kernel's
 //                            own: "pkgtest elf: N programs accepted, ABI 1.0"
-//   pkgtest b1-notime        PKG TEST (tests/pkg-test.sh, V082-B): without the time service's
+//   pkgtest b1-notime        PKG TEST (tests/pkg-test.sh): without the time service's
 //                            time desopkg refuses before connecting (repo-stub saw nothing)
 //   pkgtest b1:s1 … b1:s8    PKG TEST part 1 in 8 segments: desopkg against tests/repo-stub.py
 //                            through the real init – install, list / search / info, update,
@@ -20,6 +20,18 @@
 //                            init passes one argument).  Between segments the kernel runs
 //                            the shell (only the kernel can feed its keyboard input) and checks
 //                            what the installed programs print.
+//   pkgtest b2:k1 … b2:k7    PKG TEST part 2: desopkg killed at
+//                            every crash point K1–K10, the lock (a living holder, a dead one,
+//                            two new ones at once), a damaged newest index, generations that must
+//                            not count
+//   pkgtest b2:pa … b2:pd    with the kernel: the shell paused before exec while an
+//                            update and its gc remove the program (it looks again); a bad ELF in
+//                            a valid generation (no second try)
+//   pkgtest ph:N / pc:N      power losses: desopkg hangs at a crash point (the kernel then says
+//                            POWER OFF and tests/pkg-test.sh kills QEMU); after the next start
+//                            pc:N checks what the disk holds
+//   pkgtest m                the short sequence tests/pkg-test.sh --mutants runs against each
+//                            desopkg with one check switched off (every one must fail it)
 //
 // A failure prints "pkgtest: FAIL ..." and exits with 1.
 #![no_std]
@@ -43,6 +55,8 @@ mod cmdnames;
 mod pkgfmt;
 #[path = "../lib/pkgvec.rs"]
 mod pkgvec;
+#[path = "../lib/pkgstate.rs"]
+mod pkgstate;
 
 use alloc::format;
 use alloc::string::String;
@@ -207,14 +221,18 @@ fn main(args: deso::Args) -> i32 {
         [_, "elf"] => elf_all(),
         [_, "b1-notime"] => b1::notime(),
         [_, m] if m.starts_with("b1:") => b1::main(&m[3..]),
+        [_, m] if m.starts_with("b2:") => b1::b2_main(&m[3..]),
+        [_, m] if m.starts_with("pc:") => b1::power_check(&m[3..]),
+        [_, m] if m.starts_with("ph:") => b1::power_hang(&m[3..]),
+        [_, "m"] => b1::mutants(),
         _ => {
-            eprintln!("usage: pkgtest vectors <file> | etc | elf | b1-notime | b1:s1 .. b1:s8");
+            eprintln!("usage: pkgtest vectors <file> | etc | elf | b1-notime | b1:s1 .. b1:s8 | b2:<segment> | pc:<n> | ph:<n> | m");
             1
         }
     }
 }
 
-/// PKG TEST part 1 (V082-B plan §5, points 1–10 + P2-1, P2-2).
+/// PKG TEST part 1.
 mod b1 {
     use super::*;
     use alloc::string::ToString;
@@ -510,7 +528,7 @@ mod b1 {
                 let (code, out) = desopkg(&["verify"], "");
                 check!(code == 2 && out.contains("DAMAGED") && generation() == g - 1, "verify a damaged package file: {} {} (generation {})", code, short(&out), generation());
             }
-            // 7. Repaired; refused indexes and transfers (P2-2) change nothing; a good transfer.
+            // 7. Repaired; refused indexes and transfers change nothing; a good transfer.
             "s7" => {
                 let top = top_generation();
                 let (code, out) = desopkg(&["-y", "reinstall", "witaj"], "");
@@ -542,7 +560,7 @@ mod b1 {
                 let (code, out) = desopkg(&["-y", "install", "witaj=1.1.1"], "");
                 check!(code == 0 && out.contains("upgrade    witaj 1.1.0 -> 1.1.1"), "install witaj=1.1.1: {} {}", code, short(&out));
             }
-            // 8. No memory for a package (P2-1); a big package.
+            // 8. No memory for a package; a big package.
             "s8" => {
                 check!(put("/tmp/desopkg-nomem", b""), "nomem switch");
                 let g = generation();
@@ -560,7 +578,9 @@ mod b1 {
                 check!(code == 0 && out.contains("OK - 1 files"), "verify big: {} {}", code, short(&out));
                 let (code, out) = desopkg(&["-y", "remove", "big"], "");
                 check!(code == 0, "remove big: {} {}", code, short(&out));
-                return Ok(format!("generation {}, a 30 MiB package installed in {} ms", generation(), big_ms));
+                let g = generation();
+                println!("pkgtest result: generation={} big_ms={}", g, big_ms);
+                return Ok(format!("generation {}, a 30 MiB package installed in {} ms", g, big_ms));
             }
             _ => {
                 println!("pkgtest: FAIL unknown segment {}", seg);
@@ -578,6 +598,536 @@ mod b1 {
                 0
             }
             Err(()) => 1,
+        }
+    }
+    // ============================================================== part 2
+
+    const LOCK: &str = "/tmp/desopkg.lock";
+    const CRASH: &str = "/tmp/desopkg-crash";
+    const WITAJ: &str = "/disk/pkg/witaj";
+
+    fn crash(at: &str) -> bool {
+        put(CRASH, at.as_bytes())
+    }
+
+    fn no_crash() {
+        let _ = deso::unlink(CRASH);
+    }
+
+    fn locked() -> bool {
+        deso::stat(LOCK).is_ok()
+    }
+
+    fn sys_name(n: &str) -> bool {
+        super::system_name(n)
+    }
+
+    /// The current generation straight from the disk (no desopkg, no lock).
+    fn gen_now() -> u64 {
+        pkgstate::generations(&sys_name).current.map(|c| c.number).unwrap_or(0)
+    }
+
+    /// The installed version of a package in the current generation ("" – none).
+    fn version_of(pkg: &str) -> String {
+        pkgstate::generations(&sys_name).current.and_then(|c| c.generation.packages.iter().find(|p| p.name == pkg).map(|p| p.version.to_string())).unwrap_or_default()
+    }
+
+    /// The version directory of a package in the current generation.
+    fn dir_of(pkg: &str) -> String {
+        pkgstate::generations(&sys_name).current.and_then(|c| c.generation.packages.iter().find(|p| p.name == pkg).map(|p| pkgstate::version_dir(&p.name, &p.dir))).unwrap_or_default()
+    }
+
+    fn keys() -> Vec<pkgfmt::Key> {
+        read_file("/etc/desopkg/keys").ok().and_then(|b| pkgfmt::parse_keys(&b).ok()).unwrap_or_default()
+    }
+
+    /// The serial of the accepted index in force (0 – none).
+    fn accepted_serial() -> u64 {
+        pkgstate::accepted(&keys()).0.first().map(|a| a.serial).unwrap_or(0)
+    }
+
+    /// desopkg stopped at `point` as if killed: exit 99, the lock left behind.
+    fn killed_at(point: &str, args: &[&str]) -> Result<(), ()> {
+        check!(crash(point), "write {}", CRASH);
+        let (code, out) = desopkg(args, "");
+        no_crash();
+        check!(code == 99, "{}: desopkg {:?} was not stopped there: {} {}", point, args, code, short(&out));
+        check!(locked(), "{}: the killed desopkg's lock must stay", point);
+        Ok(())
+    }
+
+    /// A program in the background: stdout and stderr into /tmp/pt-out-<tag> / /tmp/pt-err-<tag>.
+    fn start(args: &[&str], tag: &str) -> i64 {
+        let (o, e) = (format!("/tmp/pt-out-{}", tag), format!("/tmp/pt-err-{}", tag));
+        if !put(IN, b"") || !put(&o, b"") || !put(&e, b"") {
+            return -1;
+        }
+        let fin = deso::open(IN, deso::O_READ);
+        let fout = deso::open(&o, O_WRITE);
+        let ferr = deso::open(&e, O_WRITE);
+        if fin < 0 || fout < 0 || ferr < 0 {
+            return -1;
+        }
+        let mut a = vec!["desopkg"];
+        a.extend_from_slice(args);
+        let pid = spawn_ex("/bin/desopkg", &a, &[(fin as u64, 0), (fout as u64, 1), (ferr as u64, 2), (SVC, SVC)], 0);
+        close(fin as u64);
+        close(fout as u64);
+        close(ferr as u64);
+        pid
+    }
+
+    fn err_of(tag: &str) -> String {
+        read_file(&format!("/tmp/pt-err-{}", tag)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+    }
+
+    /// Waits until the background desopkg `tag` says "HANG <point>".
+    fn hung(tag: &str, point: &str, ms: u64) -> bool {
+        let want = format!("desopkg: HANG {}", point);
+        let t = uptime_ms();
+        while uptime_ms() - t < ms {
+            if err_of(tag).contains(&want) {
+                return true;
+            }
+            sleep_ms(50);
+        }
+        false
+    }
+
+    fn sweep_by_refresh(what: &str) -> Result<(), ()> {
+        let (code, out) = desopkg(&["refresh"], "");
+        check!(code == 0, "{}: refresh (which sweeps first): {} {}", what, code, short(&out));
+        Ok(())
+    }
+
+    /// A generation file written by hand (the rules of what counts, not desopkg's writing).
+    fn put_generation(n: u64, bytes: &[u8]) -> Result<(), ()> {
+        let path = format!("{}/{}", pkgstate::GEN_DIR, n);
+        let _ = deso::unlink(&path);
+        check!(put(&path, bytes), "write {}", path);
+        Ok(())
+    }
+
+    /// Generation `n` with its packages, then "op=update" changed to "op=remove" after the hash
+    /// was made: every line valid, only the hash wrong (empty – no op line found).
+    fn wrong_hash(packages: &[pkgfmt::GenEntry], n: u64) -> Vec<u8> {
+        let mut b = pkgfmt::make_generation(n, "update", packages);
+        match b.windows(10).position(|x| x == b"op=update\n") {
+            Some(at) => {
+                b[at + 3..at + 9].copy_from_slice(b"remove");
+                b
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn b2_segment(seg: &str) -> Result<String, ()> {
+        net_ready()?;
+        let inst = |v: &str| -> String { format!("witaj={}", v) };
+        match seg {
+            // 11. The crash points of refresh (K2 before the index file, K2h in the middle of it,
+            //     K3 after it) and K1 (right after taking the lock).
+            "k1" => {
+                scenario("s50")?;
+                let a0 = accepted_serial();
+                killed_at("K2", &["refresh"])?;
+                check!(accepted_serial() == a0 && deso::stat("/disk/pkg/index/50").is_err(), "K2: nothing may change (accepted {}, before {})", accepted_serial(), a0);
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 50 accepted") && !locked(), "after K2 the next refresh takes the dead one's lock: {} {}", code, short(&out));
+                scenario("s51")?;
+                killed_at("K2h", &["refresh"])?;
+                check!(deso::stat("/disk/pkg/index/51").is_ok() && accepted_serial() == 50, "K2h: a half-written index/51 must not count (accepted {})", accepted_serial());
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 51 accepted"), "after K2h: {} {}", code, short(&out));
+                scenario("s52")?;
+                killed_at("K3", &["refresh"])?;
+                check!(accepted_serial() == 52, "K3: the whole index/52 is valid by its signature and counts (accepted {})", accepted_serial());
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains("index serial 52 is up to date"), "after K3: {} {}", code, short(&out));
+                let g = gen_now();
+                killed_at("K1", &["-y", "install", &inst("1.1.0")])?;
+                check!(gen_now() == g, "K1 changed the generation");
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 0 && !locked(), "list after K1 (the dead one's lock taken over): {} {}", code, short(&out));
+            }
+            // 11. The crash points of a change before its generation: nothing changes in force,
+            //     the next command sweeps what was left.
+            "k2" => {
+                let g = gen_now();
+                let top = top_generation();
+                let before = entries(WITAJ);
+                let d0 = before.len();
+                for point in ["K4", "K5"] {
+                    killed_at(point, &["-y", "install", &inst("1.1.0")])?;
+                    check!(gen_now() == g && top_generation() == top && files_in(WITAJ) == d0, "{} changed the disk (generation {} top {} dirs {})", point, gen_now(), top_generation(), files_in(WITAJ));
+                }
+                killed_at("K6", &["-y", "install", &inst("1.1.0")])?;
+                let new: Vec<String> = entries(WITAJ).into_iter().filter(|d| !before.contains(d)).collect();
+                check!(gen_now() == g && top_generation() == top && new.len() == 1, "K6: generation {} top {} new dirs {:?}", gen_now(), top_generation(), new);
+                check!(deso::stat(&format!("{}/{}/package", WITAJ, new[0])).is_err(), "K6: the unfinished directory has no package file");
+                sweep_by_refresh("after K6")?;
+                check!(files_in(WITAJ) == d0, "after K6 gc left {} dirs (want {})", files_in(WITAJ), d0);
+                killed_at("K7", &["-y", "install", &inst("1.1.0")])?;
+                let new: Vec<String> = entries(WITAJ).into_iter().filter(|d| !before.contains(d)).collect();
+                check!(gen_now() == g && top_generation() == top && new.len() == 1 && deso::stat(&format!("{}/{}/package", WITAJ, new[0])).is_ok(), "K7: a complete directory no generation points to: generation {} top {} new {:?}", gen_now(), top_generation(), new);
+                sweep_by_refresh("after K7")?;
+                check!(files_in(WITAJ) == d0, "after K7 gc left {} dirs (want {})", files_in(WITAJ), d0);
+                killed_at("K7h", &["-y", "install", &inst("1.1.0")])?;
+                check!(gen_now() == g && top_generation() == top + 1 && files_in(WITAJ) == d0 + 1, "K7h: a half-written gen/{} must not count: generation {} top {} dirs {}", top + 1, gen_now(), top_generation(), files_in(WITAJ));
+                sweep_by_refresh("after K7h")?;
+                check!(files_in(WITAJ) == d0 && top_generation() == top + 1, "after K7h: dirs {} top {} (the highest file stays until a newer one)", files_in(WITAJ), top_generation());
+                let (code, out) = desopkg(&["-y", "install", &inst("1.1.0")], "");
+                check!(code == 0 && out.contains(&format!("generation {} is now current", top + 2)) && deso::stat(&format!("{}/{}", pkgstate::GEN_DIR, top + 1)).is_err(), "install after K7h: {} {}", code, short(&out));
+            }
+            // 11. K8 – after the generation, before gc: the new one is in force whole.
+            "k3" => {
+                let g = gen_now();
+                killed_at("K8", &["-y", "install", &inst("1.0.1")])?;
+                check!(gen_now() > g && gen_now() == top_generation() && version_of("witaj") == "1.0.1", "K8: generation {} (before {}), witaj {}", gen_now(), g, version_of("witaj"));
+                sweep_by_refresh("after K8")?;
+                check!(files_in(WITAJ) <= 2, "after K8 gc left {} witaj dirs", files_in(WITAJ));
+            }
+            // 11. K9 – inside gc, after the generation files, before the directories.
+            "k4" => {
+                let g = gen_now();
+                let d0 = files_in(WITAJ);
+                killed_at("K9", &["-y", "install", &inst("1.1.1")])?;
+                check!(gen_now() > g && version_of("witaj") == "1.1.1" && files_in(pkgstate::GEN_DIR) == 2 && files_in(WITAJ) == d0 + 1, "K9: generation {} witaj {} gen files {} dirs {} (before {})", gen_now(), version_of("witaj"), files_in(pkgstate::GEN_DIR), files_in(WITAJ), d0);
+                sweep_by_refresh("after K9")?;
+                check!(files_in(WITAJ) == 2, "after K9 gc left {} witaj dirs", files_in(WITAJ));
+            }
+            // 11. K10 – everything done, the lock not given back.
+            "k5" => {
+                let g = gen_now();
+                killed_at("K10", &["-y", "install", &inst("1.1.0")])?;
+                check!(gen_now() > g && version_of("witaj") == "1.1.0", "K10: generation {} witaj {}", gen_now(), version_of("witaj"));
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 0 && !locked(), "list after K10: {} {}", code, short(&out));
+            }
+            // 13. The lock.
+            "k6" => {
+                // A living holder (stopped at K5): another desopkg refuses with code 4.
+                check!(crash("K5:hang"), "write {}", CRASH);
+                let pid = start(&["-y", "install", &inst("1.0.1")], "h");
+                check!(pid > 0, "start the holder: {}", deso::strerror(pid));
+                let got = hung("h", "K5", 120_000);
+                no_crash();
+                check!(got, "the holder never reached K5: {}", short(&err_of("h")));
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 4 && out.contains("another desopkg is running") && locked(), "a second desopkg beside a living one: {} {}", code, short(&out));
+                check!(deso::kill(pid as u64) >= 0, "kill the holder");
+                let _ = wait(pid as u64, 0);
+                check!(locked(), "the killed holder's lock stays");
+                let (code, out) = desopkg(&["list"], "");
+                check!(code == 0 && !locked(), "the dead holder's lock taken over: {} {}", code, short(&out));
+                // Two new ones at once beside a stale lock: never both inside (the one inside
+                // stops at K1); the other refuses and does not remove the lock.
+                let mut both_refused = 0;
+                for round in 0..3 {
+                    let r = deso::mkdir(LOCK);
+                    check!(r >= 0, "make a stale lock: {}", deso::strerror(r));
+                    check!(crash("K1:hang"), "write {}", CRASH);
+                    let a = start(&["list"], "a");
+                    let b = start(&["list"], "b");
+                    check!(a > 0 && b > 0, "start two");
+                    let mut code = [None, None];
+                    let t = uptime_ms();
+                    while uptime_ms() - t < 20_000 {
+                        for (i, pid) in [a, b].iter().enumerate() {
+                            if code[i].is_none() {
+                                if let Ok((p, c)) = wait(*pid as u64, deso::WNOHANG) {
+                                    if p != 0 {
+                                        code[i] = Some(c);
+                                    }
+                                }
+                            }
+                        }
+                        let inside = [err_of("a").contains("HANG K1"), err_of("b").contains("HANG K1")];
+                        let done = (0..2).all(|i| code[i].is_some() || inside[i]);
+                        if done && uptime_ms() - t > 2_000 {
+                            break;
+                        }
+                        sleep_ms(50);
+                    }
+                    no_crash();
+                    let inside = [err_of("a").contains("HANG K1"), err_of("b").contains("HANG K1")];
+                    check!(!(inside[0] && inside[1]), "round {}: both new desopkg took the lock", round);
+                    for i in 0..2 {
+                        check!(inside[i] || code[i] == Some(4), "round {}: desopkg {} neither inside nor refused (code {:?}: {})", round, i, code[i], short(&err_of(if i == 0 { "a" } else { "b" })));
+                    }
+                    check!(locked(), "round {}: the lock was removed", round);
+                    for (i, pid) in [a, b].iter().enumerate() {
+                        if inside[i] {
+                            let _ = deso::kill(*pid as u64);
+                            let _ = wait(*pid as u64, 0);
+                        }
+                    }
+                    if !inside[0] && !inside[1] {
+                        both_refused += 1;
+                    }
+                    let (code, out) = desopkg(&["list"], "");
+                    check!(code == 0 && !locked(), "round {}: the stale lock taken over afterwards: {} {}", round, code, short(&out));
+                }
+                return Ok(format!("generation {}, two at once: {} of 3 rounds both refused", generation(), both_refused));
+            }
+            // 15. A damaged newest index: the previous valid one; generations that must not count.
+            "k7" => {
+                let k = keys();
+                let good: Vec<u64> = pkgstate::accepted(&k).0.iter().map(|a| a.serial).collect();
+                check!(good.len() == 2, "two accepted indexes expected: {:?}", good);
+                let newest = format!("{}/{}", pkgstate::INDEX_DIR, good[0]);
+                let mut b = read_file(&newest).unwrap_or_default();
+                b.push(b'x');
+                check!(put(&newest, &b), "damage {}", newest);
+                check!(accepted_serial() == good[1], "a damaged index/{} must give way to index/{} (got {})", good[0], good[1], accepted_serial());
+                let (code, out) = desopkg(&["info", "witaj"], "");
+                check!(code == 0 && out.contains("available"), "info with the previous index: {} {}", code, short(&out));
+                scenario(&format!("s{}", good[0]))?;
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 0 && out.contains(&format!("index serial {} accepted", good[0])), "refresh replaces the damaged file: {} {}", code, short(&out));
+                let cur = pkgstate::generations(&sys_name).current;
+                check!(cur.is_some(), "no current generation");
+                let cur = cur.unwrap();
+                let m = cur.number;
+                let raw = read_file(&format!("{}/{}", pkgstate::GEN_DIR, m)).unwrap_or_default();
+                let w = cur.generation.packages.iter().position(|p| p.name == "witaj");
+                check!(w.is_some(), "witaj not in generation {}", m);
+                let w = w.unwrap();
+                // a. a copy: `generation=` is not its name
+                put_generation(m + 1, &raw)?;
+                check!(gen_now() == m, "a copy of gen/{} as gen/{} must not count", m, m + 1);
+                // b. another version
+                let mut e = cur.generation.packages.clone();
+                e[w].version = pkgfmt::Version::parse("1.0.0").unwrap();
+                put_generation(m + 1, &pkgfmt::make_generation(m + 1, "install", &e))?;
+                check!(gen_now() == m, "a generation with another version of witaj must not count");
+                // c. a program the manifest does not have
+                let mut e = cur.generation.packages.clone();
+                e[w].programs.push(String::from("inny"));
+                put_generation(m + 1, &pkgfmt::make_generation(m + 1, "install", &e))?;
+                check!(gen_now() == m, "a generation with a program outside the manifest must not count");
+                // d. a byte under the hash changed (a valid op, so only the hash is wrong)
+                let bytes = wrong_hash(&cur.generation.packages, m + 1);
+                check!(!bytes.is_empty(), "no op= line");
+                put_generation(m + 1, &bytes)?;
+                check!(gen_now() == m, "a generation with a changed byte (its hash) must not count");
+                // e. the same, unchanged: counts (the refusals above are the rules')
+                put_generation(m + 1, &pkgfmt::make_generation(m + 1, "install", &cur.generation.packages))?;
+                check!(gen_now() == m + 1, "a valid generation written by hand must count (got {})", gen_now());
+            }
+            // 14. The shell paused before exec (kernel/user/test_pkgb.rs drives it).
+            "pa" => {
+                check!(version_of("witaj") == "1.1.0", "witaj 1.1.0 expected, got {:?}", version_of("witaj"));
+                let d = dir_of("witaj");
+                check!(put("/disk/pt-pause", d.as_bytes()), "write /disk/pt-pause");
+                let _ = deso::unlink("/tmp/sh-pause-log");
+                let _ = deso::unlink("/tmp/sh-paused");
+                check!(put("/tmp/sh-pause", b""), "write /tmp/sh-pause");
+                return Ok(format!("the shell will pause before {}", d));
+            }
+            "pb" => {
+                let old = read_file("/disk/pt-pause").map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+                for v in ["1.0.1", "1.1.1"] {
+                    let (code, out) = desopkg(&["-y", "install", &inst(v)], "");
+                    check!(code == 0, "install witaj={} while the shell waits: {} {}", v, code, short(&out));
+                }
+                check!(!old.is_empty() && deso::stat(&old).is_err(), "gc must have removed {}", old);
+                let _ = deso::unlink("/tmp/sh-pause");
+                return Ok(format!("{} removed by gc, witaj {}", old, version_of("witaj")));
+            }
+            // A bad ELF in a valid generation: the shell reports it at once.
+            "pc" => {
+                let g = gen_now();
+                let prog = format!("{}/bin/witaj", dir_of("witaj"));
+                let _ = deso::unlink(&prog);
+                check!(put(&prog, b"not an ELF program\n"), "overwrite {}", prog);
+                let _ = deso::unlink("/tmp/sh-pause-log");
+                let (code, out) = desopkg(&["verify", "witaj"], "");
+                check!(code == 2 && out.contains("MODIFIED") && gen_now() == g, "verify the bad program: {} {}", code, short(&out));
+                return Ok(format!("{} is not an ELF, generation {} still valid", prog, g));
+            }
+            "pd" => {
+                let (code, out) = desopkg(&["-y", "reinstall", "witaj"], "");
+                let (code2, out2) = desopkg(&["verify"], "");
+                check!(code == 0 && code2 == 0, "reinstall repairs the program: {} {} {} {}", code, code2, short(&out), short(&out2));
+                let _ = deso::unlink("/disk/pt-pause");
+            }
+            _ => {
+                println!("pkgtest: FAIL unknown segment b2:{}", seg);
+                return Err(());
+            }
+        }
+        Ok(format!("generation {}, witaj {}", generation(), version_of("witaj")))
+    }
+
+    pub fn b2_main(seg: &str) -> i32 {
+        let t0 = uptime_ms();
+        match b2_segment(seg) {
+            Ok(summary) => {
+                println!("pkgtest b2 {}: {} checks OK ({}, {} ms)", seg, unsafe { CHECKS }, summary, uptime_ms() - t0);
+                0
+            }
+            Err(()) => {
+                no_crash();
+                1
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 12. power loss
+
+    const POWER: &str = "/disk/pt-power";
+
+    /// Numbers kept on /disk across a power loss: generation, top generation file, witaj dirs.
+    fn save_power(at: &str) -> Result<(), ()> {
+        let s = format!("{} {} {} {}", at, gen_now(), top_generation(), files_in(WITAJ));
+        let _ = deso::unlink(POWER);
+        check!(put(POWER, s.as_bytes()), "write {}", POWER);
+        Ok(())
+    }
+
+    fn load_power() -> (String, u64, u64, usize) {
+        let s = read_file(POWER).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let w: Vec<&str> = s.split_whitespace().collect();
+        let n = |i: usize| w.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+        (String::from(w.first().copied().unwrap_or("")), n(1), n(2), n(3) as usize)
+    }
+
+    /// ph:N – desopkg stopped at the N-th power-loss point (hangs there; the kernel then says
+    /// POWER OFF and tests/pkg-test.sh kills QEMU).
+    pub fn power_hang(n: &str) -> i32 {
+        let r = (|| -> Result<String, ()> {
+            net_ready()?;
+            let (point, args): (&str, Vec<&str>) = match n {
+                "1" => {
+                    scenario("s53")?;
+                    ("K2h", vec!["refresh"])
+                }
+                "2" => ("K6", vec!["-y", "install", "witaj=1.1.0"]),
+                "3" => ("K7h", vec!["-y", "install", "witaj=1.1.0"]),
+                "4" => ("K9", vec!["-y", "install", "witaj=1.1.0"]),
+                _ => {
+                    println!("pkgtest: FAIL unknown power step {}", n);
+                    return Err(());
+                }
+            };
+            save_power(point)?;
+            check!(crash(&format!("{}:hang", point)), "write {}", CRASH);
+            let pid = start(&args, "p");
+            check!(pid > 0, "start desopkg: {}", deso::strerror(pid));
+            check!(hung("p", point, 300_000), "desopkg never reached {}: {}", point, short(&err_of("p")));
+            Ok(String::from(point))
+        })();
+        match r {
+            Ok(point) => {
+                println!("pkgtest ph {}: HANG {}", n, point);
+                0
+            }
+            Err(()) => 1,
+        }
+    }
+
+    /// pc:N – after the start that followed the power loss at step N−1: what the disk holds.
+    /// Prints "shell: <text>" – what `witaj` must print now (the kernel runs the shell).
+    pub fn power_check(n: &str) -> i32 {
+        let r = (|| -> Result<String, ()> {
+            net_ready()?;
+            check!(!locked() && deso::stat(CRASH).is_err(), "a fresh /tmp expected after the start");
+            let (point, g, top, d0) = load_power();
+            match (n, point.as_str()) {
+                ("2", "K2h") => {
+                    check!(deso::stat("/disk/pkg/index/53").is_ok() && accepted_serial() == 52, "power loss at K2h: a half-written index/53 must not count (accepted {})", accepted_serial());
+                    let (code, out) = desopkg(&["refresh"], "");
+                    check!(code == 0 && out.contains("index serial 53 accepted"), "refresh after the power loss: {} {}", code, short(&out));
+                    Ok(String::from("witaj 1.1.1 "))
+                }
+                ("3", "K6") => {
+                    check!(gen_now() == g && top_generation() == top && files_in(WITAJ) == d0 + 1, "power loss at K6: generation {} (was {}), top {} (was {}), dirs {} (was {})", gen_now(), g, top_generation(), top, files_in(WITAJ), d0);
+                    sweep_by_refresh("after the power loss at K6")?;
+                    check!(files_in(WITAJ) == d0, "after K6 gc left {} dirs (want {})", files_in(WITAJ), d0);
+                    Ok(String::from("witaj 1.1.1 "))
+                }
+                ("4", "K7h") => {
+                    check!(gen_now() == g && top_generation() == top + 1 && files_in(WITAJ) == d0 + 1, "power loss at K7h: generation {} (was {}), top {} (was {}), dirs {} (was {})", gen_now(), g, top_generation(), top, files_in(WITAJ), d0);
+                    sweep_by_refresh("after the power loss at K7h")?;
+                    check!(files_in(WITAJ) == d0, "after K7h gc left {} dirs (want {})", files_in(WITAJ), d0);
+                    Ok(String::from("witaj 1.1.1 "))
+                }
+                ("5", "K9") => {
+                    check!(gen_now() > g && gen_now() == top_generation() && version_of("witaj") == "1.1.0" && files_in(pkgstate::GEN_DIR) == 2, "power loss at K9: generation {} (was {}), top {}, witaj {}, gen files {}", gen_now(), g, top_generation(), version_of("witaj"), files_in(pkgstate::GEN_DIR));
+                    sweep_by_refresh("after the power loss at K9")?;
+                    let (code, out) = desopkg(&["verify"], "");
+                    check!(code == 0 && files_in(WITAJ) == 2, "verify after the power losses: {} {} (witaj dirs {})", code, short(&out), files_in(WITAJ));
+                    let _ = deso::unlink(POWER);
+                    Ok(String::from("witaj 1.1.0 "))
+                }
+                _ => {
+                    println!("pkgtest: FAIL power check {}: the disk says the last step was {:?}", n, point);
+                    Err(())
+                }
+            }
+        })();
+        match r {
+            Ok(want) => {
+                println!("pkgtest pc {}: {} checks OK (shell: {})", n, unsafe { CHECKS }, want);
+                0
+            }
+            Err(()) => 1,
+        }
+    }
+
+    // ------------------------------------------------------------ 16. the mutants' sequence
+
+    /// What tests/pkg-test.sh --mutants runs on a fresh volume: each check one mutant switches
+    /// off (signature, serial, expires, paths, "directories before the generation", the
+    /// generation's hash) is met once – a normal desopkg passes, every mutant fails.
+    pub fn mutants() -> i32 {
+        let t0 = uptime_ms();
+        let r = (|| -> Result<(), ()> {
+            net_ready()?;
+            scenario("v100")?;
+            let (code, out) = desopkg(&["refresh"], "");
+            check!(code == 0 && out.contains("index serial 10 accepted"), "refresh v100: {} {}", code, short(&out));
+            let (code, out) = desopkg(&["-y", "install", "witaj"], "");
+            check!(code == 0 && out.contains("generation 1 is now current"), "install witaj: {} {}", code, short(&out));
+            for (sc, why) in [("old", "older than the accepted"), ("expired", "expired"), ("badsig", "signature")] {
+                scenario(sc)?;
+                let (code, out) = desopkg(&["refresh"], "");
+                check!(code == 2 && out.contains(why), "[mutant {}] refresh {}: {} {}", if sc == "old" { "serial" } else if sc == "expired" { "expires" } else { "sig" }, sc, code, short(&out));
+            }
+            scenario("evil")?;
+            let (code, out) = desopkg(&["refresh"], "");
+            check!(code == 0 && out.contains("index serial 21 accepted"), "refresh evil: {} {}", code, short(&out));
+            let (code, out) = desopkg(&["-y", "install", "zly"], "");
+            check!(code == 2 && out.contains("bad_path") && deso::stat("/disk/pkg/zly").is_err(), "[mutant paths] install zly: {} {}", code, short(&out));
+            let g = gen_now();
+            let top = top_generation();
+            killed_at("K6", &["-y", "install", "witaj=1.1.1"])?;
+            check!(gen_now() == g && top_generation() == top, "[mutant order] a crash at K6 left a generation file (top {} was {})", top_generation(), top);
+            sweep_by_refresh("after K6")?;
+            let cur = pkgstate::generations(&sys_name).current;
+            check!(cur.is_some(), "no current generation");
+            let cur = cur.unwrap();
+            let m = cur.number;
+            let bytes = wrong_hash(&cur.generation.packages, m + 1);
+            check!(!bytes.is_empty(), "no op= line");
+            put_generation(m + 1, &bytes)?;
+            let (code, out) = desopkg(&["list"], "");
+            check!(code == 0 && out.contains(&format!("generation {}", m)) && !out.contains(&format!("generation {}", m + 1)), "[mutant hash] a generation with a wrong hash counted: {} {}", code, short(&out));
+            put_generation(m + 1, &pkgfmt::make_generation(m + 1, "install", &cur.generation.packages))?;
+            let (code, out) = desopkg(&["list"], "");
+            check!(code == 0 && out.contains(&format!("generation {}", m + 1)), "a valid generation written by hand must count: {} {}", code, short(&out));
+            Ok(())
+        })();
+        match r {
+            Ok(()) => {
+                println!("pkgtest m: {} checks OK ({} ms)", unsafe { CHECKS }, uptime_ms() - t0);
+                0
+            }
+            Err(()) => {
+                no_crash();
+                1
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-// desopkg's state on the disk (V082 plan §2, §5, §6.2; V082-B plan §2) – shared by /bin/desopkg
+// desopkg's state on the disk (docs/pkg/README.md) – shared by /bin/desopkg
 // and /bin/sh, so both pick the same current generation.
 //
 //   /disk/pkg/<package>/<version>-<16 hex>/bin/<program>, share/…, package   (package = last)
@@ -6,7 +6,7 @@
 //                                superblock) – an unfinished or damaged file does not count
 //   /disk/pkg/index/<serial>     accepted indexes: the highest valid one is in force
 //
-// Validation is pkgfmt.rs (stage A): `parse_generation` + every package's `package` file
+// Validation is pkgfmt.rs: `parse_generation` + every package's `package` file
 // (`check_generation_package`); `check_accepted` for an index.  Nothing here asks the user or
 // the network.  The crate root declares `desocrypto`, `elf`, `pkgfmt` and links libdeso.
 
@@ -23,7 +23,7 @@ use libdeso::{ERROR_BUFFER_TOO_SMALL, O_CREATE, O_READ, O_TRUNC, O_WRITE};
 pub const ROOT: &str = "/disk/pkg";
 pub const GEN_DIR: &str = "/disk/pkg/gen";
 pub const INDEX_DIR: &str = "/disk/pkg/index";
-/// V082 plan §2 had a download cache here; V082-B (D-B2) downloads into memory – `gc` removes
+/// An older design had a download cache here; packages are now downloaded into memory – `gc` removes
 /// the directory if an older desopkg left one.
 pub const CACHE_DIR: &str = "/disk/pkg/cache";
 
@@ -145,7 +145,7 @@ impl Current {
     }
 }
 
-/// Generation `n` in full (§5): the file's grammar and hash, then every package's `package`
+/// Generation `n` in full (FORMAT.md §5): the file's grammar and hash, then every package's `package`
 /// file in its directory.
 pub fn load_generation(n: u64, system_name: &dyn Fn(&str) -> bool) -> Result<Current, Reason> {
     let raw = read_file(&format!("{}/{}", GEN_DIR, n), pkgfmt::MAX_GENERATION).map_err(|_| "unreadable")?;
@@ -250,10 +250,12 @@ pub struct Swept {
     pub errors: usize,
 }
 
-/// §6.2: keeps the current generation and the previous valid one with the directories they
+/// Keeps the current generation and the previous valid one with the directories they
 /// point to, and the two newest valid indexes; removes everything else under /disk/pkg.  Every
-/// step stands alone – an interrupted `gc` is finished by the next one.
-pub fn gc(current: Option<&Current>, previous: Option<u64>, keep_index: &[u64], system_name: &dyn Fn(&str) -> bool) -> Swept {
+/// step stands alone – an interrupted `gc` is finished by the next one.  `between` runs after
+/// the generation files are removed and before the directories (desopkg's crash point K9 in
+/// the self-test image: an interrupted gc).
+pub fn gc(current: Option<&Current>, previous: Option<u64>, keep_index: &[u64], system_name: &dyn Fn(&str) -> bool, between: &dyn Fn()) -> Swept {
     let mut sw = Swept::default();
     let mut keep_gen: Vec<u64> = current.map(|c| c.number).into_iter().chain(previous).collect();
     // The highest generation file stays even when it is not valid (an unfinished write, a
@@ -283,6 +285,7 @@ pub fn gc(current: Option<&Current>, previous: Option<u64>, keep_index: &[u64], 
     for name in other {
         sw.errors += remove_tree(&format!("{}/{}", GEN_DIR, name));
     }
+    between();
     // 2. indexes
     let (nums, other) = numbered(INDEX_DIR);
     for s in nums.iter().filter(|s| !keep_index.contains(s)) {

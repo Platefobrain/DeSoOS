@@ -1,4 +1,4 @@
-// desopkg – programs from the internet (V082 plan ver 4.6, V082-B plan; formats: docs/pkg/FORMAT.md).
+// desopkg – programs from the internet (docs/pkg/README.md; formats: docs/pkg/FORMAT.md).
 //
 //   desopkg refresh                      fetch and check the signed index
 //   desopkg [-y] install <name>[=<ver>]… install (a lower version than installed: a downgrade)
@@ -10,7 +10,7 @@
 //   desopkg info <name>                  one package: installed, available, dependencies, size
 //   desopkg verify [<name>]              every installed file against its manifest
 //
-// How a change is made (V082 plan §5): the new package directories are built next to the old
+// How a change is made: the new package directories are built next to the old
 // ones, then one new generation file `gen/<m>` names the new set – the highest valid generation
 // is the current one (like the DeSoFS superblock).  A crash anywhere leaves the old or the new
 // generation whole; `gc` removes what nothing points to, also after a crash.
@@ -103,7 +103,7 @@ fn system_name(n: &str) -> bool {
 
 // ------------------------------------------------------------------ crash points (self-test)
 
-/// V082-B §3 / D-B4: in the self-test image only – /tmp/desopkg-crash names a point: "K5" ends
+/// In the self-test image only – /tmp/desopkg-crash names a point: "K5" ends
 /// the process at once (as killed: nothing after it runs, the lock stays), "K5:hang" prints
 /// "desopkg: HANG K5" and waits for ever (tests/pkg-test.sh then kills QEMU – a power loss).
 #[cfg(selftest)]
@@ -144,7 +144,7 @@ fn trace(what: &str) {
 #[cfg(not(selftest))]
 fn trace(_: &str) {}
 
-/// V082-B P2-1: in the self-test image only – /tmp/desopkg-nomem makes the package buffer's
+/// In the self-test image only – /tmp/desopkg-nomem makes the package buffer's
 /// allocation fail.
 #[cfg(selftest)]
 fn force_nomem() -> bool {
@@ -156,7 +156,7 @@ fn force_nomem() -> bool {
     false
 }
 
-// ------------------------------------------------------------------ the lock (§6.3)
+// ------------------------------------------------------------------ the lock
 
 /// Other living desopkg processes (SYS_TASKS).
 fn other_desopkg() -> bool {
@@ -238,7 +238,7 @@ fn repo() -> Res<RepoConfig> {
     pkgfmt::parse_repo_config(&b).map_err(|r| Fail(EXIT_REFUSED, format!("{} refused: {}", REPO, r)))
 }
 
-/// The time desopkg trusts (V082 plan §4 step 1): a plausible clock set by the time service
+/// The time desopkg trusts: a plausible clock set by the time service
 /// (NTS) in this boot; the self-test image also takes the self-test time (source 3).
 fn trusted_now() -> Res<u64> {
     let c = deso::time_unix().map_err(|e| Fail(EXIT_NET, format!("no clock: {} - nothing sent", deso::strerror(e))))?;
@@ -285,7 +285,7 @@ fn with_anchors<R>(f: impl FnOnce(&dyn Anchors) -> Res<R>) -> Res<R> {
 // ------------------------------------------------------------------ downloads
 
 /// The body into memory: never more than `max` bytes (the connection is ended at once when the
-/// answer goes past it – V082-B P2-2), the buffer reserved up front.
+/// answer goes past it), the buffer reserved up front.
 struct Mem {
     buf: Vec<u8>,
     max: usize,
@@ -360,7 +360,7 @@ fn base_url(r: &RepoConfig) -> String {
     format!("{}{}/{}/", r.url, r.channel, r.arch)
 }
 
-// ------------------------------------------------------------------ refresh (§4)
+// ------------------------------------------------------------------ refresh
 
 /// The accepted index in force (highest valid), if any.
 fn accepted_now(keys: &[Key]) -> Option<pkgstate::Accepted> {
@@ -386,7 +386,7 @@ fn refresh(keys: &[Key], cfg: &RepoConfig, verbose: bool) -> Res<u64> {
     })?;
     let (good, _) = pkgstate::accepted(keys);
     if let Some(cur) = good.first() {
-        if idx.serial < cur.serial {
+        if idx.serial < cur.serial && !cfg!(pkg_mutant = "serial") {
             return fail(EXIT_REFUSED, format!("index refused: serial {} is older than the accepted {} (an old index)", idx.serial, cur.serial));
         }
         if idx.serial == cur.serial {
@@ -449,7 +449,7 @@ fn write_file_new(path: &str, data: &[u8], half_point: &str) -> Res<()> {
     r.map_err(|e| Fail(EXIT_DISK, format!("{}: {}", path, deso::strerror(e))))
 }
 
-/// The index `install` uses (§4 table): none or expired – refresh first; a damaged newest file –
+/// The index `install` uses: none or expired – refresh first; a damaged newest file –
 /// the previous valid one (`accepted` skips it); refresh needed but impossible – refused.
 fn index_for_change(keys: &[Key], cfg: &RepoConfig, always_refresh: bool) -> Res<Index> {
     let now_ok = deso::time_unix().ok().filter(|c| c.plausible()).map(|c| c.secs);
@@ -592,8 +592,9 @@ fn mkdirs(path: &str) -> Result<(), i64> {
 
 /// One package: download (exactly `size` bytes), every check of FORMAT.md §3 against its index
 /// entry, programs not in /disk/bin, then a new version directory – files first, `package` last.
-/// Returns (dir, SHA-256 of the manifest, programs).
-fn build_package(e: &IndexEntry, cfg: &RepoConfig, now: u64) -> Res<(String, [u8; 32], Vec<String>)> {
+/// Returns (dir, SHA-256 of the manifest, programs).  `before_dir` runs once the package passed
+/// every check, before its directory is made (only the self-test mutant "order" uses it).
+fn build_package(e: &IndexEntry, cfg: &RepoConfig, now: u64, before_dir: &mut dyn FnMut(&str, [u8; 32], &[String]) -> Res<()>) -> Res<(String, [u8; 32], Vec<String>)> {
     trace(&format!("build {} {}", e.name, e.version));
     println!("downloading {} {} ({} bytes)...", e.name, e.version, e.size);
     let url = format!("{}packages/{}-{}.pkg", base_url(cfg), e.name, e.version);
@@ -608,6 +609,7 @@ fn build_package(e: &IndexEntry, cfg: &RepoConfig, now: u64) -> Res<(String, [u8
     }
     crash_point("K5");
     let dir = format!("{}-{}", e.version, dir_id()?);
+    before_dir(&dir, desocrypto::sha256::sha256(pkg.manifest_bytes), &programs)?;
     let vdir = pkgstate::version_dir(&e.name, &dir);
     mkdirs(&vdir).map_err(|r| Fail(EXIT_DISK, format!("{}: {}", vdir, deso::strerror(r))))?;
     for (i, f) in pkg.manifest.files.iter().enumerate() {
@@ -631,7 +633,7 @@ fn build_package(e: &IndexEntry, cfg: &RepoConfig, now: u64) -> Res<(String, [u8
 fn apply(plan: &Plan, op: &str, cur: Option<&Current>, idx: Option<&Index>, cfg: Option<&RepoConfig>) -> Res<u64> {
     trace("apply");
     let now = if plan.fetches().is_empty() { 0 } else { trusted_now()? };
-    // Space (§6.4): the packages' sizes + spare.
+    // Space: the packages' sizes + spare.
     let need: u64 = plan.fetches().iter().filter_map(|s| idx.and_then(|i| i.find(&s.name, s.version))).map(|e| e.size).sum::<u64>();
     if need > 0 {
         if let Some(free) = free_on_disk() {
@@ -641,6 +643,9 @@ fn apply(plan: &Plan, op: &str, cur: Option<&Current>, idx: Option<&Index>, cfg:
         }
     }
     let mut entries: Vec<GenEntry> = Vec::new();
+    // The mutant "order": the number of the generation file it wrote early (once).
+    #[allow(unused_mut)]
+    let mut early: Option<u64> = None;
     for s in &plan.steps {
         let kept = cur.and_then(|c| c.generation.packages.iter().find(|p| p.name == s.name && p.version == s.version));
         let e = match (s.action, kept) {
@@ -654,7 +659,17 @@ fn apply(plan: &Plan, op: &str, cur: Option<&Current>, idx: Option<&Index>, cfg:
                     return fail(EXIT_DISK, format!("{}: no index to download it from", s.name));
                 };
                 let ie = idx.find(&s.name, s.version).ok_or_else(|| Fail(EXIT_REFUSED, format!("{} {} is not in the index", s.name, s.version)))?;
-                let (dir, manifest, programs) = build_package(ie, cfg, now)?;
+                let so_far = &entries;
+                let early = &mut early;
+                let mut before_dir = |dir: &str, manifest: [u8; 32], programs: &[String]| -> Res<()> {
+                    let _ = (so_far, &early, dir, manifest, programs);
+                    #[cfg(pkg_mutant = "order")]
+                    if early.is_none() {
+                        *early = Some(mutant_early_generation(op, so_far, ie, dir, manifest, programs)?);
+                    }
+                    Ok(())
+                };
+                let (dir, manifest, programs) = build_package(ie, cfg, now, &mut before_dir)?;
                 GenEntry { name: s.name.clone(), version: s.version, dir, reason: s.reason, manifest, depends_raw: ie.depends_raw.clone(), conflicts: ie.conflicts.clone(), programs }
             }
         };
@@ -669,6 +684,11 @@ fn apply(plan: &Plan, op: &str, cur: Option<&Current>, idx: Option<&Index>, cfg:
         }
     }
     crash_point("K7");
+    // The mutant "order" replaces its early file with the real one under the same number, so
+    // without a crash it looks like a normal desopkg; only a crash in between shows it.
+    if let Some(n) = early {
+        let _ = deso::unlink(&format!("{}/{}", pkgstate::GEN_DIR, n));
+    }
     let g = pkgstate::generations(&system_name);
     let m = g.highest.checked_add(1).ok_or_else(|| Fail(EXIT_DISK, String::from("generation counter exhausted")))?;
     let bytes = pkgfmt::make_generation(m, op, &entries);
@@ -677,12 +697,25 @@ fn apply(plan: &Plan, op: &str, cur: Option<&Current>, idx: Option<&Index>, cfg:
     // The moment of change: generation m counts once it reads back whole and valid.
     let now_cur = pkgstate::load_generation(m, &system_name).map_err(|r| Fail(EXIT_DISK, format!("{}: the new generation does not read back ({}) - the previous one stays", path, r)))?;
     crash_point("K8");
-    sweep(Some(&now_cur));
+    sweep(Some(&now_cur), Some("K9"));
     Ok(m)
 }
 
-/// gc (§6.2) with what is in force now.
-fn sweep(cur_hint: Option<&Current>) -> pkgstate::Swept {
+/// The self-test mutant "order" (tests/pkg-test.sh --mutants): the generation file written
+/// BEFORE the package's directory – PKG TEST must catch it (a crash at K6 then leaves a new
+/// generation file).
+#[cfg(pkg_mutant = "order")]
+fn mutant_early_generation(op: &str, so_far: &[GenEntry], ie: &IndexEntry, dir: &str, manifest: [u8; 32], programs: &[String]) -> Res<u64> {
+    let mut e: Vec<GenEntry> = so_far.to_vec();
+    e.push(GenEntry { name: ie.name.clone(), version: ie.version, dir: dir.to_string(), reason: InstallReason::Explicit, manifest, depends_raw: ie.depends_raw.clone(), conflicts: ie.conflicts.clone(), programs: programs.to_vec() });
+    let m = pkgstate::generations(&system_name).highest + 1;
+    pkgstate::write_new(&format!("{}/{}", pkgstate::GEN_DIR, m), &[&pkgfmt::make_generation(m, op, &e)]).map_err(|r| Fail(EXIT_DISK, deso::strerror(r).to_string()))?;
+    Ok(m)
+}
+
+/// gc with what is in force now; `point` – the crash point inside it (K9: after the
+/// generation files, before the directories).
+fn sweep(cur_hint: Option<&Current>, point: Option<&str>) -> pkgstate::Swept {
     let g = pkgstate::generations(&system_name);
     let cur = g.current.as_ref().or(cur_hint);
     let keep_index: Vec<u64> = match keys() {
@@ -690,8 +723,12 @@ fn sweep(cur_hint: Option<&Current>) -> pkgstate::Swept {
         // No key store: keep every index (nothing can be checked, nothing is deleted).
         Err(_) => pkgstate::numbered(pkgstate::INDEX_DIR).0,
     };
-    crash_point("K9");
-    pkgstate::gc(cur, g.previous, &keep_index, &system_name)
+    let between = || {
+        if let Some(p) = point {
+            crash_point(p);
+        }
+    };
+    pkgstate::gc(cur, g.previous, &keep_index, &system_name, &between)
 }
 
 // ------------------------------------------------------------------ commands
@@ -818,7 +855,7 @@ fn cmd_info(name: &str) -> Res<()> {
     Ok(())
 }
 
-/// §6.5: every file of every package (or of one) against its manifest; statuses OK, MISSING,
+/// Every file of every package (or of one) against its manifest; statuses OK, MISSING,
 /// MODIFIED, UNEXPECTED, SHADOWED, DAMAGED; nothing repaired.
 fn cmd_verify(only: Option<&str>) -> Res<()> {
     let (nums, _) = pkgstate::numbered(pkgstate::GEN_DIR);
@@ -942,7 +979,7 @@ fn run(args: &[&str]) -> Res<()> {
     let r = (|| -> Res<()> {
         // Whatever an earlier, interrupted run left behind is swept first.
         if matches!(cmd, "install" | "update" | "remove" | "reinstall" | "refresh") {
-            sweep(None);
+            sweep(None, None);
         }
         match (cmd, req) {
             (_, Some(req)) => change(req, cmd, yes),

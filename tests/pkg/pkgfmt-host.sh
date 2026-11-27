@@ -13,6 +13,7 @@ OUT="$ROOT/build/pkgfmt-host"
 mkdir -p "$OUT"
 rustc --edition=2024 -C overflow-checks=on -C opt-level=1 \
   --check-cfg 'cfg(selftest, desocrypto_test, desotls_test, desocrypto_no_simd)' \
+  --check-cfg 'cfg(pkg_mutant, values("sig", "serial", "expires", "paths", "order", "hash"))' \
   -o "$OUT/pkgfmt-host" tests/pkg/pkgfmt-host.rs
 BIN=()
 [ -d build/user ] && BIN=(build/user)
@@ -21,5 +22,6 @@ python3 tools/desopkg.py vectors -o "$OUT/vectors.bin" --fuzz 3000 ${BIN[@]+--bi
 # The dependency solver (user/lib/pkgsolve.rs) on the host – a table of every rule.
 rustc --edition=2024 -C overflow-checks=on -C opt-level=1 \
   --check-cfg 'cfg(selftest, desocrypto_test, desotls_test, desocrypto_no_simd)' \
+  --check-cfg 'cfg(pkg_mutant, values("sig", "serial", "expires", "paths", "order", "hash"))' \
   -o "$OUT/pkgsolve-host" tests/pkg/pkgsolve-host.rs
 "$OUT/pkgsolve-host"

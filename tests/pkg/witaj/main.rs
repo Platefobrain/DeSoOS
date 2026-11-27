@@ -1,5 +1,5 @@
-// witaj – the test package of PKG TEST (tests/pkg-test.sh) and the first real package of V082
-// stage C.  An ordinary SDK program (sdk/deso-build.sh): it prints its version, its argv[0]
+// witaj – the test package of PKG TEST (tests/pkg-test.sh) and the first real package
+// of the DecodeSoft repository.  An ordinary SDK program (sdk/deso-build.sh): it prints its version, its argv[0]
 // (the shell gives a package program its full path) and the line from its data file
 // ../share/witaj/hello.txt next to its bin/ directory.
 //

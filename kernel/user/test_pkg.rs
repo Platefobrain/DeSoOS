@@ -1,4 +1,4 @@
-// PKG FORMAT TEST – desopkg's formats (V082 stage A): user/lib/pkgfmt.rs in user space
+// PKG FORMAT TEST – desopkg's formats: user/lib/pkgfmt.rs in user space
 // (/bin/pkgtest) judges the vectors tools/desopkg.py made at build time (build.sh --selftest,
 // in the image as PKG_VECTORS) – the same verdict and reason id as the Python tool for every
 // package, manifest, index, signature, key store, accepted index and generation; the image's
