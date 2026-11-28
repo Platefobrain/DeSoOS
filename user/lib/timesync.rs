@@ -1,4 +1,4 @@
-// The time service's arithmetic (v0.79 stage D) without input or output: one NTS measurement
+// The time service's arithmetic without input or output: one NTS measurement
 // as an interval, the quorum of operators, the final interval, the NTS-KE backoff, the span
 // for the second certificate check.  /bin/timekeeper uses it; /bin/synctest tests it.
 //
@@ -15,7 +15,7 @@
 //
 // The quorum: one vote per operator (two entries of the list with the same operator_id are one
 // vote – the first that measured); a subset of at least 2 operators agrees when their
-// intervals, each widened by 1 s on both sides (2 s tolerance, as v0.78), have a point in
+// intervals, each widened by 1 s on both sides (2 s tolerance, as nettime), have a point in
 // common – the widening serves only this decision.  The largest agreeing subset wins; two or
 // more different subsets of that size (A~B, B~C, A!~C) is "ambiguous" and nothing is set.
 // The final interval is the envelope of the members' own (not widened) intervals:

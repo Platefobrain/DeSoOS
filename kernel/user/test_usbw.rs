@@ -1,4 +1,4 @@
-// USB WRITE TEST – writing to a USB stick (v0.80 stage A; the rules: docs/ARCHITECTURE.md,
+// USB WRITE TEST – writing to a USB stick (the rules: docs/ARCHITECTURE.md,
 // "Writing to a USB disk").  Only in builds with --cfg selftest.
 //
 // 1/3 the kernel side without hardware: /bin/blkwtest pretends to be a writable stick

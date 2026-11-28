@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# make-usb.sh --with-disk on the host (V080 stage C gate) – writes only files in a temporary
+# make-usb.sh --with-disk on the host – writes only files in a temporary
 # directory, never a disk:
 #
 #   tests/make-usb-test.sh          all three parts below
@@ -9,8 +9,9 @@
 #    (DESO_SYS / DESO_PROC, PATH): not USB, not removable, a partition instead of a disk,
 #    a loop device, a mounted partition, swap on a partition, holders on the disk and on a
 #    partition, larger than 256 GiB, 4096-byte sectors, a system disk, a wrong answer, the
-#    device replaced between the question and the write, no serial number; and one that passes.
-#    1b (v0.80.1): tools/mkusb.py's identity check of the opened device on a fake udev
+#    device replaced between the question and the write, no serial number; and one that passes,
+#    with the model line it shows (lsblk's vendor / model, else udev's from DESO_UDEV, else "?").
+#    1b: tools/mkusb.py's identity check of the opened device on a fake udev
 #    directory (same, other serial, swapped, other size, no record / field, empty, twice), this
 #    computer's USB disks (udev serial = lsblk's), and tools/mkdesofs.py – image files only
 #    (new, non-empty without / with --force, a character / block device, a link to one, 65 GiB).
@@ -62,7 +63,7 @@ case "$*" in
   *"-o NAME,SIZE"*) echo "sdz 4G"; exit 0 ;;
 esac
 col=""
-for a in "$@"; do case "$a" in TYPE|TRAN|SERIAL|MAJ:MIN|MODEL|SIZE|MOUNTPOINTS|NAME|PARTTYPE) col="$a" ;; esac; done
+for a in "$@"; do case "$a" in TYPE|TRAN|SERIAL|MAJ:MIN|VENDOR|MODEL|SIZE|MOUNTPOINTS|NAME|PARTTYPE) col="$a" ;; esac; done
 case "$col" in
   SERIAL)
     n=$(( $(cat "$FAKE/serial.calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE/serial.calls"
@@ -79,7 +80,7 @@ chmod +x "$F/bin/lsblk" "$F/bin/findmnt"
 
 # A fresh fake system: a 4 GiB removable USB stick sdz with two partitions, nothing mounted.
 fake_reset() {
-  rm -rf "$F/sys" "$F/proc" "$F/state"
+  rm -rf "$F/sys" "$F/proc" "$F/state" "$F/udev"
   mkdir -p "$F/sys/block/sdz/queue" "$F/sys/block/sdz/holders" "$F/sys/block/sdz/sdz1/holders" "$F/sys/block/sdz/sdz2/holders" "$F/proc" "$F/state"
   echo 1 > "$F/sys/block/sdz/removable"
   echo 512 > "$F/sys/block/sdz/queue/logical_block_size"
@@ -87,12 +88,13 @@ fake_reset() {
   echo disk > "$F/state/TYPE"; echo usb > "$F/state/TRAN"; echo "SN1234" > "$F/state/SERIAL"
   echo "8:208" > "$F/state/MAJMIN"; echo "Fake Stick" > "$F/state/MODEL"; echo $((4 << 30)) > "$F/state/SIZE"
   : > "$F/state/MOUNTPOINTS"; printf 'sdz\nsdz1\nsdz2\n' > "$F/state/NAME"; : > "$F/state/PARTTYPE"
+  mkdir -p "$F/udev"
 }
 # Runs the dry run; $1 = the answer typed; output in $W/out, the exit code returned.
 dry() {
   local answer="${1:-/dev/sdz}" dev="${2:-/dev/sdz}"
   rm -f "$F/state/serial.calls"
-  printf '%s\n' "$answer" | FAKE="$F/state" DESO_SYS="$F/sys" DESO_PROC="$F/proc" PATH="$F/bin:$PATH" ./make-usb.sh --with-disk "$dev" --dry-run > "$W/out" 2>&1
+  printf '%s\n' "$answer" | FAKE="$F/state" DESO_SYS="$F/sys" DESO_PROC="$F/proc" DESO_UDEV="$F/udev" PATH="$F/bin:$PATH" ./make-usb.sh --with-disk "$dev" --dry-run > "$W/out" 2>&1
 }
 refused() { # $1 = what, $2 = text the refusal must contain
   if dry "${3:-/dev/sdz}" "${4:-/dev/sdz}"; then bad "$1: not refused"; cat "$W/out" >> "$LOG"
@@ -100,6 +102,15 @@ refused() { # $1 = what, $2 = text the refusal must contain
   else bad "$1: refused for another reason: $(tail -n1 "$W/out")"; fi
 }
 fake_reset; dry && grep -q "Dry run: all checks passed" "$W/out" && ok "a removable USB stick passes every check (dry run, nothing written)" || { bad "a good stick refused: $(tail -n1 "$W/out")"; }
+# The model line: lsblk's vendor and model, else udev's (the USB descriptor), else "?".
+model_shown() { # $1 = what, $2 = the model line expected
+  if dry && grep -q "  model: $2   size:" "$W/out"; then ok "model shown - $1: $2"; else bad "model - $1: $(grep 'model:' "$W/out")"; fi
+}
+fake_reset; model_shown "lsblk model only" "Fake Stick"
+fake_reset; echo "Wilk" > "$F/state/VENDOR"; : > "$F/state/MODEL"; model_shown "lsblk vendor only" "Wilk"
+fake_reset; echo "Wilk" > "$F/state/VENDOR"; model_shown "lsblk vendor and model" "Wilk Fake Stick"
+fake_reset; : > "$F/state/MODEL"; printf 'E:ID_VENDOR=Kingston\nE:ID_MODEL=DataTraveler_3.0\n' > "$F/udev/b8:208"; model_shown "udev when lsblk names nothing" "Kingston DataTraveler 3.0"
+fake_reset; : > "$F/state/MODEL"; model_shown "nothing names it" "?"
 fake_reset; echo sata > "$F/state/TRAN"; refused "not USB" "not attached via USB"
 fake_reset; echo 0 > "$F/sys/block/sdz/removable"; refused "not removable" "not a removable disk"
 fake_reset; echo part > "$F/state/TYPE"; refused "a partition instead of the disk" "not a whole disk" /dev/sdz1 /dev/sdz1
@@ -118,7 +129,7 @@ dry && grep -q "YOUR DeSo OS DATA" "$W/out" && ok "an existing DeSo system parti
 
 fake_reset; : > "$F/state/SERIAL"; refused "a device without a serial number" "no serial number"
 
-# ------------------------------------------------------------------ 1b. the writer's own checks (v0.80.1)
+# ------------------------------------------------------------------ 1b. the writer's own checks
 # tools/mkusb.py: the identity of the OPENED device – major:minor of the descriptor, size, and
 # the serial number from the udev record of that major:minor (a fake udev directory here).
 U="$W/udev"; mkdir -p "$U"

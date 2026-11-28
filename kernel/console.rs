@@ -201,9 +201,35 @@ pub fn print_fmt(args: core::fmt::Arguments<'_>) {
 /// Log line (`serial_println!`): text + '\n' without interjections from other CPUs.
 pub fn print_line(args: core::fmt::Arguments<'_>) {
     let t = out_lock();
+    if AT_LINE_START.load(Ordering::Relaxed) {
+        screen_stamp();
+    }
     let _ = ConsoleWriter.write_fmt(args);
     let _ = ConsoleWriter.write_str("\n");
     out_unlock(t);
+}
+
+/// On the screen only, before a kernel line: the time since the timer started, in seconds
+/// with milliseconds, e.g. `[15.728] ` – how long each step of the start took, readable on a machine with no
+/// serial port.  The serial copy (the log the tests read) stays without it.  No heap: called
+/// from panics and watchdog reports too.
+fn screen_stamp() {
+    struct Buf {
+        b: [u8; 24],
+        n: usize,
+    }
+    impl Write for Buf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = (self.n + s.len()).min(self.b.len());
+            self.b[self.n..end].copy_from_slice(&s.as_bytes()[..end - self.n]);
+            self.n = end;
+            Ok(())
+        }
+    }
+    let mut buf = Buf { b: [0; 24], n: 0 };
+    let ms = crate::time::uptime_ms();
+    let _ = write!(buf, "[{}.{:03}] ", ms / 1000, ms % 1000);
+    with_fb(|fb| fb.write_bytes(&buf.b[..buf.n]));
 }
 
 #[allow(dead_code)]

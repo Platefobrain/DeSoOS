@@ -44,11 +44,27 @@ cd "$ROOT"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# tests/make-usb-test.sh runs the checks against a fake /sys and /proc (and fake lsblk /
-# findmnt in PATH); the real ones otherwise.
+# tests/make-usb-test.sh runs the checks against a fake /sys, /proc and udev database (and fake
+# lsblk / findmnt in PATH); the real ones otherwise.
 SYS="${DESO_SYS:-/sys}"
 PROC="${DESO_PROC:-/proc}"
+UDEV="${DESO_UDEV:-/run/udev/data}"
 DESO_SYSTEM_GUID="1a0e2e7d-de32-4c13-9442-9fcb2649ca02"
+
+# What a person reads on the stick's label: lsblk's VENDOR and MODEL (the SCSI inquiry strings);
+# when both are empty (many cheap sticks), udev's ID_VENDOR / ID_MODEL (the USB descriptor) for
+# major:minor $2.  Empty when nothing names it.
+device_model() {
+  local dev="$1" mm="$2" v m f
+  v="$(lsblk -dno VENDOR "$dev" 2>/dev/null | xargs || true)"
+  m="$(lsblk -dno MODEL "$dev" 2>/dev/null | xargs || true)"
+  if [ -z "$v$m" ] && [ -r "$UDEV/b$mm" ]; then
+    f="$UDEV/b$mm"
+    v="$(sed -n 's/^E:ID_VENDOR=//p' "$f" | head -n1 | tr '_' ' ' | xargs || true)"
+    m="$(sed -n 's/^E:ID_MODEL=//p' "$f" | head -n1 | tr '_' ' ' | xargs || true)"
+  fi
+  echo "$v $m" | xargs
+}
 
 # Disk (e.g. sdb) for a device or partition (e.g. /dev/sdb1).
 parent_disk() {
@@ -152,7 +168,7 @@ check_device() {
   [ -n "$SERIAL" ] || die "$dev reports no serial number - it cannot be told apart from another stick; refusing"
   MAJMIN="$(lsblk -dno MAJ:MIN "$dev" 2>/dev/null | tr -d ' ')"
   case "$MAJMIN" in *:*) ;; *) die "major:minor of $dev unknown" ;; esac
-  MODEL="$(lsblk -dno MODEL "$dev" 2>/dev/null | xargs || true)"
+  MODEL="$(device_model "$dev" "$MAJMIN")"
   DEV="$dev"; NAME="$name"; BYTES="$bytes"
 }
 
@@ -224,7 +240,7 @@ install_to() {
   [ "$tran" = "usb" ] || die "$mnt ($src) is not on a USB disk (TRAN='$tran') - refusing"
   is_system_disk "$disk" && die "$src is on a system disk - refusing"
 
-  echo "Flash drive: $src ($(lsblk -dno SIZE,MODEL "/dev/$disk" | xargs)) mounted at $mnt"
+  echo "Flash drive: $src ($(lsblk -dno SIZE "/dev/$disk" | xargs) $(device_model "/dev/$disk" "$(lsblk -dno MAJ:MIN "/dev/$disk" | tr -d ' ')")) mounted at $mnt"
 
   local target="$mnt/EFI/BOOT/BOOTX64.EFI"
   if [ -f "$target" ] && [ "$overwrite" != 1 ]; then

@@ -84,8 +84,10 @@ deso/stable/x86_64/packages/<name>-<version>.pkg
    time `YYYYMMDDHHMM`, but always above the index already there (two builds in one minute, or a clock behind it), so
    a system that took the last upload takes the next one. Only `stable/x86_64` is replaced, and only when it holds
    nothing but the script's own files: the index already there must carry a good signature and its packages must match
-   it; a damaged index, a missing signature or any other file stops the build with the reason and the file names, and
-   nothing is changed. The new files are built and checked in `x86_64.new`, then swapped in by two renames
+   it; a damaged index, a missing signature or any other file or folder (an empty one too) stops the build with the
+   reason and the names, and nothing is changed. One build at a time: a second `build` on the same folder is refused
+   while the first runs (`~/Pulpit/deso-repo/.deso-repo.lock`, never uploaded); a lock left by a build that was killed
+   is taken over. The new files are built and checked in `x86_64.new`, then swapped in by two renames
    (`x86_64` → `x86_64.old`, `x86_64.new` → `x86_64`); if that is interrupted, the next `build` puts `x86_64.old`
    back first. Other folders and files in `deso/` are never touched.
 3. **Upload.** The folder `stable` into `deso/` at the top of the site (`public_html/deso/stable/…`). Check that

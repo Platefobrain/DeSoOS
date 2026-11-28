@@ -16,12 +16,12 @@
 // * Other names: the program /bin/<name> or a path (containing '/'), and if there is none –
 //   information from the kernel (sysinfo syscall, read-only: mem, lspci,
 //   cpus, disk...).  Writing to disk and run – only in the kernel's emergency shell.
-// * Programs from the disk (v0.80): a name found nowhere above is looked up in /disk/bin –
+// * Programs from the disk: a name found nowhere above is looked up in /disk/bin –
 //   copy a program there (`cp /usb1/prog /disk/bin/prog`) and type its name.  It never hides a
 //   name of the system: a built-in, a /bin program, an information command or a kernel-only
 //   command always wins.  It gets what a /bin program typed by hand gets (stdio and the
 //   program channel) – no SYSCTL, no SETTIME, no administration channel (only /bin/netconfig).
-// * Programs from packages (v0.82, desopkg): a name found nowhere above – not even in /disk/bin –
+// * Programs from packages (desopkg): a name found nowhere above – not even in /disk/bin –
 //   is a program of the current package generation (/disk/pkg/gen/<n>, the highest valid one –
 //   user/lib/pkgstate.rs, the same rule as desopkg).  It never hides a system name or a
 //   /disk/bin program; it gets its full path in argv[0] (its data is in ../share/).  The
@@ -65,7 +65,7 @@ const HISTORY_MAX: usize = 32;
 // the kernel-only commands – one list shared with /bin/desopkg (user/lib/cmdnames.rs).
 #[path = "../lib/cmdnames.rs"]
 mod cmdnames;
-// Programs from packages (v0.82): the current generation, read exactly as desopkg reads it.
+// Programs from packages: the current generation, read exactly as desopkg reads it.
 #[path = "../../common/desocrypto/mod.rs"]
 mod desocrypto;
 #[path = "../../common/elf.rs"]
@@ -605,7 +605,7 @@ fn suggest(name: &str) -> Option<String> {
         .map(|(_, n)| n)
 }
 
-/// Where programs copied to the disk live (v0.80).
+/// Where programs copied to the disk live.
 const DISK_BIN: &str = "/disk/bin";
 
 /// A name the system already uses – a /disk/bin program of that name is never run by name

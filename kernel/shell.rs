@@ -2389,8 +2389,17 @@ pub fn self_test() {
         .unwrap();
         check!(r == ['ż', 'ó', '€'], "cells {:?}", r);
         check!(font::glyph('ż') != font::glyph('?') && font::glyph('ą') != font::glyph('a'), "missing Polish glyphs");
+        // A kernel line on the screen starts with the time since the timer started (the serial
+        // copy does not: the tests read it).
         console::with_framebuffer(|fb| fb.write_bytes(b"\x1b[2J\x1b[H"));
-        serial_println!("[CON TEST] 5/10 UTF-8 + Polish glyphs PASS");
+        serial_println!("[CON TEST] stamp probe");
+        let row = console::with_framebuffer(|fb| (0..fb.cols.min(60)).map(|c| fb.cell(c, 0).ch).collect::<alloc::string::String>()).unwrap();
+        let stamp_ok = row.strip_prefix('[').and_then(|r| r.split_once("] [CON TEST] stamp probe")).is_some_and(|(t, _)| {
+            t.split_once('.').is_some_and(|(s, f)| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) && f.len() == 3 && f.bytes().all(|c| c.is_ascii_digit()))
+        });
+        check!(stamp_ok, "screen line without a time stamp: {:?}", row.trim_end());
+        console::with_framebuffer(|fb| fb.write_bytes(b"\x1b[2J\x1b[H"));
+        serial_println!("[CON TEST] 5/10 UTF-8 + Polish glyphs, time stamp on kernel lines PASS");
     } else {
         serial_println!("[CON TEST] 1-5/10 skipped (no framebuffer)");
     }

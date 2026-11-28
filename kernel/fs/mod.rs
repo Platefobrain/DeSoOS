@@ -1197,7 +1197,7 @@ pub fn init() {
     serial_println!("[FS] /bin: {} programs (ELF, built from user/bin/*.rs)", programs);
 
     // The internal disk (disk 0, registered by the PCI drivers before this point; never a USB
-    // disk) – the one that keeps /disk when it holds DeSoFS (V080 rule E).
+    // disk) – the one that keeps /disk when it holds DeSoFS.
     crate::block::set_internal();
     if crate::block::count() == 0 {
         serial_println!("[FS] / = ramfs (no disk)");

@@ -1,4 +1,4 @@
-// Fake writable USB sticks with a device cache for USB DISK TEST (v0.80 stage B): a stick's
+// Fake writable USB sticks with a device cache for USB DISK TEST: a stick's
 // "DeSo system" partition as /disk, the choice between sticks, the last known good time on a
 // stick, power loss under ublk.
 //

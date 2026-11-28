@@ -244,7 +244,7 @@ pub fn self_test() {
     check!(rtc::time_status().1 == Err(I::LkgUnreadable) && lkg::describe().contains("UNREADABLE"), "a damaged file: {:?} {}", rtc::time_status().1, lkg::describe());
     let h = https_refused("last known good time unreadable");
     check!(h.is_ok(), "netget https with a damaged LKG file: {:?}", h.err());
-    // A new LKG written repairs it (stage D: an authenticated time).
+    // A new LKG written repairs it (an authenticated time).
     let ahead2 = ahead + 10;
     check!(lkg::raise_for_test(ahead2) == Raised::Saved && lkg::file_state() == FileState::Good && rtc::time_status().1 == Err(I::BeforeLkg), "a new LKG after the damage: {:?}", rtc::time_status().1);
     // No volume: the raise stays in memory ("not saved"); the next raise saves it, even a

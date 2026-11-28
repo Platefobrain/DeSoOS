@@ -235,8 +235,8 @@ fn read_hw_checked() -> (DateTime, bool) {
 // `time_status` is a heuristic, not a guarantee: it refuses a lost battery, a broken
 // reading, dates before the image was built and dates before the last known good time
 // (time_lkg.rs – a lower bound kept on the system volume), but anyone with access to the
-// firmware can set any date above those bounds – only an authenticated time (NTS, v0.79
-// stage D) can do better.
+// firmware can set any date above those bounds – only an authenticated time (NTS, the
+// time service) can do better.
 
 /// Seconds since 1970 when this image was built (build.sh: SOURCE_DATE_EPOCH when set, else
 /// the build time) and where that came from.

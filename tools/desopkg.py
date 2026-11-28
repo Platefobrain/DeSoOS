@@ -1262,7 +1262,8 @@ def published_state(d, keys):
     None when there is none (missing or empty); else (serial, files) – files relative to d, the
     only ones the script may replace or delete.  Refused: an index without its signature (or the
     other way round), a bad signature, a package of the index missing or not matching it, and
-    any file the index does not account for (listed in the reason)."""
+    any file or directory the index does not account for, empty ones too (listed in the
+    reason)."""
     if not os.path.isdir(d):
         if os.path.lexists(d):
             fail("published_not_a_directory")
@@ -1271,12 +1272,10 @@ def published_state(d, keys):
     for top, dirs, names in os.walk(d):
         dirs.sort()
         for n in sorted(dirs):
-            p = os.path.join(top, n)
-            if os.path.islink(p):
-                found.append(os.path.relpath(p, d))
+            found.append(os.path.relpath(os.path.join(top, n), d))
         for n in sorted(names):
             found.append(os.path.relpath(os.path.join(top, n), d))
-    if not found and os.listdir(d) == []:
+    if not found:
         return None
     has_index = os.path.isfile(os.path.join(d, "index"))
     has_sig = os.path.isfile(os.path.join(d, "index.sig"))
@@ -1286,7 +1285,7 @@ def published_state(d, keys):
     idx = parse_index(b)
     verify_index(b, open(os.path.join(d, "index.sig"), "rb").read(), keys)
     sn = system_name_fn()
-    known = ["index", "index.sig"]
+    known = ["index", "index.sig", "packages"]
     for e in idx["packages"]:
         rel = "packages/%s-%s.pkg" % (e["name"], ver_str(e["version"]))
         p = os.path.join(d, rel)
@@ -1295,11 +1294,12 @@ def published_state(d, keys):
         check_pkg_against_index(open(p, "rb").read(), e, sn)
         known.append(rel)
     unknown = [f for f in found if f not in known]
-    if os.path.lexists(os.path.join(d, "packages")) and (os.path.islink(os.path.join(d, "packages")) or not os.path.isdir(os.path.join(d, "packages"))):
+    pk = os.path.join(d, "packages")
+    if os.path.lexists(pk) and (os.path.islink(pk) or not os.path.isdir(pk)):
         unknown.append("packages")
     if unknown:
         fail("published_unknown_files %s" % " ".join(sorted(set(unknown))))
-    return idx["serial"], known
+    return idx["serial"], [k for k in known if k != "packages"]
 
 
 def next_serial(previous, now):

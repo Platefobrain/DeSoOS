@@ -73,7 +73,7 @@ pub fn self_test() {
     serial_println!("[NTP TEST] 2/3 {}; hardware RTC minus the clock {} s before, {} s after PASS", line, gap0, gap1);
 
     // 3. A clock that is not plausible: NTS-KE cannot check a certificate – refused before
-    //    anything is sent (the way out is the time service, v0.79 stage D).
+    //    anything is sent (the way out is the time service).
     crate::drivers::rtc::FORCE_IMPLAUSIBLE.store(true, core::sync::atomic::Ordering::Release);
     let opts = SpawnOptions { stdin: Some(alloc::vec::Vec::new()), capture: true, ..SpawnOptions::default() };
     let r = exec("/bin/nettime", &["nettime", "--nts", "tls.deso:58510"], "/", &opts).ok().and_then(|id| wait_exit(id, 30_000));

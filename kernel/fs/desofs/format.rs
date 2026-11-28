@@ -89,8 +89,8 @@ fn has_partition_table(index: usize) -> Result<bool, String> {
 
 /// Formats disk `index`.  Returns the number of blocks of the new volume.
 pub fn format(index: usize, p: &Params) -> Result<u64, String> {
-    // A partition of a USB disk: only "DeSo system", only inside a format session (V080
-    // rule F) – the session is the only thing that lets these writes through.
+    // A partition of a USB disk: only "DeSo system", only inside a format session –
+    // the session is the only thing that lets these writes through.
     if let Some(r) = crate::user::usbdisk::format_session(index, || format_inner(index, p)) {
         // A new DeSoFS may be a /disk candidate now.
         crate::user::usbdisk::changed();

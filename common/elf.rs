@@ -1,5 +1,5 @@
 // ELF64 (x86_64) parser shared by DSB (loading the kernel), the kernel (loading user
-// programs) and desopkg (checking a package's programs before they are installed, v0.82).
+// programs) and desopkg (checking a package's programs before they are installed).
 // No allocation and no dependencies – it only validates headers and returns the PT_LOAD
 // segments.  WHERE the segments may live (kernel in the upper half, program in the lower
 // half) is up to the caller; for user programs `check_program` below holds the rules of
@@ -202,7 +202,7 @@ pub fn parse_with(len: usize, read: &mut dyn FnMut(usize, &mut [u8]) -> bool) ->
 
 // ------------------------------------------------------------
 // User programs: the ABI note and the load rules (ABI 1.0, docs/abi/README.md).
-// Moved here from kernel/user/elf_loader.rs (v0.82) – the kernel's loader and desopkg call
+// Shared here – the kernel's loader and desopkg call
 // the same code.  Nothing here maps memory: it only says whether a file is a program the
 // kernel would start.
 // ------------------------------------------------------------

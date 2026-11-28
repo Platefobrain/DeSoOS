@@ -1,6 +1,6 @@
 // Loading ELF programs into a process address space.
 //
-// The rules a program must meet live in common/elf.rs (`check_program`, v0.82 – desopkg checks
+// The rules a program must meet live in common/elf.rs (`check_program` – desopkg checks
 // a package's programs with the same function before installing them):
 //   * segments only in the load range of ABI 1.0 (docs/abi/README.md): from USER_MIN
 //     (the first 1 MiB is empty – null pointer) to USER_MAX – below the heap's largest

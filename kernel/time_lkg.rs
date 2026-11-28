@@ -3,7 +3,7 @@
 // The wall clock is the RTC read at boot plus the uptime (drivers/rtc.rs).  Anyone with the
 // firmware set-up can set the RTC to any date, and a dead battery resets it; the build date
 // is only a weak lower bound.  The LKG is a better one: a time the system once knew to be
-// true (v0.79 stage D: only an authenticated time from NTS raises it – never the RTC, plain
+// true (only an authenticated time from NTS raises it – never the RTC, plain
 // NTP, an HTTP `Date` header, a certificate's notBefore or a time a program gives).  A clock
 // earlier than the LKG is not plausible (reason 7), and TLS refuses to connect.
 //
@@ -42,7 +42,7 @@
 // Reason 7 compares with a stored or raised LKG; the build date keeps its 24 h tolerance
 // as reason 5 (a clock kept in local time west of UTC).
 //
-// The time service (v0.79 stage D) – the only real source:
+// The time service – the only real source:
 //   SYS_TIME_SET(t, u, servers) -> `set_time`: the kernel checks the numbers (servers 2..=3,
 //   u <= 10 s, t - u >= the build date, t + u <= 2099, no overflow; t + u below the LKG is
 //   refused), computes L = floor(T - U - 2 s) itself, raises the LKG to L when higher and
@@ -80,7 +80,7 @@ pub const TEMP: &str = "/.deso/lkg.new";
 pub enum Source {
     /// Nothing stored: the build date.
     Build = 1,
-    /// An authenticated time from NTS (v0.79 stage D).
+    /// An authenticated time from NTS (the time service).
     Nts = 2,
     /// The self-test switch (selftest builds only).
     Test = 3,
@@ -365,7 +365,7 @@ pub fn load() {
         Some(Ok(None)) => {
             // A volume without the file while memory holds a time (raised earlier in this
             // start, e.g. before a USB stick was plugged in): it must reach this volume – the
-            // next accepted SYS_TIME_SET writes max(memory, its own L) (V080 rule D).
+            // next accepted SYS_TIME_SET writes max(memory, its own L).
             if mem > 0 {
                 DIRTY.store(true, Ordering::Release);
             }
@@ -384,7 +384,7 @@ pub fn load() {
             FileState::Good
         }
         // Not a quiet reset to the build date: the clock is not plausible until a new LKG
-        // is written (stage D) or the volume is repaired.
+        // is written (an authenticated time) or the volume is repaired.
         Some(Err(bad)) => FileState::Unreadable(bad),
     };
     FILE_STATE.store(encode_state(state), Ordering::Release);

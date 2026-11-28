@@ -185,8 +185,11 @@ pub extern "sysv64" fn kernel_main(
     }
     let _ = mouse;
 
-    // Serial input (typing in a terminal) + shell.
-    if !drivers::serial::enable_rx_interrupts() {
+    // Serial input (typing in a terminal) + shell.  A computer without COM1 (most laptops) is
+    // normal, not a fault: only a port that is there and still cannot take input is a warning.
+    if !drivers::serial::present() {
+        serial_println!("[CON] no serial port (COM1) - typing only on the keyboard");
+    } else if !drivers::serial::enable_rx_interrupts() {
         serial_println!("[CON] WARNING: serial input not available");
     }
     #[cfg(selftest)]
@@ -347,7 +350,7 @@ pub extern "sysv64" fn kernel_main(
     if !selftest::looping() {
         user::usb_self_test();
     }
-    // Writing to a USB stick – registrations, the three locks, usbd, hot-plug (v0.80).
+    // Writing to a USB stick – registrations, the three locks, usbd, hot-plug.
     #[cfg(selftest)]
     if !selftest::looping() {
         user::usbw_self_test();

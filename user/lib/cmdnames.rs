@@ -1,5 +1,5 @@
 // The names the system keeps for itself – one list for the shell (/bin/sh) and the package
-// manager (/bin/desopkg, v0.82).
+// manager (/bin/desopkg).
 //
 // A name on these lists, or the name of any file in /bin, is a *system name*: the shell runs
 // the built-in, the information command or the /bin program and never looks further – not in

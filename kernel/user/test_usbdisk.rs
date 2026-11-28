@@ -1,5 +1,5 @@
-// USB DISK TEST – a USB stick's "DeSo system" partition as /disk (v0.80 stage B; rules D, D2,
-// E, F of the V080 plan).  Only in builds with --cfg selftest.
+// USB DISK TEST – a USB stick's "DeSo system" partition as /disk (docs/ARCHITECTURE.md "A USB
+// stick as /disk").  Only in builds with --cfg selftest.
 //
 // 1/2 fake sticks with a write cache (/bin/blkdtest): `desofs format` only in a format session
 //     (ESP refused, the session counter used up – nothing written), /disk from the only
@@ -275,7 +275,7 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     // Free again – stick 1 gets /disk once something changes.
     super::usbdisk::changed();
     ck!(wait_for(8_000, || find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "stick 1 did not get the freed /disk");
-    // Rule 5 / 6 (review of stage B): who holds what comes from the mount table.
+    // Who holds what comes from the mount table.
     // (a) No free /usbN: no attempt counted – a mount point freed later is used.
     let mut filled = Vec::new();
     while let Some(pt) = super::ublk::free_mount_point() {
@@ -288,7 +288,7 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     ck!(wait_for(8_000, || find("blkd-2").is_some()), "blkd-2 not attached");
     crate::time::sleep_ms(super::usbdisk::SETTLE_MS + 600);
     ck!(usb_desofs_mounts() == 0, "mounted with no free /usbN ({})", usb_desofs_mounts());
-    // Two earlier failures of each partition (review of the stage B fix): a mount that works
+    // Two earlier failures of each partition: a mount that works
     // clears them – they do not count against later attempts.
     let s2 = find("blkd-2").unwrap();
     for &p in &sys_parts(s2.index.load(Ordering::SeqCst)) {
@@ -352,7 +352,7 @@ fn fake_inner(_opts: &SpawnOptions) -> Result<String, String> {
     super::usbdisk::changed();
     ck!(wait_for(8_000, || s1.disk_part() == Some(p1) && mounted("/disk").is_some()), "/disk unmounted some other way not given again (stale owner?)");
     ck!(!crate::fs::is_read_only("/disk/x"), "/disk given again is read-only");
-    // Stage D – programs from the disk.  A shell holding SYSCTL, SETTIME and HW_ROOT (like the
+    // Programs from the disk.  A shell holding SYSCTL, SETTIME and HW_ROOT (like the
     // one init starts) copies programs to /disk/bin and runs them by name: found after
     // everything of the system, never instead of it, and given exactly what a /bin program gets.
     let sh_opts = |script: &[u8]| SpawnOptions { stdin: Some(script.to_vec()), capture: true, hw_root: true, sysctl: true, settime: true, ..SpawnOptions::default() };
@@ -397,7 +397,7 @@ mkdir /disk/x\ncp /bin/privtest /disk/x/netconfig\nhellod\nprimes 30\nmem\necho 
     ck!(flag(&s2, 0x800), "attach stick 1");
     ck!(flag(&s2, 0x20), "detach stick 2");
     ck!(wait_for(10_000, || find("blkd-2").is_none() && find("blkd-1").is_some_and(|s| s.disk_part().is_some())), "stick 1 not back at /disk");
-    // v0.80.1 – the network administration channel goes to /bin/netconfig only, checked on
+    // The network administration channel goes to /bin/netconfig only, checked on
     // the handles the processes really get: a shell given an administration channel (A, slot
     // 3) and a program channel (B, slot 5), as init gives them; where each program's message
     // arrives says which one it got.
@@ -669,7 +669,7 @@ pub fn usb_restart() {
     }
 }
 
-/// ONE STICK TEST (V080 stage C) – QEMU started from an image made by tools/mkusb.py (the code of
+/// ONE STICK TEST – QEMU started from an image made by tools/mkusb.py (the code of
 /// `make-usb.sh --with-disk`), nothing else attached: UEFI loads BOOTX64.EFI from its ESP, the
 /// stick's ESP is /usb0 (read-only) and its "DeSo system" partition /disk (read-write) – both
 /// from the same disk.  Start 1 writes a file and the last known good time; start 2 (the same

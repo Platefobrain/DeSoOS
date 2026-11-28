@@ -1,5 +1,5 @@
-// privtest – what a program got from whoever started it (V080 stage D: a program run from
-// /disk/bin must get exactly what a /bin program typed by hand gets).
+// privtest – what a program got from whoever started it (a program run from /disk/bin
+// must get exactly what a /bin program typed by hand gets).
 //
 //   privtest send   one message on slot 3 (which channel the shell gave it – USB DISK TEST)
 //   privtest        one line: the kind of every handle in slots 0-15, then the result of a

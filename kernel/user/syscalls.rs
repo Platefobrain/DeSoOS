@@ -323,7 +323,7 @@ pub const SYS_GETRANDOM: u64 = 58;
 /// No right needed (reading the time).  "Plausible" is a heuristic, not proof – see rtc.rs.
 /// Returns 0; ERROR_INVALID_ADDRESS (out is not 24 writable bytes).
 pub const SYS_TIME: u64 = 59;
-/// time_set(SETTIME, t_ms, u_ms, servers): the time service (/bin/timekeeper, v0.79 stage D)
+/// time_set(SETTIME, t_ms, u_ms, servers): the time service (/bin/timekeeper)
 /// gives the time it agreed with NTS servers of `servers` different operators: T = t_ms
 /// (Unix ms) +- U = u_ms.  The kernel trusts the service's word for where the time came
 /// from (it cannot check that), and checks only what it can: servers 2 or 3, u <= 10 s,

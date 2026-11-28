@@ -25,7 +25,7 @@
 // answer, 5 = TLS refused (certificate, clock, handshake, record, server alert).
 //
 // The client itself (TCP through netd, TLS, the request, the answer) is user/lib/fetch.rs, shared
-// with /bin/desopkg (v0.82) – the same messages and exit codes.
+// with /bin/desopkg – the same messages and exit codes.
 #![no_std]
 #![no_main]
 

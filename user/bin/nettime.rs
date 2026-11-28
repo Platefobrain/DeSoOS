@@ -3,7 +3,7 @@
 // machine's clock is from the answer.  The clock is what `date` shows: the RTC as read at
 // boot plus the time since (whole seconds).  It reads only: nothing here sets the RTC or the
 // clock, changes whether the clock counts as plausible, or raises any lower bound for it –
-// also not with --nts (only the time service may, v0.79 stage D).  Exit code 0 means "a
+// also not with --nts (only the time service may).  Exit code 0 means "a
 // well-formed answer came", not "the time is trusted".
 //
 // Plain NTP (user/lib/ntp.rs): all servers are asked at once, each over its own UDP socket
@@ -17,7 +17,7 @@
 // server[:port] (default port 4460, the "net" right), TLS 1.3 with DeSoTLS, ALPN "ntske/1",
 // the server's certificate checked against /etc/certs/roots (or only the CA in --anchor) at
 // the wall clock's time: a clock that is not plausible refuses before anything is sent (the
-// way out of that – the time service, stage D).  The keys come from the TLS exporter, the
+// way out of that – the time service).  The keys come from the TLS exporter, the
 // cookies and the NTP server (Server / Port Negotiation, otherwise the KE server and 123)
 // from the KE records.  Then NTP exactly as above, but every query carries a fresh Unique
 // Identifier, an unused cookie and the Authenticator, and an answer counts only when it is

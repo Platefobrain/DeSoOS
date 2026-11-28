@@ -1,5 +1,5 @@
-// A USB stick's "DeSo system" partition as /disk (v0.80 stage B; rules D2 and E of the V080
-// plan, docs/ARCHITECTURE.md "A USB stick as /disk").  Called by the usb-disks task (ublk.rs)
+// A USB stick's "DeSo system" partition as /disk (docs/ARCHITECTURE.md "A USB stick as
+// /disk").  Called by the usb-disks task (ublk.rs)
 // after every change of the USB disks, once they settled.
 //
 // A CANDIDATE is a (USB disk instance, partition) pair: a GPT partition of type "DeSo system"

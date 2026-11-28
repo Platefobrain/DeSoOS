@@ -1,4 +1,4 @@
-// NTS TEST – the time service (/bin/timekeeper, v0.79 stage D) and the kernel's side of it
+// NTS TEST – the time service (/bin/timekeeper) and the kernel's side of it
 // (SYS_TIME_SET, SYS_TIME_BOUND, time_lkg.rs set_time) – only in builds with --cfg selftest.
 //
 //   1. /bin/synctest: the arithmetic without a network – the interval of one answer, the

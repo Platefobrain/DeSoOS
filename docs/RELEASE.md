@@ -253,6 +253,56 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.83.0 — 2026-11-28
+
+**Status: stabilization – no new subsystem.**
+
+### What is new (details: `CHANGELOG.md`)
+
+- `tools/deso-repo.sh`: an empty unknown folder stops the build; one build per output folder at a time (a lock,
+  taken over when its build was killed). `tests/repo-build-test.sh` 12 checks.
+- `make-usb.sh`: the model line from lsblk's vendor and model, else udev's.
+- The screen console: a time stamp before every kernel line; no COM1 is an information line, not a warning.
+- Version and stage tags removed from code comments.
+
+### Tests (build machine, 2026-11-28)
+
+- `tests/repo-build-test.sh` with the real SDK: **12/12 PASS** (also the empty unknown folder, two builds at once,
+  the stale lock).
+- `tests/make-usb-test.sh`: **47 checks PASS** – the 5 model cases, the udev serial = lsblk's on the attached stick
+  (070B5B95F520B036), the image, `fsck.vfat`, the update v1 → v2 in QEMU.
+- `tests/test.sh` (TCG, 4 CPUs): **PASS**, 485 s (restart 25 s, USB restart 5 s, one stick 9 s, soak 131 s), 45/45
+  suites, ABI host 5/5, pkg host 6/6, 353 tests, CON TEST 5/10 with the screen time stamp, soak leaks 0, errors 0.
+- `ACCEL=kvm tests/test.sh`: **PASS**, 398 s (restart 12 s, USB restart 5 s, one stick 8 s, soak 125 s), the same
+  counts, soak leaks 0, errors 0.
+- After the stamp format changed to seconds (`[15.728]` instead of a padded `[   15728 ms]`), both runs again:
+  TCG **PASS** 481 s (restart 25 s, USB restart 5 s, one stick 9 s, soak 131 s), KVM **PASS** 402 s (restart 13 s,
+  USB restart 5 s, one stick 8 s, soak 125 s), 353 tests, soak leaks 0; TCG TLS hello 96 ms.
+
+### Real hardware (test laptop, Ryzen 7 4800H, the "Wilk" stick made with `--with-disk`)
+
+- `make-usb.sh` shows `model: Wilk` (lsblk had no model for this stick; udev's `ID_MODEL` is used).
+- Every kernel line on the screen carries its time: `[0.000]` up to the local APIC, `[0.112]` for the keyboard,
+  `[0.133]` for the file systems, `[0.154]` for the other cores – the kernel is ready in about 0.35 s; DHCP gives the
+  address at about 15.7 s.
+- No serial port: `[CON] no serial port (COM1) - typing only on the keyboard`, no warning.
+- `ver`: DeSo OS v0.83.0 (x86_64, UEFI, ABI 1.0); the stick's partition mounted read-write at `/disk`, the time from
+  three NTS operators saved to `/disk/.deso/lkg`.
+
+### Performance against v0.82.1
+
+| | TCG v0.82.1 | TCG v0.83.0 | KVM v0.82.1 | KVM v0.83.0 |
+|---|---|---|---|---|
+| TLS hello (ms) | 85 | 155 | 55 | 47 |
+| DeSoFS write 8 MiB (KiB/s) | 7494 | 7366 | 14760 | 18367 |
+| DeSoFS read 8 MiB (KiB/s) | 12800 | 11787 | 54251 | 52178 |
+| 1000 files – create (ms) | 11950 | 13520 | 8875 | 6829 |
+| 1000 files – read (ms) | 3494 | 3899 | 822 | 849 |
+
+Verdict: no regression. The TCG TLS handshake (155 ms) was one sample – the network and TLS code did not change, KVM
+got faster (47 ms), and the next TCG run gave 96 ms.
+The time stamp is a few characters written to the screen per kernel line, not on any path a benchmark measures.
+
 ## v0.82.1 — 2026-11-28
 
 **Status: a fix release of the repository build tool (`tools/deso-repo.sh`) after the review of v0.82.0; the kernel,

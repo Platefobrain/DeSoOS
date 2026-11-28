@@ -623,7 +623,10 @@ execute `hlt`.
   AML). ISA lines (timer, keyboard, serial, mouse) via the I/O APIC; the 8259 PIC is masked.
 - **Disks** – virtio-blk, NVMe (admin + I/O queue), GPT/MBR partitions as separate disks; USB storage via `ublk`.
 - **Input/output** – UEFI framebuffer (text console with Polish characters, scrollback), serial, PS/2 (keyboard,
-  mouse), USB keyboard/mouse via `/bin/usbd`.
+  mouse), USB keyboard/mouse via `/bin/usbd`.  On the screen every kernel line starts with the time since the timer
+  started in seconds with milliseconds (`[15.728] `) – how long each step of the start took, also on a machine without a serial port; the
+  serial copy (the log the tests read) has no such prefix.  A computer without COM1 gets an information line, not a
+  warning ("no serial port (COM1) - typing only on the keyboard").
 
 **Data protection on real hardware** – independent barriers:
 
@@ -1120,7 +1123,7 @@ the tests start is made by the very code that writes a stick (`fsck.vfat -n` che
 Safety (`make-usb.sh`, every unclear answer stops): a whole disk (not a partition, loop, dm or md), removable
 (`/sys/block/X/removable`), USB (`TRAN`), 200 MiB – 256 GiB, 512-byte sectors, not a system disk (`/`, `/boot`,
 `/boot/efi`), nothing mounted on it, no swap on it or its partitions (`/proc/swaps`), no holders (LVM / RAID /
-dm-crypt); model, size, serial and partitions shown, a "DeSo system" partition already there named ("your DeSo OS data
+dm-crypt); model (lsblk's vendor and model, else udev's from the USB descriptor), size, serial and partitions shown, a "DeSo system" partition already there named ("your DeSo OS data
 will be lost"), the device name retyped; then, after the build, **every check again** and the same major:minor, serial
 and size – otherwise nothing is written (a stick without a serial number is refused); `tools/mkusb.py` opens the device
 with `O_EXCL` (Linux refuses while anything on it is mounted or held), then checks the open descriptor: major:minor,

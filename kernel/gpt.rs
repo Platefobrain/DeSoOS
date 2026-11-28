@@ -51,7 +51,7 @@ const fn guid(s: &[u8; 36]) -> [u8; 16] {
 }
 
 pub const ESP: [u8; 16] = guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
-/// "DeSo system" – the only partition type a USB disk may ever be written in (v0.80, the
+/// "DeSo system" – the only partition type a USB disk may ever be written in (the
 /// write rules: docs/ARCHITECTURE.md, "Writing to a USB disk").  The same GUID is in make-usb.sh
 /// and tests/mkgpt.py.
 pub const DESO_SYSTEM: [u8; 16] = guid(b"1A0E2E7D-DE32-4C13-9442-9FCB2649CA02");

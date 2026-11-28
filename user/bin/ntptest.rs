@@ -14,7 +14,7 @@
 // verdict is what it was (the kernel side of the test compares the hardware RTC with the
 // clock before and after).  "ntptest net: N cases OK".
 //
-// NTS (user/lib/nts.rs, v0.79 stage B): `ntptest` also checks the NTS-KE records (every
+// NTS (user/lib/nts.rs): `ntptest` also checks the NTS-KE records (every
 // refusal), the cookie pool, the placeholder count, the request's fields and Authenticator,
 // and every answer an NTS client can get (built here with AES-SIV); `ntptest net` runs
 // `nettime --nts` against tests/nts-server (rustls + RustCrypto aes-siv – independent of

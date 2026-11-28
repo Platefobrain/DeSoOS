@@ -367,7 +367,7 @@ pub fn partition_blocks(index: usize) -> Option<(usize, u64, u64)> {
     Some((parent, start / f, sectors / f))
 }
 
-/// The internal disk (V080 rule E): the first disk registered before the file systems start
+/// The internal disk: the first disk registered before the file systems start
 /// (PCI: virtio-blk, then NVMe) – remembered by identity, never by number, so a USB disk
 /// that later gets number 0 is never it.  0 = none.
 static INTERNAL_UID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -724,7 +724,7 @@ pub fn create_ram_disk(mib: u64) -> Result<usize, String> {
 // ------------------------------------------------------------
 
 /// A test RAM disk: its contents in 4 KiB physical frames, like `desofs ramdisk` – none of it
-/// on the kernel heap.  (Until v0.80 the contents were 64 KiB heap blocks; DESOFS TEST holds
+/// on the kernel heap.  (Kept as 64 KiB heap blocks, the contents failed: DESOFS TEST holds
 /// several disks of up to 16 MiB plus image copies at once, and after the earlier suites
 /// fragmented the 64 MiB heap a 64 KiB block was now and then not found – "memory allocation
 /// of 65536 bytes failed", twice in TCG runs.)  Only the frame list is on the heap.

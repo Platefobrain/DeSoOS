@@ -21,11 +21,15 @@
 # x86_64.new; then x86_64 → x86_64.old, x86_64.new → x86_64, and x86_64.old is emptied.  If
 # that is interrupted, the next `build` puts x86_64.old back first.  Nothing is removed with a
 # recursive delete: only the index, its signature and package files, then the empty folders.
+# One build at a time per OUT: OUT/.deso-repo.lock (a folder holding the builder's pid, put in
+# place by one rename) – a second build is refused while the first runs; a lock left by a build
+# that was killed (its pid gone) is taken over.  The lock is outside OUT/deso, never uploaded.
 #
 # Tests (tests/repo-build-test.sh) set DESO_REPO_TEST=1: the test key (tests/pkg/test-key.pem
 # and user/etc/desopkg/keys.test) instead of ~/.deso-keys, and DESO_REPO_NOW (the UTC minute),
 # DESO_REPO_SDK (the SDK build script) and DESO_REPO_STOP=swap (killed between the two
-# renames).  Without DESO_REPO_TEST=1 those are ignored.
+# renames) or =locked (holds the lock 5 s before anything else).  Without DESO_REPO_TEST=1 those
+# are ignored.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,6 +72,55 @@ remove_ours() {
     (cd "$d" && find . -mindepth 1 | sed 's|^\./|  |' | sort)
     return 1
   fi
+}
+
+# One build per OUT at a time.  The lock folder is made complete (with the pid) under another
+# name and renamed into place: rename refuses a non-empty target, so of two builds only one
+# gets it, and a lock is never seen without its pid.
+LOCK=""
+take_lock() {
+  local out="$1" lock="$1/.deso-repo.lock" tmp old p2
+  mkdir -p "$out"
+  tmp="$lock.new.$$"
+  if [ -e "$tmp" ]; then rm -f -- "$tmp/pid"; rmdir -- "$tmp"; fi
+  mkdir -- "$tmp"
+  echo $$ > "$tmp/pid"
+  for _ in 1 2; do
+    if mv -T -- "$tmp" "$lock" 2>/dev/null; then
+      LOCK="$lock"
+      return 0
+    fi
+    old="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+      rm -f -- "$tmp/pid"; rmdir -- "$tmp"
+      echo "another build (pid $old) is running on $out - try again when it has finished"
+      echo "(if no build is running, remove the folder $lock)"
+      return 1
+    fi
+    # Left by a build that is gone: moved aside in one rename (only one taker wins), then removed.
+    if mv -T -- "$lock" "$lock.stale.$$" 2>/dev/null; then
+      p2="$(cat "$lock.stale.$$/pid" 2>/dev/null || true)"
+      if [ "$p2" != "$old" ] && [ -n "$p2" ] && kill -0 "$p2" 2>/dev/null; then
+        # Another build took it over in between: its lock goes back, this build stops.
+        mv -T -- "$lock.stale.$$" "$lock" 2>/dev/null || true
+        rm -f -- "$tmp/pid"; rmdir -- "$tmp"
+        echo "another build (pid $p2) is running on $out - try again when it has finished"
+        return 1
+      fi
+      rm -f -- "$lock.stale.$$/pid"
+      rmdir -- "$lock.stale.$$" 2>/dev/null || true
+      echo "took over the lock of a build that stopped (pid ${old:-unknown})"
+    fi
+  done
+  rm -f -- "$tmp/pid"; rmdir -- "$tmp" 2>/dev/null || true
+  echo "could not take the lock $lock - another build is starting"
+  return 1
+}
+drop_lock() {
+  [ -n "$LOCK" ] || return 0
+  rm -f -- "$LOCK/pid"
+  rmdir -- "$LOCK" 2>/dev/null || true
+  LOCK=""
 }
 
 # `desopkg.py published`: the state of a published folder.  Sets PREV (serial or none), NEXT
@@ -114,6 +167,13 @@ case "${1:-}" in
     case "$OUT" in
       "$ROOT"|"$ROOT"/*) echo "OUT must be outside the project ($OUT)"; exit 1 ;;
     esac
+    W=""
+    trap 'drop_lock; [ -z "$W" ] || rm -rf "$W"' EXIT
+    take_lock "$OUT" || exit 1
+    if [ "$STOP" = locked ]; then
+      echo "DESO_REPO_STOP=locked: holding the lock for 5 s"
+      sleep 5
+    fi
     STABLE="$OUT/deso/stable"
     LIVE="$STABLE/x86_64"
     NEW="$STABLE/x86_64.new"
@@ -145,7 +205,6 @@ case "${1:-}" in
     fi
 
     W="$(mktemp -d /tmp/deso-repo.XXXXXX)"
-    trap 'rm -rf "$W"' EXIT
     BASE="$W/x86_64"
     mkdir -p "$BASE/packages"
     for v in "${VERSIONS[@]}"; do

@@ -2,6 +2,30 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.83.0 — 2026-11-28 (stabilization)
+
+No new subsystem: small fixes, things seen on the test laptop, and the leftovers of the v0.82.1 review.
+
+- **`tools/deso-repo.sh`**: a folder the script did not make – an empty one too – stops the build like an unknown
+  file (`desopkg.py published` lists directories now; before, an empty folder passed the check and only the last
+  step, emptying `x86_64.old`, failed). One build per `OUT` at a time: `OUT/.deso-repo.lock` (a folder holding the
+  builder's pid, put in place by one rename – rename refuses a non-empty target, so of two builds only one gets it,
+  and a lock is never seen without its pid); a second build is refused while the first runs, a lock left by a killed
+  build (its pid gone) is taken over, and one taken over by another build in between is put back. The lock is
+  outside `OUT/deso`, never uploaded. `tests/repo-build-test.sh` 9 → 12 checks (an empty unknown folder, two builds
+  at once, a stale lock); mutations caught: directories not listed (10/12), no lock (11, 12), a stale lock never
+  taken over (8–12), the lock never released (5–7, 9–12).
+- **`make-usb.sh`**: the model shown before the question is lsblk's vendor and model together (a stick that reports
+  only a vendor showed "?"), else udev's `ID_VENDOR` / `ID_MODEL` (the USB descriptor), else "?"; also on the line of
+  an update. `tests/make-usb-test.sh`: 5 model cases on a fake `lsblk` and udev directory (`DESO_UDEV`).
+- **Time stamps on the screen**: every kernel line on the screen console starts with the time since the timer started
+  in seconds with milliseconds (`[15.728] `) – how long each step of the start takes, readable on a laptop with no serial port; the serial
+  copy (the log the tests read) is unchanged. CON TEST 5/10 checks the stamp.
+- **No COM1** (most laptops): `[CON] no serial port (COM1) - typing only on the keyboard` instead of
+  `[CON] WARNING: serial input not available`; the warning stays for a port that is there and still cannot take input.
+- **Comments**: version and stage tags (`v0.80`, `V080 stage C`, `review of stage B`…) removed from the code in 29
+  files – the history is in this file; what a comment says stays.
+
 ## v0.82.1 — 2026-11-28 (the repository build: serials and a safe swap)
 
 After the review of v0.82.0 (9.8/10): two fixes in the release tool `tools/deso-repo.sh`. The kernel, ABI 1.0,

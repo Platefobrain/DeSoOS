@@ -34,7 +34,7 @@
 //   /usb0, /usb1, … (read-only); disk gone -> unmount, remove the
 //   partitions and the disk, free the buffer and channel (the disk number returns to the pool).
 //
-// Writing (v0.80, rules A–G of the V080 plan): the disk as a whole never takes a write
+// Writing (docs/ARCHITECTURE.md, "Writing to a USB disk"): the disk as a whole never takes a write
 // (`read_only` = true, the block layer refuses before the driver).  Only a partition with a
 // GRANT from the kernel writes – through `write_range` / `flush_range` here, and only inside
 // THE registration this disk holds: at most one at a time, created and withdrawn only by the

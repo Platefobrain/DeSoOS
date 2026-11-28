@@ -37,7 +37,7 @@ pub const fn context_primitive(n: u8) -> u8 {
     0x80 | n
 }
 
-/// Deepest nesting accepted (plan limit C: 16).
+/// Deepest nesting accepted (16).
 pub const MAX_DEPTH: u8 = 16;
 
 /// One element: its tag, its contents and its whole encoding (tag, length, contents).

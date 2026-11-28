@@ -42,7 +42,7 @@
 //   (DMA) -> reply (id, status, blocks).  Transfer error: STALL -> Clear
 //   Halt; timeout / bad CSW -> Bulk-Only Reset (reset recovery).  Disconnect ->
 //   channel closed (kernel: disk disappears, unmounted).
-//   WRITING ONLY WHERE THE KERNEL REGISTERED IT (v0.80, docs/ARCHITECTURE.md "Writing to a
+//   WRITING ONLY WHERE THE KERNEL REGISTERED IT (docs/ARCHITECTURE.md "Writing to a
 //   USB disk"): the kernel sends REG messages – probe (exactly one FLUSH, no WRITE), rw
 //   (WRITE in [start, start + len) + FLUSH) or format (both only with its session id),
 //   each with the disk's generation; usbd keeps its own copy per stick (a new stick starts

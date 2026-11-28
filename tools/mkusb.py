@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# The layout of a DeSo OS USB stick with a disk (V080 stage C) – one code path for a real stick
+# The layout of a DeSo OS USB stick with a disk – one code path for a real stick
 # (make-usb.sh --with-disk /dev/sdX, after its safety checks) and for an image file
 # (make-usb.sh --with-disk --image, tests/test.sh, tests/make-usb-test.sh):
 #
