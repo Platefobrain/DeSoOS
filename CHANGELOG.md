@@ -2,6 +2,34 @@
 
 Format: newest on top. Dates in Central European time.
 
+## v0.82.1 — 2026-11-28 (the repository build: serials and a safe swap)
+
+After the review of v0.82.0 (9.8/10): two fixes in the release tool `tools/deso-repo.sh`. The kernel, ABI 1.0,
+desopkg and the package formats are unchanged.
+
+- **Serial**: the new index gets the UTC minute `YYYYMMDDHHMM`, but always above the serial of the index already
+  published in `OUT` (`max(minute, previous + 1)`). Before, two builds in one minute got the same serial, and a system
+  that had taken the first refused the second ("serial … again, but with other contents") until the next build. The
+  published index is checked first (its signature with the image's key, its packages against it); a damaged one or a
+  missing signature stops the build instead of counting as "nothing published". A serial past 2^64 − 1 is refused.
+- **No `rm -rf "$OUT/deso"`**: only `OUT/deso/stable/x86_64` is replaced, and only when it holds nothing but the
+  script's own files (the index, its signature, the packages the index lists); anything else stops the build, listed
+  and left alone. The new files are built in a temporary folder, copied to `x86_64.new` and checked there, then
+  swapped in by two renames (`x86_64` → `x86_64.old`, `x86_64.new` → `x86_64`); the old folder is emptied file by
+  file (only index, signature and packages), never by a recursive delete. A build stopped between the renames is put
+  back by the next one (`x86_64.old` → `x86_64`). Other files in `OUT/deso` (e.g. a test file) stay.
+- `tools/desopkg.py published DIR --keys KEYS [--now …]`: the state of a published folder and the next serial (used
+  by the script).
+- **`tests/repo-build-test.sh`** (new, host, offline, the test key): first build, two builds in one minute, a clock
+  behind the published serial, a later clock, a damaged index and a missing signature refused, an unknown file refused
+  and kept, a failed SDK build leaves the publication, a build killed during the swap put back, a serial at 2^64 − 1
+  refused – 9 checks. Test hooks (`DESO_REPO_NOW`, `DESO_REPO_SDK`, `DESO_REPO_STOP=swap`) work only with
+  `DESO_REPO_TEST=1`. Mutations caught: the serial from the clock alone (2/9, 3/9), no unknown-file check (6/9), no
+  signature check of the published index (5/9), no putting back after a stopped swap (8/9), the live folder deleted
+  before the swap (8/9), the old `rm -rf "$OUT/deso"` (1/9 and more), no overflow check (9/9).
+- Version 0.82.1 (`Cargo.toml`, `Cargo.lock`, the README badge); `docs/pkg/README.md` "Publishing", `tools/README.md`,
+  `tests/README.md`, `docs/RELEASE.md`.
+
 ## v0.82.0 — 2026-11-27 (desopkg: programs from the internet)
 
 Plan: V082 ver 4.6 (accepted) and V082-B ver 1 (accepted). Stages A, B1, B2 and C, one release. Details:

@@ -1,4 +1,4 @@
-# DeSo OS <img src="https://img.shields.io/badge/version-0.82.0-1f6feb?style=for-the-badge" alt="Version 0.82.0">
+# DeSo OS <img src="https://img.shields.io/badge/version-0.82.1-1f6feb?style=for-the-badge" alt="Version 0.82.1">
 <p>
   Written from scratch in Rust: its own boot loader, kernel, file system, TCP/IP, TLS 1.3 and authenticated time
 </p>
@@ -533,7 +533,7 @@ programs; `run <program> <n>` starts n copies (1..16), e.g. `run xmm 16 &`.
   SDK of ABI 1.0 frozen, built and run by `tests/sdk-test.sh` on every later system.
 - `common/` - code shared by different parts of DeSo OS: ELF parsing (boot loader, kernel), DeSoCrypto
   (`common/desocrypto/`, kernel and programs) and DeSoTLS (`common/desotls/`, programs; the kernel only in its tests).
-- `tests/` - `test.sh`, `sdk-test.sh` (the SDK outside the repository), `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
+- `tests/` - `test.sh`, `sdk-test.sh` (the SDK outside the repository), `repo-build-test.sh` (the package repository build), `soak.sh`, `stress-qemu.sh`, `mkfat32.py`, `mkdesofs.py` (DeSoFS reference image), `qemu-hotplug.py`.
 - `docs/` - documentation of the whole system: architecture, release reports, DeSoFS (`docs/desofs/FORMAT.md` – the
   on-disk format).
 - `abi/` - the ABI description `abi.toml` (system calls, handles and rights, constants, the loader's limits) and the

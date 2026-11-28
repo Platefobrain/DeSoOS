@@ -12,6 +12,9 @@ id.
   desopkg.py keys K.pem --keyid ID [-o FILE]  the /etc/desopkg/keys file for a key
   desopkg.py check FILE [--keys KEYS] [--sig SIG] [--gen N]
                                               an independent check (kind from its first line)
+  desopkg.py published DIR --keys KEYS [--now YYYYMMDDHHMM]
+                                              a published repository directory (what
+                                              tools/deso-repo.sh may replace) and the next serial
   desopkg.py vectors -o FILE [--bin DIR] [--fuzz N]
                                               the PKG FORMAT TEST vectors (every hand-written one
                                               judged here first: a verdict that is not the
@@ -1254,6 +1257,90 @@ def cmd_keys(args):
         sys.stdout.write(b.decode())
 
 
+def published_state(d, keys):
+    """A published repository directory (OUT/deso/stable/x86_64) as tools/deso-repo.sh left it.
+    None when there is none (missing or empty); else (serial, files) – files relative to d, the
+    only ones the script may replace or delete.  Refused: an index without its signature (or the
+    other way round), a bad signature, a package of the index missing or not matching it, and
+    any file the index does not account for (listed in the reason)."""
+    if not os.path.isdir(d):
+        if os.path.lexists(d):
+            fail("published_not_a_directory")
+        return None
+    found = []
+    for top, dirs, names in os.walk(d):
+        dirs.sort()
+        for n in sorted(dirs):
+            p = os.path.join(top, n)
+            if os.path.islink(p):
+                found.append(os.path.relpath(p, d))
+        for n in sorted(names):
+            found.append(os.path.relpath(os.path.join(top, n), d))
+    if not found and os.listdir(d) == []:
+        return None
+    has_index = os.path.isfile(os.path.join(d, "index"))
+    has_sig = os.path.isfile(os.path.join(d, "index.sig"))
+    if not has_index or not has_sig:
+        fail("published_incomplete (index %s, index.sig %s)" % ("present" if has_index else "missing", "present" if has_sig else "missing"))
+    b = open(os.path.join(d, "index"), "rb").read()
+    idx = parse_index(b)
+    verify_index(b, open(os.path.join(d, "index.sig"), "rb").read(), keys)
+    sn = system_name_fn()
+    known = ["index", "index.sig"]
+    for e in idx["packages"]:
+        rel = "packages/%s-%s.pkg" % (e["name"], ver_str(e["version"]))
+        p = os.path.join(d, rel)
+        if not os.path.isfile(p) or os.path.islink(p):
+            fail("published_package_missing %s" % rel)
+        check_pkg_against_index(open(p, "rb").read(), e, sn)
+        known.append(rel)
+    unknown = [f for f in found if f not in known]
+    if os.path.lexists(os.path.join(d, "packages")) and (os.path.islink(os.path.join(d, "packages")) or not os.path.isdir(os.path.join(d, "packages"))):
+        unknown.append("packages")
+    if unknown:
+        fail("published_unknown_files %s" % " ".join(sorted(set(unknown))))
+    return idx["serial"], known
+
+
+def next_serial(previous, now):
+    """The serial of a new index: the UTC minute YYYYMMDDHHMM, but always above the previous one
+    (two builds in one minute, or a clock behind the last index).  Refused past 2^64 - 1."""
+    if not re.fullmatch(r"[0-9]{12}", now):
+        fail("bad_clock %r" % now)
+    s = int(now)
+    if previous is not None:
+        if previous >= U64_MAX:
+            fail("serial_exhausted")
+        s = max(s, previous + 1)
+    if s == 0 or s > U64_MAX:
+        fail("serial_exhausted")
+    return s
+
+
+def cmd_published(args):
+    """published DIR --keys KEYS [--now YYYYMMDDHHMM]: the state of a published directory and the
+    serial the next index gets.  Prints `none` or `serial N`, then `next N`, then `file F` lines."""
+    args = list(args)
+    keys = opt(args, "--keys")
+    now = opt(args, "--now")
+    if len(args) != 1 or not keys:
+        sys.exit("usage: desopkg.py published DIR --keys KEYS [--now YYYYMMDDHHMM]")
+    try:
+        st = published_state(args[0], parse_keys(open(keys, "rb").read()))
+        if now is None:
+            import time
+
+            now = time.strftime("%Y%m%d%H%M", time.gmtime())
+        nxt = next_serial(st[0] if st else None, now)
+    except Refused as e:
+        print("%s: REFUSED: %s" % (args[0], e.reason))
+        sys.exit(2)
+    print("none" if st is None else "serial %d" % st[0])
+    print("next %d" % nxt)
+    for f in st[1] if st else []:
+        print("file %s" % f)
+
+
 def cmd_check(args):
     args = list(args)
     keys = opt(args, "--keys")
@@ -1975,6 +2062,8 @@ def main():
             cmd_keys(args)
         elif cmd == "check":
             cmd_check(args)
+        elif cmd == "published":
+            cmd_published(args)
         elif cmd == "vectors":
             cmd_vectors(args)
         elif cmd == "--test":

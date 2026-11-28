@@ -253,6 +253,48 @@ timings move by ±15% from run to run on the same build).
 
 ---
 
+## v0.82.1 — 2026-11-28
+
+**Status: a fix release of the repository build tool (`tools/deso-repo.sh`) after the review of v0.82.0; the kernel,
+ABI 1.0, desopkg and the package formats are unchanged.**
+
+### What is new (details: `CHANGELOG.md`)
+
+- **The index serial never repeats**: the UTC minute, but always above the published index (two builds in one minute
+  no longer give the same serial, which a system that took the first would refuse).
+- **No recursive delete of the repository folder**: only `deso/stable/x86_64` is replaced, built and checked in
+  `x86_64.new` and swapped in by two renames; a damaged published index, a missing signature or a file the script did
+  not make stops the build and changes nothing; an interrupted swap is put back by the next build.
+- **`tests/repo-build-test.sh`**: 9 host checks, offline, with the test key.
+
+### Tests (build machine, 2026-11-28)
+
+- `tests/repo-build-test.sh` with the real SDK: **9/9 PASS** (first build, two builds in one minute → 202611281039,
+  a clock behind the index → 202611281040, a later clock, a damaged index and a missing signature refused, an
+  unknown file refused and kept, a failed build leaves the publication, a build killed during the swap put back and
+  then 202611281106 published, serial 2^64−1 refused).
+- `tests/test.sh` (TCG, 4 CPUs): **PASS**, 483 s (restart 22 s, USB restart 6 s, one stick 9 s, soak 131 s), 45/45
+  suites, ABI host 5/5, pkg host 6/6, 353 tests, soak leaks 0, errors 0.
+- `ACCEL=kvm tests/test.sh`: **PASS**, 404 s (restart 13 s, USB restart 5 s, one stick 8 s, soak 126 s), the same
+  counts, soak leaks 0, errors 0.
+- The real repository: `tools/deso-repo.sh build` read the published serial 202611272157 and signed serial
+  202611281155 (valid until 2026-12-28T11:55:30Z), replacing only `stable/x86_64`; the rebuilt `witaj` 1.0.0 and
+  1.0.1 packages are byte for byte the published ones (the same SHA-256 as the index of 2026-11-27 – the SDK build is
+  reproducible). Uploaded to decodesoft.pl: `https://decodesoft.pl/deso/stable/x86_64/index` serves the new serial.
+
+### Performance against v0.82.0
+
+| | TCG v0.82.0 | TCG v0.82.1 | KVM v0.82.0 | KVM v0.82.1 |
+|---|---|---|---|---|
+| TLS hello (ms) | 97 | 85 | 54 | 55 |
+| DeSoFS write 8 MiB (KiB/s) | 7627 | 7494 | 17770 | 14760 |
+| DeSoFS read 8 MiB (KiB/s) | 12720 | 12800 | 53542 | 54251 |
+| 1000 files – create (ms) | 12297 | 11950 | 7937 | 8875 |
+| 1000 files – read (ms) | 3471 | 3494 | 833 | 822 |
+
+Verdict: no regression – no code that runs in DeSo OS changed (only the version number); the KVM write (−17 %) and
+create (+12 %) differences are the known run-to-run spread of KVM disk timings (±15–25 %, measured in v0.65.1).
+
 ## v0.82.0 — 2026-11-27
 
 **Status: stable on QEMU (TCG and KVM) and on the Legion; programs from the internet – `desopkg` installs, updates,
